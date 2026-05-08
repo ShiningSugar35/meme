@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solana-meme-bot"
+version = "0.1.0"
+dependencies = [
+    "fastapi>=0.95",
+    "uvicorn[standard]>=0.22",
+    "httpx>=0.24",
+    "aiosqlite>=0.18",
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+    "loguru>=0.7",
+    "websockets>=11.0",
+    "pytest",
+    "pytest-asyncio",
+]
