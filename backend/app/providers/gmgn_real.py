@@ -158,18 +158,45 @@ class GMGNProvider(MarketDataProvider):
         Returns:
             Dict with standardized fields
         """
+        # TODO: Confirm GMGN API field names for:
+        # - 'pool_created_at' (may be 'pool_created_timestamp' or similar)
+        # - 'renounced_mint' (may be 'mint_renounced' or similar)
+        # - 'top_10_holder_rate' (may be 'top10_holder_rate' without underscore)
         return {
             'token_mint': raw.get('token_mint') or raw.get('address'),
             'pool_address': raw.get('pool_address') or raw.get('pool'),
-            'pool_created_at': raw.get('pool_created_at'),
+            'pool_created_at': raw.get('pool_created_at'),  # TODO: verify field name
             'latest_price_usd': raw.get('price_usd') or raw.get('price'),
             'liquidity_usd': raw.get('liquidity_usd') or raw.get('liquidity'),
             'volume_usd': raw.get('volume_usd') or raw.get('volume'),
             'market_cap': raw.get('market_cap'),
-            'top_10_holder_rate': raw.get('top_10_holder_rate'),
-            'top1_holder_rate': raw.get('top1_holder_rate'),
-            'renounced_mint': 1 if raw.get('renounced_mint') else 0,
-            'renounced_freeze_account': 1 if raw.get('renounced_freeze_account') else 0,
+            'top_10_holder_rate': raw.get('top_10_holder_rate'),  # TODO: verify field name
+            'top1_holder_rate': raw.get('top1_holder_rate'),  # TODO: verify field name
+            'renounced_mint': 1 if raw.get('renounced_mint') else 0,  # TODO: verify field name
+            'renounced_freeze_account': 1 if raw.get('renounced_freeze_account') else 0,  # TODO: verify
+            'raw_json': json.dumps(raw) if raw else None,
+        }
+    
+    # Field mapping functions for different GMGN endpoints
+    def normalize_gmgn_trenches(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize trenches (trending tokens) response. TODO: confirm GMGN trenches fields."""
+        return self._normalize_token_data(raw)
+    
+    def normalize_gmgn_token_snapshot(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize token snapshot/price response. TODO: confirm GMGN price fields."""
+        return self._normalize_token_data(raw)
+    
+    def normalize_gmgn_kline(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize kline/candlestick response. TODO: confirm GMGN kline fields."""
+        return {
+            'open_time': raw.get('open_time') or raw.get('timestamp'),
+            'open': raw.get('open'),
+            'high': raw.get('high'),
+            'low': raw.get('low'),
+            'close': raw.get('close'),
+            'buy_volume': raw.get('buy_volume') or raw.get('buy_vol'),
+            'sell_volume': raw.get('sell_volume') or raw.get('sell_vol'),
+            'volume_usd': raw.get('volume_usd') or raw.get('volume'),
             'raw_json': json.dumps(raw) if raw else None,
         }
 

@@ -7,7 +7,7 @@ def test_exit_small_remaining_forces_full():
     position = {"entry_price_sol": 1.0, "remaining_value_usd": 5}
     tick = {"price_sol": 1.0}
     rolling = {"low": 0.5, "high": 1.5}
-    res = asyncio.get_event_loop().run_until_complete(decide_exit(position, tick, rolling, {}))
+    res = asyncio.run(decide_exit(position, tick, rolling, {}))
     assert res.should_exit is True
     assert res.exit_pct == 1.0
 
@@ -16,7 +16,7 @@ def test_exit_hard_tp():
     position = {"entry_price_sol": 1.0, "remaining_value_usd": 100}
     tick = {"price_sol": 3.2}
     rolling = {"low": 0.5, "high": 1.5}
-    res = asyncio.get_event_loop().run_until_complete(decide_exit(position, tick, rolling, {}))
+    res = asyncio.run(decide_exit(position, tick, rolling, {}))
     assert res.should_exit is True
     assert res.exit_pct == 1.0
 
@@ -26,28 +26,28 @@ def test_exit_hard_levels_and_dynamic_and_time():
     # hard tp 1.8
     tick = {"price_sol": 1.85}
     rolling = {"low": 0.5, "high": 2.0}
-    res = asyncio.get_event_loop().run_until_complete(decide_exit(position, tick, rolling, {}))
+    res = asyncio.run(decide_exit(position, tick, rolling, {}))
     assert any(r.name.startswith("HARD_TP") for r in res.reasons)
 
     # hard sl 0.6
     tick2 = {"price_sol": 0.55}
-    res2 = asyncio.get_event_loop().run_until_complete(decide_exit(position, tick2, rolling, {}))
+    res2 = asyncio.run(decide_exit(position, tick2, rolling, {}))
     assert any(r.name.startswith("HARD_SL") for r in res2.reasons)
 
     # dynamic tp using rolling low
     position3 = {"entry_price_sol": 1.0, "remaining_value_usd": 100}
     tick3 = {"price_sol": 2.1}
     rolling3 = {"low": 1.0, "high": 3.0}
-    res3 = asyncio.get_event_loop().run_until_complete(decide_exit(position3, tick3, rolling3, {}))
+    res3 = asyncio.run(decide_exit(position3, tick3, rolling3, {}))
     assert any(r.name.startswith("DYN_TP") for r in res3.reasons)
 
     # remaining value dust
     pos4 = {"entry_price_sol": 1.0, "remaining_value_usd": 5}
     tick4 = {"price_sol": 1.0}
-    res4 = asyncio.get_event_loop().run_until_complete(decide_exit(pos4, tick4, rolling, {}))
+    res4 = asyncio.run(decide_exit(pos4, tick4, rolling, {}))
     assert any(r.name == "DUST_FORCE_EXIT" for r in res4.reasons)
 
     # completed
     pos5 = {"entry_price_sol": 1.0, "remaining_value_usd": 100, "type": "completed"}
-    res5 = asyncio.get_event_loop().run_until_complete(decide_exit(pos5, tick4, rolling, {}))
+    res5 = asyncio.run(decide_exit(pos5, tick4, rolling, {}))
     assert any(r.name == "COMPLETED" for r in res5.reasons)

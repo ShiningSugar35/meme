@@ -80,12 +80,12 @@ class TradingPipeline:
             await self.repo.append_system_event('INFO', 'TRADE', 'winner selected', 
                                                     str({'winner_id': winner.get('id'), 'priority': winner.get('priority')}))
 
-        # ====== CHECK IF TOKEN ALREADY HAS OPEN LIVE POSITION IN THIS CYCLE ======
-        # Note: closed positions do NOT block new trades in a new cycle
-        existing_live = await self.repo.get_open_live_position_by_token_and_cycle(token_mint, discovery_event_id)
-        if existing_live:
-            await self.repo.append_system_event('WARN', 'TRADE', 'Token already has open live position in this cycle, blocking duplicate', 
-                                                        str({'token': token_mint, 'discovery_event_id': discovery_event_id}))
+        # ====== CHECK IF TOKEN ALREADY HAS ANY OPEN LIVE POSITION ======
+        # Hard rule: same token cannot have multiple open live positions, even across cycles
+        existing_any_live = await self.repo.get_open_live_position_by_token(token_mint)
+        if existing_any_live:
+            await self.repo.append_system_event('WARN', 'TRADE', 'Token already has open live position, blocking duplicate buy', 
+                                                        str({'token': token_mint, 'existing_position_id': existing_any_live.get('id')}))
             # still process sim strategies
         else:
             if winner:

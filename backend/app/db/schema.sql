@@ -260,9 +260,9 @@ CREATE TABLE IF NOT EXISTS discovery_events (
   status TEXT NOT NULL DEFAULT 'DISCOVERED',
   source_snapshot_id INTEGER,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL'
+  updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_discovery_events_token'
+CREATE INDEX IF NOT EXISTS idx_discovery_events_token
 ON discovery_events(token_mint, status);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_discovery_snapshot_token_pool

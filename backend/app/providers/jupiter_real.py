@@ -47,6 +47,7 @@ class JupiterProvider(SwapProvider):
         self.repo = repo
         self.mode = mode or settings.get_provider_mode()
         self.api_base_url = settings.JUPITER_API_BASE_URL or "https://quote-api.jup.ag"
+        self._test_scenario = 'success'  # for testing only
         
         if self.mode == ProviderMode.MOCK:
             logger.info("Jupiter Provider initialized in MOCK mode - schema validation only")
@@ -148,22 +149,28 @@ class JupiterProvider(SwapProvider):
     def _validate_quote_response(self, quote: Dict[str, Any]) -> Dict[str, Any]:
         """
         Validate and normalize quote response.
-        
-        Returns:
-            Normalized quote dict
+        Extracts key fields: priceImpactPct, routePlan, outAmount, otherAmountThreshold.
+        Logs only summary, not full quote.
         """
+        # TODO: Confirm Jupiter API fields for priceImpactPct (may be 'priceImpactPct' or 'impactPct')
         return {
             'inputMint': quote.get('inputMint'),
             'outputMint': quote.get('outputMint'),
             'inAmount': quote.get('inAmount'),
-            'outAmount': quote.get('outAmount'),
-            'otherAmountThreshold': quote.get('otherAmountThreshold'),
+            'outAmount': quote.get('outAmount'),  # Required for trade execution
+            'otherAmountThreshold': quote.get('otherAmountThreshold'),  # Slippage-protected min out
             'swapMode': quote.get('swapMode'),
-            'priceImpactPct': quote.get('priceImpactPct', 0),
-            'routePlan': quote.get('routePlan', []),
+            'priceImpactPct': float(quote.get('priceImpactPct', 0)),  # Used for hard cap check
+            'routePlan': quote.get('routePlan', []),  # Array of swap steps
             'contextSlot': quote.get('contextSlot'),
             'timeTaken': quote.get('timeTaken'),
-            'raw_json': json.dumps(quote) if quote else None,
+            # Save only summary to logs, not full raw_json
+            'summary': {
+                'input': quote.get('inputMint'),
+                'output': quote.get('outputMint'),
+                'impact': quote.get('priceImpactPct'),
+                'out': quote.get('outAmount'),
+            }
         }
 
     async def quote_exact_in(
@@ -178,22 +185,23 @@ class JupiterProvider(SwapProvider):
         LIVE: Same as ONLINE_READONLY
         """
         try:
+            # Get quote (mock or real)
+            quote = None
             if self.mode == ProviderMode.MOCK:
-                # MOCK: return mock quote
+                # MOCK: return mock quote, support test scenarios
+                price_impact = 0.15 if getattr(self, '_test_scenario', 'success') == 'high_impact' else 0.005
                 quote = {
                     'inAmount': str(amount),
                     'outAmount': str(int(amount * 0.95)),
                     'otherAmountThreshold': str(int(amount * 0.94)),
                     'swapMode': 'ExactIn',
-                    'priceImpactPct': 0.005,  # 0.5% impact
+                    'priceImpactPct': price_impact,
                     'routePlan': [{'swapInfo': {'label': 'Orca', 'inputMint': input_mint, 'outputMint': output_mint}}],
                     'mode': 'MOCK'
                 }
                 await self._log('/v6/quote', True,
                               {'input': input_mint, 'output': output_mint, 'amount': amount, 'slippageBps': slippage_bps},
                               {'impact': quote['priceImpactPct']})
-                return quote
-            
             elif self.mode in [ProviderMode.ONLINE_READONLY, ProviderMode.LIVE]:
                 # ONLINE_READONLY/LIVE: call real API
                 path = '/v6/quote'
@@ -209,16 +217,22 @@ class JupiterProvider(SwapProvider):
                 
                 # Validate and normalize response
                 quote = self._validate_quote_response(data)
-                
-                # Check price impact
-                if quote['priceImpactPct'] > 0.10:  # 10% threshold
-                    await self._log('/v6/quote', False, params, quote,
-                                error_code='HIGH_PRICE_IMPACT',
-                                error_summary=f"Price impact too high: {quote['priceImpactPct']}")
+            else:
+                raise ValueError(f"Unsupported mode: {self.mode}")
+            
+            # Check price impact (default 10% = 0.10) for ALL modes
+            if quote:
+                price_impact = quote.get('priceImpactPct', 0)
+                if price_impact > 0.10:  # TODO: make threshold configurable via strategy
+                    await self._log('/v6/quote', False, 
+                                  {'input': input_mint, 'output': output_mint}, 
+                                  quote.get('summary', {}),
+                                  error_code='HIGH_PRICE_IMPACT',
+                                  error_summary=f"Price impact too high: {price_impact}")
                     quote['error'] = 'HIGH_PRICE_IMPACT'
-                
-                return quote
-                
+            
+            return quote
+            
         except Exception as e:
             await self._log('/v6/quote', False,
                           {'input': input_mint, 'output': output_mint},

@@ -35,6 +35,7 @@ def pipeline_factory(repo):
         # Create providers in MOCK mode for testing
         gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
         jupiter = JupiterProvider(repo, mode=ProviderMode.MOCK)
+        jupiter._test_scenario = scenario  # set test scenario for mock
         jito = JitoProvider(repo, mode=ProviderMode.MOCK)
         rpc = RpcRealProvider(repo, mode=ProviderMode.MOCK)
         pipeline = TradingPipeline(repo, gmgn, jupiter, jito, rpc)

@@ -46,7 +46,8 @@ class RpcRealProvider(RpcProvider):
         """
         self.repo = repo
         self.mode = mode or settings.get_provider_mode()
-        self.rpc_url = settings.SOLANA_RPC_HTTP_PRIMARY or "https://api.mainnet-beta.solana.com"
+        self.rpc_url = settings.get_rpc_http_url() or "https://api.mainnet-beta.solana.com"
+        self.rpc_ws_url = settings.get_rpc_ws_url()
         
         if self.mode == ProviderMode.MOCK:
             logger.info("RPC Provider initialized in MOCK mode - no real RPC calls")
@@ -54,10 +55,16 @@ class RpcRealProvider(RpcProvider):
             if not HAS_HTTPX:
                 raise ImportError("httpx required for online_readonly mode. Install with: pip install httpx")
             logger.info(f"RPC Provider initialized in ONLINE_READONLY mode - RPC: {self.rpc_url}")
+            if self.rpc_ws_url:
+                logger.info(f"  WebSocket: {self.rpc_ws_url}")
+            else:
+                logger.info("  WebSocket: Not configured (account/signature subscriptions unavailable)")
         elif self.mode == ProviderMode.LIVE:
             if not HAS_HTTPX:
                 raise ImportError("httpx required for live mode. Install with: pip install httpx")
             logger.info(f"RPC Provider initialized in LIVE mode - RPC: {self.rpc_url}")
+            if self.rpc_ws_url:
+                logger.info(f"  WebSocket: {self.rpc_ws_url}")
 
     async def _log(
         self, endpoint: str, ok: bool, 

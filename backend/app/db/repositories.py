@@ -382,6 +382,24 @@ class Repositories:
             await self.append_system_event("ERROR", "DB", "update_discovery_event_status failed", str({"error": str(e), "id": event_id}))
             raise
 
+    async def list_discovery_events(
+        self, token_mint: Optional[str] = None, status: Optional[str] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """List discovery events with optional filters."""
+        query = "SELECT * FROM discovery_events WHERE 1=1"
+        params = []
+        if token_mint:
+            query += " AND token_mint = ?"
+            params.append(token_mint)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        async with self.db.execute(query, tuple(params)) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def list_token_discovery_events(self, token_mint: str, limit: int = 100) -> List[Dict[str, Any]]:
         async with self.db.execute(
             "SELECT * FROM discovery_events WHERE token_mint = ? ORDER BY id DESC LIMIT ?",
@@ -526,7 +544,19 @@ class Repositories:
             ) as cur:
                 row = await cur.fetchone()
         return dict(row) if row else None
-
+ 
+    async def get_open_live_position_by_token(self, token_mint: str) -> Optional[Dict[str, Any]]:
+        """
+        Get ANY open live position for token (regardless of cycle).
+        Used to enforce hard rule: no duplicate live positions for same token.
+        """
+        async with self.db.execute(
+            "SELECT * FROM positions WHERE token_mint = ? AND is_live = 1 AND status != 'CLOSED' ORDER BY id DESC LIMIT 1",
+            (token_mint,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+ 
     async def list_positions_by_token(self, token_mint: str, limit: int = 100) -> List[Dict[str, Any]]:
         async with self.db.execute("SELECT * FROM positions WHERE token_mint = ? ORDER BY id DESC LIMIT ?", (token_mint, limit)) as cur:
             rows = await cur.fetchall()

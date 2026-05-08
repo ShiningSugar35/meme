@@ -8,7 +8,7 @@ def test_second_filter_high_eq_low():
     latest_price = {"price": 1.0}
     klines = [{"close": 1.0}, {"close": 1.0}]
     buy_sell_1m = {"buy_volume": 10, "sell_volume": 5}
-    res = asyncio.get_event_loop().run_until_complete(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
+    res = asyncio.run(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
     assert res.passed is False
 
 
@@ -18,7 +18,7 @@ def test_second_filter_basic_pass():
     latest_price = {"price": 2.0}
     klines = [{"close": 1.0}, {"close": 3.0}]
     buy_sell_1m = {"buy_volume": 100, "sell_volume": 10}
-    res = asyncio.get_event_loop().run_until_complete(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
+    res = asyncio.run(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
     assert res.passed is True
 
 
@@ -29,7 +29,7 @@ def test_second_filter_various_y_thresholds():
         latest_price = {"price": 2.0}
         klines = [{"close": 1.0}, {"close": 3.0}]
         buy_sell_1m = {"buy_volume": 100, "sell_volume": 10}
-        res = asyncio.get_event_loop().run_until_complete(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
+        res = asyncio.run(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
         assert res.passed is True
 
 
@@ -39,7 +39,7 @@ def test_second_filter_buy_volume_failure():
     latest_price = {"price": 2.0}
     klines = [{"close": 1.0}, {"close": 3.0}]
     buy_sell_1m = {"buy_volume": 1, "sell_volume": 100}
-    res = asyncio.get_event_loop().run_until_complete(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
+    res = asyncio.run(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
     assert any(d["rule"] == "buy_vs_sell_1m" and not d["passed"] for d in res.details)
 
 
@@ -50,10 +50,10 @@ def test_second_filter_price_ratio_failures():
     latest_price = {"price": 0.1}
     klines = [{"close": 1.0}, {"close": 3.0}]
     buy_sell_1m = {"buy_volume": 100, "sell_volume": 10}
-    res = asyncio.get_event_loop().run_until_complete(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
+    res = asyncio.run(run_second_filter(token, strategy_group, latest_price, klines, buy_sell_1m))
     assert any(d["rule"] == "price_gt_high_over_y" and not d["passed"] for d in res.details)
 
     # price too high
     latest_price2 = {"price": 100.0}
-    res2 = asyncio.get_event_loop().run_until_complete(run_second_filter(token, strategy_group, latest_price2, klines, buy_sell_1m))
+    res2 = asyncio.run(run_second_filter(token, strategy_group, latest_price2, klines, buy_sell_1m))
     assert any(d["rule"] == "price_lt_low_times_y" and not d["passed"] for d in res2.details)

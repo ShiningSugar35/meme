@@ -47,6 +47,9 @@ class JitoProvider(ExecutionProvider):
         self.repo = repo
         self.mode = mode or settings.get_provider_mode()
         self.jito_enabled = settings.JITO_ENABLED
+        self._tip_cache = None
+        self._tip_cache_time = 0
+        self._tip_cache_ttl = 3  # 3 seconds cache
         
         if self.mode == ProviderMode.MOCK:
             logger.info("Jito Provider initialized in MOCK mode - send() is BLOCKED")
@@ -139,27 +142,46 @@ class JitoProvider(ExecutionProvider):
 
     async def get_tip_floor(self) -> Dict[str, Any]:
         """
-        Get current tip floor (monitoring only, read-only safe)
+        Get current tip floor with 3-second cache.
+        Parses 50th, 75th, 95th percentile from response.
         """
+        # Check cache (3 second TTL)
+        now = time.time()
+        if self._tip_cache and (now - self._tip_cache_time) < self._tip_cache_ttl:
+            return self._tip_cache
+        
         try:
             if self.mode == ProviderMode.MOCK:
-                # MOCK: return mock tip floor
+                # MOCK: return mock tip floor with percentiles
                 response = {
-                    'landed_tips_25th_percentile': 1000,
-                    'landed_tips_50th_percentile': 2000,
-                    'landed_tips_75th_percentile': 3000,
-                    'landed_tips_95th_percentile': 5000,
+                    'landed_tips_50th_percentile': 2000,  # 50th percentile
+                    'landed_tips_75th_percentile': 3000,  # 75th percentile
+                    'landed_tips_95th_percentile': 5000,  # 95th percentile
                     'ema_landed_tips_50th_percentile': 2000,
                     'mode': 'MOCK'
                 }
-                await self._log('/api/v1/bundles/tip_floor', True, {}, response)
+                await self._log('/api/v1/bundles/tip_floor', True, {}, {'mode': 'MOCK'})
+                self._tip_cache = response
+                self._tip_cache_time = now
                 return response
             
             elif self.mode in [ProviderMode.ONLINE_READONLY, ProviderMode.LIVE]:
                 # ONLINE_READONLY/LIVE: call real API
                 data = await self._make_request('/api/v1/bundles/tip_floor')
-                return data
                 
+                # Parse and normalize response
+                tip_data = {
+                    'landed_tips_50th_percentile': data.get('landed_tips_50th_percentile', 0),
+                    'landed_tips_75th_percentile': data.get('landed_tips_75th_percentile', 0),
+                    'landed_tips_95th_percentile': data.get('landed_tips_95th_percentile', 0),
+                    'ema_landed_tips_50th_percentile': data.get('ema_landed_tips_50th_percentile', 0),
+                    'raw': data if len(str(data)) < 500 else {'summary': 'response too large'}
+                }
+                
+                self._tip_cache = tip_data
+                self._tip_cache_time = now
+                return tip_data
+            
         except Exception as e:
             await self._log('/api/v1/bundles/tip_floor', False, {}, {}, 500, 0, 'JITO_ERROR', str(e))
             raise
@@ -197,11 +219,14 @@ class JitoProvider(ExecutionProvider):
 
     async def send(self, transaction_or_bundle: Any) -> Dict[str, Any]:
         """
-        Send transaction/bundle to Jito
+        Send transaction/bundle to Jito with retry logic.
         
         CRITICAL PROTECTION: BLOCKED in ONLINE_READONLY mode (default)
-        This is the final defense against accidental real transaction broadcast.
         MOCK mode: Allows mock send for testing.
+        LIVE mode: Implements tip ladder retry (50th→75th→95th, max 2 retries)
+        InstructionError: Direct failure, no retry.
+        tip too low: Retry with higher tip.
+        v1: No fallback to normal RPC.
         """
         if self.mode == ProviderMode.ONLINE_READONLY:
             # ONLINE_READONLY: BLOCK send (do NOT broadcast)
@@ -210,8 +235,8 @@ class JitoProvider(ExecutionProvider):
                 f"Set mode to LIVE only if you intend live trading."
             )
             logger.error(error_msg)
-            await self._log('/api/v1/bundles/send', False, {'tx': '...'}, 403, 0,
-                          'JITO_MODE_BLOCKED', error_msg)
+            await self._log('/api/v1/bundles/send', False, {'tx': '...'}, {},
+                          403, 0, 'JITO_MODE_BLOCKED', error_msg)
             return {
                 'ok': False,
                 'error': 'MODE_BLOCKED',
@@ -229,20 +254,76 @@ class JitoProvider(ExecutionProvider):
             await self._log('/api/v1/bundles/send', True, {'tx': '...'}, response)
             return response
         
-        # LIVE mode
-        try:
-            # LIVE: call real API (future implementation)
-            # This path is only reached if mode=LIVE and LIVE_TRADING_ENABLED=true
-            data = await self._make_request('/api/v1/bundles/send', json_data=transaction_or_bundle)
-            response = {
-                'ok': True,
-                'bundle_id': data.get('bundle_id', 'NOT_IMPLEMENTED'),
-                'signature': data.get('signature', 'NOT_IMPLEMENTED'),
-                'mode': 'LIVE'
-            }
-            await self._log('/api/v1/bundles/send', True, {'tx': '...'}, response)
-            return response
-            
-        except Exception as e:
-            await self._log('/api/v1/bundles/send', False, {'tx': '...'}, {}, 500, 0, 'JITO_ERROR', str(e))
-            raise
+        # LIVE mode: Implement retry logic
+        tip_ladder = [
+            ('landed_tips_50th_percentile', 0),
+            ('landed_tips_75th_percentile', 1),
+            ('landed_tips_95th_percentile', 2),
+        ]
+        
+        for tip_key, retry_count in tip_ladder:
+            try:
+                # Get current tip floor
+                tip_data = await self.get_tip_floor()
+                tip_lamports = tip_data.get(tip_key, 2000)
+                
+                # TODO: Inject tip into transaction_or_bundle
+                # transaction_with_tip = inject_tip(transaction_or_bundle, tip_lamports)
+                
+                # Send
+                data = await self._make_request('/api/v1/bundles/send', 
+                                                    json_data=transaction_or_bundle)
+                
+                response = {
+                    'ok': True,
+                    'bundle_id': data.get('bundle_id', ''),
+                    'signature': data.get('signature', ''),
+                    'mode': 'LIVE',
+                    'tip_used': tip_lamports,
+                    'retry_count': retry_count,
+                }
+                await self._log('/api/v1/bundles/send', True, 
+                               {'tip': tip_lamports, 'retry': retry_count}, 
+                               {'bundle_id': response['bundle_id']})
+                return response
+                
+            except Exception as e:
+                error_msg = str(e)
+                
+                # InstructionError: Direct failure, no retry
+                if 'InstructionError' in error_msg:
+                    await self._log('/api/v1/bundles/send', False, 
+                                   {'tx': '...'}, {}, 400, 0, 
+                                   'JITO_INSTRUCTION_ERROR', error_msg)
+                    return {
+                        'ok': False,
+                        'error': 'INSTRUCTION_ERROR',
+                        'message': 'Instruction error, no retry',
+                        'mode': 'LIVE'
+                    }
+                
+                # tip too low: Retry with higher tip
+                if 'tip too low' in error_msg.lower() and retry_count < 2:
+                    await self._log('/api/v1/bundles/send', False,
+                                   {'tip': tip_lamports}, {},
+                                   400, 0, 'JITO_TIP_TOO_LOW', 
+                                   f"Retry {retry_count+1}/2 with higher tip")
+                    continue  # Try next tip in ladder
+                
+                # Other errors: Fail
+                await self._log('/api/v1/bundles/send', False,
+                               {'tx': '...'}, {}, 500, 0, 'JITO_ERROR', error_msg)
+                return {
+                    'ok': False,
+                    'error': 'JITO_ERROR',
+                    'message': error_msg,
+                    'mode': 'LIVE'
+                }
+        
+        # All retries failed
+        return {
+            'ok': False,
+            'error': 'MAX_RETRIES_EXCEEDED',
+            'message': 'Failed after 2 tip retries',
+            'mode': 'LIVE'
+        }

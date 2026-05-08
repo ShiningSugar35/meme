@@ -3,7 +3,7 @@ from ..config import settings, ProviderMode
 from ..providers.gmgn_real import GMGNProvider
 from ..providers.jupiter_real import JupiterProvider
 from ..providers.jito_real import JitoProvider
-from ..providers.rpc_real import RpcProvider
+from ..providers.rpc_real import RpcRealProvider as RpcProvider
 from ..providers.mock_data import MockData
 
 

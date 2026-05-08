@@ -30,24 +30,122 @@ class Settings(BaseSettings):
     # GMGN API Configuration
     GMGN_API_BASE_URL: Optional[str] = None
     GMGN_API_KEY_1: Optional[SecretStr] = None
+    GMGN_PUBLIC_KEY_1: Optional[str] = None
+    GMGN_PRIVATE_KEY_1: Optional[SecretStr] = None
+    GMGN_API_KEY_2: Optional[SecretStr] = None
+    GMGN_PUBLIC_KEY_2: Optional[str] = None
+    GMGN_PRIVATE_KEY_2: Optional[SecretStr] = None
+    GMGN_API_KEY_3: Optional[SecretStr] = None
+    GMGN_PUBLIC_KEY_3: Optional[str] = None
+    GMGN_PRIVATE_KEY_3: Optional[SecretStr] = None
     GMGN_TRENCHES_PATH: str = Field('/api/v1/trenches')
     GMGN_TOKEN_PRICE_PATH: str = Field('/api/v1/token/price')
     GMGN_KLINE_PATH: str = Field('/api/v1/token/kline')
+    
+    def get_gmgn_api_key(self) -> Optional[SecretStr]:
+        """API key rotation: return first available GMGN API key."""
+        return self.GMGN_API_KEY_1 or self.GMGN_API_KEY_2 or self.GMGN_API_KEY_3
 
     # Jupiter API Configuration
     JUPITER_API_BASE_URL: Optional[str] = None
+    JUPITER_API_KEY_1: Optional[SecretStr] = None
+    JUPITER_API_KEY_2: Optional[SecretStr] = None
+    JUPITER_API_KEY_3: Optional[SecretStr] = None
+    # Legacy keys (kept for compatibility)
     JUPITER_API_KEY_MEME1: Optional[SecretStr] = None
     JUPITER_API_KEY_MEME2: Optional[SecretStr] = None
     JUPITER_API_KEY_MEME3: Optional[SecretStr] = None
+    
+    def get_jupiter_api_key(self) -> Optional[SecretStr]:
+        """API key rotation: return first available Jupiter API key."""
+        return (self.JUPITER_API_KEY_1 or self.JUPITER_API_KEY_2 or 
+                self.JUPITER_API_KEY_3 or self.JUPITER_API_KEY_MEME1 or
+                self.JUPITER_API_KEY_MEME2 or self.JUPITER_API_KEY_MEME3)
 
     # Solana RPC Configuration
     SOLANA_RPC_HTTP_PRIMARY: Optional[str] = None
+    SOLANA_RPC_WS_PRIMARY: Optional[str] = None
+    SOLANA_RPC_HTTP_BACKUP_1: Optional[str] = None
+    SOLANA_RPC_WS_BACKUP_1: Optional[str] = None
     ALCHEMY_API_KEYS: Optional[str] = None
-    ANKR_API_KEY_1: Optional[str] = None
-    ANKR_API_KEY_2: Optional[str] = None
+    ANKR_API_KEY_1: Optional[SecretStr] = None
+    ANKR_API_KEY_2: Optional[SecretStr] = None
+    
+    def _get_ankr_http_url(self, api_key: Optional[SecretStr]) -> Optional[str]:
+        """Generate ANKR Solana HTTP RPC URL from API key."""
+        if not api_key:
+            return None
+        return f"https://rpc.ankr.com/solana/{api_key.get_secret_value()}"
+    
+    def _get_ankr_ws_url(self, api_key: Optional[SecretStr]) -> Optional[str]:
+        """Generate ANKR Solana WebSocket RPC URL from API key."""
+        if not api_key:
+            return None
+        return f"wss://rpc.ankr.com/solana/ws/{api_key.get_secret_value()}"
+    
+    def get_rpc_http_url(self) -> Optional[str]:
+        """
+        Get HTTP RPC URL with support for:
+        1. Direct URL: https://...
+        2. Special value 'ankr': use ANKR_API_KEY to construct URL
+        3. Fallback to ANKR_API_KEY or backup RPC
+        """
+        # If PRIMARY is "ankr", construct from ANKR_API_KEY
+        if self.SOLANA_RPC_HTTP_PRIMARY == "ankr":
+            ankr_url = (self._get_ankr_http_url(self.ANKR_API_KEY_1) or 
+                       self._get_ankr_http_url(self.ANKR_API_KEY_2))
+            if ankr_url:
+                return ankr_url
+        
+        # Otherwise use PRIMARY or BACKUP_1
+        if self.SOLANA_RPC_HTTP_PRIMARY and self.SOLANA_RPC_HTTP_PRIMARY != "ankr":
+            return self.SOLANA_RPC_HTTP_PRIMARY
+        if self.SOLANA_RPC_HTTP_BACKUP_1:
+            return self.SOLANA_RPC_HTTP_BACKUP_1
+        
+        # Fallback: construct from ANKR_API_KEY
+        return (self._get_ankr_http_url(self.ANKR_API_KEY_1) or 
+               self._get_ankr_http_url(self.ANKR_API_KEY_2))
+    
+    def get_rpc_ws_url(self) -> Optional[str]:
+        """
+        Get WebSocket RPC URL with support for:
+        1. Direct URL: wss://...
+        2. Fallback to ANKR_API_KEY for WebSocket construction
+        Returns None if WSS not available (allowed in dry-run mode)
+        """
+        # If PRIMARY is configured and not empty
+        if self.SOLANA_RPC_WS_PRIMARY:
+            return self.SOLANA_RPC_WS_PRIMARY
+        if self.SOLANA_RPC_WS_BACKUP_1:
+            return self.SOLANA_RPC_WS_BACKUP_1
+        
+        # Fallback: construct from ANKR_API_KEY (optional)
+        # Note: Return None if not available, WSS is optional for dry-run
+        return None
+    
+    def get_rpc_url(self) -> Optional[str]:
+        """Legacy method for backward compatibility. Use get_rpc_http_url() instead."""
+        return self.get_rpc_http_url()
 
-    # Jito Configuration
+     # Jito Configuration
     JITO_ENABLED: bool = Field(True)
+    JITO_BLOCK_ENGINE_URL: str = Field('https://mainnet.block-engine.jito.wtf')
+    JITO_TIP_FLOOR_URL: str = Field('https://bundles.jito.wtf/api/v1/bundles/tip_floor')
+    JITO_TIP_STREAM_WS: str = Field('wss://bundles.jito.wtf/api/v1/bundles/tip_stream')
+
+    # Trading Parameters (optional - defaults in code)
+    POLL_INTERVAL_SECONDS: int = Field(60)
+    ACTIVE_POSITION_PRICE_POLL_SECONDS: int = Field(1)
+    TIP_FLOOR_REFRESH_SECONDS: int = Field(3)
+    
+    BUY_SLIPPAGE_CAP_BPS: int = Field(1500)
+    SELL_SLIPPAGE_CAP_BPS: int = Field(2000)
+    EMERGENCY_SLIPPAGE_CAP_BPS: int = Field(3500)
+    PRICE_IMPACT_HARD_CAP_PCT: float = Field(10.0)
+    
+    LIVE_ROLLING_10_LOSS_LIMIT: float = Field(-0.20)
+    MAX_REQUOTE_RETRY: int = Field(2)
 
     # Wallet Configuration (only used if LIVE_TRADING_ENABLED=true)
     WALLET_PUBLIC_KEY: Optional[str] = None
@@ -101,12 +199,18 @@ class Settings(BaseSettings):
             missing = []
             if not self.GMGN_API_BASE_URL:
                 missing.append('GMGN_API_BASE_URL')
+            if not self.get_gmgn_api_key():
+                missing.append('GMGN_API_KEY_1')
             if not self.JUPITER_API_BASE_URL:
                 missing.append('JUPITER_API_BASE_URL')
-            if not self.SOLANA_RPC_HTTP_PRIMARY:
-                missing.append('SOLANA_RPC_HTTP_PRIMARY')
+            if not self.get_jupiter_api_key():
+                missing.append('JUPITER_API_KEY_1')
+            if not (self.SOLANA_RPC_HTTP_PRIMARY or self.ANKR_API_KEY_1):
+                missing.append('SOLANA_RPC_HTTP_PRIMARY or ANKR_API_KEY_1')
             if not self.JITO_ENABLED:
                 missing.append('JITO_ENABLED')
+            if not self.JITO_BLOCK_ENGINE_URL:
+                missing.append('JITO_BLOCK_ENGINE_URL')
             if not self.WALLET_PUBLIC_KEY:
                 missing.append('WALLET_PUBLIC_KEY')
             if not self.WALLET_PRIVATE_KEY_BASE58:
