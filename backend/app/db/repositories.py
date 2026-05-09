@@ -490,6 +490,19 @@ class Repositories:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def list_all_positions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        async with self.db.execute("SELECT * FROM positions ORDER BY opened_at DESC LIMIT ?", (limit,)) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def list_strategy_matches_by_token(self, token_mint: str, limit: int = 50) -> List[Dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT * FROM token_strategy_matches WHERE token_mint = ? ORDER BY created_at DESC LIMIT ?",
+            (token_mint, limit)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def update_position_remaining(self, position_id: int, remaining_token_amount: float, remaining_value_usd: float, last_fill_at: Optional[str] = None, last_fill_price_usd: Optional[float] = None):
         try:
             await self.db.execute("BEGIN")

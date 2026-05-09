@@ -12,6 +12,23 @@ from ..providers.rpc_real import RpcRealProvider
 from ..trading.executor import TradingPipeline
 
 
+def pytest_addoption(parser):
+    parser.addoption("--run-smoke", action="store_true", default=False, help="run smoke tests against real APIs")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "smoke: mark test as smoke test (requires --run-smoke)")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-smoke"):
+        return
+    skip_smoke = pytest.mark.skip(reason="need --run-smoke option to run")
+    for item in items:
+        if "smoke" in item.keywords:
+            item.add_marker(skip_smoke)
+
+
 @pytest_asyncio.fixture
 async def repo(tmp_path):
     db_file = tmp_path / "test.sqlite3"
