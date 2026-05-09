@@ -97,9 +97,10 @@ class JupiterProvider(SwapProvider):
         url = f"{self.api_base_url}{path}"
         headers = {'Content-Type': 'application/json'}
         
-        # Add API key if available
-        if settings.JUPITER_API_KEY_MEME1:
-            headers['Authorization'] = f"Bearer {settings.JUPITER_API_KEY_MEME1.get_secret_value()}"
+        # Add API key if available (dynamic scanning)
+        jupiter_key = settings.get_jupiter_api_key()
+        if jupiter_key:
+            headers['Authorization'] = f"Bearer {jupiter_key.get_secret_value() if hasattr(jupiter_key, 'get_secret_value') else jupiter_key}"
         
         start = time.time()
         try:

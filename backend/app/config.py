@@ -5,6 +5,16 @@ import os
 import re
 from enum import Enum
 
+# Pre-load .env into os.environ so dynamic key scanning can find ALL keys,
+# not just the ones explicitly defined as model fields.
+# This enables truly dynamic GMGN_API_KEY_N / JUPITER_API_KEY_N / ANKR_API_KEY_N
+# without any hardcoded count limit.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 
 class ProviderMode(str, Enum):
     MOCK = "mock"
@@ -13,7 +23,7 @@ class ProviderMode(str, Enum):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
     APP_ENV: str = Field('development')
     SQLITE_PATH: str = Field('./data/trading_bot.sqlite3')
@@ -73,113 +83,65 @@ class Settings(BaseSettings):
     GMGN_KLINE_PATH: str = Field('/api/v1/token/kline')
     
     def _scan_gmgn_accounts(self) -> List[Dict[str, Any]]:
-        """Dynamically scan for GMGN_API_KEY_* from model fields + os.environ fallback."""
+        r"""Dynamically scan os.environ for GMGN_API_KEY_\d+ patterns. No hardcoded count limit."""
         accounts = []
-        api_keys = {}
-        seen_indices: set = set()
+        api_keys: Dict[int, SecretStr] = {}
 
-        # 1. Scan explicitly defined model fields (1-12)
-        for i in range(1, 13):
-            key_field = getattr(self, f'GMGN_API_KEY_{i}', None)
-            if key_field is not None:
-                secret_val = key_field.get_secret_value() if hasattr(key_field, 'get_secret_value') else key_field
-                if secret_val and isinstance(secret_val, str) and secret_val.strip():
-                    api_keys[i] = key_field
-                    seen_indices.add(i)
-
-        # 2. Also scan os.environ for keys beyond 12 (future expansion)
         for key, value in os.environ.items():
             match = re.match(r'GMGN_API_KEY_(\d+)', key)
             if match and value:
                 index = int(match.group(1))
-                if index not in seen_indices:
-                    api_keys[index] = SecretStr(value)
-                    seen_indices.add(index)
+                api_keys[index] = SecretStr(value)
 
-        # For each API key found, assemble account with public/private keys
         for index in sorted(api_keys.keys()):
-            account = {'index': index, 'api_key': api_keys[index]}
+            pub_key = os.environ.get(f'GMGN_PUBLIC_KEY_{index}')
+            priv_key_raw = os.environ.get(f'GMGN_PRIVATE_KEY_{index}')
+            priv_key = SecretStr(priv_key_raw) if priv_key_raw else None
 
-            # Try model field first, then os.environ fallback
-            pub_key = getattr(self, f'GMGN_PUBLIC_KEY_{index}', None) or os.environ.get(f'GMGN_PUBLIC_KEY_{index}')
-            priv_key = getattr(self, f'GMGN_PRIVATE_KEY_{index}', None)
-            priv_key_env = os.environ.get(f'GMGN_PRIVATE_KEY_{index}')
+            account: Dict[str, Any] = {'index': index, 'api_key': api_keys[index]}
 
-            if priv_key is None and priv_key_env:
-                priv_key = SecretStr(priv_key_env)
-
-            # Validate public/private key pairing
             if (pub_key and not priv_key) or (not pub_key and priv_key):
                 account['invalid_config'] = f"Mismatched keys: public_key={bool(pub_key)}, private_key={bool(priv_key)}"
             else:
                 account['public_key'] = pub_key
-                account['private_key'] = priv_key if priv_key else None
+                account['private_key'] = priv_key
 
             accounts.append(account)
 
         return accounts
-    
+
     def _scan_jupiter_api_keys(self) -> List[SecretStr]:
-        """Dynamically scan for JUPITER_API_KEY_* from model fields + os.environ fallback."""
+        r"""Dynamically scan os.environ for JUPITER_API_KEY_\d+ patterns. No hardcoded count limit."""
         keys = []
-        jupiter_keys = {}
-        seen_indices: set = set()
+        jupiter_keys: Dict[int, SecretStr] = {}
 
-        # 1. Scan explicitly defined model fields (1-3 + MEME1-3)
-        field_names = ['JUPITER_API_KEY_1', 'JUPITER_API_KEY_2', 'JUPITER_API_KEY_3',
-                       'JUPITER_API_KEY_MEME1', 'JUPITER_API_KEY_MEME2', 'JUPITER_API_KEY_MEME3']
-        for name in field_names:
-            val = getattr(self, name, None)
-            if val is not None:
-                secret_val = val.get_secret_value() if hasattr(val, 'get_secret_value') else val
-                if secret_val and isinstance(secret_val, str) and secret_val.strip():
-                    jupiter_keys[name] = val
-
-        # 2. Also scan os.environ for additional keys (future expansion)
         for key, value in os.environ.items():
             match = re.match(r'JUPITER_API_KEY_(\d+)', key)
             if match and value:
                 index = int(match.group(1))
-                field_name = f'JUPITER_API_KEY_{index}'
-                if field_name not in jupiter_keys:
-                    jupiter_keys[field_name] = SecretStr(value)
+                jupiter_keys[index] = SecretStr(value)
 
-        # Return sorted by field name
-        for name in sorted(jupiter_keys.keys()):
-            keys.append(jupiter_keys[name])
+        for index in sorted(jupiter_keys.keys()):
+            keys.append(jupiter_keys[index])
 
         return keys
-    
+
     def _scan_ankr_api_keys(self) -> List[SecretStr]:
-        """Dynamically scan for ANKR_API_KEY_* from model fields + os.environ fallback."""
+        r"""Dynamically scan os.environ for ANKR_API_KEY_\d+ patterns. No hardcoded count limit."""
         keys = []
-        ankr_keys = {}
-        seen_indices: set = set()
+        ankr_keys: Dict[int, SecretStr] = {}
 
-        # 1. Scan explicitly defined model fields (1-2)
-        for i in range(1, 3):
-            val = getattr(self, f'ANKR_API_KEY_{i}', None)
-            if val is not None:
-                secret_val = val.get_secret_value() if hasattr(val, 'get_secret_value') else val
-                if secret_val and isinstance(secret_val, str) and secret_val.strip():
-                    ankr_keys[i] = val
-                    seen_indices.add(i)
-
-        # 2. Also scan os.environ for additional keys (future expansion)
         for key, value in os.environ.items():
             match = re.match(r'ANKR_API_KEY_(\d+)', key)
             if match and value:
                 index = int(match.group(1))
-                if index not in seen_indices:
-                    ankr_keys[index] = SecretStr(value)
-                    seen_indices.add(index)
+                ankr_keys[index] = SecretStr(value)
 
-        # Return sorted by index
         for index in sorted(ankr_keys.keys()):
             keys.append(ankr_keys[index])
 
         return keys
-    
+
     def get_gmgn_accounts(self) -> List[Dict[str, Any]]:
         """Return dynamically scanned GMGN accounts (with validation info)."""
         if not hasattr(self, '_gmgn_accounts'):

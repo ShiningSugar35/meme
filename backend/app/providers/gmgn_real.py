@@ -47,7 +47,11 @@ class GMGNProvider(MarketDataProvider):
         self.repo = repo
         self.mode = mode or settings.get_provider_mode()
         self.api_base_url = settings.GMGN_API_BASE_URL or "https://api.gmgn.ai"
-        self.api_key = settings.GMGN_API_KEY_1.get_secret_value() if settings.GMGN_API_KEY_1 else None
+        # Use dynamic key scanning: picks first available GMGN_API_KEY_*
+        self.api_key = None
+        key = settings.get_gmgn_api_key()
+        if key:
+            self.api_key = key.get_secret_value() if hasattr(key, 'get_secret_value') else key
         
         # Set up mock data for mock mode
         self.mock_data = None
