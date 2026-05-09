@@ -1,10 +1,10 @@
 # Implementation Report - Solana Meme Trading Bot v1
 
-## Current Status: Phase B.1 Complete (Real API Field Mapping)
+## Current Status: Phase B.2 + B.3 Complete (Runners + Business Rules)
 
-- **Overall Progress:** Phase A + B.1 Complete, 82/82 tests passing
-- **Latest Update:** 2026-05-08 - Phase B.1 GMGN endpoints + API field mapping
-- **Next Focus:** Phase B.2 (Runner Implementation)
+- **Overall Progress:** Phase A + B.1 + B.2 + B.3 Complete, 113/113 tests passing
+- **Latest Update:** 2026-05-09 - Phase B.2/B.3 runners, PriceAggregator, dynamic scan, dust exit, SSE
+- **Next Focus:** Phase C (Live provider integration)
 
 ## Phase Completion Status
 
@@ -12,8 +12,8 @@
 |-------|--------|---------|
 | Phase A | ✅ Complete | Discovery dedup, schema fixes, 65 tests |
 | Phase B.1 | ✅ Complete | GMGN endpoints, API field mapping, response masking |
-| Phase B.2 | ⏳ Pending | Runner implementation (5 runners + EventBus) |
-| Phase B.3 | ⏳ Pending | Test coverage for runners and business rules |
+| Phase B.2 | ✅ Complete | 5 runners + EventBus + PriceAggregator + SSE |
+| Phase B.3 | ✅ Complete | 31 business rule tests (dynamic keys, price fallback, scan tiers, dust, SSE) |
 | Phase C | ⏳ Pending | Live provider integration (when keys available) |
 | Phase D | ⏳ Pending | Live executor implementation |
 | Phase E | ⏳ Pending | Frontend (React + Vite) |
@@ -61,15 +61,67 @@
     - ✅ Generated `docs/API_FIELD_MAPPING_REPORT.md` (9 sections, field name TODOs, masking strategy)
     - ✅ All 82 tests passing with new endpoints
 
-## Uncompleted Modules
-### Phase B: Runner Closure
-- DiscoveryRunner
-- SecondFilterRunner
-- PriceMonitorRunner
-- PositionRiskRunner
-- KillSwitchRunner
-- EventBus / SSE log stream
+6. **Phase B.2 + B.3: Runners, PriceAggregator, EventBus, Business Rule Tests**
+    - ✅ **Dynamic API Key Scanning** — Fixed Pydantic model field loading for GMGN keys 1-12, Jupiter keys 1-3, Ankr keys 1-2. Scanning reads from model fields first, then os.environ fallback for future expansion beyond 12 keys.
+      - `_scan_gmgn_accounts()` — returns 12 accounts with api_key, public_key, private_key, invalid_config flag
+      - `_scan_jupiter_api_keys()` — returns 3 keys via JUPITER_API_KEY_\d+ scanning
+      - `_scan_ankr_api_keys()` — returns 2 keys via ANKR_API_KEY_\d+ scanning
+      - `get_gmgn_api_key()` / `get_jupiter_api_key()` — backward compatible (first key only)
+    - ✅ **Risk Scan Tiers** — Added 10 config fields for dynamic scan frequency:
+      - Tier 1: >= 1.5 SOL → scan every 2s
+      - Tier 2: >= 1.0 SOL → scan every 4s
+      - Tier 3: >= 0.5 SOL → scan every 8s
+      - Tier 4: >= 0.25 SOL → scan every 16s
+      - Tier 5: < 0.25 SOL → scan every 32s
+      - `get_risk_scan_interval_seconds(remaining_value_sol)` — method on Settings
+    - ✅ **Dust Force Exit Rule** — `DUST_FORCE_EXIT_SOL=0.125` (SOL-based, not USD)
+    - ✅ **GMGN WebSocket Subscriber** (`providers/gmgn_subscriber.py`):
+      - `GMGNSubscriberBase` abstract base class with subscribe/unsubscribe/get_latest/get_latest_batch
+      - `GMGNMockSubscriber` — inject_tick, on_tick callback, in-memory tick storage
+      - `create_gmgn_subscriber()` — factory returning mock in MOCK mode, mock fallback otherwise
+    - ✅ **PriceAggregator** (`services/price_aggregator.py`):
+      - 3-tier fallback: GMGN subscription → GMGN latest → Jupiter quote
+      - Fallback ticks marked as `JUPITER_QUOTE_FALLBACK` in source
+      - `get_price()` — single token with automatic fallback
+      - `get_prices_batch()` — batch price fetching
+      - Tick snapshots logged via `repo.insert_tick_snapshot()` with source tracking
+    - ✅ **Updated DiscoveryRunner** (`runners/discovery_runner.py`):
+      - Snapshot_id dedup via `get_discovery_event_by_snapshot_token_pool()`
+      - Discovery event creation with pool_address and source_snapshot_id
+      - EventBus integration for system event publishing
+    - ✅ **Updated PriceMonitorRunner** (`runners/price_monitor_runner.py`):
+      - Uses PriceAggregator instead of raw GMGN provider
+      - Source tracking in tick snapshots (GMGN_SUBSCRIPTION / GMGN_LATEST / JUPITER_QUOTE_FALLBACK)
+    - ✅ **Updated PositionRiskRunner** (`runners/position_risk_runner.py`):
+      - Dynamic scan frequency via `settings.get_risk_scan_interval_seconds(remaining_value_sol)`
+      - Last-scan-time cache to skip recently scanned positions
+      - Dust force exit: remaining_value_sol < 0.125 → 100% exit with DUST_FORCE_EXIT reason
+      - Extended tick window from 60s to 120s for rolling calculations
+      - EventBus integration for risk events
+    - ✅ **EventBus** (`services/event_bus.py`):
+      - Async pub/sub with per-channel subscriber queues
+      - Thread-safe with asyncio.Lock
+      - `subscribe()` / `unsubscribe()` / `publish()` API
+      - Max queue size of 100 to prevent memory leaks
+    - ✅ **SSE `/api/logs/stream` endpoint** (`api/routes_logs.py`):
+      - Server-Sent Events via Starlette `StreamingResponse`
+      - 30s ping heartbeat to keep connections alive
+      - Connection cleanup on disconnect via `event_bus.unsubscribe()`
+      - Uses `text/event-stream` content type with no-buffering headers
+    - ✅ **Updated MockLifecycleRunner** — wires up PriceAggregator with GMGN subscriber, passes to PriceMonitorRunner
+    - ✅ **31 B.3 tests** (`tests/test_runners_b3.py`):
+      - Dynamic API key tests (7 tests): account scanning, key availability, config validation, risk scan tiers, dust exit default
+      - PriceAggregator tests (5 tests): subscription priority, GMGN latest fallback, source field tracking, batch operations
+      - Jupiter fallback tests (2 tests): fallback label, error resilience
+      - Position risk tests (3 tests): dynamic scan frequency, dust force exit, scan interval skip
+      - Kill switch tests (2 tests): insufficient data, rolling_10_roi
+      - SSE/EventBus tests (5 tests): sub/pub, multiple subscribers, cleanup, recent logs endpoint, stream route registration
+      - SecondFilterRunner test (1 test): provider error handling
+      - GMGN Subscriber tests (4 tests): sub/unsub, batch, factory creation
+      - E2E MockLifecycleRunner test (1 test): all stages run
+    - ✅ All 113 tests passing (82 baseline + 31 new)
 
+## Uncompleted Modules
 ### Phase C: Provider Real Integration
 - Full GMGN real API integration
 - Full Jupiter real API integration
@@ -147,6 +199,28 @@ ANKR_API_KEY_1=
 # Wallet (live only)
 WALLET_PUBLIC_KEY=
 WALLET_PRIVATE_KEY_BASE58=  # Never commit real keys
+
+# Trading Parameters
+BUY_SLIPPAGE_CAP_BPS=1500
+SELL_SLIPPAGE_CAP_BPS=2000
+EMERGENCY_SLIPPAGE_CAP_BPS=3500
+PRICE_IMPACT_HARD_CAP_PCT=10
+LIVE_ROLLING_10_LOSS_LIMIT=-0.20
+MAX_REQUOTE_RETRY=2
+
+# Risk Feature Scan Tiers (dynamic based on remaining position value in SOL)
+RISK_FEATURE_SCAN_TIER_1_SOL=1.5
+RISK_FEATURE_SCAN_TIER_1_SECONDS=2
+RISK_FEATURE_SCAN_TIER_2_SOL=1.0
+RISK_FEATURE_SCAN_TIER_2_SECONDS=4
+RISK_FEATURE_SCAN_TIER_3_SOL=0.5
+RISK_FEATURE_SCAN_TIER_3_SECONDS=8
+RISK_FEATURE_SCAN_TIER_4_SOL=0.25
+RISK_FEATURE_SCAN_TIER_4_SECONDS=16
+RISK_FEATURE_SCAN_TIER_5_SECONDS=32
+
+# Dust Position Rules (in SOL, not USD)
+DUST_FORCE_EXIT_SOL=0.125
 ```
 
 ## How to Start Frontend
