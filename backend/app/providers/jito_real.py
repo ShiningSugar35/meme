@@ -58,8 +58,8 @@ class JitoProvider(ExecutionProvider):
                 raise ImportError("httpx required for online_readonly mode. Install with: pip install httpx")
             logger.info("Jito Provider initialized in ONLINE_READONLY mode - send() is BLOCKED")
         elif self.mode == ProviderMode.LIVE:
-            if not self.jito_enabled or not settings.LIVE_TRADING_ENABLED:
-                raise ValueError("Jito requires LIVE_TRADING_ENABLED=true")
+            if not self.jito_enabled:
+                raise ValueError("Jito requires JITO_ENABLED=true")
             if not HAS_HTTPX:
                 raise ImportError("httpx required for live mode. Install with: pip install httpx")
             logger.info("Jito Provider initialized in LIVE mode")

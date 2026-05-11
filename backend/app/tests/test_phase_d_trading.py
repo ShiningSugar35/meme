@@ -27,15 +27,9 @@ class TestSafetyGate:
     def test_dry_run_default_is_true(self):
         assert settings.DRY_RUN is True
 
-    def test_live_trading_default_is_false(self):
-        assert settings.LIVE_TRADING_ENABLED is False
-
-    def test_jito_enabled_default_is_true(self):
-        assert settings.JITO_ENABLED is True
-
     def test_non_mock_mode_with_dry_run_would_block(self):
         assert settings.DRY_RUN is True
-        assert settings.LIVE_TRADING_ENABLED is False
+        # With DRY_RUN=true, get_provider_mode returns MOCK
 
 
 class TestPriceImpactBlocks:

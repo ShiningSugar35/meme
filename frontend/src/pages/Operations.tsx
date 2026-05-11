@@ -12,6 +12,9 @@ export default function Operations() {
   const [tab, setTab] = useState<'logs' | 'trades' | 'providers'>('logs')
   const [confirmAction, setConfirmAction] = useState<{ label: string, action: () => void } | null>(null)
 
+  const [killActive, setKillActive] = useState(false)
+  const [liveStopped, setLiveStopped] = useState(false)
+
   const refresh = useCallback(() => {
     api.getRuntimeStatus().then(setRuntime).catch(() => {})
     api.getRecentLogs(filterLevel || undefined, filterCat || undefined).then(r => setLogs(r || [])).catch(() => {})
@@ -48,8 +51,41 @@ export default function Operations() {
   const CATEGORIES = ['', 'DISCOVERY', 'SECOND_FILTER', 'RISK', 'TRADE', 'JITO', 'GMGN', 'JUPITER', 'RPC', 'WORKER', 'EMERGENCY', 'CONFIG', 'DB']
   const LEVELS = ['', 'INFO', 'WARN', 'ERROR']
 
-  const mode = runtime?.user_mode || 'SIM_TEST'
-  const workersRunning = false /* updated via runtime */
+  const mode = runtime?.user_mode || 'IDLE'
+  const modeLabel = mode === 'FORMAL_SIM_LIVE' ? '实盘' : mode === 'SIM_TEST' ? '模拟盘' : 'IDLE'
+  const liveReady = runtime?.can_live_trade ? 'Ready' : 'Blocked'
+
+  const handleKill = () => {
+    if (killActive) {
+      doConfirm('Resume (disable kill switch)', async () => {
+        await api.toggleKill(false)
+        setKillActive(false)
+        setMsg('Kill switch disabled')
+      })
+    } else {
+      doConfirm('Kill switch - block all new entries', async () => {
+        await api.toggleKill(true)
+        setKillActive(true)
+        setMsg('Kill switch enabled')
+      })
+    }
+  }
+
+  const handleStopLive = () => {
+    if (liveStopped) {
+      doConfirm('Resume live mode trading', async () => {
+        await api.resumeLiveMode()
+        setLiveStopped(false)
+        setMsg('Live trading resumed')
+      })
+    } else {
+      doConfirm('Stop all live mode trading', async () => {
+        await api.stopLiveMode()
+        setLiveStopped(true)
+        setMsg('Live trading stopped')
+      })
+    }
+  }
 
   return (
     <div>
@@ -74,34 +110,28 @@ export default function Operations() {
 
       {/* Status bar */}
       <div className="flex items-center gap-4 mb-4 text-xs text-gray-400">
-        <span>Mode: <span className={mode === 'FORMAL_SIM_LIVE' ? 'text-red-400' : 'text-cyan-400'}>{mode}</span></span>
-        <span>Live: <span className={runtime?.can_live_trade ? 'text-green-400' : 'text-red-400'}>{runtime?.can_live_trade ? 'Ready' : 'Blocked'}</span></span>
-        <span>Kill Switch: <span className={runtime?.pause_new_entries ? 'text-red-400' : 'text-green-400'}>{runtime?.pause_new_entries ? 'ACTIVE' : 'Clear'}</span></span>
-        <span>Workers: <span className={workersRunning ? 'text-green-400' : 'text-gray-500'}>{workersRunning ? 'On' : 'Off'}</span></span>
+        <span>Mode: <span className={mode === 'FORMAL_SIM_LIVE' ? 'text-red-400' : 'text-cyan-400'}>{modeLabel}</span></span>
+        <span>Live: <span className={runtime?.can_live_trade ? 'text-green-400' : 'text-red-400'}>{liveReady}</span></span>
       </div>
 
       {/* Emergency Actions */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-        <button onClick={() => doConfirm('Kill Switch ON - block all new entries', () => api.toggleKillSwitch(true))}
-          className="bg-red-800 hover:bg-red-700 px-3 py-2 rounded text-xs text-white">Kill Switch ON</button>
-        <button onClick={() => doConfirm('Kill Switch OFF - resume entries', () => api.toggleKillSwitch(false))}
-          className="bg-yellow-800 hover:bg-yellow-700 px-3 py-2 rounded text-xs text-white">Kill Switch OFF</button>
-        <button onClick={() => doConfirm('Pause new live entries', () => api.pauseLiveEntries())}
-          className="bg-red-900 hover:bg-red-800 px-3 py-2 rounded text-xs text-white">Pause Live Entries</button>
-        <button onClick={() => doConfirm('Resume new live entries', () => api.resumeLiveEntries())}
-          className="bg-green-900 hover:bg-green-800 px-3 py-2 rounded text-xs text-white">Resume Live Entries</button>
-        <button onClick={() => api.stopWorkers().then(refresh)}
-          className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-xs">Stop Workers</button>
-        <button onClick={() => api.startWorkers().then(refresh)}
-          className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-xs">Start Workers</button>
-        <button onClick={() => { api.mockRunOnce(); setMsg('Mock lifecycle triggered'); setTimeout(refresh, 500) }}
-          className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-xs">Run Once</button>
+        <button onClick={handleKill}
+          className={`px-3 py-2 rounded text-xs text-white ${killActive ? 'bg-gray-600 hover:bg-gray-500' : 'bg-red-800 hover:bg-red-700'}`}>
+          {killActive ? 'Resume' : 'Kill'}
+        </button>
+        <button onClick={handleStopLive}
+          className={`px-3 py-2 rounded text-xs text-white ${liveStopped ? 'bg-green-800 hover:bg-green-700' : 'bg-orange-800 hover:bg-orange-700'}`}>
+          {liveStopped ? '恢复实盘' : '停止实盘'}
+        </button>
+        <button onClick={() => doConfirm('Export losing positions', () => api.exportLosing())}
+          className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-xs">
+          亏钱盘导出
+        </button>
         <button onClick={() => doConfirm('Repair legacy DB configs', () => api.repairLegacyDb())}
           className="bg-purple-900 hover:bg-purple-800 px-3 py-2 rounded text-xs text-white">Repair Legacy DB</button>
         <button onClick={() => { api.backupDb(); setMsg('DB backup started') }}
           className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-xs">Backup DB</button>
-        <button onClick={() => api.resetKillSwitch().then(refresh)}
-          className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-xs">Reset Kill Switch</button>
       </div>
 
       {/* Tabs */}

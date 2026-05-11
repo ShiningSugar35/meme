@@ -3,6 +3,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+from pathlib import Path
+from datetime import datetime, timezone
 from ..config import settings, ProviderMode
 from ..logging_config import logger
 
@@ -10,24 +12,20 @@ router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
 
 class ModeSwitchRequest(BaseModel):
-    user_mode: str  # SIM_TEST or FORMAL_SIM_LIVE
+    user_mode: str  # SIM_TEST / FORMAL_SIM_LIVE / IDLE
 
 
-# Runtime status
 @router.get("/status")
 async def runtime_status(request: Request):
     repo = request.app.state.repo
     settings_dict = await repo.get_all_runtime_settings()
     mode = settings.get_provider_mode()
 
-    user_mode = settings_dict.get('user_mode', 'SIM_TEST')
+    user_mode = settings_dict.get('user_mode', 'IDLE')
     workers_enabled = settings_dict.get('workers_enabled', 'false') == 'true'
     live_entries_enabled = settings_dict.get('live_entries_enabled', 'false') == 'true'
 
-    # Live safety check
     live_checks = _check_live_readiness()
-
-    # Kill switch
     pause_new = getattr(request.app.state, 'pause_new_entries', False)
 
     return JSONResponse({
@@ -41,53 +39,45 @@ async def runtime_status(request: Request):
     })
 
 
-# Switch user mode
 @router.post("/mode")
 async def switch_mode(body: ModeSwitchRequest, request: Request):
     repo = request.app.state.repo
     new_mode = body.user_mode
+    worker_mgr = getattr(request.app.state, 'worker_manager', None)
 
-    if new_mode not in ('SIM_TEST', 'FORMAL_SIM_LIVE'):
-        return JSONResponse({'ok': False, 'error': f'Invalid mode: {new_mode}. Must be SIM_TEST or FORMAL_SIM_LIVE'}, status_code=400)
+    if new_mode not in ('SIM_TEST', 'FORMAL_SIM_LIVE', 'IDLE'):
+        return JSONResponse({'ok': False, 'error': f'Invalid mode: {new_mode}.'}, status_code=400)
 
     if new_mode == 'FORMAL_SIM_LIVE':
         checks = _check_live_readiness()
         if not checks.get('ready'):
             return JSONResponse({
-                'ok': False,
-                'error': 'Live mode not ready',
+                'ok': False, 'error': 'Live mode not ready',
                 'missing': checks.get('missing', []),
                 'checks': checks,
             }, status_code=400)
 
     await repo.set_runtime_setting('user_mode', new_mode, 'frontend')
-    await repo.append_system_event('INFO', 'RUNTIME', f'User mode switched to {new_mode}', None, account_type='SIM')
 
+    # Auto-control workers based on mode
+    if worker_mgr:
+        if new_mode == 'IDLE':
+            await worker_mgr.stop_all()
+            await repo.set_runtime_setting('workers_enabled', 'false', 'frontend')
+            await repo.set_runtime_setting('live_entries_enabled', 'false', 'frontend')
+        elif new_mode == 'SIM_TEST':
+            await repo.set_runtime_setting('live_entries_enabled', 'false', 'frontend')
+            await worker_mgr.start_all()
+            await repo.set_runtime_setting('workers_enabled', 'true', 'frontend')
+        elif new_mode == 'FORMAL_SIM_LIVE':
+            await repo.set_runtime_setting('live_entries_enabled', 'true', 'frontend')
+            await worker_mgr.start_all()
+            await repo.set_runtime_setting('workers_enabled', 'true', 'frontend')
+
+    await repo.append_system_event('INFO', 'RUNTIME', f'User mode switched to {new_mode}', None, account_type='SIM')
     return JSONResponse({'ok': True, 'user_mode': new_mode})
 
 
-# Workers control
-@router.post("/workers/start")
-async def start_workers(request: Request):
-    repo = request.app.state.repo
-    worker_mgr = request.app.state.worker_manager
-    await worker_mgr.start_all()
-    await repo.set_runtime_setting('workers_enabled', 'true', 'frontend')
-    await repo.append_system_event('INFO', 'WORKER', 'All workers started', None, account_type='SIM')
-    return JSONResponse({'ok': True, 'status': 'started'})
-
-
-@router.post("/workers/stop")
-async def stop_workers(request: Request):
-    repo = request.app.state.repo
-    worker_mgr = request.app.state.worker_manager
-    await worker_mgr.stop_all()
-    await repo.set_runtime_setting('workers_enabled', 'false', 'frontend')
-    await repo.append_system_event('INFO', 'WORKER', 'All workers stopped', None, account_type='SIM')
-    return JSONResponse({'ok': True, 'status': 'stopped'})
-
-
-# Workers status
 @router.get("/workers/status")
 async def workers_status(request: Request):
     worker_mgr = getattr(request.app.state, 'worker_manager', None)
@@ -96,20 +86,23 @@ async def workers_status(request: Request):
     return JSONResponse(worker_mgr.get_status())
 
 
-# Portfolio table
+# Portfolio table with  ratio (current / entry)
 @router.get("/portfolio/table")
 async def portfolio_table(request: Request, account_type: str = 'LIVE'):
     repo = request.app.state.repo
-    positions = await repo.list_positions_for_portfolio(account_type, 100)
+    positions = await repo.list_positions_for_portfolio(account_type, 200)
     result = []
     for p in positions:
         mint = p.get('token_mint', '')
+        entry_price = p.get('entry_price_usd', 0) or 0
+        current_price = p.get('last_fill_price_usd') or p.get('entry_price_usd', 0) or 0
+        ratio = (current_price / entry_price) if entry_price and entry_price > 0 else 1.0
+
         result.append({
             'id': p['id'],
             'status': p.get('status', 'UNKNOWN'),
-            'entry_usd': p.get('entry_price_usd', 0),
+            'ratio': round(ratio, 2),
             'remaining': p.get('remaining_value_usd', 0),
-            'price': p.get('entry_price_usd', 0),
             'liquidity': None,
             'pnl_pct': p.get('pnl_pct') or p.get('realized_pnl_pct'),
             'market_cap': None,
@@ -122,7 +115,6 @@ async def portfolio_table(request: Request, account_type: str = 'LIVE'):
     return JSONResponse(result)
 
 
-# Positions summary
 @router.get("/positions/summary")
 async def positions_summary(request: Request):
     repo = request.app.state.repo
@@ -130,11 +122,13 @@ async def positions_summary(request: Request):
     return JSONResponse(summary)
 
 
-# Emergency endpoints
+# Emergency: kill switch toggle
 @router.post("/emergency/kill-switch")
 async def toggle_kill_switch(request: Request, enable: bool = True):
     repo = request.app.state.repo
     request.app.state.pause_new_entries = enable
+    if enable:
+        await repo.set_runtime_setting('live_entries_enabled', 'false', 'emergency')
     await repo.append_system_event(
         'WARN' if enable else 'INFO', 'EMERGENCY',
         f'Kill switch {"ON" if enable else "OFF"}',
@@ -143,48 +137,87 @@ async def toggle_kill_switch(request: Request, enable: bool = True):
     return JSONResponse({'ok': True, 'kill_switch_active': enable})
 
 
-@router.post("/emergency/pause-new-live-entries")
-async def pause_new_live_entries(request: Request):
+# Emergency: stop/stop live entries (auto-switches to SIM_TEST)
+@router.post("/emergency/stop-live")
+async def stop_live_mode(request: Request):
     repo = request.app.state.repo
     request.app.state.pause_new_entries = True
-    await repo.set_runtime_setting('live_entries_enabled', 'false', 'frontend')
-    await repo.append_system_event('WARN', 'EMERGENCY', 'New live entries PAUSED', None, account_type='SIM')
-    return JSONResponse({'ok': True, 'status': 'paused'})
+    await repo.set_runtime_setting('live_entries_enabled', 'false', 'emergency')
+    await repo.set_runtime_setting('user_mode', 'SIM_TEST', 'emergency')
+    await repo.append_system_event('WARN', 'EMERGENCY', 'Live trading stopped, switched to SIM_TEST', None, account_type='SIM')
+    return JSONResponse({'ok': True, 'user_mode': 'SIM_TEST'})
 
 
-@router.post("/emergency/resume-new-live-entries")
-async def resume_new_live_entries(request: Request):
+@router.post("/emergency/resume-live")
+async def resume_live_mode(request: Request):
     repo = request.app.state.repo
+    checks = _check_live_readiness()
+    if not checks.get('ready'):
+        return JSONResponse({'ok': False, 'error': 'Live mode not ready', 'missing': checks.get('missing', [])}, status_code=400)
     request.app.state.pause_new_entries = False
-    await repo.set_runtime_setting('live_entries_enabled', 'true', 'frontend')
-    await repo.append_system_event('INFO', 'EMERGENCY', 'New live entries RESUMED', None, account_type='SIM')
-    return JSONResponse({'ok': True, 'status': 'resumed'})
+    await repo.set_runtime_setting('live_entries_enabled', 'true', 'emergency')
+    await repo.set_runtime_setting('user_mode', 'FORMAL_SIM_LIVE', 'emergency')
+    await repo.append_system_event('INFO', 'EMERGENCY', 'Live trading resumed', None, account_type='SIM')
+    return JSONResponse({'ok': True, 'user_mode': 'FORMAL_SIM_LIVE'})
 
 
-@router.post("/emergency/backup-db")
-async def backup_db(request: Request):
-    import shutil
+# Emergency: export losing positions DB
+@router.post("/emergency/export-losing")
+async def export_losing_db(request: Request):
+    import aiosqlite
     from pathlib import Path
     from datetime import datetime, timezone
+    import json
 
+    repo = request.app.state.repo
     src = Path(settings.SQLITE_PATH)
     if not src.exists():
         return JSONResponse({'ok': False, 'error': 'DB file not found'}, status_code=404)
 
-    backup_dir = Path('data_backup')
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    export_dir = Path('data_backup')
+    export_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-    dst = backup_dir / f"trading_bot_backup_{ts}.sqlite3"
+    dst = export_dir / f"losing_trades_{ts}.sqlite3"
 
-    if src.exists():
-        import aiosqlite
-        src_db = await aiosqlite.connect(str(src))
-        dst_db = await aiosqlite.connect(str(dst))
-        await src_db.backup(dst_db)
-        await src_db.close()
-        await dst_db.close()
+    src_db = await aiosqlite.connect(str(src))
+    dst_db = await aiosqlite.connect(str(dst))
 
-    return JSONResponse({'ok': True, 'backup_path': str(dst)})
+    await dst_db.execute("PRAGMA journal_mode=WAL")
+    await dst_db.execute("""
+        CREATE TABLE IF NOT EXISTS losing_positions (
+            id INTEGER PRIMARY KEY,
+            token_mint TEXT,
+            account_type TEXT,
+            entry_price_usd REAL,
+            remaining_value_usd REAL,
+            pnl_pct REAL,
+            realized_pnl_sol REAL,
+            opened_at TEXT,
+            closed_at TEXT,
+            close_reason TEXT,
+            status TEXT
+        )
+    """)
+    await dst_db.commit()
+
+    async with src_db.execute(
+        "SELECT * FROM positions WHERE (pnl_pct < 0 OR realized_pnl_sol < 0) AND status='CLOSED' ORDER BY closed_at DESC LIMIT 500"
+    ) as cur:
+        rows = await cur.fetchall()
+        for row in rows:
+            d = dict(row)
+            await dst_db.execute(
+                "INSERT INTO losing_positions(id, token_mint, account_type, entry_price_usd, remaining_value_usd, pnl_pct, realized_pnl_sol, opened_at, closed_at, close_reason, status) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (d.get('id'), d.get('token_mint'), d.get('account_type'), d.get('entry_price_usd'),
+                 d.get('remaining_value_usd'), d.get('pnl_pct') or d.get('realized_pnl_pct'),
+                 d.get('realized_pnl_sol'), d.get('opened_at'), d.get('closed_at'),
+                 d.get('close_reason'), d.get('status'))
+            )
+    await dst_db.commit()
+    await src_db.close()
+    await dst_db.close()
+
+    return JSONResponse({'ok': True, 'export_path': str(dst), 'losing_count': len(rows) if rows else 0})
 
 
 @router.post("/emergency/repair-legacy-db")
@@ -193,7 +226,7 @@ async def repair_legacy_db(request: Request):
     repaired = 0
 
     cursor = await repo.db.execute(
-        "SELECT id, locked_strategy_config_json FROM positions WHERE legacy_config_status = 'LEGACY_INVALID_CONFIG'"
+        "SELECT id FROM positions WHERE legacy_config_status = 'LEGACY_INVALID_CONFIG'"
     )
     rows = await cursor.fetchall()
     for row in rows:
@@ -211,7 +244,6 @@ def _check_live_readiness() -> dict:
     checks = {}
 
     checks['DRY_RUN'] = settings.DRY_RUN
-    checks['LIVE_TRADING_ENABLED'] = settings.LIVE_TRADING_ENABLED
     checks['JITO_ENABLED'] = settings.JITO_ENABLED
     checks['WALLET_PUBLIC_KEY'] = bool(settings.WALLET_PUBLIC_KEY)
     checks['WALLET_PRIVATE_KEY_BASE58'] = bool(settings.WALLET_PRIVATE_KEY_BASE58)
@@ -221,8 +253,6 @@ def _check_live_readiness() -> dict:
 
     if settings.DRY_RUN:
         missing.append('DRY_RUN=true - must be false for live trading')
-    if not settings.LIVE_TRADING_ENABLED:
-        missing.append('LIVE_TRADING_ENABLED=false')
     if not settings.JITO_ENABLED:
         missing.append('JITO_ENABLED=false')
     if not settings.WALLET_PUBLIC_KEY:

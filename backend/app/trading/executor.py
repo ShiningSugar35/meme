@@ -25,15 +25,16 @@ class TradingPipeline:
 
     def _safety_gate(self) -> Optional[Dict[str, Any]]:
         mode = settings.get_provider_mode()
-        from ..config import ProviderMode
         if mode == ProviderMode.MOCK:
             return None
         if settings.DRY_RUN:
             return {'ok': False, 'error': 'DRY_RUN', 'message': 'DRY_RUN=true blocks real trade broadcasts'}
-        if not settings.LIVE_TRADING_ENABLED:
-            return {'ok': False, 'error': 'LIVE_TRADING_DISABLED', 'message': 'LIVE_TRADING_ENABLED=false'}
         if not settings.JITO_ENABLED:
             return {'ok': False, 'error': 'JITO_DISABLED', 'message': 'Jito is disabled, no RPC fallback allowed'}
+        if not settings.WALLET_PUBLIC_KEY:
+            return {'ok': False, 'error': 'NO_WALLET_PUBKEY', 'message': 'WALLET_PUBLIC_KEY not configured'}
+        if not settings.WALLET_PRIVATE_KEY_BASE58:
+            return {'ok': False, 'error': 'NO_WALLET_PRIVKEY', 'message': 'WALLET_PRIVATE_KEY_BASE58 not configured'}
         return None
 
     def _build_idempotency_key(self, side: str, token_mint: str, strategy: Dict[str, Any], snapshot_id: Optional[int], extra: str = '') -> str:

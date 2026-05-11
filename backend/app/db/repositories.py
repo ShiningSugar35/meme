@@ -168,13 +168,11 @@ class Repositories:
             raise
 
     async def ensure_default_strategy_groups(self):
-        # Create defaults if none exist
         cur = await self.db.execute("SELECT COUNT(*) as c FROM strategy_groups")
         row = await cur.fetchone()
         if row and row[0] == 0:
-            await self.create_strategy_group("live_group_1", 0.15, 2.25, 150, is_live=True, priority=10, raw_config_json='{}')
-            await self.create_strategy_group("live_group_2", 0.20, 2.75, 510, is_live=True, priority=20, raw_config_json='{}')
-            await self.create_strategy_group("sim_group", 0.18, 2.5, 300, is_live=False, priority=100, raw_config_json='{}')
+            await self.create_strategy_group("模拟盘1", 0.15, 2.25, 150, is_live=False, priority=10, raw_config_json='{}')
+            await self.create_strategy_group("模拟盘2", 0.20, 2.75, 510, is_live=False, priority=20, raw_config_json='{}')
 
     # tokens
     async def upsert_token_first_seen(self, token_mint: str, chain: str = 'solana', pool_address: Optional[str] = None, launchpad: Optional[str] = None, symbol: Optional[str] = None, name: Optional[str] = None, pool_created_at: Optional[str] = None, latest_state: str = 'discovered'):

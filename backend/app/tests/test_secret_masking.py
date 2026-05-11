@@ -108,24 +108,13 @@ async def test_private_key_never_logged(repo):
 
 @pytest.mark.asyncio
 async def test_settings_validate_live_requires_keys():
-    """
-    When LIVE_TRADING_ENABLED=true, validate that required keys are present
-    """
+    """When PROVIDER_MODE=live, validate that required keys are present."""
     from pydantic import SecretStr
-    
-    # Test 1: LIVE_TRADING_ENABLED=true with DRY_RUN=true should fail
-    with pytest.raises(ValueError) as exc_info:
-        settings = Settings(
-            LIVE_TRADING_ENABLED=True,
-            DRY_RUN=True,  # This should cause error
-        )
-    assert 'DRY_RUN=false' in str(exc_info.value), "Should require DRY_RUN=false for live trading"
-    
-    # Test 2: LIVE_TRADING_ENABLED=true with missing wallet keys should fail
+
+    # Test: PROVIDER_MODE=live with missing wallet keys should fail
     with pytest.raises(ValueError) as exc_info:
         settings = Settings(
             PROVIDER_MODE='live',
-            LIVE_TRADING_ENABLED=True,
             DRY_RUN=False,
             GMGN_API_BASE_URL='https://api.gmgn.ai',
             GMGN_API_KEY_1=SecretStr('test_key'),

@@ -14,12 +14,15 @@ import pytest
 import json
 from ..db.repositories import Repositories
 from ..trading.executor import TradingPipeline
-from ..config import ProviderMode
-from ..providers.gmgn_real import GMGNProvider
-from ..providers.jupiter_real import JupiterProvider
-from ..providers.jito_real import JitoProvider
-from ..providers.rpc_real import RpcRealProvider
-from ..providers.mock_data import MockData
+
+
+async def _ensure_live(repo):
+    groups = await repo.list_strategy_groups()
+    live = [g for g in groups if g['is_live']]
+    if not live:
+        await repo.create_strategy_group("test_live", 0.15, 2.25, 150, is_live=True, priority=10, raw_config_json='{}')
+        groups = await repo.list_strategy_groups()
+    return [g for g in groups if g['is_live']]
 
 
 @pytest.mark.asyncio
@@ -76,8 +79,7 @@ async def test_one_live_position_per_token_constraint(repo, pipeline_factory):
     """
     # Create pipeline with MOCK providers
     pipeline, _ = pipeline_factory()
-    groups = await repo.get_enabled_strategy_groups()
-    live_groups = [g for g in groups if g['is_live']]
+    live_groups = await _ensure_live(repo)
     token_mint = 'PASS1'  # Use mock token
     
     # First call: should create live position (new cycle)
@@ -205,8 +207,7 @@ async def test_closed_live_position_allows_new_cycle_live_trade(repo, pipeline_f
     there is no OPEN live position for that token.
     """
     pipeline, _ = pipeline_factory()
-    groups = await repo.get_enabled_strategy_groups()
-    live_groups = [g for g in groups if g['is_live']]
+    live_groups = await _ensure_live(repo)
     token_mint = 'PASS1'
     
     # First cycle: create and close a live position
@@ -246,8 +247,7 @@ async def test_same_cycle_blocks_duplicate_live_trade(repo, pipeline_factory):
     Note: This test uses discovery_event_id to identify the cycle.
     """
     pipeline, _ = pipeline_factory()
-    groups = await repo.get_enabled_strategy_groups()
-    live_groups = [g for g in groups if g['is_live']]
+    live_groups = await _ensure_live(repo)
     token_mint = 'PASS1'
     
     # First call: creates open live position with discovery_event_id
@@ -378,3 +378,4 @@ async def test_small_dust_position_cleared_in_single_exit(repo):
     assert pos.get('remaining_value_usd') == 5.0
     assert pos.get('remaining_value_usd') < 10.0, "Position is dust"
     # The exit logic should clear this in one go when triggered
+

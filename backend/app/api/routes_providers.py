@@ -20,7 +20,6 @@ async def provider_health(request: Request):
 
         result = {
             "provider_mode": mode.value,
-            "live_trading_enabled": settings.LIVE_TRADING_ENABLED,
             "providers": []
         }
 

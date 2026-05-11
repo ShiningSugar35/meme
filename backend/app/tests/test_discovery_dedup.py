@@ -29,12 +29,20 @@ async def repo_and_pipeline(tmp_path):
         await repo.close()
 
 
+async def _ensure_live(repo):
+    groups = await repo.list_strategy_groups()
+    live = [g for g in groups if g['is_live']]
+    if not live:
+        await repo.create_strategy_group("test_live", 0.15, 2.25, 150, is_live=True, priority=10, raw_config_json='{}')
+        groups = await repo.list_strategy_groups()
+    return [g for g in groups if g['is_live']]
+
+
 @pytest.mark.asyncio
 async def test_same_snapshot_no_duplicate_discovery_event(repo_and_pipeline):
     """Same snapshot_id second call does not create second discovery event."""
     repo, pipeline = repo_and_pipeline
-    groups = await repo.get_enabled_strategy_groups()
-    live_groups = [g for g in groups if g['is_live']]
+    live_groups = await _ensure_live(repo)
     
     # First call with snapshot_id=100 using PASS1 (existing mock token)
     await pipeline.handle_token_second_filter_result('PASS1', live_groups, snapshot_id=100)
@@ -56,8 +64,7 @@ async def test_same_snapshot_no_duplicate_discovery_event(repo_and_pipeline):
 async def test_same_snapshot_no_duplicate_live_position(repo_and_pipeline):
     """Same snapshot_id second call does not create second live position."""
     repo, pipeline = repo_and_pipeline
-    groups = await repo.get_enabled_strategy_groups()
-    live_groups = [g for g in groups if g['is_live']]
+    live_groups = await _ensure_live(repo)
     
     # First call
     await pipeline.handle_token_second_filter_result('PASS1', live_groups, snapshot_id=200)
@@ -94,8 +101,7 @@ async def test_same_snapshot_no_duplicate_simulated_positions(repo_and_pipeline)
 async def test_diff_snapshot_allows_new_cycle(repo_and_pipeline):
     """Different snapshot_id allows new cycle but respects open live position rule."""
     repo, pipeline = repo_and_pipeline
-    groups = await repo.get_enabled_strategy_groups()
-    live_groups = [g for g in groups if g['is_live']]
+    live_groups = await _ensure_live(repo)
     
     # First cycle
     await pipeline.handle_token_second_filter_result('PASS1', live_groups, snapshot_id=400)
@@ -128,8 +134,7 @@ async def test_discovery_event_id_in_strategy_matches(repo_and_pipeline):
 async def test_discovery_event_id_in_positions(repo_and_pipeline):
     """positions should have discovery_event_id set."""
     repo, pipeline = repo_and_pipeline
-    groups = await repo.get_enabled_strategy_groups()
-    live_groups = [g for g in groups if g['is_live']]
+    live_groups = await _ensure_live(repo)
     
     await pipeline.handle_token_second_filter_result('PASS1', live_groups, snapshot_id=600)
     
@@ -151,3 +156,4 @@ async def test_discovery_event_id_in_bandit_observations(repo_and_pipeline):
     assert len(observations) > 0
     for o in observations:
         assert o.get('discovery_event_id') is not None, "Bandit observation must have discovery_event_id"
+

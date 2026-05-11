@@ -65,6 +65,11 @@ function PosTable({ accountType, title, colorClass }: { accountType: string, tit
     return <span className={`px-1.5 py-0.5 rounded text-xs ${map[status] || 'bg-gray-800 text-gray-400'}`}>{status}</span>
   }
 
+  const ratioVal = (p: PosRow) => {
+    if (!p.entry_usd || p.entry_usd === 0) return '-'
+    return (p.price / p.entry_usd).toFixed(2)
+  }
+
   return (
     <div className="mb-6">
       <h2 className={`text-sm font-bold mb-2 ${colorClass}`}>{title} ({data.length})</h2>
@@ -72,12 +77,13 @@ function PosTable({ accountType, title, colorClass }: { accountType: string, tit
         <table className="w-full text-xs">
           <thead>
             <tr className="text-gray-400 border-b border-gray-700">
-              <th className="text-left p-1.5"><SortBtn label="status" /></th>
-              <th className="text-right p-1.5"><SortBtn label="entry_usd" /></th>
-              <th className="text-right p-1.5"><SortBtn label="remaining" /></th>
-              <th className="text-right p-1.5"><SortBtn label="price" /></th>
+              <th className="text-left p-1.5">
+                <StatusBadge status="status" />
+              </th>
+              <th className="text-right p-1.5"><SortBtn label="倍率" /></th>
+              <th className="text-right p-1.5"><SortBtn label="当前持仓" /></th>
               <th className="text-right p-1.5"><SortBtn label="liquidity" /></th>
-              <th className="text-right p-1.5"><SortBtn label="pnl_pct" /></th>
+              <th className="text-right p-1.5"><SortBtn label="收益率" /></th>
               <th className="text-right p-1.5"><SortBtn label="market_cap" /></th>
               <th className="w-4"></th>
             </tr>
@@ -91,9 +97,8 @@ function PosTable({ accountType, title, colorClass }: { accountType: string, tit
                     <StatusBadge status={p.status} />
                     <span className="text-gray-500 ml-1 font-mono">{p.mint_short}</span>
                   </td>
-                  <td className="text-right p-1.5">{p.entry_usd?.toFixed(6) || '-'}</td>
+                  <td className="text-right p-1.5">{ratioVal(p)}</td>
                   <td className="text-right p-1.5">{p.remaining?.toFixed(2) || '-'}</td>
-                  <td className="text-right p-1.5">{p.price?.toFixed(6) || '-'}</td>
                   <td className="text-right p-1.5">{p.liquidity?.toFixed(0) || '-'}</td>
                   <td className={`text-right p-1.5 ${(p.pnl_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                     {p.pnl_pct != null ? `${p.pnl_pct.toFixed(1)}%` : '-'}
@@ -103,7 +108,7 @@ function PosTable({ accountType, title, colorClass }: { accountType: string, tit
                 </tr>
                 {expanded === p.id && (
                   <tr key={`${p.id}-detail`} className="bg-gray-800/50">
-                    <td colSpan={8} className="p-3 text-xs text-gray-400">
+                    <td colSpan={7} className="p-3 text-xs text-gray-400">
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                         <div><span className="text-gray-500">Mint:</span> <span className="font-mono text-gray-300">{p.mint}</span></div>
                         <div><span className="text-gray-500">Account:</span> <span className={p.account_type === 'LIVE' ? 'text-red-400' : 'text-blue-400'}>{p.account_type}</span></div>

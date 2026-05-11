@@ -59,18 +59,19 @@ export const api = {
 
   // Risk
   getKillSwitch: () => fetchJSON(`${BASE}/risk/kill-switch`),
-  resetKillSwitch: () => fetchJSON(`${BASE}/risk/kill-switch/reset`, { method: 'POST' }),
 
   // Providers
   getProviderHealth: () => fetchJSON(`${BASE}/providers/health`),
 
-  // Mock / Sim
-  mockRunOnce: () => fetchJSON(`${BASE}/mock/run-once`, { method: 'POST' }),
-
   // Emergency
+  toggleKill: (enable: boolean) => fetchJSON(`${BASE}/runtime/emergency/kill-switch`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enable })
+  }),
+  stopLiveMode: () => fetchJSON(`${BASE}/runtime/emergency/stop-live`, { method: 'POST' }),
+  resumeLiveMode: () => fetchJSON(`${BASE}/runtime/emergency/resume-live`, { method: 'POST' }),
+  exportLosing: () => fetchJSON(`${BASE}/runtime/emergency/export-losing`, { method: 'POST' }),
+
   toggleKillSwitch: (enable: boolean) => fetchJSON(`${BASE}/runtime/emergency/kill-switch?enable=${enable}`, { method: 'POST' }),
-  pauseLiveEntries: () => fetchJSON(`${BASE}/runtime/emergency/pause-new-live-entries`, { method: 'POST' }),
-  resumeLiveEntries: () => fetchJSON(`${BASE}/runtime/emergency/resume-new-live-entries`, { method: 'POST' }),
   backupDb: () => fetchJSON(`${BASE}/runtime/emergency/backup-db`, { method: 'POST' }),
   repairLegacyDb: () => fetchJSON(`${BASE}/runtime/emergency/repair-legacy-db`, { method: 'POST' }),
 }

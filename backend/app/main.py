@@ -57,10 +57,9 @@ async def lifespan(app: FastAPI):
     worker_mgr.register_worker('position_risk', risk.run_once, 10)
     worker_mgr.register_worker('kill_switch', kill.run_once, 30)
 
-    await repo.set_runtime_setting('user_mode', 'SIM_TEST', 'system')
+    await repo.set_runtime_setting('user_mode', 'IDLE', 'system')
     await repo.set_runtime_setting('workers_enabled', 'false', 'system')
-    # Do NOT pre-set live_entries_enabled to false - let kill switch handle it.
-    # Live entries are gated by safety gate in trading pipeline.
+    # Workers start only when user clicks 模拟交易 or 实盘交易 button
 
     yield
 

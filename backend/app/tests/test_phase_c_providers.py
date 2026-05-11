@@ -340,10 +340,6 @@ class TestProviderConfigValidation:
         """Default provider mode must be MOCK for safety."""
         assert settings.get_provider_mode() == ProviderMode.MOCK
 
-    def test_live_trading_disabled_by_default(self):
-        """LIVE_TRADING_ENABLED must be False by default."""
-        assert settings.LIVE_TRADING_ENABLED is False
-
     def test_dry_run_enabled_by_default(self):
         """DRY_RUN must be True by default for safety."""
         assert settings.DRY_RUN is True

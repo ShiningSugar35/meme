@@ -1,23 +1,27 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api/client'
 
+const MODE_LABELS: Record<string, string> = {
+  'IDLE': 'IDLE',
+  'SIM_TEST': '模拟交易',
+  'FORMAL_SIM_LIVE': '实盘交易',
+}
+
 export default function ControlCenter() {
   const [runtime, setRuntime] = useState<any>(null)
   const [providers, setProviders] = useState<any[]>([])
-  const [workers, setWorkers] = useState<any>({})
   const [strategies, setStrategies] = useState<any[]>([])
   const [summary, setSummary] = useState<any>({})
   const [msg, setMsg] = useState('')
   const [confirmLive, setConfirmLive] = useState(false)
 
   const [form, setForm] = useState({
-    name: '', x: 0.15, y: 2.25, t_seconds: 3600, is_live: false, priority: 100, raw_config_json: '{}'
+    name: '', x: 0.15, y: 2.25, t_seconds: 3600, is_live: false
   })
 
   const refresh = useCallback(() => {
     api.getRuntimeStatus().then(setRuntime).catch(() => {})
     api.getProviderHealth().then(r => setProviders(r?.providers || [])).catch(() => {})
-    api.getWorkersStatus().then(setWorkers).catch(() => {})
     api.getStrategies().then(r => setStrategies(r || [])).catch(() => {})
     api.getPositionsSummary().then(setSummary).catch(() => {})
   }, [])
@@ -28,44 +32,37 @@ export default function ControlCenter() {
     return () => clearInterval(t)
   }, [refresh])
 
-  const mode = runtime?.user_mode || 'SIM_TEST'
+  const mode = runtime?.user_mode || 'IDLE'
   const canLiveTrade = runtime?.can_live_trade || false
   const liveReady = runtime?.live_readiness || {}
 
   const switchToMode = async (newMode: string) => {
+    if (newMode === mode) {
+      const r = await api.switchMode('IDLE')
+      if (r.ok) { setMsg('Switched to IDLE'); refresh() }
+      else setMsg(`Failed: ${r.error || 'unknown error'}`)
+      return
+    }
     if (newMode === 'FORMAL_SIM_LIVE') {
       setConfirmLive(true)
       return
     }
     const r = await api.switchMode(newMode)
-    if (r.ok) { setMsg(`Switched to ${newMode}`); refresh() }
+    if (r.ok) { setMsg(`Switched to ${MODE_LABELS[newMode] || newMode}`); refresh() }
     else setMsg(`Failed: ${r.error || JSON.stringify(r.missing)}`)
   }
 
   const confirmSwitchToLive = async () => {
     setConfirmLive(false)
     const r = await api.switchMode('FORMAL_SIM_LIVE')
-    if (r.ok) { setMsg('Switched to FORMAL_SIM_LIVE'); refresh() }
+    if (r.ok) { setMsg('Switched to 实盘交易'); refresh() }
     else setMsg(`Failed: ${r.error || JSON.stringify(r.missing)}`)
   }
 
   const createStrategy = async () => {
     await api.createStrategy(form)
-    setForm({ name: '', x: 0.15, y: 2.25, t_seconds: 3600, is_live: false, priority: 100, raw_config_json: '{}' })
+    setForm({ name: '', x: 0.15, y: 2.25, t_seconds: 3600, is_live: false })
     refresh()
-  }
-
-  const toggleWorker = async () => {
-    const enabled = workers?.discovery?.running
-    if (enabled) { await api.stopWorkers() }
-    else { await api.startWorkers() }
-    refresh()
-  }
-
-  const runOnce = async () => {
-    await api.mockRunOnce()
-    setMsg('Mock lifecycle triggered')
-    setTimeout(refresh, 500)
   }
 
   const Badge = ({ ok }: { ok: boolean }) => (
@@ -79,7 +76,11 @@ export default function ControlCenter() {
     </div>
   )
 
-  const workersRunning = workers?.discovery?.running || false
+  const fmtUsd = (sol: number | undefined | null) => {
+    if (sol == null) return '$0.00'
+    const usd = sol * 150
+    return `$${usd.toFixed(2)}`
+  }
 
   return (
     <div>
@@ -113,85 +114,59 @@ export default function ControlCenter() {
         </div>
       )}
 
-      {/* Mode + Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <Card title="Mode">
-          <span className={`text-lg font-bold ${mode === 'FORMAL_SIM_LIVE' ? 'text-red-400' : 'text-cyan-400'}`}>
-            {mode === 'FORMAL_SIM_LIVE' ? 'Sim + Live' : 'Sim Test'}
-          </span>
-        </Card>
-        <Card title="Live Trading">
-          <span className={canLiveTrade ? 'text-green-400' : 'text-red-400'}>{canLiveTrade ? 'Ready' : 'Blocked'}</span>
-        </Card>
-        <Card title="Workers">
-          <span className={workersRunning ? 'text-green-400' : 'text-gray-500'}>{workersRunning ? 'Running' : 'Stopped'}</span>
-        </Card>
-        <Card title="Kill Switch">
-          <span className={runtime?.pause_new_entries ? 'text-red-400' : 'text-green-400'}>
-            {runtime?.pause_new_entries ? 'ACTIVE' : 'Clear'}
-          </span>
-        </Card>
-      </div>
-
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <Card title="Live Open"><span className="text-lg">{summary.live_open_count ?? 0}</span></Card>
-        <Card title="Sim Open"><span className="text-lg">{summary.sim_open_count ?? 0}</span></Card>
-        <Card title="Live PnL SOL"><span className={`text-lg ${(summary.live_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>{summary.live_pnl_sol?.toFixed(4) ?? '0'}</span></Card>
-        <Card title="Sim PnL SOL"><span className={`text-lg ${(summary.sim_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>{summary.sim_pnl_sol?.toFixed(4) ?? '0'}</span></Card>
-      </div>
-
-      {/* Mode Switch */}
+      {/* Mode Switch Buttons */}
       <div className="flex gap-3 mb-4">
         <button onClick={() => switchToMode('SIM_TEST')}
           className={`px-4 py-2 rounded text-sm ${mode === 'SIM_TEST' ? 'bg-cyan-700 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}>
-          Sim Test Only
+          模拟交易
         </button>
         <button onClick={() => switchToMode('FORMAL_SIM_LIVE')}
           className={`px-4 py-2 rounded text-sm ${mode === 'FORMAL_SIM_LIVE' ? 'bg-red-700 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}>
-          Sim + Live Trading
-        </button>
-        <button onClick={toggleWorker}
-          className={`px-4 py-2 rounded text-sm ${workersRunning ? 'bg-red-800 hover:bg-red-700' : 'bg-green-800 hover:bg-green-700'} text-white`}>
-          {workersRunning ? 'Stop Workers' : 'Start Workers'}
-        </button>
-        <button onClick={runOnce}
-          className="px-4 py-2 rounded text-sm bg-gray-700 hover:bg-gray-600 text-gray-300">
-          Run Once
+          实盘交易
         </button>
       </div>
 
-      {/* Provider Health + Worker Status */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-        <Card title="Provider Health">
-          {providers.map((p: any, i: number) => (
-            <div key={i} className="text-xs mb-1 flex items-center gap-2">
-              <Badge ok={p.ok} />
-              <span className="text-gray-300">{p.provider}</span>
-              <span className={`${p.ok ? 'text-green-400' : 'text-red-400'}`}>{p.ok ? 'OK' : p.summary || 'DEGRADED'}</span>
-              {p.latency_ms > 0 && <span className="text-gray-500 ml-auto">{p.latency_ms}ms</span>}
-            </div>
-          ))}
-          {providers.length === 0 && <p className="text-xs text-gray-500">No provider data</p>}
+      {/* Summary Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
+        <Card title="模拟盘">
+          <span className={`text-lg font-bold ${mode === 'FORMAL_SIM_LIVE' ? 'text-red-400' : mode === 'SIM_TEST' ? 'text-cyan-400' : 'text-gray-500'}`}>
+            {MODE_LABELS[mode] || mode}
+          </span>
         </Card>
-
-        <Card title="Worker Status">
-          {Object.entries(workers || {}).map(([name, w]: [string, any]) => (
-            <div key={name} className="text-xs mb-1 flex items-center gap-2">
-              <Badge ok={w.running} />
-              <span className="text-gray-300 capitalize">{name.replace(/_/g, ' ')}</span>
-              <span className={w.running ? 'text-green-400' : 'text-gray-500'}>{w.running ? 'Active' : 'Idle'}</span>
-              {w.processed_count > 0 && <span className="text-gray-500 ml-auto">{w.processed_count} processed</span>}
-              {w.last_error && <span className="text-red-400 ml-2" title={w.last_error}>ERR</span>}
-            </div>
-          ))}
-          {Object.keys(workers || {}).length === 0 && <p className="text-xs text-gray-500">No workers registered</p>}
+        <Card title="实盘开仓">
+          <span className="text-lg">{summary.live_open_count ?? 0}</span>
+        </Card>
+        <Card title="模拟盘开仓">
+          <span className="text-lg">{summary.sim_open_count ?? 0}</span>
+        </Card>
+        <Card title="实盘收益">
+          <span className={`text-lg ${(summary.live_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {fmtUsd(summary.live_pnl_sol)}
+          </span>
+        </Card>
+        <Card title="模拟盘收益">
+          <span className={`text-lg ${(summary.sim_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {fmtUsd(summary.sim_pnl_sol)}
+          </span>
         </Card>
       </div>
 
-      {/* Strategy Config */}
+      {/* Provider Health */}
+      <Card title="Provider Health" className="mb-4">
+        {providers.map((p: any, i: number) => (
+          <div key={i} className="text-xs mb-1 flex items-center gap-2">
+            <Badge ok={p.ok} />
+            <span className="text-gray-300">{p.provider}</span>
+            <span className={`${p.ok ? 'text-green-400' : 'text-red-400'}`}>{p.ok ? 'OK' : p.summary || 'DEGRADED'}</span>
+            {p.latency_ms > 0 && <span className="text-gray-500 ml-auto">{p.latency_ms}ms</span>}
+          </div>
+        ))}
+        {providers.length === 0 && <p className="text-xs text-gray-500">No provider data</p>}
+      </Card>
+
+      {/* Strategy Groups */}
       <Card title="Strategy Groups" className="mb-4">
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-xs mb-2">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs mb-2">
           <input placeholder="Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
             className="bg-gray-800 border border-gray-600 rounded px-2 py-1" />
           <input type="number" placeholder="X" value={form.x} step={0.01}
@@ -206,9 +181,6 @@ export default function ControlCenter() {
           <label className="flex items-center gap-1 text-gray-400">
             <input type="checkbox" checked={form.is_live} onChange={e => setForm({ ...form, is_live: e.target.checked })} /> Live
           </label>
-          <input type="number" placeholder="Priority" value={form.priority}
-            onChange={e => setForm({ ...form, priority: +e.target.value })}
-            className="bg-gray-800 border border-gray-600 rounded px-2 py-1" />
         </div>
         <div className="flex gap-2">
           <button onClick={createStrategy} className="bg-cyan-700 hover:bg-cyan-600 px-3 py-1 rounded text-xs">Create</button>
@@ -217,14 +189,13 @@ export default function ControlCenter() {
         <div className="mt-3 overflow-x-auto">
           <table className="w-full text-xs">
             <thead><tr className="text-gray-400 border-b border-gray-700">
-              <th className="text-left p-1">ID</th><th className="text-left">Name</th><th>X</th><th>Y</th><th>T(s)</th><th>Live</th><th>Pri</th><th>Enabled</th>
+              <th className="text-left p-1">ID</th><th className="text-left">Name</th><th>X</th><th>Y</th><th>T(s)</th><th>Live</th><th>Enabled</th>
             </tr></thead>
             <tbody>
               {strategies.map(s => (
                 <tr key={s.id} className="border-b border-gray-800 hover:bg-gray-850">
                   <td className="p-1">{s.id}</td><td>{s.name}</td><td>{s.x}</td><td>{s.y}</td><td>{s.t_seconds}</td>
                   <td className={s.is_live ? 'text-green-400' : 'text-gray-500'}>{s.is_live ? 'LIVE' : 'sim'}</td>
-                  <td>{s.priority}</td>
                   <td>{s.enabled ? <Badge ok={true} /> : <Badge ok={false} />}</td>
                 </tr>
               ))}
