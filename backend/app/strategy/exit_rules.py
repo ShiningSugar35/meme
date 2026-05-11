@@ -59,32 +59,24 @@ async def decide_exit(position: Dict[str, Any], tick: Dict[str, Any], rolling_60
         elif current_price < 0.75 * high_60:
             reasons.append(ExitReason("DYN_SL_75_HIGH60", 0.5, {}))
 
-    # time stop loss: check last confirmed fill
+    # time stop loss: check last confirmed fill (all prices in SOL for consistency)
     last_fill_at = position.get("last_fill_at")
     last_fill_price = position.get("last_fill_price_usd")
-    if last_fill_at and last_fill_price and current_price:
+    entry_sol = position.get("entry_price_sol")
+    if last_fill_at and entry_sol and current_price:
         try:
             t = datetime.fromisoformat(last_fill_at)
             if now >= t + timedelta(minutes=5):
-                pct_change = current_price / last_fill_price - 1
-                if pct_change < 0.15 and (position.get("last_exit_action_count", 0) == 0):
+                pct_change = current_price / entry_sol - 1
+                if pct_change < 0.15:
                     reasons.append(ExitReason("TIME_STOPLOSS", 1.0, {"pct_change": pct_change}))
         except Exception:
             pass
 
-    # risk stoploss: re-run filters with locked_strategy_config_json
-    locked = position.get("locked_strategy_config_json")
-    if locked:
-        try:
-            locked_cfg = json.loads(locked)
-            # if there's an embedded x and snapshot available, caller should re-evaluate using filters; here we just note the hook
-            # For v1, assume caller will call filters explicitly; if mismatch, trigger full exit via external check
-        except Exception:
-            pass
-
-    # completed
-    if position.get("type") == "completed":
-        reasons.append(ExitReason("COMPLETED", 1.0, {}))
+    # type completed: pool graduated (from GMGN trenches data)
+    token_type = position.get("latest_token_type") or position.get("type")
+    if token_type == "completed":
+        reasons.append(ExitReason("COMPLETED", 1.0, {"type": token_type}))
 
     if reasons:
         exit_pct = max(r.desired_exit_pct for r in reasons)

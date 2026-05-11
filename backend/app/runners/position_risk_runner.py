@@ -62,7 +62,7 @@ class PositionRiskRunner:
                     str({'error': str(e)}), account_type=account_type)
                 continue
 
-            ticks = await self.repo.get_recent_ticks(token, 120)
+            ticks = await self.repo.get_recent_ticks(token, 60)
             low = min([t.get('price_sol', latest.get('price')) for t in ticks]) if ticks else latest.get('price')
             high = max([t.get('price_sol', latest.get('price')) for t in ticks]) if ticks else latest.get('price')
             rolling = {'low': low, 'high': high}
@@ -116,7 +116,14 @@ class PositionRiskRunner:
                         'message': f'Risk recheck failed for {token}'})
                     continue
 
-            decision = await decide_exit(p, tick, rolling, {})
+            # Fetch token's latest type for completed check
+            token_info = await self.repo.get_token(token)
+            if token_info and token_info.get('latest_type'):
+                p_dict = dict(p)
+                p_dict['latest_token_type'] = token_info['latest_type']
+                decision = await decide_exit(p_dict, tick, rolling, {})
+            else:
+                decision = await decide_exit(p, tick, rolling, {})
             if decision.should_exit:
                 await self.repo.append_trade_event(
                     f"SELL:{token}:{pos_id}:1", token_mint=token,

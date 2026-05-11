@@ -2,12 +2,12 @@ from ..db.repositories import Repositories
 from ..providers.base import MarketDataProvider, SwapProvider, ExecutionProvider, RpcProvider
 from ..strategy.second_filter import run_second_filter
 from ..config import settings, ProviderMode
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any
 from ..logging_config import logger
 from ..trading.executor import TradingPipeline
 
-MOCK_MINTS = {'PASS1', 'FAIL_INIT', 'FAIL_SECOND'}
+MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
 
 
 class SecondFilterRunner:
@@ -31,6 +31,18 @@ class SecondFilterRunner:
             # Skip mock tokens in non-mock mode to prevent real GMGN queries on fake mints
             if mode != ProviderMode.MOCK and token_mint in MOCK_MINTS:
                 continue
+
+            # Second filter runs 60s after first discovery (一分钟后再次调取).
+            # Skip this delay in MOCK mode where tokens are instant.
+            if mode != ProviderMode.MOCK:
+                first_seen = t.get('first_seen_at')
+                if first_seen:
+                    try:
+                        fs = datetime.fromisoformat(first_seen)
+                        if (now - fs).total_seconds() < 60:
+                            continue
+                    except Exception:
+                        pass
 
             try:
                 latest = await self.gmgn.fetch_latest_price(token_mint)

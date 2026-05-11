@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from ..logging_config import logger
 
-MOCK_MINTS = {'PASS1', 'FAIL_INIT', 'FAIL_SECOND'}
+MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
 
 
 class DiscoveryRunner:
@@ -60,6 +60,7 @@ class DiscoveryRunner:
                 symbol=token.get('symbol'),
                 pool_address=pool_address,
                 pool_created_at=pool_created_at,
+                latest_state=token.get('type', 'discovered'),
             )
             await self.repo.insert_token_metric_snapshot(
                 token_mint, now.isoformat(), str(token),
