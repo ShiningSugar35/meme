@@ -98,6 +98,9 @@ class PositionRiskRunner:
                     cfg = json.loads(locked)
                 except (json.JSONDecodeError, TypeError):
                     continue
+                # Skip risk recheck for SIM positions - they are paper-trade tracking only
+                if account_type == 'SIM':
+                    continue
                 snap = await self.gmgn.fetch_token_snapshot(token)
                 res = await run_initial_filter(snap, cfg, now)
                 if not res.passed:

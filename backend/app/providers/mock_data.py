@@ -3,6 +3,10 @@ from datetime import datetime, timedelta, timezone
 class MockData:
     def __init__(self):
         now = datetime.now(timezone.utc)
+        self._pool_base = now
+        self._last_refresh = now
+        self._refresh_interval = timedelta(seconds=30)
+
         # define 3 tokens
         # token A: passes initial and second filter
         self.tokens = {
@@ -28,7 +32,6 @@ class MockData:
                 'dev_team_hold_rate': 0.0,
                 'dev_token_burn_ratio': 1.0,
                 'sniper_count': 1,
-                'pool_created_at': (now - timedelta(seconds=150)).isoformat(),
                 'platform': 'Pump.fun',
             },
             'FAIL_INIT': {
@@ -36,7 +39,6 @@ class MockData:
                 'type': 'new_creation',
                 'liquidity_usd': 1000,
                 'top_10_holder_rate': 0.5,
-                'pool_created_at': (now - timedelta(seconds=150)).isoformat(),
                 'platform': 'Pump.fun',
             },
             'FAIL_SECOND': {
@@ -61,12 +63,28 @@ class MockData:
                 'dev_team_hold_rate': 0.0,
                 'dev_token_burn_ratio': 1.0,
                 'sniper_count': 1,
-                'pool_created_at': (now - timedelta(seconds=150)).isoformat(),
                 'platform': 'Pump.fun',
             }
         }
 
-        # klines: for PASS1 good, for FAIL_SECOND bad
+        self.klines = {}
+
+        # latest prices that can change over time; simple increments per call
+        self.latest = {
+            'PASS1': {'price': 1.5, 'calls': 0, 'price_usd': 1.5, 'sol_price': 1.5, 'sol_liquidity': 1000},
+            'FAIL_SECOND': {'price': 1.0, 'calls': 0, 'price_usd': 1.0, 'sol_price': 1.0, 'sol_liquidity': 1000},
+            'FAIL_INIT': {'price': 1.0, 'calls': 0, 'price_usd': 1.0, 'sol_price': 1.0, 'sol_liquidity': 1000},
+        }
+
+        self._refresh_all()
+
+    def _refresh_all(self):
+        """Refresh time-dependent data: pool_created_at and klines."""
+        now = datetime.now(timezone.utc)
+        self._last_refresh = now
+        pool_age = now - timedelta(seconds=150)
+        for mint, t in self.tokens.items():
+            t['pool_created_at'] = pool_age.isoformat()
         self.klines = {
             'PASS1': [
                 {'open_time': (now - timedelta(minutes=5)).isoformat(), 'close': 1.0},
@@ -79,12 +97,11 @@ class MockData:
             ]
         }
 
-        # latest prices that can change over time; simple increments per call
-        self.latest = {
-            'PASS1': {'price': 1.5, 'calls': 0, 'price_usd': 1.5, 'sol_price': 1.5, 'sol_liquidity': 1000},
-            'FAIL_SECOND': {'price': 1.0, 'calls': 0, 'price_usd': 1.0, 'sol_price': 1.0, 'sol_liquidity': 1000},
-            'FAIL_INIT': {'price': 1.0, 'calls': 0, 'price_usd': 1.0, 'sol_price': 1.0, 'sol_liquidity': 1000},
-        }
+    def _maybe_refresh(self):
+        """Refresh time-dependent data every 30 seconds so time windows stay valid."""
+        now = datetime.now(timezone.utc)
+        if now - self._last_refresh > self._refresh_interval:
+            self._refresh_all()
 
     def advance_price(self, token_mint: str, delta: float):
         if token_mint in self.latest:

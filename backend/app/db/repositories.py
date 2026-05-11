@@ -203,8 +203,10 @@ class Repositories:
         async with self.db.execute("SELECT COUNT(*) as c FROM strategy_groups") as cur:
             row = await cur.fetchone()
         if row and row[0] == 0:
+            # 模拟盘1: t=150, matches mock pool age ~150s (window [150,210])
             await self.create_strategy_group("模拟盘1", 0.15, 2.25, 150, is_live=False, priority=10, raw_config_json='{}')
-            await self.create_strategy_group("模拟盘2", 0.20, 2.75, 510, is_live=False, priority=20, raw_config_json='{}')
+            # 模拟盘2: t=180, still within mock pool age window [180,240] after refresh
+            await self.create_strategy_group("模拟盘2", 0.20, 2.75, 180, is_live=False, priority=20, raw_config_json='{}')
 
     # tokens
     async def upsert_token_first_seen(self, token_mint: str, chain: str = 'solana',

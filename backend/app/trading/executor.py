@@ -303,6 +303,16 @@ class TradingPipeline:
         size_sol = sizing.get('size_sol', 0)
         sid = strategy.get('id', 0)
 
+        # Create BUY trade event for audit trail
+        idem_key = f"SIM_BUY:{token_mint}:{sid}:{snapshot_id or 0}"
+        await self.repo.append_trade_event(
+            idem_key, token_mint=token_mint, side='BUY', event_type='SIM_BUY', status='CONFIRMED',
+            is_live=0, account_type='SIM',
+            requested_pct=100, requested_sol_amount=size_sol,
+            price_usd=latest.get('price'), price_sol=latest.get('price_sol'),
+            slippage_bps=1500, price_impact_pct=0,
+        )
+
         pos_id = await self.repo.create_position(
             token_mint, False, json.dumps(strategy), 'SIM_OPEN',
             latest.get('price'), latest.get('price_sol'),

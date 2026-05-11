@@ -214,7 +214,8 @@ class GMGNProvider(MarketDataProvider):
         """
         try:
             if self.mode == ProviderMode.MOCK:
-                # MOCK: return mock data
+                # MOCK: return mock data (refresh time window each call)
+                self.mock_data._maybe_refresh()
                 tokens = list(self.mock_data.tokens.values())
                 for t in tokens:
                     t['source_mode'] = 'MOCK'
@@ -254,6 +255,7 @@ class GMGNProvider(MarketDataProvider):
         try:
             if self.mode == ProviderMode.MOCK:
                 # MOCK: return mock snapshot
+                self.mock_data._maybe_refresh()
                 t = self.mock_data.tokens.get(token_mint)
                 if t:
                     t['source_mode'] = 'MOCK'
@@ -292,6 +294,7 @@ class GMGNProvider(MarketDataProvider):
         try:
             if self.mode == ProviderMode.MOCK:
                 # MOCK: return mock klines
+                self.mock_data._maybe_refresh()
                 k = self.mock_data.klines.get(token_mint, [])
                 for item in k:
                     item['source_mode'] = 'MOCK'
@@ -332,6 +335,7 @@ class GMGNProvider(MarketDataProvider):
         try:
             if self.mode == ProviderMode.MOCK:
                 # MOCK: return mock price with increment
+                self.mock_data._maybe_refresh()
                 info = self.mock_data.latest.get(token_mint)
                 if not info:
                     await self._log_request(f"/latest/{token_mint}", False, 
