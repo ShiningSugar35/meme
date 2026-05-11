@@ -81,7 +81,7 @@ class MockData:
 
         # latest prices that can change over time; simple increments per call
         self.latest = {
-            'PASS1': {'price': 1.0, 'calls': 0, 'price_usd': 1.0, 'sol_price': 1.0, 'sol_liquidity': 1000},
+            'PASS1': {'price': 1.5, 'calls': 0, 'price_usd': 1.5, 'sol_price': 1.5, 'sol_liquidity': 1000},
             'FAIL_SECOND': {'price': 1.0, 'calls': 0, 'price_usd': 1.0, 'sol_price': 1.0, 'sol_liquidity': 1000},
             'FAIL_INIT': {'price': 1.0, 'calls': 0, 'price_usd': 1.0, 'sol_price': 1.0, 'sol_liquidity': 1000},
         }

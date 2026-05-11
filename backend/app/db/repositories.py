@@ -32,23 +32,45 @@ class Repositories:
         finally:
             self._closed = True
 
-    # system_events
-    async def append_system_event(self, level: str, category: str, message: str, context_json: Optional[str] = None):
-        created_at = datetime.now(timezone.utc).isoformat()
+    # runtime_settings
+    async def get_runtime_setting(self, key: str) -> Optional[str]:
+        async with self.db.execute("SELECT value FROM runtime_settings WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_runtime_setting(self, key: str, value: str, updated_by: str = 'system'):
+        updated_at = datetime.now(timezone.utc).isoformat()
         try:
-            # begin transaction, execute insert, commit
             await self.db.execute("BEGIN")
             await self.db.execute(
-                "INSERT INTO system_events(level, category, message, context_json, created_at) VALUES(?,?,?,?,?)",
-                (level, category, message, context_json, created_at),
+                "INSERT OR REPLACE INTO runtime_settings(key, value, updated_at, updated_by) VALUES(?,?,?,?)",
+                (key, value, updated_at, updated_by),
             )
             await self.db.commit()
         except Exception as e:
-            # do not raise; log for diagnostics
+            logger.exception("set_runtime_setting failed", error=str(e), key=key)
+            raise
+
+    async def get_all_runtime_settings(self) -> Dict[str, str]:
+        async with self.db.execute("SELECT key, value FROM runtime_settings") as cur:
+            rows = await cur.fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    # system_events
+    async def append_system_event(self, level: str, category: str, message: str, context_json: Optional[str] = None, account_type: str = 'SIM'):
+        created_at = datetime.now(timezone.utc).isoformat()
+        try:
+            await self.db.execute("BEGIN")
+            await self.db.execute(
+                "INSERT INTO system_events(level, category, message, context_json, account_type, created_at) VALUES(?,?,?,?,?,?)",
+                (level, category, message, context_json, account_type, created_at),
+            )
+            await self.db.commit()
+        except Exception as e:
             logger.error("append_system_event failed", error=str(e))
 
-    async def list_recent_system_events(self, limit: int = 100, level: Optional[str] = None, category: Optional[str] = None) -> List[Dict[str, Any]]:
-        sql = "SELECT id, level, category, message, context_json, created_at FROM system_events"
+    async def list_recent_system_events(self, limit: int = 100, level: Optional[str] = None, category: Optional[str] = None, account_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT id, level, category, message, context_json, account_type, created_at FROM system_events"
         clauses = []
         params: List[Any] = []
         if level:
@@ -57,6 +79,9 @@ class Repositories:
         if category:
             clauses.append("category = ?")
             params.append(category)
+        if account_type:
+            clauses.append("account_type = ?")
+            params.append(account_type)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC LIMIT ?"
@@ -446,21 +471,26 @@ class Repositories:
         opened_at: Optional[str] = None, live_strategy_id: Optional[int] = None,
         strategy_config_version: int = 1, total_cost_sol: float = 0.0,
         open_trade_event_id: Optional[int] = None, last_fill_at: Optional[str] = None,
-        last_fill_price_usd: Optional[float] = None, discovery_event_id: Optional[int] = None
+        last_fill_price_usd: Optional[float] = None, discovery_event_id: Optional[int] = None,
+        account_type: Optional[str] = None, legacy_config_status: Optional[str] = None
     ) -> int:
         opened_at = opened_at or datetime.now(timezone.utc).isoformat()
+        acct = account_type or ('LIVE' if is_live else 'SIM')
+        now = datetime.now(timezone.utc).isoformat()
         try:
             await self.db.execute("BEGIN")
             cur = await self.db.execute(
-                "INSERT INTO positions(token_mint, pool_address, discovery_event_id, is_live, live_strategy_id, strategy_config_version, locked_strategy_config_json, status, entry_price_usd, entry_price_sol, entry_token_amount, remaining_token_amount, remaining_value_usd, total_cost_sol, opened_at, last_fill_at, last_fill_price_usd, open_trade_event_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO positions(token_mint, pool_address, discovery_event_id, is_live, account_type, live_strategy_id, strategy_config_version, locked_strategy_config_json, legacy_config_status, status, entry_price_usd, entry_price_sol, entry_token_amount, remaining_token_amount, remaining_value_usd, total_cost_sol, opened_at, last_fill_at, last_fill_price_usd, open_trade_event_id, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     token_mint,
                     None,
                     discovery_event_id,
                     1 if is_live else 0,
+                    acct,
                     live_strategy_id,
                     strategy_config_version,
                     locked_strategy_config_json,
+                    legacy_config_status,
                     status,
                     entry_price_usd,
                     entry_price_sol,
@@ -472,6 +502,7 @@ class Repositories:
                     last_fill_at,
                     last_fill_price_usd,
                     open_trade_event_id,
+                    now,
                 ),
             )
             await self.db.commit()
@@ -485,15 +516,89 @@ class Repositories:
             row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def list_open_positions(self) -> List[Dict[str, Any]]:
-        async with self.db.execute("SELECT * FROM positions WHERE status NOT IN ('CLOSED') ORDER BY opened_at DESC") as cur:
+    async def list_open_positions(self, account_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        if account_type:
+            async with self.db.execute(
+                "SELECT * FROM positions WHERE status NOT IN ('CLOSED', 'LEGACY_INVALID_CONFIG', 'MIGRATION_NEEDED') AND account_type = ? ORDER BY opened_at DESC",
+                (account_type,)
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with self.db.execute("SELECT * FROM positions WHERE status NOT IN ('CLOSED', 'LEGACY_INVALID_CONFIG', 'MIGRATION_NEEDED') ORDER BY opened_at DESC") as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def list_all_positions(self, limit: int = 100, account_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        if account_type:
+            async with self.db.execute(
+                "SELECT * FROM positions WHERE account_type = ? ORDER BY opened_at DESC LIMIT ?",
+                (account_type, limit)
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with self.db.execute("SELECT * FROM positions ORDER BY opened_at DESC LIMIT ?", (limit,)) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def list_positions_for_portfolio(self, account_type: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return positions with computed PnL for portfolio table display."""
+        async with self.db.execute(
+            "SELECT id, token_mint, status, account_type, entry_price_usd, entry_token_amount, "
+            "remaining_token_amount, remaining_value_usd, realized_pnl_sol, realized_pnl_pct, "
+            "pnl_pct, total_cost_sol, total_return_sol, opened_at, closed_at, close_reason, "
+            "updated_at, is_live, entry_price_sol "
+            "FROM positions WHERE account_type = ? ORDER BY opened_at DESC LIMIT ?",
+            (account_type, limit)
+        ) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-    async def list_all_positions(self, limit: int = 100) -> List[Dict[str, Any]]:
-        async with self.db.execute("SELECT * FROM positions ORDER BY opened_at DESC LIMIT ?", (limit,)) as cur:
-            rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+    async def get_positions_summary(self) -> Dict[str, Any]:
+        """Get summary counts and PnL per account_type."""
+        async with self.db.execute(
+            "SELECT COUNT(*) as c FROM positions WHERE account_type = 'LIVE' AND status NOT IN ('CLOSED', 'LEGACY_INVALID_CONFIG', 'MIGRATION_NEEDED')"
+        ) as cur:
+            row = await cur.fetchone()
+        live_open = row[0] if row else 0
+
+        async with self.db.execute(
+            "SELECT COUNT(*) as c FROM positions WHERE account_type = 'SIM' AND status NOT IN ('CLOSED', 'LEGACY_INVALID_CONFIG', 'MIGRATION_NEEDED')"
+        ) as cur:
+            row = await cur.fetchone()
+        sim_open = row[0] if row else 0
+
+        async with self.db.execute(
+            "SELECT COALESCE(SUM(realized_pnl_sol), 0) as total_pnl FROM positions WHERE account_type = 'LIVE' AND status = 'CLOSED'"
+        ) as cur:
+            row = await cur.fetchone()
+        live_pnl = row[0] if row else 0
+
+        async with self.db.execute(
+            "SELECT COALESCE(SUM(realized_pnl_sol), 0) as total_pnl FROM positions WHERE account_type = 'SIM' AND status = 'CLOSED'"
+        ) as cur:
+            row = await cur.fetchone()
+        sim_pnl = row[0] if row else 0
+
+        async with self.db.execute(
+            "SELECT COUNT(*) as c FROM discovery_events WHERE created_at > datetime('now', '-1 hour')"
+        ) as cur:
+            row = await cur.fetchone()
+        events = row[0] if row else 0
+
+        async with self.db.execute(
+            "SELECT COUNT(*) as c FROM system_events WHERE level = 'ERROR' AND created_at > datetime('now', '-1 hour')"
+        ) as cur:
+            row = await cur.fetchone()
+        errors = row[0] if row else 0
+
+        return {
+            'live_open_count': live_open,
+            'sim_open_count': sim_open,
+            'live_pnl_sol': live_pnl,
+            'sim_pnl_sol': sim_pnl,
+            'recent_discoveries': events,
+            'recent_errors': errors,
+        }
 
     async def list_strategy_matches_by_token(self, token_mint: str, limit: int = 50) -> List[Dict[str, Any]]:
         async with self.db.execute(
@@ -516,14 +621,30 @@ class Repositories:
         closed_at = closed_at or datetime.now(timezone.utc).isoformat()
         try:
             await self.db.execute("BEGIN")
-            await self.db.execute("UPDATE positions SET status = 'CLOSED', closed_at = ?, close_reason = ?, total_return_sol = ? WHERE id = ?", (closed_at, close_reason, total_return_sol, position_id))
+            await self.db.execute("UPDATE positions SET status = 'CLOSED', closed_at = ?, close_reason = ?, total_return_sol = ?, updated_at = ? WHERE id = ?", (closed_at, close_reason, total_return_sol, closed_at, position_id))
             await self.db.commit()
         except Exception as e:
             await self.append_system_event("ERROR", "DB", "close_position failed", str({"error": str(e), "position_id": position_id}))
             raise
 
+    async def mark_position_legacy_config(self, position_id: int, status: str):
+        """Mark a position's legacy config status to prevent repeated warnings."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            await self.db.execute("BEGIN")
+            await self.db.execute(
+                "UPDATE positions SET legacy_config_status = ?, updated_at = ? WHERE id = ?",
+                (status, now, position_id)
+            )
+            await self.db.commit()
+        except Exception as e:
+            await self.append_system_event("ERROR", "DB", "mark_position_legacy_config failed", str({"error": str(e), "position_id": position_id}))
+
     async def list_recent_closed_live_positions(self, limit: int = 10) -> List[Dict[str, Any]]:
-        async with self.db.execute("SELECT * FROM positions WHERE is_live = 1 AND status = 'CLOSED' ORDER BY closed_at DESC LIMIT ?", (limit,)) as cur:
+        async with self.db.execute(
+            "SELECT * FROM positions WHERE account_type = 'LIVE' AND status = 'CLOSED' ORDER BY closed_at DESC LIMIT ?",
+            (limit,)
+        ) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
@@ -607,6 +728,10 @@ class Repositories:
         cols = ['idempotency_key', 'created_at', 'token_mint', 'side', 'event_type', 'status', 'is_live']
         vals = [idempotency_key, created_at, token_mint, side, event_type, status, is_live]
 
+        account_type_val = kwargs.get('account_type', 'SIM')
+        cols.append('account_type')
+        vals.append(account_type_val)
+
         for c in extra_cols:
             if c in kwargs and kwargs[c] is not None:
                 cols.append(c)
@@ -640,9 +765,16 @@ class Repositories:
             row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def list_trade_events(self, limit: int = 100) -> List[Dict[str, Any]]:
-        async with self.db.execute("SELECT * FROM trade_events ORDER BY id DESC LIMIT ?", (limit,)) as cur:
-            rows = await cur.fetchall()
+    async def list_trade_events(self, limit: int = 100, account_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        if account_type:
+            async with self.db.execute(
+                "SELECT * FROM trade_events WHERE account_type = ? ORDER BY id DESC LIMIT ?",
+                (account_type, limit)
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with self.db.execute("SELECT * FROM trade_events ORDER BY id DESC LIMIT ?", (limit,)) as cur:
+                rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
     # bandit_observations

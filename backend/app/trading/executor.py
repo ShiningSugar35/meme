@@ -6,7 +6,7 @@ from ..strategy.sizing import compute_entry_size
 from ..strategy.slippage import compute_slippage_bps
 from ..logging_config import logger
 from ..providers.base import SwapProvider, ExecutionProvider, RpcProvider, MarketDataProvider
-from ..config import settings
+from ..config import settings, ProviderMode
 from datetime import datetime, timezone
 import math
 
@@ -65,7 +65,22 @@ class TradingPipeline:
 
         winner = None
         if live_strategies:
-            winner = sorted(live_strategies, key=lambda s: (s.get('priority', 100), s.get('id', 0)))[0]
+            live_entries_enabled = await self.repo.get_runtime_setting('live_entries_enabled')
+            if live_entries_enabled is not None and live_entries_enabled != 'true':
+                # Only block if explicitly disabled AND we're not in mock mode
+                mode = settings.get_provider_mode()
+                if mode != ProviderMode.MOCK:
+                    await self.repo.append_system_event('WARN', 'TRADE',
+                        'Live entries blocked - entries paused or kill switch active',
+                        str({'token': token_mint}), account_type='SIM')
+                    winner = None
+                else:
+                    winner = sorted(live_strategies, key=lambda s: (s.get('priority', 100), s.get('id', 0)))[0]
+            else:
+                winner = sorted(live_strategies, key=lambda s: (s.get('priority', 100), s.get('id', 0)))[0]
+
+        if not winner and live_strategies:
+            pass  # All live strategies blocked
 
         existing_live = await self.repo.get_open_live_position_by_token(token_mint)
         if existing_live and winner:
@@ -111,9 +126,13 @@ class TradingPipeline:
             slippage_bps=slippage, price_impact_pct=quote.get('priceImpactPct'),
             quote_json=json.dumps({'impact': quote.get('priceImpactPct')}),
             route_plan_json=json.dumps(quote.get('routePlan', [])[:3]),
+            account_type='LIVE',
         )
 
-        wallet_pubkey = settings.WALLET_PUBLIC_KEY or 'MOCK_PUBKEY'
+        if not settings.WALLET_PUBLIC_KEY:
+            await self.repo.append_system_event('ERROR', 'TRADE', 'Buy blocked: missing WALLET_PUBLIC_KEY', str({'token': token_mint}))
+            return
+        wallet_pubkey = settings.WALLET_PUBLIC_KEY
         instr = await self.jupiter.build_swap_instructions(quote, wallet_pubkey, {})
         if instr.get('swapTransaction') is None and instr.get('mode') not in ('MOCK_NO_TRANSACTION', 'ONLINE_READONLY_NO_TRANSACTION'):
             await self.repo.append_system_event('ERROR', 'TRADE', 'build_swap failed', str({'token': token_mint}))
@@ -144,7 +163,8 @@ class TradingPipeline:
             price_usd=latest.get('price'), price_sol=latest.get('price_sol'),
             slippage_bps=slippage, price_impact_pct=quote.get('priceImpactPct'),
             tx_signature=sig, bundle_id=send_result.get('bundle_id'),
-            provider='JITO'
+            provider='JITO',
+            account_type='LIVE',
         )
 
         opened_at = datetime.now(timezone.utc).isoformat()
@@ -157,6 +177,7 @@ class TradingPipeline:
             total_cost_sol=size_sol, open_trade_event_id=te_confirmed.get('id'),
             last_fill_at=opened_at, last_fill_price_usd=latest.get('price'),
             discovery_event_id=discovery_event_id,
+            account_type='LIVE',
         )
 
         await self.repo.insert_bandit_observation(
@@ -217,9 +238,13 @@ class TradingPipeline:
             slippage_bps=sell_bps,
             price_impact_pct=quote.get('priceImpactPct'),
             quote_json=json.dumps({'impact': quote.get('priceImpactPct')}),
+            account_type='LIVE',
         )
 
-        wallet_pubkey = settings.WALLET_PUBLIC_KEY or 'MOCK_PUBKEY'
+        if not settings.WALLET_PUBLIC_KEY:
+            await self.repo.append_system_event('ERROR', 'TRADE', 'Sell blocked: missing WALLET_PUBLIC_KEY', str({'position_id': position.get('id')}))
+            return {'ok': False, 'error': 'MISSING_WALLET_PUBLIC_KEY'}
+        wallet_pubkey = settings.WALLET_PUBLIC_KEY
         instr = await self.jupiter.build_swap_instructions(quote, wallet_pubkey, {})
         if instr.get('swapTransaction') is None and instr.get('mode') not in ('MOCK_NO_TRANSACTION', 'ONLINE_READONLY_NO_TRANSACTION'):
             return {'ok': False, 'error': 'BUILD_FAILED'}
@@ -243,7 +268,8 @@ class TradingPipeline:
             executed_token_amount=sell_amount,
             tx_signature=sig, bundle_id=send_result.get('bundle_id'),
             slippage_bps=sell_bps, price_impact_pct=quote.get('priceImpactPct'),
-            provider='JITO'
+            provider='JITO',
+            account_type='LIVE',
         )
 
         if exit_pct >= 1.0:
@@ -283,6 +309,7 @@ class TradingPipeline:
             None, live_strategy_id=None, strategy_config_version=strategy.get('config_version', 1),
             total_cost_sol=0.0, open_trade_event_id=None,
             last_fill_at=None, last_fill_price_usd=None, discovery_event_id=discovery_event_id,
+            account_type='SIM',
         )
         await self.repo.insert_bandit_observation(token_mint, sid, False,
             json.dumps({'entry_price': latest.get('price'), 'size_sol': size_sol}),

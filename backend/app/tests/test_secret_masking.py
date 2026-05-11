@@ -122,10 +122,9 @@ async def test_settings_validate_live_requires_keys():
     assert 'DRY_RUN=false' in str(exc_info.value), "Should require DRY_RUN=false for live trading"
     
     # Test 2: LIVE_TRADING_ENABLED=true with missing wallet keys should fail
-    # Since .env has wallet keys, we create a Settings object via direct mode_validate
-    # by forcing PROVIDER_MODE=live without wallet
     with pytest.raises(ValueError) as exc_info:
         settings = Settings(
+            PROVIDER_MODE='live',
             LIVE_TRADING_ENABLED=True,
             DRY_RUN=False,
             GMGN_API_BASE_URL='https://api.gmgn.ai',
@@ -135,8 +134,8 @@ async def test_settings_validate_live_requires_keys():
             SOLANA_RPC_HTTP_PRIMARY='https://api.mainnet-beta.solana.com',
             JITO_ENABLED=True,
             JITO_BLOCK_ENGINE_URL='https://mainnet.block-engine.jito.wtf',
-            WALLET_PUBLIC_KEY=None,  # Explicitly override .env
-            WALLET_PRIVATE_KEY_BASE58=None,  # Explicitly override .env
+            WALLET_PUBLIC_KEY=None,
+            WALLET_PRIVATE_KEY_BASE58=None,
         )
     assert 'WALLET_PUBLIC_KEY' in str(exc_info.value)
     assert 'WALLET_PRIVATE_KEY_BASE58' in str(exc_info.value)

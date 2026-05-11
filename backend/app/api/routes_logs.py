@@ -1,16 +1,17 @@
 import json
 import asyncio
 from fastapi import APIRouter, Request
-from ..db.repositories import Repositories
 from ..services.event_bus import event_bus
 
 router = APIRouter()
 
 
 @router.get('/api/logs/recent')
-async def recent_logs(request: Request, limit: int = 100):
+async def recent_logs(request: Request, limit: int = 100, level: str = '', category: str = ''):
     repo = request.app.state.repo
-    return await repo.list_recent_system_events(limit)
+    lvl = level if level else None
+    cat = category if category else None
+    return await repo.list_recent_system_events(limit, level=lvl, category=cat)
 
 
 @router.get('/api/logs/stream')

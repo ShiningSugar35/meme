@@ -1,5 +1,12 @@
 PRAGMA foreign_keys=ON;
 
+CREATE TABLE IF NOT EXISTS runtime_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL DEFAULT 'system'
+);
+
 CREATE TABLE IF NOT EXISTS system_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   level TEXT NOT NULL,
@@ -99,6 +106,7 @@ CREATE TABLE IF NOT EXISTS token_metric_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token_mint TEXT NOT NULL,
   source TEXT NOT NULL DEFAULT 'GMGN',
+  source_mode TEXT NOT NULL DEFAULT 'MOCK',
   observed_at TEXT NOT NULL,
 
   type TEXT,
@@ -184,9 +192,11 @@ CREATE TABLE IF NOT EXISTS positions (
   discovery_event_id INTEGER,
 
   is_live INTEGER NOT NULL,
+  account_type TEXT NOT NULL DEFAULT 'SIM',
   live_strategy_id INTEGER,
   strategy_config_version INTEGER,
-  locked_strategy_config_json TEXT NOT NULL,
+  locked_strategy_config_json TEXT,
+  legacy_config_status TEXT,
 
   status TEXT NOT NULL,
   entry_price_usd REAL,
@@ -199,9 +209,13 @@ CREATE TABLE IF NOT EXISTS positions (
   total_return_sol REAL DEFAULT 0,
   realized_pnl_sol REAL DEFAULT 0,
   realized_pnl_pct REAL,
+  pnl_pct REAL,
 
   max_runup_pct REAL DEFAULT 0,
   max_drawdown_pct REAL DEFAULT 0,
+
+  next_check_at TEXT,
+  last_checked_at TEXT,
 
   opened_at TEXT NOT NULL,
   last_fill_at TEXT,
@@ -211,8 +225,9 @@ CREATE TABLE IF NOT EXISTS positions (
   open_trade_event_id INTEGER,
   close_reason TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_positions_status
-ON positions(status, is_live);
+CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status, account_type);
+CREATE INDEX IF NOT EXISTS idx_positions_account ON positions(account_type, status);
+CREATE INDEX IF NOT EXISTS idx_positions_token ON positions(token_mint, account_type);
 
 CREATE TABLE IF NOT EXISTS provider_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

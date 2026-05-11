@@ -4,9 +4,10 @@ router = APIRouter(prefix="/api/trades", tags=["trades"])
 
 
 @router.get("")
-async def list_trades(request: Request, limit: int = 100):
+async def list_trades(request: Request, limit: int = 100, account_type: str = ""):
     repo = request.app.state.repo
-    return await repo.list_trade_events(limit) or []
+    acct = account_type if account_type else None
+    return await repo.list_trade_events(limit, account_type=acct) or []
 
 
 @router.get("/provider-requests")

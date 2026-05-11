@@ -216,6 +216,8 @@ class GMGNProvider(MarketDataProvider):
             if self.mode == ProviderMode.MOCK:
                 # MOCK: return mock data
                 tokens = list(self.mock_data.tokens.values())
+                for t in tokens:
+                    t['source_mode'] = 'MOCK'
                 await self._log_request(settings.GMGN_TRENCHES_PATH, True, params, {'count': len(tokens)})
                 return tokens
             
@@ -228,7 +230,9 @@ class GMGNProvider(MarketDataProvider):
                 tokens = []
                 raw_tokens = data.get('data', {}).get('tokens', []) if isinstance(data, dict) else []
                 for t in raw_tokens:
-                    tokens.append(self._normalize_token_data(t))
+                    normalized = self._normalize_token_data(t)
+                    normalized['source_mode'] = 'REAL'
+                    tokens.append(normalized)
                 
                 await self._log_request(path, True, params, {'count': len(tokens)})
                 return tokens
@@ -252,6 +256,7 @@ class GMGNProvider(MarketDataProvider):
                 # MOCK: return mock snapshot
                 t = self.mock_data.tokens.get(token_mint)
                 if t:
+                    t['source_mode'] = 'MOCK'
                     await self._log_request(f"{settings.GMGN_TOKEN_PRICE_PATH}/{token_mint}", True, 
                                            {'token_mint': token_mint}, t)
                     return t
@@ -264,6 +269,8 @@ class GMGNProvider(MarketDataProvider):
                 
                 # Normalize response
                 snapshot = self._normalize_token_data(data.get('data', {})) if isinstance(data, dict) else {}
+                if snapshot:
+                    snapshot['source_mode'] = 'REAL'
                 await self._log_request(path, True, {'token_mint': token_mint}, snapshot)
                 return snapshot
                 
@@ -286,6 +293,8 @@ class GMGNProvider(MarketDataProvider):
             if self.mode == ProviderMode.MOCK:
                 # MOCK: return mock klines
                 k = self.mock_data.klines.get(token_mint, [])
+                for item in k:
+                    item['source_mode'] = 'MOCK'
                 await self._log_request(f"{settings.GMGN_KLINE_PATH}/{token_mint}", True,
                                        {'token_mint': token_mint, 'interval': interval, 'limit': limit},
                                        {'count': len(k)})
@@ -299,6 +308,8 @@ class GMGNProvider(MarketDataProvider):
                 
                 # Normalize response
                 klines = data.get('data', {}).get('klines', []) if isinstance(data, dict) else []
+                for item in klines:
+                    item['source_mode'] = 'REAL'
                 await self._log_request(path, True, params, {'count': len(klines)})
                 return klines
                 
@@ -341,6 +352,7 @@ class GMGNProvider(MarketDataProvider):
                     'price_usd': info.get('price', None),
                     'price_sol': info['sol_price'],
                     'sol_side_liquidity': info['sol_liquidity'],
+                    'source_mode': 'MOCK',
                 }
             
             elif self.mode in [ProviderMode.ONLINE_READONLY, ProviderMode.LIVE]:
@@ -356,6 +368,7 @@ class GMGNProvider(MarketDataProvider):
                     'price_sol': raw.get('price_sol') or raw.get('sol_price', 0.0),
                     'sol_side_liquidity': raw.get('sol_side_liquidity') or raw.get('liquidity', 0),
                     'raw_json': json.dumps(raw) if raw else None,
+                    'source_mode': 'REAL',
                 }
                 
         except Exception as e:

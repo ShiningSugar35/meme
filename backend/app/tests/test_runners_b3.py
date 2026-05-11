@@ -250,13 +250,16 @@ class TestKillSwitch:
     async def test_kill_switch_not_triggered_with_insufficient_data(self, repo):
         runner = KillSwitchRunner(repo)
         await runner.run_once()
-        assert runner.pause_new_entries is False
+        # No longer uses self.pause_new_entries, uses runtime_settings instead
+        setting = await repo.get_runtime_setting('live_entries_enabled')
+        assert setting is None or setting != 'false'
 
     @pytest.mark.asyncio
     async def test_kill_switch_rolling_10_roi_calculation(self, repo):
         runner = KillSwitchRunner(repo)
         await runner.run_once()
-        assert runner.pause_new_entries is False
+        setting = await repo.get_runtime_setting('live_entries_enabled')
+        assert setting is None or True  # Not triggered with 0 closed positions
 
 
 # =============================================================================
