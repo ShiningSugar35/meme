@@ -128,6 +128,10 @@ export default function Operations() {
           className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-xs">
           亏钱盘导出
         </button>
+        <button onClick={async () => { const r = await api.exportDiagnostic(); setMsg(r.ok ? `Diagnostic saved: ${r.path} (${r.size_bytes} bytes)` : `Export failed: ${r.error}`) }}
+          className="bg-cyan-800 hover:bg-cyan-700 px-3 py-2 rounded text-xs text-white">
+          导出诊断日志
+        </button>
         <button onClick={() => doConfirm('Repair legacy DB configs', () => api.repairLegacyDb())}
           className="bg-purple-900 hover:bg-purple-800 px-3 py-2 rounded text-xs text-white">Repair Legacy DB</button>
         <button onClick={() => { api.backupDb(); setMsg('DB backup started') }}

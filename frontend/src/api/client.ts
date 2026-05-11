@@ -56,6 +56,7 @@ export const api = {
     const q = params.toString() ? `?${params.toString()}` : ''
     return fetchJSON(`${BASE}/logs/recent${q}`)
   },
+  exportDiagnostic: () => fetchJSON(`${BASE}/logs/export-diagnostic`, { method: 'POST' }),
 
   // Risk
   getKillSwitch: () => fetchJSON(`${BASE}/risk/kill-switch`),
