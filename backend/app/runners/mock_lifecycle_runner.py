@@ -7,10 +7,18 @@ from ..db.repositories import Repositories
 from ..services.provider_factory import ProviderContainer
 from ..services.price_aggregator import PriceAggregator
 from ..providers.gmgn_subscriber import create_gmgn_subscriber
-from ..logging_config import logger
+from ..trading.executor import TradingPipeline
 
 
 class MockLifecycleRunner:
+    """Single-pass lifecycle runner used by mock/dev flows.
+
+    The object mirrors main.py wiring: discovery -> second filter/entry -> price
+    monitor -> position risk exits -> kill-switch housekeeping.  It deliberately
+    passes the same provider set into TradingPipeline so this runner does not
+    diverge from the app-scoped workers used in normal runtime mode.
+    """
+
     def __init__(self, repo: Repositories, providers: ProviderContainer, strategy_groups: list):
         self.repo = repo
         self.providers = providers
@@ -18,11 +26,19 @@ class MockLifecycleRunner:
 
         subscriber = create_gmgn_subscriber()
         self.aggregator = PriceAggregator(repo, providers.gmgn, providers.jupiter, subscriber)
+        self.trading_pipeline = TradingPipeline(repo, providers.gmgn, providers.jupiter, providers.jito, providers.rpc)
 
         self.discovery = DiscoveryRunner(repo, providers.gmgn, strategy_groups)
-        self.second = SecondFilterRunner(repo, providers.gmgn, providers.jupiter, providers.jito, providers.rpc, strategy_groups)
+        self.second = SecondFilterRunner(
+            repo,
+            providers.gmgn,
+            providers.jupiter,
+            providers.jito,
+            providers.rpc,
+            strategy_groups,
+        )
         self.price = PriceMonitorRunner(repo, self.aggregator)
-        self.risk = PositionRiskRunner(repo, providers.gmgn)
+        self.risk = PositionRiskRunner(repo, providers.gmgn, trading_pipeline=self.trading_pipeline)
         self.kill = KillSwitchRunner(repo)
 
     async def run_once(self):

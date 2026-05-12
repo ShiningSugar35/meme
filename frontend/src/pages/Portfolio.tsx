@@ -1,139 +1,148 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { api } from '../api/client'
 
-interface PosRow {
-  id: number
-  status: string
-  entry_usd: number
-  remaining: number
-  price: number
-  liquidity: number | null
-  pnl_pct: number | null
-  market_cap: number | null
-  token_symbol: string | null
-  mint_short: string
-  mint: string
-  account_type: string
-  updated_at: string
+const fmt = (v: any, digits = 2) => {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '-'
+  return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits })
 }
+const fmtUsd = (v: any) => v === null || v === undefined ? '-' : `$${fmt(v, 6)}`
+const fmtPct = (v: any) => v === null || v === undefined ? '-' : `${Number(v) >= 0 ? '+' : ''}${fmt(v, 2)}%`
+const fmtSol = (v: any) => v === null || v === undefined ? '-' : `${fmt(v, 4)} SOL`
 
-function PosTable({ accountType, title, colorClass }: { accountType: string, title: string, colorClass: string }) {
-  const [data, setData] = useState<PosRow[]>([])
-  const [expanded, setExpanded] = useState<number | null>(null)
-  const [sortKey, setSortKey] = useState<string>('')
-  const [sortDir, setSortDir] = useState<1 | -1>(-1)
+export default function Portfolio() {
+  const [accountType, setAccountType] = useState('LIVE')
+  const [rows, setRows] = useState<any[]>([])
+  const [summary, setSummary] = useState<any>({})
+  const [sortKey, setSortKey] = useState('updated_at')
+  const [sortDesc, setSortDesc] = useState(true)
+  const [msg, setMsg] = useState('')
+  const [busyId, setBusyId] = useState<number | null>(null)
 
-  const load = useCallback(() => {
-    api.getPortfolioTable(accountType).then(r => setData(r || [])).catch(() => {})
+  const refresh = useCallback(async () => {
+    try {
+      const [table, s] = await Promise.all([
+        api.getPortfolioTable(accountType),
+        api.getPositionsSummary().catch(() => ({})),
+      ])
+      setRows(Array.isArray(table) ? table : [])
+      setSummary(s || {})
+    } catch (e: any) {
+      setMsg(e?.message || 'Load portfolio failed')
+    }
   }, [accountType])
 
   useEffect(() => {
-    load()
-    const t = setInterval(load, 5000)
+    refresh()
+    const t = setInterval(refresh, 5000)
     return () => clearInterval(t)
-  }, [load])
+  }, [refresh])
 
-  const sorted = [...data].sort((a, b) => {
-    if (!sortKey) return 0
-    const av = (a as any)[sortKey] ?? 0
-    const bv = (b as any)[sortKey] ?? 0
-    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * sortDir
-    return String(av).localeCompare(String(bv)) * sortDir
-  })
+  const sorted = useMemo(() => {
+    const r = [...rows]
+    r.sort((a, b) => {
+      const av = a?.[sortKey]
+      const bv = b?.[sortKey]
+      if (av === bv) return 0
+      if (av === null || av === undefined) return 1
+      if (bv === null || bv === undefined) return -1
+      const an = Number(av)
+      const bn = Number(bv)
+      let cmp = 0
+      if (!Number.isNaN(an) && !Number.isNaN(bn)) cmp = an - bn
+      else cmp = String(av).localeCompare(String(bv))
+      return sortDesc ? -cmp : cmp
+    })
+    return r
+  }, [rows, sortKey, sortDesc])
 
-  const doSort = (key: string) => {
-    if (sortKey === key) setSortDir(d => d === 1 ? -1 : 1)
-    else { setSortKey(key); setSortDir(-1) }
+  const setSort = (key: string) => {
+    if (key === sortKey) setSortDesc(!sortDesc)
+    else { setSortKey(key); setSortDesc(true) }
   }
 
-  const SortBtn = ({ label }: { label: string }) => (
-    <span className="cursor-pointer hover:text-cyan-400 select-none" onClick={() => doSort(label)}>{label}</span>
-  )
-
-  const StatusBadge = ({ status }: { status: string }) => {
-    const map: Record<string, string> = {
-      'POSITION_OPEN': 'bg-green-900 text-green-300',
-      'SIM_OPEN': 'bg-blue-900 text-blue-300',
-      'CLOSED': 'bg-gray-700 text-gray-400',
-      'PENDING_ENTRY': 'bg-yellow-900 text-yellow-300',
-      'PENDING_EXIT': 'bg-orange-900 text-orange-300',
-      'FAILED': 'bg-red-900 text-red-300',
-      'BLOCKED': 'bg-red-900 text-red-400',
-      'LEGACY_INVALID_CONFIG': 'bg-purple-900 text-purple-300',
-      'MIGRATION_NEEDED': 'bg-pink-900 text-pink-300',
+  const closePosition = async (id: number) => {
+    setBusyId(id)
+    try {
+      const r = await api.manualClose(id)
+      if (r?.ok === false) setMsg(`Close failed: ${r.error || 'unknown error'}`)
+      else setMsg(`Close request sent for position ${id}`)
+      await refresh()
+    } catch (e: any) {
+      setMsg(e?.message || 'Close failed')
+    } finally {
+      setBusyId(null)
     }
-    return <span className={`px-1.5 py-0.5 rounded text-xs ${map[status] || 'bg-gray-800 text-gray-400'}`}>{status}</span>
   }
 
-  const ratioVal = (p: PosRow) => {
-    if (!p.entry_usd || p.entry_usd === 0) return '-'
-    return (p.price / p.entry_usd).toFixed(2)
-  }
+  const SortBtn = ({ k, children }: { k: string, children: any }) =>
+    <button onClick={() => setSort(k)} className="hover:text-cyan-300">
+      {children}{sortKey === k ? (sortDesc ? ' ↓' : ' ↑') : ''}
+    </button>
 
-  return (
-    <div className="mb-6">
-      <h2 className={`text-sm font-bold mb-2 ${colorClass}`}>{title} ({data.length})</h2>
-      <div className="bg-gray-900 border border-gray-700 rounded overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="text-gray-400 border-b border-gray-700">
-              <th className="text-left p-1.5">
-                <StatusBadge status="status" />
-              </th>
-              <th className="text-right p-1.5"><SortBtn label="倍率" /></th>
-              <th className="text-right p-1.5"><SortBtn label="当前持仓" /></th>
-              <th className="text-right p-1.5"><SortBtn label="liquidity" /></th>
-              <th className="text-right p-1.5"><SortBtn label="收益率" /></th>
-              <th className="text-right p-1.5"><SortBtn label="market_cap" /></th>
-              <th className="w-4"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map(p => (
-              <>
-                <tr key={p.id} className="border-b border-gray-800 hover:bg-gray-850 cursor-pointer"
-                  onClick={() => setExpanded(expanded === p.id ? null : p.id)}>
-                  <td className="p-1.5">
-                    <StatusBadge status={p.status} />
-                    <span className="text-gray-500 ml-1 font-mono">{p.mint_short}</span>
-                  </td>
-                  <td className="text-right p-1.5">{ratioVal(p)}</td>
-                  <td className="text-right p-1.5">{p.remaining?.toFixed(2) || '-'}</td>
-                  <td className="text-right p-1.5">{p.liquidity?.toFixed(0) || '-'}</td>
-                  <td className={`text-right p-1.5 ${(p.pnl_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {p.pnl_pct != null ? `${p.pnl_pct.toFixed(1)}%` : '-'}
-                  </td>
-                  <td className="text-right p-1.5">{p.market_cap?.toFixed(0) || '-'}</td>
-                  <td className="p-1.5 text-gray-600">{expanded === p.id ? '▼' : '▶'}</td>
-                </tr>
-                {expanded === p.id && (
-                  <tr key={`${p.id}-detail`} className="bg-gray-800/50">
-                    <td colSpan={7} className="p-3 text-xs text-gray-400">
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                        <div><span className="text-gray-500">Mint:</span> <span className="font-mono text-gray-300">{p.mint}</span></div>
-                        <div><span className="text-gray-500">Account:</span> <span className={p.account_type === 'LIVE' ? 'text-red-400' : 'text-blue-400'}>{p.account_type}</span></div>
-                        <div><span className="text-gray-500">Status:</span> {p.status}</div>
-                        <div><span className="text-gray-500">Updated:</span> {p.updated_at?.slice(0, 19) || '-'}</div>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </>
-            ))}
-          </tbody>
-        </table>
-        {data.length === 0 && <p className="text-gray-500 text-xs py-4 text-center">No positions yet.</p>}
+  const pnlColor = (v: any) => Number(v || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+  const prefix = accountType.toLowerCase()
+
+  return <div>
+    <div className="flex items-center justify-between mb-4">
+      <h1 className="text-xl font-bold text-cyan-400">Portfolio</h1>
+      <div className="flex gap-2">
+        <button onClick={() => setAccountType('LIVE')} className={`px-3 py-1 rounded text-sm ${accountType === 'LIVE' ? 'bg-red-800 text-white' : 'bg-gray-800 text-gray-400'}`}>LIVE</button>
+        <button onClick={() => setAccountType('SIM')} className={`px-3 py-1 rounded text-sm ${accountType === 'SIM' ? 'bg-blue-800 text-white' : 'bg-gray-800 text-gray-400'}`}>SIM</button>
       </div>
     </div>
-  )
-}
 
-export default function Portfolio() {
-  return (
-    <div>
-      <h1 className="text-xl font-bold mb-4 text-cyan-400">Portfolio</h1>
-      <PosTable accountType="LIVE" title="LIVE Positions" colorClass="text-red-400" />
-      <PosTable accountType="SIM" title="SIM Positions" colorClass="text-blue-400" />
+    {msg && <div className="bg-gray-800 border border-cyan-700 rounded p-2 mb-3 text-sm text-cyan-400">
+      {msg}<button onClick={() => setMsg('')} className="ml-3 text-gray-500 hover:text-white">x</button>
+    </div>}
+
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      <div className="bg-gray-900 border border-gray-700 rounded p-3"><div className="text-xs text-gray-500">Open Count</div><div className="text-lg font-bold text-cyan-300">{summary?.[`${prefix}_open_count`] ?? 0}</div></div>
+      <div className="bg-gray-900 border border-gray-700 rounded p-3"><div className="text-xs text-gray-500">Open Cost</div><div className="text-lg font-bold text-gray-200">{fmtSol(summary?.[`${prefix}_open_cost_sol`])}</div></div>
+      <div className="bg-gray-900 border border-gray-700 rounded p-3"><div className="text-xs text-gray-500">Open Value</div><div className="text-lg font-bold text-gray-200">{fmtSol(summary?.[`${prefix}_open_value_sol`])}</div></div>
+      <div className="bg-gray-900 border border-gray-700 rounded p-3"><div className="text-xs text-gray-500">Realized PnL</div><div className={`text-lg font-bold ${pnlColor(summary?.[`${prefix}_pnl_sol`])}`}>{fmtSol(summary?.[`${prefix}_pnl_sol`])}</div></div>
     </div>
-  )
+
+    <div className="bg-gray-900 border border-gray-700 rounded overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead className="bg-gray-950 text-gray-500 border-b border-gray-700">
+          <tr>
+            <th className="text-left p-2"><SortBtn k="id">ID</SortBtn></th>
+            <th className="text-left p-2">Token</th>
+            <th className="p-2"><SortBtn k="status">Status</SortBtn></th>
+            <th className="p-2"><SortBtn k="ratio">倍率</SortBtn></th>
+            <th className="p-2"><SortBtn k="remaining_sol">持仓SOL</SortBtn></th>
+            <th className="p-2"><SortBtn k="pnl_pct">PnL%</SortBtn></th>
+            <th className="p-2"><SortBtn k="pnl_sol">PnL SOL</SortBtn></th>
+            <th className="p-2"><SortBtn k="liquidity">Liquidity</SortBtn></th>
+            <th className="p-2"><SortBtn k="market_cap">Market Cap</SortBtn></th>
+            <th className="p-2"><SortBtn k="updated_at">Updated</SortBtn></th>
+            <th className="p-2">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r) => <tr key={r.id} className="border-b border-gray-800 hover:bg-gray-800/50">
+            <td className="p-2 text-gray-400">#{r.id}</td>
+            <td className="p-2">
+              <div className="text-gray-200">{r.token_symbol || r.mint_short}</div>
+              <div className="text-gray-600 font-mono">{r.mint_short}</div>
+            </td>
+            <td className="p-2 text-center"><span className={`px-2 py-0.5 rounded ${r.status === 'CLOSED' ? 'bg-gray-700 text-gray-400' : 'bg-green-900 text-green-300'}`}>{r.status}</span></td>
+            <td className={`p-2 text-center ${Number(r.ratio || 1) >= 1 ? 'text-green-400' : 'text-red-400'}`}>{r.ratio === null || r.ratio === undefined ? '-' : `${fmt(r.ratio, 2)}x`}</td>
+            <td className="p-2 text-center text-cyan-300">{fmtSol(r.remaining_sol)}</td>
+            <td className={`p-2 text-center ${pnlColor(r.pnl_pct)}`}>{fmtPct(r.pnl_pct)}</td>
+            <td className={`p-2 text-center ${pnlColor(r.pnl_sol)}`}>{fmtSol(r.pnl_sol)}</td>
+            <td className="p-2 text-center">{fmtUsd(r.liquidity)}</td>
+            <td className="p-2 text-center">{fmtUsd(r.market_cap)}</td>
+            <td className="p-2 text-center text-gray-500">{r.updated_at ? String(r.updated_at).slice(0, 19) : '-'}</td>
+            <td className="p-2 text-center">
+              {r.status !== 'CLOSED'
+                ? <button disabled={busyId === r.id} onClick={() => closePosition(r.id)} className="bg-red-800 hover:bg-red-700 disabled:opacity-50 px-2 py-1 rounded text-white">Close</button>
+                : <span className="text-gray-600">-</span>}
+            </td>
+          </tr>)}
+        </tbody>
+      </table>
+      {sorted.length === 0 && <div className="text-center text-gray-500 py-8">No positions.</div>}
+    </div>
+  </div>
 }

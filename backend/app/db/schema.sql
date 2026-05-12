@@ -13,8 +13,15 @@ CREATE TABLE IF NOT EXISTS system_events (
   category TEXT NOT NULL,
   message TEXT NOT NULL,
   context_json TEXT,
+  account_type TEXT NOT NULL DEFAULT 'SIM',
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_system_events_level
+ON system_events(level);
+CREATE INDEX IF NOT EXISTS idx_system_events_category
+ON system_events(category);
+CREATE INDEX IF NOT EXISTS idx_system_events_account
+ON system_events(account_type, created_at);
 
 CREATE TABLE IF NOT EXISTS trade_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,6 +29,7 @@ CREATE TABLE IF NOT EXISTS trade_events (
   token_mint TEXT NOT NULL,
   strategy_id INTEGER,
   is_live INTEGER NOT NULL,
+  account_type TEXT NOT NULL DEFAULT 'SIM',
 
   side TEXT NOT NULL,
   event_type TEXT NOT NULL,
@@ -55,8 +63,13 @@ CREATE TABLE IF NOT EXISTS trade_events (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_trade_idempotency
 ON trade_events(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_trade_events_account
+ON trade_events(account_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_trade_events_token
+ON trade_events(token_mint, created_at);
+CREATE INDEX IF NOT EXISTS idx_trade_events_position
+ON trade_events(position_id, created_at);
 
--- Minimal required tables for initial skeleton
 CREATE TABLE IF NOT EXISTS strategy_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -101,6 +114,10 @@ CREATE TABLE IF NOT EXISTS tokens (
   latest_snapshot_id INTEGER,
   updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_tokens_updated
+ON tokens(updated_at);
+CREATE INDEX IF NOT EXISTS idx_tokens_type
+ON tokens(latest_type);
 
 CREATE TABLE IF NOT EXISTS token_metric_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +126,9 @@ CREATE TABLE IF NOT EXISTS token_metric_snapshots (
   source_mode TEXT NOT NULL DEFAULT 'MOCK',
   observed_at TEXT NOT NULL,
 
+  pool_address TEXT,
+  platform TEXT,
+  launchpad TEXT,
   type TEXT,
   liquidity_usd REAL,
   sol_side_liquidity REAL,
@@ -140,6 +160,8 @@ CREATE TABLE IF NOT EXISTS token_metric_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_token_metric_snapshots_token_time
 ON token_metric_snapshots(token_mint, observed_at);
+CREATE INDEX IF NOT EXISTS idx_token_metric_snapshots_type_time
+ON token_metric_snapshots(type, observed_at);
 
 CREATE TABLE IF NOT EXISTS kline_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,6 +177,8 @@ CREATE TABLE IF NOT EXISTS kline_snapshots (
   volume_usd REAL,
   raw_json TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_kline_token_interval_time
+ON kline_snapshots(token_mint, interval, open_time);
 
 CREATE TABLE IF NOT EXISTS tick_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,6 +208,10 @@ CREATE TABLE IF NOT EXISTS token_strategy_matches (
   feature_vector_json TEXT,
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_strategy_matches_token_stage
+ON token_strategy_matches(token_mint, stage, created_at);
+CREATE INDEX IF NOT EXISTS idx_strategy_matches_discovery
+ON token_strategy_matches(discovery_event_id, stage);
 
 CREATE TABLE IF NOT EXISTS positions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,6 +232,7 @@ CREATE TABLE IF NOT EXISTS positions (
   entry_token_amount REAL,
   remaining_token_amount REAL,
   remaining_value_usd REAL,
+  remaining_value_sol REAL,
 
   total_cost_sol REAL DEFAULT 0,
   total_return_sol REAL DEFAULT 0,
@@ -216,18 +245,35 @@ CREATE TABLE IF NOT EXISTS positions (
 
   next_check_at TEXT,
   last_checked_at TEXT,
+  last_risk_check_at TEXT,
+  next_risk_check_at TEXT,
+  risk_check_interval_seconds INTEGER,
+
+  executed_exit_rules_json TEXT NOT NULL DEFAULT '[]',
 
   opened_at TEXT NOT NULL,
   last_fill_at TEXT,
   last_fill_price_usd REAL,
+  last_fill_price_sol REAL,
   closed_at TEXT,
 
   open_trade_event_id INTEGER,
-  close_reason TEXT
+  close_reason TEXT,
+  last_exit_reason TEXT,
+  updated_at TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status, account_type);
-CREATE INDEX IF NOT EXISTS idx_positions_account ON positions(account_type, status);
-CREATE INDEX IF NOT EXISTS idx_positions_token ON positions(token_mint, account_type);
+CREATE INDEX IF NOT EXISTS idx_positions_status
+ON positions(status, account_type);
+CREATE INDEX IF NOT EXISTS idx_positions_account
+ON positions(account_type, status);
+CREATE INDEX IF NOT EXISTS idx_positions_token
+ON positions(token_mint, account_type);
+CREATE INDEX IF NOT EXISTS idx_positions_next_check
+ON positions(next_check_at, status);
+CREATE INDEX IF NOT EXISTS idx_positions_next_risk_check
+ON positions(next_risk_check_at, status, account_type);
+CREATE INDEX IF NOT EXISTS idx_positions_updated
+ON positions(updated_at);
 
 CREATE TABLE IF NOT EXISTS provider_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,17 +315,43 @@ CREATE TABLE IF NOT EXISTS discovery_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token_mint TEXT NOT NULL,
   pool_address TEXT NOT NULL DEFAULT '',
+  strategy_id INTEGER,
+  strategy_config_version INTEGER,
+
   first_seen_at TEXT NOT NULL,
   pool_created_at TEXT,
   t_seconds INTEGER,
+
   status TEXT NOT NULL DEFAULT 'DISCOVERED',
+
   source_snapshot_id INTEGER,
+  initial_snapshot_id INTEGER,
+  recheck_snapshot_id INTEGER,
+
+  initial_match_id INTEGER,
+  recheck_match_id INTEGER,
+  second_filter_match_id INTEGER,
+
+  next_second_check_at TEXT,
+  second_filter_checked_at TEXT,
+
+  entry_position_id INTEGER,
+  last_error TEXT,
+  fail_reason_json TEXT,
+  feature_vector_json TEXT,
+
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_discovery_events_token
 ON discovery_events(token_mint, status);
+CREATE INDEX IF NOT EXISTS idx_discovery_events_status_next
+ON discovery_events(status, next_second_check_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_events_strategy
+ON discovery_events(strategy_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_events_token_strategy
+ON discovery_events(token_mint, pool_address, strategy_id, status);
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_discovery_snapshot_token_pool
-ON discovery_events(source_snapshot_id, token_mint, pool_address)
-WHERE source_snapshot_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_discovery_snapshot_token_pool_strategy
+ON discovery_events(source_snapshot_id, token_mint, pool_address, strategy_id)
+WHERE source_snapshot_id IS NOT NULL AND strategy_id IS NOT NULL;

@@ -1,209 +1,134 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api/client'
 
-const MODE_LABELS: Record<string, string> = {
-  'IDLE': 'IDLE',
-  'SIM_TEST': '模拟交易',
-  'FORMAL_SIM_LIVE': '实盘交易',
+const fmtSol = (n: any) => {
+  const v = Number(n || 0)
+  return `${v >= 0 ? '+' : ''}${v.toFixed(4)} SOL`
+}
+
+const fmtBool = (v: any) => v ? 'ON' : 'OFF'
+
+function StatCard({ title, value, color }: { title: string, value: string, color?: string }) {
+  return <div className="bg-gray-900 border border-gray-700 rounded p-3">
+    <div className="text-xs text-gray-500 mb-1">{title}</div>
+    <div className={`text-lg font-bold ${color || 'text-cyan-400'}`}>{value}</div>
+  </div>
 }
 
 export default function ControlCenter() {
   const [runtime, setRuntime] = useState<any>(null)
-  const [providers, setProviders] = useState<any[]>([])
-  const [strategies, setStrategies] = useState<any[]>([])
-  const [summary, setSummary] = useState<any>({})
+  const [summary, setSummary] = useState<any>(null)
+  const [workers, setWorkers] = useState<any>({})
   const [msg, setMsg] = useState('')
-  const [confirmLive, setConfirmLive] = useState(false)
+  const [busy, setBusy] = useState(false)
 
-  const [form, setForm] = useState({
-    name: '', x: 0.15, y: 2.25, t_seconds: 3600, is_live: false
-  })
-
-  const refresh = useCallback(() => {
-    api.getRuntimeStatus().then(setRuntime).catch(() => {})
-    api.getProviderHealth().then(r => setProviders(r?.providers || [])).catch(() => {})
-    api.getStrategies().then(r => setStrategies(r || [])).catch(() => {})
-    api.getPositionsSummary().then(setSummary).catch(() => {})
+  const refresh = useCallback(async () => {
+    try {
+      const [r, s, w] = await Promise.all([
+        api.getRuntimeStatus(),
+        api.getPositionsSummary(),
+        api.getWorkersStatus().catch(() => ({})),
+      ])
+      setRuntime(r || {})
+      setSummary(s || {})
+      setWorkers(w || {})
+    } catch (e: any) {
+      setMsg(e?.message || 'Refresh failed')
+    }
   }, [])
 
   useEffect(() => {
     refresh()
-    const t = setInterval(refresh, 3000)
+    const t = setInterval(refresh, 4000)
     return () => clearInterval(t)
   }, [refresh])
 
+  const run = async (label: string, fn: () => Promise<any>) => {
+    setBusy(true)
+    try {
+      const r = await fn()
+      if (r?.ok === false) {
+        setMsg(`${label} failed: ${r.error || 'unknown error'}`)
+      } else {
+        setMsg(`${label} completed`)
+      }
+      await refresh()
+    } catch (e: any) {
+      setMsg(`${label} failed: ${e?.message || e}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const mode = runtime?.user_mode || 'IDLE'
-  const canLiveTrade = runtime?.can_live_trade || false
-  const liveReady = runtime?.live_readiness || {}
-
-  const switchToMode = async (newMode: string) => {
-    if (newMode === mode) {
-      const r = await api.switchMode('IDLE')
-      if (r.ok) { setMsg('Switched to IDLE'); refresh() }
-      else setMsg(`Failed: ${r.error || 'unknown error'}`)
-      return
-    }
-    if (newMode === 'FORMAL_SIM_LIVE') {
-      setConfirmLive(true)
-      return
-    }
-    const r = await api.switchMode(newMode)
-    if (r.ok) { setMsg(`Switched to ${MODE_LABELS[newMode] || newMode}`); refresh() }
-    else setMsg(`Failed: ${r.error || JSON.stringify(r.missing)}`)
-  }
-
-  const confirmSwitchToLive = async () => {
-    setConfirmLive(false)
-    const r = await api.switchMode('FORMAL_SIM_LIVE')
-    if (r.ok) { setMsg('Switched to 实盘交易'); refresh() }
-    else setMsg(`Failed: ${r.error || JSON.stringify(r.missing)}`)
-  }
-
-  const createStrategy = async () => {
-    await api.createStrategy(form)
-    setForm({ name: '', x: 0.15, y: 2.25, t_seconds: 3600, is_live: false })
-    refresh()
-  }
-
-  const Badge = ({ ok }: { ok: boolean }) => (
-    <span className={`inline-block w-2 h-2 rounded-full ${ok ? 'bg-green-500' : 'bg-red-500'}`} />
-  )
-
-  const Card = ({ title, children, className = '' }: { title: string, children: React.ReactNode, className?: string }) => (
-    <div className={`bg-gray-900 border border-gray-700 rounded p-3 ${className}`}>
-      <h3 className="text-sm text-gray-400 mb-2">{title}</h3>
-      {children}
-    </div>
-  )
-
-  const fmtUsd = (sol: number | undefined | null) => {
-    if (sol == null) return '$0.00'
-    const usd = sol * 150
-    return `$${usd.toFixed(2)}`
-  }
+  const modeLabel = mode === 'FORMAL_SIM_LIVE' ? '实盘模式' : mode === 'SIM_TEST' ? '模拟模式' : '空闲'
+  const killActive = !!runtime?.kill_switch_active || !!runtime?.pause_new_entries
+  const workerList = Object.entries(workers || {}) as [string, any][]
+  const runningCount = workerList.filter(([, w]) => w?.running).length
+  const liveReady = !!runtime?.live_readiness?.ready
 
   return (
     <div>
       <h1 className="text-xl font-bold mb-4 text-cyan-400">Control Center</h1>
 
-      {msg && <div className="bg-gray-800 border border-cyan-700 rounded p-2 mb-3 text-sm text-cyan-400">{msg}
-        <button onClick={() => setMsg('')} className="ml-3 text-gray-500 hover:text-white">x</button>
+      {msg && <div className="bg-gray-800 border border-cyan-700 rounded p-2 mb-3 text-sm text-cyan-400">
+        {msg}<button onClick={() => setMsg('')} className="ml-3 text-gray-500 hover:text-white">x</button>
       </div>}
 
-      {confirmLive && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-          <div className="bg-gray-900 border border-red-600 rounded-lg p-6 max-w-md">
-            <h2 className="text-lg text-red-400 font-bold mb-3">Confirm Live Trading Mode</h2>
-            <p className="text-sm text-gray-300 mb-4">This will enable REAL transaction broadcasting. Your wallet will execute actual trades on Solana mainnet.</p>
-            <div className="text-xs text-gray-400 mb-4">
-              {Object.entries(liveReady).filter(([k]) => !['ready', 'missing'].includes(k)).map(([k, v]) => (
-                <div key={k} className="flex items-center gap-2 py-0.5">
-                  <Badge ok={!!v} /> {k}: {v ? 'OK' : 'MISSING'}
-                </div>
-              ))}
-              {liveReady.missing?.length > 0 && (
-                <div className="mt-2 text-red-400">Missing: {liveReady.missing.join(', ')}</div>
-              )}
-            </div>
-            <div className="flex gap-3">
-              <button onClick={confirmSwitchToLive} className="bg-red-700 hover:bg-red-600 px-4 py-2 rounded text-sm flex-1"
-                disabled={!canLiveTrade}>Confirm Live Trading</button>
-              <button onClick={() => setConfirmLive(false)} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded text-sm">Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Mode Switch Buttons */}
-      <div className="flex gap-3 mb-4">
-        <button onClick={() => switchToMode('SIM_TEST')}
-          className={`px-4 py-2 rounded text-sm ${mode === 'SIM_TEST' ? 'bg-cyan-700 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}>
-          模拟交易
-        </button>
-        <button onClick={() => switchToMode('FORMAL_SIM_LIVE')}
-          className={`px-4 py-2 rounded text-sm ${mode === 'FORMAL_SIM_LIVE' ? 'bg-red-700 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}>
-          实盘交易
-        </button>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <StatCard title="Runtime Mode" value={modeLabel} color={mode === 'FORMAL_SIM_LIVE' ? 'text-red-400' : mode === 'SIM_TEST' ? 'text-blue-400' : 'text-gray-400'} />
+        <StatCard title="Workers" value={`${runningCount}/${workerList.length || 0}`} color={runningCount > 0 ? 'text-green-400' : 'text-gray-400'} />
+        <StatCard title="Kill Switch" value={fmtBool(killActive)} color={killActive ? 'text-red-400' : 'text-green-400'} />
+        <StatCard title="Live Readiness" value={liveReady ? 'READY' : 'BLOCKED'} color={liveReady ? 'text-green-400' : 'text-red-400'} />
+        <StatCard title="LIVE Realized PnL" value={fmtSol(summary?.live_pnl_sol)} color={(summary?.live_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'} />
+        <StatCard title="LIVE Open Value" value={`${Number(summary?.live_open_value_sol || 0).toFixed(4)} SOL`} color="text-red-300" />
+        <StatCard title="SIM Realized PnL" value={fmtSol(summary?.sim_pnl_sol)} color={(summary?.sim_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'} />
+        <StatCard title="SIM Open Value" value={`${Number(summary?.sim_open_value_sol || 0).toFixed(4)} SOL`} color="text-blue-300" />
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
-        <Card title="模拟盘">
-          <span className={`text-lg font-bold ${mode === 'FORMAL_SIM_LIVE' ? 'text-red-400' : mode === 'SIM_TEST' ? 'text-cyan-400' : 'text-gray-500'}`}>
-            {MODE_LABELS[mode] || mode}
-          </span>
-        </Card>
-        <Card title="实盘开仓">
-          <span className="text-lg">{summary.live_open_count ?? 0}</span>
-        </Card>
-        <Card title="模拟盘开仓">
-          <span className="text-lg">{summary.sim_open_count ?? 0}</span>
-        </Card>
-        <Card title="实盘收益">
-          <span className={`text-lg ${(summary.live_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {fmtUsd(summary.live_pnl_sol)}
-          </span>
-        </Card>
-        <Card title="模拟盘收益">
-          <span className={`text-lg ${(summary.sim_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {fmtUsd(summary.sim_pnl_sol)}
-          </span>
-        </Card>
+      <div className="bg-gray-900 border border-gray-700 rounded p-4 mb-4">
+        <h2 className="text-sm font-bold mb-3 text-gray-300">Mode Switch</h2>
+        <div className="flex gap-2 flex-wrap">
+          <button disabled={busy} onClick={() => run('Switch to IDLE', () => api.switchMode('IDLE'))}
+            className="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 px-4 py-2 rounded text-sm">停止/空闲</button>
+          <button disabled={busy} onClick={() => run('Switch to SIM_TEST', () => api.switchMode('SIM_TEST'))}
+            className="bg-blue-800 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded text-sm text-white">模拟交易</button>
+          <button disabled={busy || !liveReady || killActive} onClick={() => run('Switch to FORMAL_SIM_LIVE', () => api.switchMode('FORMAL_SIM_LIVE'))}
+            className="bg-red-800 hover:bg-red-700 disabled:opacity-50 px-4 py-2 rounded text-sm text-white">实盘交易</button>
+        </div>
+        {!liveReady && <p className="text-xs text-red-400 mt-2">Live missing: {(runtime?.live_readiness?.missing || []).join(', ') || '-'}</p>}
       </div>
 
-      {/* Provider Health */}
-      <Card title="Provider Health" className="mb-4">
-        {providers.map((p: any, i: number) => (
-          <div key={i} className="text-xs mb-1 flex items-center gap-2">
-            <Badge ok={p.ok} />
-            <span className="text-gray-300">{p.provider}</span>
-            <span className={`${p.ok ? 'text-green-400' : 'text-red-400'}`}>{p.ok ? 'OK' : p.summary || 'DEGRADED'}</span>
-            {p.latency_ms > 0 && <span className="text-gray-500 ml-auto">{p.latency_ms}ms</span>}
-          </div>
-        ))}
-        {providers.length === 0 && <p className="text-xs text-gray-500">No provider data</p>}
-      </Card>
+      <div className="bg-gray-900 border border-gray-700 rounded p-4 mb-4">
+        <h2 className="text-sm font-bold mb-3 text-gray-300">Emergency</h2>
+        <div className="flex gap-2 flex-wrap">
+          <button disabled={busy} onClick={() => run(killActive ? 'Disable kill switch' : 'Enable kill switch', () => api.toggleKill(!killActive))}
+            className={`${killActive ? 'bg-green-800 hover:bg-green-700' : 'bg-red-800 hover:bg-red-700'} disabled:opacity-50 px-4 py-2 rounded text-sm text-white`}>
+            {killActive ? '解除 Kill Switch' : '启动 Kill Switch'}
+          </button>
+          <button disabled={busy} onClick={() => run('Stop live mode', () => api.stopLiveMode())}
+            className="bg-orange-800 hover:bg-orange-700 disabled:opacity-50 px-4 py-2 rounded text-sm text-white">停止实盘并转模拟</button>
+          <button disabled={busy || !liveReady} onClick={() => run('Resume live mode', () => api.resumeLiveMode())}
+            className="bg-green-800 hover:bg-green-700 disabled:opacity-50 px-4 py-2 rounded text-sm text-white">恢复实盘入口</button>
+        </div>
+      </div>
 
-      {/* Strategy Groups */}
-      <Card title="Strategy Groups" className="mb-4">
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs mb-2">
-          <input placeholder="Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
-            className="bg-gray-800 border border-gray-600 rounded px-2 py-1" />
-          <input type="number" placeholder="X" value={form.x} step={0.01}
-            onChange={e => setForm({ ...form, x: +e.target.value })}
-            className="bg-gray-800 border border-gray-600 rounded px-2 py-1" />
-          <input type="number" placeholder="Y" value={form.y} step={0.01}
-            onChange={e => setForm({ ...form, y: +e.target.value })}
-            className="bg-gray-800 border border-gray-600 rounded px-2 py-1" />
-          <input type="number" placeholder="T seconds" value={form.t_seconds}
-            onChange={e => setForm({ ...form, t_seconds: +e.target.value })}
-            className="bg-gray-800 border border-gray-600 rounded px-2 py-1" />
-          <label className="flex items-center gap-1 text-gray-400">
-            <input type="checkbox" checked={form.is_live} onChange={e => setForm({ ...form, is_live: e.target.checked })} /> Live
-          </label>
+      <div className="bg-gray-900 border border-gray-700 rounded p-4">
+        <h2 className="text-sm font-bold mb-3 text-gray-300">Workers</h2>
+        <div className="flex gap-2 mb-3">
+          <button disabled={busy} onClick={() => run('Start workers', () => api.startWorkers())}
+            className="bg-cyan-800 hover:bg-cyan-700 disabled:opacity-50 px-3 py-1.5 rounded text-xs text-white">Start All</button>
+          <button disabled={busy} onClick={() => run('Stop workers', () => api.stopWorkers())}
+            className="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 px-3 py-1.5 rounded text-xs">Stop All</button>
         </div>
-        <div className="flex gap-2">
-          <button onClick={createStrategy} className="bg-cyan-700 hover:bg-cyan-600 px-3 py-1 rounded text-xs">Create</button>
-          <button onClick={() => { api.applyConfig(); refresh() }} className="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-xs">Apply Config</button>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+          {workerList.map(([name, w]) => <div key={name} className="bg-gray-800 rounded p-2 flex justify-between">
+            <span className="text-gray-300">{name}</span>
+            <span className={w?.running ? 'text-green-400' : 'text-gray-500'}>{w?.running ? 'running' : 'stopped'} · {w?.interval_sec ?? '-'}s</span>
+          </div>)}
+          {workerList.length === 0 && <p className="text-gray-500">No worker status.</p>}
         </div>
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead><tr className="text-gray-400 border-b border-gray-700">
-              <th className="text-left p-1">ID</th><th className="text-left">Name</th><th>X</th><th>Y</th><th>T(s)</th><th>Live</th><th>Enabled</th>
-            </tr></thead>
-            <tbody>
-              {strategies.map(s => (
-                <tr key={s.id} className="border-b border-gray-800 hover:bg-gray-850">
-                  <td className="p-1">{s.id}</td><td>{s.name}</td><td>{s.x}</td><td>{s.y}</td><td>{s.t_seconds}</td>
-                  <td className={s.is_live ? 'text-green-400' : 'text-gray-500'}>{s.is_live ? 'LIVE' : 'sim'}</td>
-                  <td>{s.enabled ? <Badge ok={true} /> : <Badge ok={false} />}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {strategies.length === 0 && <p className="text-gray-500 text-xs py-4 text-center">No strategies configured. Create one above.</p>}
-        </div>
-      </Card>
+      </div>
     </div>
   )
 }

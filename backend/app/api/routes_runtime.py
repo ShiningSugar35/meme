@@ -1,6 +1,7 @@
 """Runtime mode, workers, portfolio, and emergency API routes."""
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 from typing import Optional
 from pathlib import Path
@@ -9,6 +10,11 @@ from ..config import settings, ProviderMode
 from ..logging_config import logger
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
+
+
+def _json_response(content, status_code: int = 200) -> JSONResponse:
+    """Return JSON after converting datetime/Enum/model objects into JSON-safe values."""
+    return JSONResponse(content=jsonable_encoder(content), status_code=status_code)
 
 
 class ModeSwitchRequest(BaseModel):
@@ -28,7 +34,7 @@ async def runtime_status(request: Request):
     live_checks = _check_live_readiness()
     pause_new = getattr(request.app.state, 'pause_new_entries', False)
 
-    return JSONResponse({
+    return _json_response({
         'user_mode': user_mode,
         'workers_enabled': workers_enabled,
         'live_entries_enabled': live_entries_enabled,
@@ -46,12 +52,12 @@ async def switch_mode(body: ModeSwitchRequest, request: Request):
     worker_mgr = getattr(request.app.state, 'worker_manager', None)
 
     if new_mode not in ('SIM_TEST', 'FORMAL_SIM_LIVE', 'IDLE'):
-        return JSONResponse({'ok': False, 'error': f'Invalid mode: {new_mode}.'}, status_code=400)
+        return _json_response({'ok': False, 'error': f'Invalid mode: {new_mode}.'}, status_code=400)
 
     if new_mode == 'FORMAL_SIM_LIVE':
         checks = _check_live_readiness()
         if not checks.get('ready'):
-            return JSONResponse({
+            return _json_response({
                 'ok': False, 'error': 'Live mode not ready',
                 'missing': checks.get('missing', []),
                 'checks': checks,
@@ -75,15 +81,15 @@ async def switch_mode(body: ModeSwitchRequest, request: Request):
             await repo.set_runtime_setting('workers_enabled', 'true', 'frontend')
 
     await repo.append_system_event('INFO', 'RUNTIME', f'User mode switched to {new_mode}', None, account_type='SIM')
-    return JSONResponse({'ok': True, 'user_mode': new_mode})
+    return _json_response({'ok': True, 'user_mode': new_mode})
 
 
 @router.get("/workers/status")
 async def workers_status(request: Request):
     worker_mgr = getattr(request.app.state, 'worker_manager', None)
     if not worker_mgr:
-        return JSONResponse({'error': 'Worker manager not initialized'}, status_code=503)
-    return JSONResponse(worker_mgr.get_status())
+        return _json_response({'error': 'Worker manager not initialized'}, status_code=503)
+    return _json_response(worker_mgr.get_status())
 
 
 # Portfolio table with  ratio (current / entry)
@@ -112,14 +118,14 @@ async def portfolio_table(request: Request, account_type: str = 'LIVE'):
             'account_type': p.get('account_type', account_type),
             'updated_at': p.get('updated_at', p.get('opened_at', '')),
         })
-    return JSONResponse(result)
+    return _json_response(result)
 
 
 @router.get("/positions/summary")
 async def positions_summary(request: Request):
     repo = request.app.state.repo
     summary = await repo.get_positions_summary()
-    return JSONResponse(summary)
+    return _json_response(summary)
 
 
 # Emergency: kill switch toggle
@@ -134,7 +140,7 @@ async def toggle_kill_switch(request: Request, enable: bool = True):
         f'Kill switch {"ON" if enable else "OFF"}',
         None, account_type='SIM'
     )
-    return JSONResponse({'ok': True, 'kill_switch_active': enable})
+    return _json_response({'ok': True, 'kill_switch_active': enable})
 
 
 # Emergency: stop/stop live entries (auto-switches to SIM_TEST)
@@ -145,7 +151,7 @@ async def stop_live_mode(request: Request):
     await repo.set_runtime_setting('live_entries_enabled', 'false', 'emergency')
     await repo.set_runtime_setting('user_mode', 'SIM_TEST', 'emergency')
     await repo.append_system_event('WARN', 'EMERGENCY', 'Live trading stopped, switched to SIM_TEST', None, account_type='SIM')
-    return JSONResponse({'ok': True, 'user_mode': 'SIM_TEST'})
+    return _json_response({'ok': True, 'user_mode': 'SIM_TEST'})
 
 
 @router.post("/emergency/resume-live")
@@ -153,12 +159,12 @@ async def resume_live_mode(request: Request):
     repo = request.app.state.repo
     checks = _check_live_readiness()
     if not checks.get('ready'):
-        return JSONResponse({'ok': False, 'error': 'Live mode not ready', 'missing': checks.get('missing', [])}, status_code=400)
+        return _json_response({'ok': False, 'error': 'Live mode not ready', 'missing': checks.get('missing', [])}, status_code=400)
     request.app.state.pause_new_entries = False
     await repo.set_runtime_setting('live_entries_enabled', 'true', 'emergency')
     await repo.set_runtime_setting('user_mode', 'FORMAL_SIM_LIVE', 'emergency')
     await repo.append_system_event('INFO', 'EMERGENCY', 'Live trading resumed', None, account_type='SIM')
-    return JSONResponse({'ok': True, 'user_mode': 'FORMAL_SIM_LIVE'})
+    return _json_response({'ok': True, 'user_mode': 'FORMAL_SIM_LIVE'})
 
 
 # Emergency: export losing positions DB
@@ -172,7 +178,7 @@ async def export_losing_db(request: Request):
     repo = request.app.state.repo
     src = Path(settings.SQLITE_PATH)
     if not src.exists():
-        return JSONResponse({'ok': False, 'error': 'DB file not found'}, status_code=404)
+        return _json_response({'ok': False, 'error': 'DB file not found'}, status_code=404)
 
     export_dir = Path('data_backup')
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -217,7 +223,7 @@ async def export_losing_db(request: Request):
     await src_db.close()
     await dst_db.close()
 
-    return JSONResponse({'ok': True, 'export_path': str(dst), 'losing_count': len(rows) if rows else 0})
+    return _json_response({'ok': True, 'export_path': str(dst), 'losing_count': len(rows) if rows else 0})
 
 
 @router.post("/emergency/repair-legacy-db")
@@ -236,36 +242,75 @@ async def repair_legacy_db(request: Request):
 
     await repo.append_system_event('INFO', 'EMERGENCY', f'Legacy DB repair complete',
         str({'positions_marked': repaired}), account_type='SIM')
-    return JSONResponse({'ok': True, 'repaired_count': repaired})
+    return _json_response({'ok': True, 'repaired_count': repaired})
 
 
 def _check_live_readiness() -> dict:
+    """Centralized live-mode readiness gate.
+
+    Uses the new canonical env names while keeping legacy aliases readable:
+    - wallet: WALLET_PUBLIC_KEY/WALLET_PRIVATE_KEY_BASE58, fallback WALLET_ADDRESS/PRIVATE_KEY
+    - RPC: SOLANA_RPC_HTTP_URLS or constructed Alchemy/Ankr HTTP URLs
+    - Jupiter: JUPITER_API_BASE_URL + JUPITER_API_KEY_N
+    """
     missing = []
+    warnings = []
     checks = {}
 
+    rpc_urls = settings.get_rpc_http_urls()
+    gmgn_keys = settings.get_gmgn_api_keys()
+    jupiter_keys = settings.get_jupiter_api_keys()
+    alchemy_keys = settings.get_alchemy_api_keys()
+    ankr_keys = settings.get_ankr_api_keys()
+    wallet_public_key = settings.get_wallet_public_key()
+    wallet_private_key = settings.get_wallet_private_key_base58()
+
+    checks['PROVIDER_MODE'] = settings.get_provider_mode().value
     checks['DRY_RUN'] = settings.DRY_RUN
+    checks['SIMULATION_ENABLED'] = settings.SIMULATION_ENABLED
     checks['JITO_ENABLED'] = settings.JITO_ENABLED
-    checks['WALLET_PUBLIC_KEY'] = bool(settings.WALLET_PUBLIC_KEY)
-    checks['WALLET_PRIVATE_KEY_BASE58'] = bool(settings.WALLET_PRIVATE_KEY_BASE58)
-    checks['GMGN_API_KEY'] = bool(settings.get_gmgn_api_key())
-    checks['JUPITER_API_KEY'] = bool(settings.get_jupiter_api_key())
-    checks['RPC_URL'] = bool(settings.get_rpc_http_url())
+    checks['JITO_BLOCK_ENGINE_URL'] = bool(settings.JITO_BLOCK_ENGINE_URL)
+    checks['WALLET_PUBLIC_KEY'] = bool(wallet_public_key)
+    checks['WALLET_PRIVATE_KEY_BASE58'] = bool(wallet_private_key)
+    checks['GMGN_API_KEY_COUNT'] = len(gmgn_keys)
+    checks['JUPITER_API_BASE_URL'] = bool(settings.get_jupiter_api_base_url())
+    checks['JUPITER_API_KEY_COUNT'] = len(jupiter_keys)
+    checks['SOLANA_RPC_HTTP_URL_COUNT'] = len(rpc_urls)
+    checks['SOLANA_RPC_WS_REQUIRED'] = False
+    checks['SOLANA_RPC_WS_CONFIGURED'] = bool(settings.get_rpc_ws_url())
+    checks['ALCHEMY_API_KEY_COUNT'] = len(alchemy_keys)
+    checks['ANKR_API_KEY_COUNT'] = len(ankr_keys)
+
+    # For UI display/debug only: never expose full URLs or secrets.
+    checks['RPC_HTTP_PROVIDERS'] = [
+        'alchemy' if 'alchemy.com' in url else 'ankr' if 'ankr.com' in url else 'custom'
+        for url in rpc_urls
+    ]
 
     if settings.DRY_RUN:
-        missing.append('DRY_RUN=true - must be false for live trading')
+        missing.append('DRY_RUN=false required for formal live trading')
     if not settings.JITO_ENABLED:
-        missing.append('JITO_ENABLED=false')
-    if not settings.WALLET_PUBLIC_KEY:
+        missing.append('JITO_ENABLED=true required')
+    if not settings.JITO_BLOCK_ENGINE_URL:
+        missing.append('JITO_BLOCK_ENGINE_URL missing')
+    if not wallet_public_key:
         missing.append('WALLET_PUBLIC_KEY missing')
-    if not settings.WALLET_PRIVATE_KEY_BASE58:
+    if not wallet_private_key:
         missing.append('WALLET_PRIVATE_KEY_BASE58 missing')
-    if not settings.get_gmgn_api_key():
-        missing.append('GMGN_API_KEY missing')
-    if not settings.get_jupiter_api_key():
-        missing.append('JUPITER_API_KEY missing')
-    if not settings.get_rpc_http_url():
-        missing.append('RPC_URL missing')
+    if not gmgn_keys:
+        missing.append('GMGN_API_KEY_N missing')
+    if not settings.get_jupiter_api_base_url():
+        missing.append('JUPITER_API_BASE_URL missing')
+    if not jupiter_keys:
+        missing.append('JUPITER_API_KEY_N missing')
+    if not rpc_urls:
+        missing.append('SOLANA_RPC_HTTP_URLS missing')
+
+    # Your Alchemy free plan is HTTP-only; no WebSocket RPC is required.
+    if settings.get_rpc_ws_url():
+        warnings.append('SOLANA_RPC_WS_* is configured but the current RPC provider uses HTTP polling only')
 
     checks['missing'] = missing
+    checks['warnings'] = warnings
     checks['ready'] = len(missing) == 0
     return checks

@@ -3,14 +3,16 @@ from pydantic import Field, SecretStr, model_validator
 from typing import Optional, List, Dict, Any
 import os
 import re
+import warnings
 from enum import Enum
 
 # Pre-load .env into os.environ so dynamic key scanning can find ALL keys,
 # not just the ones explicitly defined as model fields.
-# This enables truly dynamic GMGN_API_KEY_N / JUPITER_API_KEY_N / ANKR_API_KEY_N
-# without any hardcoded count limit.
+# This enables truly dynamic GMGN_API_KEY_N / JUPITER_API_KEY_N /
+# ANKR_API_KEY_N / ALCHEMY_API_KEY_N without a hardcoded practical limit.
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
@@ -22,6 +24,35 @@ class ProviderMode(str, Enum):
     LIVE = "live"
 
 
+def _secret_to_str(value: Optional[SecretStr | str]) -> Optional[str]:
+    """Return a stripped string from SecretStr/str, treating blanks as None."""
+    if value is None:
+        return None
+    if hasattr(value, "get_secret_value"):
+        raw = value.get_secret_value()
+    else:
+        raw = str(value)
+    raw = (raw or "").strip()
+    return raw or None
+
+
+def _split_csv(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item and item.strip()]
+
+
+def _dedupe(items: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
@@ -29,10 +60,23 @@ class Settings(BaseSettings):
     SQLITE_PATH: str = Field('./data/trading_bot.sqlite3')
 
     # Provider Mode (new, preferred)
-    PROVIDER_MODE: Optional[ProviderMode] = Field(None, description="Provider mode: mock/online_readonly/live. Overrides DRY_RUN if set.")
+    PROVIDER_MODE: Optional[ProviderMode] = Field(
+        None,
+        description="Provider mode: mock/online_readonly/live. Overrides DRY_RUN if set.",
+    )
 
     # DRY_RUN MODE (legacy, kept for compatibility)
-    DRY_RUN: bool = Field(True, description="DRY_RUN=true blocks real transactions. Always true by default for safety.")
+    DRY_RUN: bool = Field(
+        True,
+        description="DRY_RUN=true blocks real transactions. Always true by default for safety.",
+    )
+
+    # Legacy env names kept only so old front-end/backend checks do not become disconnected.
+    LIVE_TRADING_ENABLED: Optional[bool] = None
+    PRIVATE_KEY: Optional[SecretStr] = None
+    WALLET_ADDRESS: Optional[str] = None
+    SOLANA_RPC_URL: Optional[str] = None
+    JUPITER_API_BASE: Optional[str] = None
 
     SIMULATION_ENABLED: bool = Field(True)
 
@@ -47,7 +91,6 @@ class Settings(BaseSettings):
     GMGN_API_KEY_3: Optional[SecretStr] = None
     GMGN_PUBLIC_KEY_3: Optional[str] = None
     GMGN_PRIVATE_KEY_3: Optional[SecretStr] = None
-    # Support for additional GMGN keys (4-12+)
     GMGN_API_KEY_4: Optional[SecretStr] = None
     GMGN_PUBLIC_KEY_4: Optional[str] = None
     GMGN_PRIVATE_KEY_4: Optional[SecretStr] = None
@@ -75,191 +118,34 @@ class Settings(BaseSettings):
     GMGN_API_KEY_12: Optional[SecretStr] = None
     GMGN_PUBLIC_KEY_12: Optional[str] = None
     GMGN_PRIVATE_KEY_12: Optional[SecretStr] = None
-    
+
     GMGN_TRENCHES_PATH: str = Field('/api/v1/trenches')
     GMGN_TOKEN_PRICE_PATH: str = Field('/api/v1/token/price')
     GMGN_KLINE_PATH: str = Field('/api/v1/token/kline')
-    
-    def _scan_gmgn_accounts(self) -> List[Dict[str, Any]]:
-        r"""Dynamically scan os.environ for GMGN_API_KEY_\d+ patterns. No hardcoded count limit."""
-        accounts = []
-        api_keys: Dict[int, SecretStr] = {}
-
-        for key, value in os.environ.items():
-            match = re.match(r'GMGN_API_KEY_(\d+)', key)
-            if match and value:
-                index = int(match.group(1))
-                api_keys[index] = SecretStr(value)
-
-        for index in sorted(api_keys.keys()):
-            pub_key = os.environ.get(f'GMGN_PUBLIC_KEY_{index}')
-            priv_key_raw = os.environ.get(f'GMGN_PRIVATE_KEY_{index}')
-            priv_key = SecretStr(priv_key_raw) if priv_key_raw else None
-
-            account: Dict[str, Any] = {'index': index, 'api_key': api_keys[index]}
-
-            if (pub_key and not priv_key) or (not pub_key and priv_key):
-                account['invalid_config'] = f"Mismatched keys: public_key={bool(pub_key)}, private_key={bool(priv_key)}"
-            else:
-                account['public_key'] = pub_key
-                account['private_key'] = priv_key
-
-            accounts.append(account)
-
-        return accounts
-
-    def _scan_jupiter_api_keys(self) -> List[SecretStr]:
-        r"""Dynamically scan os.environ for JUPITER_API_KEY_\d+ patterns. No hardcoded count limit."""
-        keys = []
-        jupiter_keys: Dict[int, SecretStr] = {}
-
-        for key, value in os.environ.items():
-            match = re.match(r'JUPITER_API_KEY_(\d+)', key)
-            if match and value:
-                index = int(match.group(1))
-                jupiter_keys[index] = SecretStr(value)
-
-        for index in sorted(jupiter_keys.keys()):
-            keys.append(jupiter_keys[index])
-
-        return keys
-
-    def _scan_ankr_api_keys(self) -> List[SecretStr]:
-        r"""Dynamically scan os.environ for ANKR_API_KEY_\d+ patterns. No hardcoded count limit."""
-        keys = []
-        ankr_keys: Dict[int, SecretStr] = {}
-
-        for key, value in os.environ.items():
-            match = re.match(r'ANKR_API_KEY_(\d+)', key)
-            if match and value:
-                index = int(match.group(1))
-                ankr_keys[index] = SecretStr(value)
-
-        for index in sorted(ankr_keys.keys()):
-            keys.append(ankr_keys[index])
-
-        return keys
-
-    def get_gmgn_accounts(self) -> List[Dict[str, Any]]:
-        """Return dynamically scanned GMGN accounts (with validation info)."""
-        if not hasattr(self, '_gmgn_accounts'):
-            self._gmgn_accounts = self._scan_gmgn_accounts()
-        return self._gmgn_accounts
-    
-    def get_gmgn_api_keys(self) -> List[SecretStr]:
-        """Return list of all available GMGN API keys (including 1-12+)."""
-        accounts = self.get_gmgn_accounts()
-        return [acc['api_key'] for acc in accounts if 'api_key' in acc]
-    
-    def get_jupiter_api_keys(self) -> List[SecretStr]:
-        """Return dynamically scanned Jupiter API keys."""
-        if not hasattr(self, '_jupiter_api_keys'):
-            self._jupiter_api_keys = self._scan_jupiter_api_keys()
-        return self._jupiter_api_keys
-    
-    def get_ankr_api_keys(self) -> List[SecretStr]:
-        """Return dynamically scanned Ankr API keys."""
-        if not hasattr(self, '_ankr_api_keys'):
-            self._ankr_api_keys = self._scan_ankr_api_keys()
-        return self._ankr_api_keys
-    
-    def get_gmgn_api_key(self) -> Optional[SecretStr]:
-        """API key rotation: return first available GMGN API key (backward compatible)."""
-        keys = self.get_gmgn_api_keys()
-        return keys[0] if keys else None
 
     # Jupiter API Configuration
     JUPITER_API_BASE_URL: Optional[str] = None
     JUPITER_API_KEY_1: Optional[SecretStr] = None
     JUPITER_API_KEY_2: Optional[SecretStr] = None
     JUPITER_API_KEY_3: Optional[SecretStr] = None
-    # Legacy keys (kept for compatibility)
     JUPITER_API_KEY_MEME1: Optional[SecretStr] = None
     JUPITER_API_KEY_MEME2: Optional[SecretStr] = None
     JUPITER_API_KEY_MEME3: Optional[SecretStr] = None
-    
-    def get_jupiter_api_key(self) -> Optional[SecretStr]:
-        """API key rotation: return first available Jupiter API key (backward compatible)."""
-        keys = self.get_jupiter_api_keys()
-        if keys:
-            return keys[0]
-        # Fallback to legacy keys for backward compatibility
-        return (self.JUPITER_API_KEY_1 or self.JUPITER_API_KEY_2 or 
-                self.JUPITER_API_KEY_3 or self.JUPITER_API_KEY_MEME1 or
-                self.JUPITER_API_KEY_MEME2 or self.JUPITER_API_KEY_MEME3)
 
-    # Solana RPC Configuration
+    # Solana RPC Configuration: HTTP-only load balancing is supported.
+    # No Alchemy WebSocket field is required or constructed.
+    SOLANA_RPC_HTTP_URLS: Optional[str] = None
     SOLANA_RPC_HTTP_PRIMARY: Optional[str] = None
     SOLANA_RPC_WS_PRIMARY: Optional[str] = None
     SOLANA_RPC_HTTP_BACKUP_1: Optional[str] = None
     SOLANA_RPC_WS_BACKUP_1: Optional[str] = None
     ALCHEMY_API_KEYS: Optional[str] = None
+    ALCHEMY_API_KEY_1: Optional[SecretStr] = None
+    ALCHEMY_API_KEY_2: Optional[SecretStr] = None
+    ALCHEMY_API_KEY_3: Optional[SecretStr] = None
+    ALCHEMY_API_KEY_4: Optional[SecretStr] = None
     ANKR_API_KEY_1: Optional[SecretStr] = None
     ANKR_API_KEY_2: Optional[SecretStr] = None
-    
-    def _get_ankr_http_url(self, api_key: Optional[SecretStr]) -> Optional[str]:
-        """Generate ANKR Solana HTTP RPC URL from API key."""
-        if not api_key:
-            return None
-        return f"https://rpc.ankr.com/solana/{api_key.get_secret_value()}"
-    
-    def _get_ankr_ws_url(self, api_key: Optional[SecretStr]) -> Optional[str]:
-        """Generate ANKR Solana WebSocket RPC URL from API key."""
-        if not api_key:
-            return None
-        return f"wss://rpc.ankr.com/solana/ws/{api_key.get_secret_value()}"
-    
-    def get_rpc_http_url(self) -> Optional[str]:
-        """
-        Get HTTP RPC URL with support for:
-        1. Direct URL: https://...
-        2. Special value 'ankr': use ANKR_API_KEY to construct URL
-        3. Fallback to ANKR_API_KEY or backup RPC
-        """
-        # If PRIMARY is "ankr", construct from ANKR_API_KEY
-        if self.SOLANA_RPC_HTTP_PRIMARY == "ankr":
-            ankr_keys = self.get_ankr_api_keys()
-            if ankr_keys:
-                return self._get_ankr_http_url(ankr_keys[0])
-            # Fallback to hardcoded _1/_2 if env scan failed
-            ankr_url = (self._get_ankr_http_url(self.ANKR_API_KEY_1) or 
-                       self._get_ankr_http_url(self.ANKR_API_KEY_2))
-            if ankr_url:
-                return ankr_url
-        
-        # Otherwise use PRIMARY or BACKUP_1
-        if self.SOLANA_RPC_HTTP_PRIMARY and self.SOLANA_RPC_HTTP_PRIMARY != "ankr":
-            return self.SOLANA_RPC_HTTP_PRIMARY
-        if self.SOLANA_RPC_HTTP_BACKUP_1:
-            return self.SOLANA_RPC_HTTP_BACKUP_1
-        
-        # Fallback: construct from ANKR_API_KEY
-        ankr_keys = self.get_ankr_api_keys()
-        if ankr_keys:
-            return self._get_ankr_http_url(ankr_keys[0])
-        return (self._get_ankr_http_url(self.ANKR_API_KEY_1) or 
-               self._get_ankr_http_url(self.ANKR_API_KEY_2))
-    
-    def get_rpc_ws_url(self) -> Optional[str]:
-        """
-        Get WebSocket RPC URL with support for:
-        1. Direct URL: wss://...
-        2. Fallback to ANKR_API_KEY for WebSocket construction
-        Returns None if WSS not available (allowed in dry-run mode)
-        """
-        # If PRIMARY is configured and not empty
-        if self.SOLANA_RPC_WS_PRIMARY:
-            return self.SOLANA_RPC_WS_PRIMARY
-        if self.SOLANA_RPC_WS_BACKUP_1:
-            return self.SOLANA_RPC_WS_BACKUP_1
-        
-        # Fallback: construct from ANKR_API_KEY (optional)
-        # Note: Return None if not available, WSS is optional for dry-run
-        return None
-    
-    def get_rpc_url(self) -> Optional[str]:
-        """Legacy method for backward compatibility. Use get_rpc_http_url() instead."""
-        return self.get_rpc_http_url()
 
     # Jito Configuration
     JITO_ENABLED: bool = Field(True)
@@ -267,19 +153,19 @@ class Settings(BaseSettings):
     JITO_TIP_FLOOR_URL: str = Field('https://bundles.jito.wtf/api/v1/bundles/tip_floor')
     JITO_TIP_STREAM_WS: str = Field('wss://bundles.jito.wtf/api/v1/bundles/tip_stream')
 
-    # Trading Parameters (optional - defaults in code)
+    # Trading Parameters
     POLL_INTERVAL_SECONDS: int = Field(60)
     ACTIVE_POSITION_PRICE_POLL_SECONDS: int = Field(1)
     TIP_FLOOR_REFRESH_SECONDS: int = Field(3)
-    
+
     BUY_SLIPPAGE_CAP_BPS: int = Field(1500)
     SELL_SLIPPAGE_CAP_BPS: int = Field(2000)
     EMERGENCY_SLIPPAGE_CAP_BPS: int = Field(3500)
     PRICE_IMPACT_HARD_CAP_PCT: float = Field(10.0)
-    
+
     LIVE_ROLLING_10_LOSS_LIMIT: float = Field(-0.20)
     MAX_REQUOTE_RETRY: int = Field(2)
-    
+
     # Risk Feature Scan Tiers (dynamic based on remaining position value in SOL)
     RISK_FEATURE_SCAN_TIER_1_SOL: float = Field(1.5)
     RISK_FEATURE_SCAN_TIER_1_SECONDS: int = Field(2)
@@ -290,86 +176,227 @@ class Settings(BaseSettings):
     RISK_FEATURE_SCAN_TIER_4_SOL: float = Field(0.25)
     RISK_FEATURE_SCAN_TIER_4_SECONDS: int = Field(16)
     RISK_FEATURE_SCAN_TIER_5_SECONDS: int = Field(32)
-    
+
     # Dust Position Rules (in SOL, not USD)
     DUST_FORCE_EXIT_SOL: float = Field(0.125)
 
-    # Wallet Configuration (only used if LIVE_TRADING_ENABLED=true)
+    # Wallet Configuration
     WALLET_PUBLIC_KEY: Optional[str] = None
     WALLET_PRIVATE_KEY_BASE58: Optional[SecretStr] = None
 
+    def _scan_numbered_secrets(self, prefix: str) -> List[SecretStr]:
+        """Dynamically scan os.environ for PREFIX_N patterns."""
+        numbered: Dict[int, SecretStr] = {}
+        pattern = re.compile(rf'^{re.escape(prefix)}_(\d+)$')
+        for key, value in os.environ.items():
+            match = pattern.match(key)
+            if match and value and value.strip():
+                numbered[int(match.group(1))] = SecretStr(value.strip())
+        return [numbered[i] for i in sorted(numbered)]
+
+    def _scan_gmgn_accounts(self) -> List[Dict[str, Any]]:
+        accounts: List[Dict[str, Any]] = []
+        pattern = re.compile(r'^GMGN_API_KEY_(\d+)$')
+        indexes: List[int] = []
+        for key, value in os.environ.items():
+            match = pattern.match(key)
+            if match and value and value.strip():
+                indexes.append(int(match.group(1)))
+
+        for index in sorted(set(indexes)):
+            api_key_raw = os.environ.get(f'GMGN_API_KEY_{index}')
+            api_key = SecretStr(api_key_raw.strip()) if api_key_raw and api_key_raw.strip() else None
+            pub_key = (os.environ.get(f'GMGN_PUBLIC_KEY_{index}') or '').strip() or None
+            priv_key_raw = os.environ.get(f'GMGN_PRIVATE_KEY_{index}')
+            priv_key = SecretStr(priv_key_raw.strip()) if priv_key_raw and priv_key_raw.strip() else None
+            if not api_key:
+                continue
+
+            account: Dict[str, Any] = {'index': index, 'api_key': api_key}
+            if (pub_key and not priv_key) or (not pub_key and priv_key):
+                account['invalid_config'] = (
+                    f"Mismatched keys: public_key={bool(pub_key)}, private_key={bool(priv_key)}"
+                )
+            else:
+                account['public_key'] = pub_key
+                account['private_key'] = priv_key
+            accounts.append(account)
+        return accounts
+
+    def get_gmgn_accounts(self) -> List[Dict[str, Any]]:
+        return self._scan_gmgn_accounts()
+
+    def get_gmgn_api_keys(self) -> List[SecretStr]:
+        return [acc['api_key'] for acc in self.get_gmgn_accounts() if acc.get('api_key')]
+
+    def get_gmgn_api_key(self) -> Optional[SecretStr]:
+        keys = self.get_gmgn_api_keys()
+        return keys[0] if keys else None
+
+    def get_jupiter_api_keys(self) -> List[SecretStr]:
+        keys = self._scan_numbered_secrets('JUPITER_API_KEY')
+        legacy = [self.JUPITER_API_KEY_MEME1, self.JUPITER_API_KEY_MEME2, self.JUPITER_API_KEY_MEME3]
+        existing_values = {_secret_to_str(k) for k in keys}
+        for item in legacy:
+            raw = _secret_to_str(item)
+            if raw and raw not in existing_values:
+                keys.append(SecretStr(raw))
+                existing_values.add(raw)
+        return keys
+
+    def get_jupiter_api_key(self) -> Optional[SecretStr]:
+        keys = self.get_jupiter_api_keys()
+        return keys[0] if keys else None
+
+    def get_jupiter_api_base_url(self) -> str:
+        return (self.JUPITER_API_BASE_URL or self.JUPITER_API_BASE or 'https://api.jup.ag/swap/v1').rstrip('/')
+
+    def get_ankr_api_keys(self) -> List[SecretStr]:
+        return self._scan_numbered_secrets('ANKR_API_KEY')
+
+    def get_alchemy_api_keys(self) -> List[SecretStr]:
+        keys = self._scan_numbered_secrets('ALCHEMY_API_KEY')
+        extra = _split_csv(self.ALCHEMY_API_KEYS)
+        existing_values = {_secret_to_str(k) for k in keys}
+        for raw in extra:
+            if raw and raw not in existing_values:
+                keys.append(SecretStr(raw))
+                existing_values.add(raw)
+        return keys
+
+    def _get_ankr_http_url(self, api_key: Optional[SecretStr]) -> Optional[str]:
+        raw = _secret_to_str(api_key)
+        return f"https://rpc.ankr.com/solana/{raw}" if raw else None
+
+    def _get_alchemy_http_url(self, api_key: Optional[SecretStr]) -> Optional[str]:
+        raw = _secret_to_str(api_key)
+        return f"https://solana-mainnet.g.alchemy.com/v2/{raw}" if raw else None
+
+    def get_rpc_http_urls(self) -> List[str]:
+        """
+        Return HTTP RPC endpoints for load balancing.
+
+        Order:
+        1. SOLANA_RPC_HTTP_URLS CSV (preferred for your Alchemy four-endpoint setup)
+        2. Legacy SOLANA_RPC_URL CSV
+        3. SOLANA_RPC_HTTP_PRIMARY / SOLANA_RPC_HTTP_BACKUP_1 direct URLs
+        4. Constructed Alchemy endpoints from ALCHEMY_API_KEY_N / ALCHEMY_API_KEYS
+        5. Constructed Ankr endpoints as last fallback
+        """
+        urls: List[str] = []
+        urls.extend(_split_csv(self.SOLANA_RPC_HTTP_URLS))
+        urls.extend(_split_csv(self.SOLANA_RPC_URL))
+
+        for item in [self.SOLANA_RPC_HTTP_PRIMARY, self.SOLANA_RPC_HTTP_BACKUP_1]:
+            if not item:
+                continue
+            item = item.strip()
+            if not item:
+                continue
+            if item.lower() == 'alchemy':
+                urls.extend(filter(None, [self._get_alchemy_http_url(k) for k in self.get_alchemy_api_keys()]))
+            elif item.lower() == 'ankr':
+                urls.extend(filter(None, [self._get_ankr_http_url(k) for k in self.get_ankr_api_keys()]))
+            else:
+                urls.append(item)
+
+        urls.extend(filter(None, [self._get_alchemy_http_url(k) for k in self.get_alchemy_api_keys()]))
+        urls.extend(filter(None, [self._get_ankr_http_url(k) for k in self.get_ankr_api_keys()]))
+        return _dedupe(urls)
+
+    def get_rpc_http_url(self) -> Optional[str]:
+        urls = self.get_rpc_http_urls()
+        return urls[0] if urls else None
+
+    def get_rpc_ws_url(self) -> Optional[str]:
+        """Return only explicitly configured WebSocket URLs. Alchemy free HTTP-only plan needs none."""
+        if self.SOLANA_RPC_WS_PRIMARY:
+            return self.SOLANA_RPC_WS_PRIMARY.strip()
+        if self.SOLANA_RPC_WS_BACKUP_1:
+            return self.SOLANA_RPC_WS_BACKUP_1.strip()
+        return None
+
+    def get_rpc_url(self) -> Optional[str]:
+        """Legacy method for backward compatibility. Use get_rpc_http_url(s) instead."""
+        return self.get_rpc_http_url()
+
+    def get_wallet_public_key(self) -> Optional[str]:
+        return (self.WALLET_PUBLIC_KEY or self.WALLET_ADDRESS or '').strip() or None
+
+    def get_wallet_private_key_base58(self) -> Optional[str]:
+        return _secret_to_str(self.WALLET_PRIVATE_KEY_BASE58) or _secret_to_str(self.PRIVATE_KEY)
+
     def get_risk_scan_interval_seconds(self, remaining_value_sol: float) -> int:
-        """
-        Calculate risk feature scan interval based on remaining position value in SOL.
-        
-        Returns scan interval in seconds:
-        - remaining_value_sol >= 1.5: 2s
-        - remaining_value_sol >= 1.0: 4s
-        - remaining_value_sol >= 0.5: 8s
-        - remaining_value_sol >= 0.25: 16s
-        - remaining_value_sol < 0.25: 32s
-        """
         if remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_1_SOL:
             return self.RISK_FEATURE_SCAN_TIER_1_SECONDS
-        elif remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_2_SOL:
+        if remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_2_SOL:
             return self.RISK_FEATURE_SCAN_TIER_2_SECONDS
-        elif remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_3_SOL:
+        if remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_3_SOL:
             return self.RISK_FEATURE_SCAN_TIER_3_SECONDS
-        elif remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_4_SOL:
+        if remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_4_SOL:
             return self.RISK_FEATURE_SCAN_TIER_4_SECONDS
-        else:
-            return self.RISK_FEATURE_SCAN_TIER_5_SECONDS
+        return self.RISK_FEATURE_SCAN_TIER_5_SECONDS
 
     def get_provider_mode(self) -> ProviderMode:
-        """Get effective provider mode, considering DRY_RUN compatibility."""
+        """Get effective provider mode, considering new and legacy switches."""
         if self.PROVIDER_MODE is not None:
             return self.PROVIDER_MODE
+        if self.LIVE_TRADING_ENABLED is True:
+            return ProviderMode.LIVE
         if self.DRY_RUN:
             return ProviderMode.MOCK
-        else:
-            return ProviderMode.LIVE
+        return ProviderMode.LIVE
 
-    def mask_key(self, s: Optional[SecretStr]) -> Optional[str]:
-        if s is None:
+    def mask_key(self, s: Optional[SecretStr | str]) -> Optional[str]:
+        val = _secret_to_str(s)
+        if val is None:
             return None
-        val = s.get_secret_value()
         if len(val) <= 8:
             return '****'
         return val[:4] + '...' + val[-4:]
 
     @model_validator(mode='after')
     def validate_live_config(self):
+        """
+        Do not raise during app boot.
+
+        The runtime mode switch uses /api/runtime/status and /api/runtime/mode as the
+        authoritative gate for real live trading. Raising here makes the UI unusable
+        when a user is still filling .env values.
+        """
         mode = self.get_provider_mode()
 
         if mode == ProviderMode.LIVE:
-            missing = []
+            missing: List[str] = []
             if not self.GMGN_API_BASE_URL:
                 missing.append('GMGN_API_BASE_URL')
-            if not self.get_gmgn_api_key():
-                missing.append('GMGN_API_KEY_1')
-            if not self.JUPITER_API_BASE_URL:
+            if not self.get_gmgn_api_keys():
+                missing.append('GMGN_API_KEY_N')
+            if not self.get_jupiter_api_base_url():
                 missing.append('JUPITER_API_BASE_URL')
-            if not self.get_jupiter_api_key():
-                missing.append('JUPITER_API_KEY_1')
-            if not (self.SOLANA_RPC_HTTP_PRIMARY or self.ANKR_API_KEY_1):
-                missing.append('SOLANA_RPC_HTTP_PRIMARY or ANKR_API_KEY_1')
+            if not self.get_jupiter_api_keys():
+                missing.append('JUPITER_API_KEY_N')
+            if not self.get_rpc_http_urls():
+                missing.append('SOLANA_RPC_HTTP_URLS or ALCHEMY_API_KEY_N')
             if not self.JITO_ENABLED:
                 missing.append('JITO_ENABLED')
             if not self.JITO_BLOCK_ENGINE_URL:
                 missing.append('JITO_BLOCK_ENGINE_URL')
-            if not self.WALLET_PUBLIC_KEY:
+            if not self.get_wallet_public_key():
                 missing.append('WALLET_PUBLIC_KEY')
-            if not self.WALLET_PRIVATE_KEY_BASE58:
+            if not self.get_wallet_private_key_base58():
                 missing.append('WALLET_PRIVATE_KEY_BASE58')
             if missing:
-                raise ValueError(f'PROVIDER_MODE=live requires: {missing}')
+                warnings.warn(
+                    'PROVIDER_MODE=live is configured but live trading is not ready: '
+                    + ', '.join(missing)
+                )
 
         elif mode == ProviderMode.ONLINE_READONLY:
-            if self.WALLET_PRIVATE_KEY_BASE58:
-                import warnings
+            if self.get_wallet_private_key_base58():
                 warnings.warn(
-                    'WALLET_PRIVATE_KEY_BASE58 is set but PROVIDER_MODE=online_readonly. '
-                    'Private key will NOT be used in online_readonly mode.'
+                    'WALLET_PRIVATE_KEY_BASE58/PRIVATE_KEY is set but '
+                    'PROVIDER_MODE=online_readonly. Private key will NOT be used.'
                 )
 
         return self
