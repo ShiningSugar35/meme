@@ -23,6 +23,23 @@ class MarketDataProvider(ABC):
     async def fetch_kline(self, token_mint: str, interval: str, limit: int) -> List[Dict[str, Any]]:
         ...
 
+    async def fetch_top_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Optional provider hook for holder concentration checks.
+
+        Implementations that do not support top holders may return an empty list.
+        The second-filter/risk runners only call this method after cheaper snapshot
+        and K-line checks pass, so it stays off the hot path for most tokens.
+        """
+        return []
+
+    async def fetch_top1_holder_rate(self, token_mint: str, addr_type: int = 0) -> Dict[str, Any]:
+        """Return {'top1_holder_rate': float|None, ...} for top holder addr_type."""
+        holders = await self.fetch_top_holders(token_mint, limit=20)
+        for holder in holders or []:
+            if int(holder.get('addr_type', addr_type) or 0) == int(addr_type):
+                return holder
+        return {"top1_holder_rate": None, "addr_type": addr_type}
+
     @abstractmethod
     async def fetch_latest_price(self, token_mint: str) -> Dict[str, Any]:
         ...

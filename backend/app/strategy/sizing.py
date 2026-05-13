@@ -1,21 +1,20 @@
-"""Position sizing rules for the meme trading system.
+"""Position sizing rules.
 
-The intended entry rule is deliberately simple and conservative:
+The current strategy sizes entries in USD, then the executor converts USD to SOL
+using live token/SOL pricing data:
 
-    entry_size_sol = min(1.25% * current SOL-side pool liquidity, 2 SOL)
-
-This module keeps that rule, but adds defensive validation so missing/invalid
-liquidity never turns into an accidental trade size.
+    entry_size_usd = min(1.25% * current pool liquidity USD, $200)
 """
 
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 
 ENTRY_LIQUIDITY_PCT = 0.0125
-ENTRY_MAX_SOL = 2.0
+ENTRY_MAX_USD = 200.0
 
 
 def _as_finite_float(value: object) -> Optional[float]:
@@ -23,35 +22,30 @@ def _as_finite_float(value: object) -> Optional[float]:
         v = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(v):
-        return None
-    return v
+    return v if math.isfinite(v) else None
 
 
-async def compute_entry_size(
-    sol_side_liquidity: float,
+def _env_float(name: str, default: float) -> float:
+    v = _as_finite_float(os.getenv(name))
+    return default if v is None else v
+
+
+async def compute_entry_size_usd(
+    liquidity_usd: float,
     *,
-    liquidity_pct: float = ENTRY_LIQUIDITY_PCT,
-    max_entry_sol: float = ENTRY_MAX_SOL,
-    min_entry_sol: float = 0.0,
+    liquidity_pct: Optional[float] = None,
+    max_entry_usd: Optional[float] = None,
+    min_entry_usd: float = 0.0,
 ) -> float:
-    """Return the SOL entry size for a token.
+    """Return the USD entry notional for a token.
 
-    Args:
-        sol_side_liquidity: Current SOL-side pool liquidity, in SOL.
-        liquidity_pct: Fraction of the SOL-side liquidity to use.
-        max_entry_sol: Absolute per-entry cap, in SOL.
-        min_entry_sol: Optional minimum executable size. When the computed size is
-            below this value, return 0 rather than rounding up.
-
-    Returns:
-        A non-negative SOL amount. Returns 0.0 when inputs are missing, invalid,
-        non-positive, or below the optional minimum.
+    Missing/invalid liquidity returns 0.0.  The function floors to cents and
+    never rounds a risk amount upward.
     """
-    liq = _as_finite_float(sol_side_liquidity)
-    pct = _as_finite_float(liquidity_pct)
-    cap = _as_finite_float(max_entry_sol)
-    min_size = _as_finite_float(min_entry_sol)
+    liq = _as_finite_float(liquidity_usd)
+    pct = _as_finite_float(liquidity_pct if liquidity_pct is not None else _env_float("ENTRY_SIZE_LIQUIDITY_PCT", ENTRY_LIQUIDITY_PCT))
+    cap = _as_finite_float(max_entry_usd if max_entry_usd is not None else _env_float("ENTRY_MAX_USD", ENTRY_MAX_USD))
+    min_size = _as_finite_float(min_entry_usd)
 
     if liq is None or pct is None or cap is None or min_size is None:
         return 0.0
@@ -62,5 +56,28 @@ async def compute_entry_size(
     if size <= 0 or size < min_size:
         return 0.0
 
-    # Round down to a practical precision; never round up a risk amount.
-    return math.floor(size * 1_000_000_000) / 1_000_000_000
+    return math.floor(size * 100.0) / 100.0
+
+
+async def compute_entry_size(
+    liquidity_usd: float,
+    *,
+    liquidity_pct: float = ENTRY_LIQUIDITY_PCT,
+    max_entry_sol: Optional[float] = None,
+    max_entry_usd: Optional[float] = None,
+    min_entry_sol: float = 0.0,
+    min_entry_usd: float = 0.0,
+) -> float:
+    """Backward-compatible wrapper.
+
+    Older executor code called this function expecting a SOL-denominated value.
+    This strategy is now USD-denominated, so the wrapper returns USD notional.
+    New code should call :func:`compute_entry_size_usd` explicitly.
+    """
+    _ = max_entry_sol, min_entry_sol  # retained for call-site compatibility
+    return await compute_entry_size_usd(
+        liquidity_usd,
+        liquidity_pct=liquidity_pct,
+        max_entry_usd=max_entry_usd,
+        min_entry_usd=min_entry_usd,
+    )

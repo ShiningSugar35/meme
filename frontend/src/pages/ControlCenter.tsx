@@ -5,7 +5,6 @@ const fmtSol = (n: any) => {
   const v = Number(n || 0)
   return `${v >= 0 ? '+' : ''}${v.toFixed(4)} SOL`
 }
-
 const fmtBool = (v: any) => v ? 'ON' : 'OFF'
 
 function StatCard({ title, value, color }: { title: string, value: string, color?: string }) {
@@ -47,11 +46,8 @@ export default function ControlCenter() {
     setBusy(true)
     try {
       const r = await fn()
-      if (r?.ok === false) {
-        setMsg(`${label} failed: ${r.error || 'unknown error'}`)
-      } else {
-        setMsg(`${label} completed`)
-      }
+      if (r?.ok === false) setMsg(`${label} failed: ${r.error || 'unknown error'}`)
+      else setMsg(`${label} completed`)
       await refresh()
     } catch (e: any) {
       setMsg(`${label} failed: ${e?.message || e}`)
@@ -80,10 +76,10 @@ export default function ControlCenter() {
         <StatCard title="Workers" value={`${runningCount}/${workerList.length || 0}`} color={runningCount > 0 ? 'text-green-400' : 'text-gray-400'} />
         <StatCard title="Kill Switch" value={fmtBool(killActive)} color={killActive ? 'text-red-400' : 'text-green-400'} />
         <StatCard title="Live Readiness" value={liveReady ? 'READY' : 'BLOCKED'} color={liveReady ? 'text-green-400' : 'text-red-400'} />
+        <StatCard title="LIVE Open Positions" value={`${summary?.live_open_count ?? 0}`} color="text-red-300" />
         <StatCard title="LIVE Realized PnL" value={fmtSol(summary?.live_pnl_sol)} color={(summary?.live_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'} />
-        <StatCard title="LIVE Open Value" value={`${Number(summary?.live_open_value_sol || 0).toFixed(4)} SOL`} color="text-red-300" />
+        <StatCard title="SIM Open Positions" value={`${summary?.sim_open_count ?? 0}`} color="text-blue-300" />
         <StatCard title="SIM Realized PnL" value={fmtSol(summary?.sim_pnl_sol)} color={(summary?.sim_pnl_sol || 0) >= 0 ? 'text-green-400' : 'text-red-400'} />
-        <StatCard title="SIM Open Value" value={`${Number(summary?.sim_open_value_sol || 0).toFixed(4)} SOL`} color="text-blue-300" />
       </div>
 
       <div className="bg-gray-900 border border-gray-700 rounded p-4 mb-4">

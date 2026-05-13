@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ..config import ProviderMode, settings
@@ -34,7 +34,9 @@ SNAPSHOT_COLUMNS = [
     'fresh_wallet_rate',
     'sell_tax',
     'has_social',
+    'has_at_least_one_social',
     'creator_token_status',
+    'burn_status',
     'dev_team_hold_rate',
     'dev_token_burn_ratio',
     'sniper_count',
@@ -109,6 +111,131 @@ def _extract_buy_sell_1m(klines: List[Dict[str, Any]], snapshot: Dict[str, Any])
     }
 
 
+
+def _interval_seconds(interval: str) -> int:
+    value = str(interval or '1m').strip().lower()
+    if value.endswith('m'):
+        return max(1, int(float(value[:-1]) * 60))
+    if value.endswith('h'):
+        return max(1, int(float(value[:-1]) * 3600))
+    if value.endswith('d'):
+        return max(1, int(float(value[:-1]) * 86400))
+    return 60
+
+
+def _completed_klines(klines: List[Dict[str, Any]], interval: str, now: datetime) -> List[Dict[str, Any]]:
+    span = timedelta(seconds=_interval_seconds(interval))
+    completed: List[Dict[str, Any]] = []
+    for item in _sort_klines(klines):
+        opened = _parse_dt(_first_present(item, ['open_time', 'time', 'timestamp', 't']))
+        if not opened:
+            continue
+        if opened + span <= now:
+            completed.append(item)
+    return completed
+
+
+def _median(values: List[float]) -> Optional[float]:
+    clean = sorted(v for v in values if v is not None)
+    if not clean:
+        return None
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return clean[mid]
+    return (clean[mid - 1] + clean[mid]) / 2.0
+
+
+def _kline_precheck(snapshot: Dict[str, Any], latest: Dict[str, Any], klines_1m: List[Dict[str, Any]], klines_5m: List[Dict[str, Any]], sg: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+    """Cheap local gate before calling the top-holder endpoint.
+
+    Mirrors the strategy's K-line predicates closely enough to keep top-holder
+    API calls as the last expensive check. run_second_filter remains the final
+    authority and writes the canonical decision detail.
+    """
+    y = _to_float(sg.get('y')) or 2.25
+    latest_1m = klines_1m[-1] if klines_1m else {}
+    if not latest_1m:
+        return False, {'reason': 'no_completed_1m_candle'}
+
+    open_1m = _to_float(_first_present(latest_1m, ['open', 'o']))
+    high_1m = _to_float(_first_present(latest_1m, ['high', 'h']))
+    low_1m = _to_float(_first_present(latest_1m, ['low', 'l']))
+    close_1m = _to_float(_first_present(latest_1m, ['close', 'c']))
+    volume_1m = _to_float(_first_present(latest_1m, ['volume_usd', 'volume', 'v'])) or 0.0
+    liquidity = _to_float(snapshot.get('liquidity_usd')) or _to_float(latest.get('liquidity_usd')) or 0.0
+
+    if open_1m is None or high_1m is None or low_1m is None or close_1m is None:
+        return False, {'reason': 'incomplete_1m_candle'}
+    range_1m = high_1m - low_1m
+    if range_1m <= 0:
+        return False, {'reason': 'zero_1m_range'}
+
+    prev_volumes = [
+        _to_float(_first_present(k, ['volume_usd', 'volume', 'v'])) or 0.0
+        for k in klines_1m[-6:-1]
+    ]
+    median_prev = _median(prev_volumes) or 0.0
+    volume_threshold = max(liquidity * max(0.0, (0.07 - 0.02 * y)), median_prev * max(0.0, (1.3 - 0.1 * y)))
+    close_threshold = open_1m * (1 - 0.002 * y)
+    close_position_1m = (close_1m - low_1m) / range_1m
+
+    range_source = (klines_5m[-1:] if klines_5m else []) or klines_1m[-5:]
+    highs = [_to_float(_first_present(k, ['high', 'h'])) for k in range_source]
+    lows = [_to_float(_first_present(k, ['low', 'l'])) for k in range_source]
+    highs = [v for v in highs if v is not None]
+    lows = [v for v in lows if v is not None]
+    if not highs or not lows:
+        return False, {'reason': 'no_5m_range'}
+    high_5m = max(highs)
+    low_5m = min(lows)
+    range_5m = high_5m - low_5m
+    if range_5m <= 0:
+        return False, {'reason': 'zero_5m_range'}
+
+    current_price = _to_float(_first_present(latest, ['price_usd', 'price', 'latest_price_usd'])) or close_1m
+    pos_5m = (current_price - low_5m) / range_5m
+
+    checks = {
+        'volume_1m': volume_1m > volume_threshold,
+        'close_1m': close_1m > close_threshold,
+        'close_position_1m': close_position_1m > (0.80 - 0.01 * y),
+        'price_gt_high_5m_over_y': current_price > high_5m / y,
+        'price_lt_low_5m_times_y': current_price < low_5m * y,
+        'price_position_5m': (0.8 - 0.2 * y) < pos_5m < (0.35 + 0.2 * y),
+    }
+    features = {
+        'y': y,
+        'open_1m': open_1m,
+        'high_1m': high_1m,
+        'low_1m': low_1m,
+        'close_1m': close_1m,
+        'volume_1m': volume_1m,
+        'volume_threshold': volume_threshold,
+        'median_volume_prev_5m': median_prev,
+        'close_position_1m': close_position_1m,
+        'current_price': current_price,
+        'high_5m': high_5m,
+        'low_5m': low_5m,
+        'price_position_5m': pos_5m,
+        'checks': checks,
+    }
+    return all(checks.values()), features
+
+
+def _top1_threshold(sg: Dict[str, Any]) -> float:
+    x = _to_float(sg.get('x'))
+    if x is None:
+        x = 0.2
+    return 0.048 + 0.01 * x
+
+
+async def _fetch_top1_holder_rate(provider: MarketDataProvider, token_mint: str) -> Optional[float]:
+    if not hasattr(provider, 'fetch_top1_holder_rate'):
+        return None
+    data = await provider.fetch_top1_holder_rate(token_mint, addr_type=0)  # type: ignore[attr-defined]
+    return _to_float((data or {}).get('top1_holder_rate') if isinstance(data, dict) else None)
+
+
 class SecondFilterRunner:
     def __init__(
         self,
@@ -170,7 +297,6 @@ class SecondFilterRunner:
             try:
                 fresh_snapshot = await self.gmgn.fetch_token_snapshot(token_mint)
                 latest = await self.gmgn.fetch_latest_price(token_mint)
-                klines = await self.gmgn.fetch_kline(token_mint, '1m', 5)
             except Exception as e:
                 await self.repo.append_system_event(
                     'ERROR', 'SECOND_FILTER', 'GMGN second-filter fetch failed',
@@ -252,11 +378,80 @@ class SecondFilterRunner:
                 await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_RECHECK_FAILED')
                 continue
 
-            sorted_klines = _sort_klines(klines)
+            try:
+                raw_klines_1m = await self.gmgn.fetch_kline(token_mint, '1m', 8)
+                raw_klines_5m = await self.gmgn.fetch_kline(token_mint, '5m', 2)
+            except Exception as e:
+                await self.repo.append_system_event(
+                    'ERROR', 'SECOND_FILTER', 'GMGN kline fetch failed',
+                    _json_dumps({'token': token_mint, 'discovery_event_id': discovery_event_id, 'error': str(e)}),
+                    account_type='SIM',
+                )
+                continue
+
+            sorted_klines = _completed_klines(raw_klines_1m, '1m', now)
+            sorted_klines_5m = _completed_klines(raw_klines_5m, '5m', now)
+            if not sorted_klines:
+                await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_FAILED', fail_reason_json=_json_dumps({'reason': 'no_completed_1m_candle'}))
+                continue
+
+            precheck_passed_groups: List[Dict[str, Any]] = []
+            precheck_features: Dict[int, Dict[str, Any]] = {}
+            for sg in recheck_passed_groups:
+                ok, features = _kline_precheck(fresh_snapshot, latest, sorted_klines, sorted_klines_5m, sg)
+                precheck_features[int(sg.get('id', 0))] = features
+                if ok:
+                    precheck_passed_groups.append(sg)
+                else:
+                    await self.repo.insert_strategy_match(
+                        token_mint,
+                        sg.get('id', 0),
+                        sg.get('config_version', 1),
+                        recheck_snapshot_id,
+                        'second_kline_precheck',
+                        False,
+                        _json_dumps(features),
+                        _json_dumps(features),
+                        discovery_event_id=discovery_event_id,
+                    )
+
+            if not precheck_passed_groups:
+                await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_FAILED', fail_reason_json=_json_dumps({'reason': 'kline_precheck_failed'}))
+                continue
+
+            # Top holders are intentionally deferred until after snapshot + K-line checks pass.
+            top1_rate = await _fetch_top1_holder_rate(self.gmgn, token_mint)
+            fresh_snapshot['top1_holder_rate'] = top1_rate
+            for sg in precheck_passed_groups:
+                threshold = _top1_threshold(sg)
+                if top1_rate is None or top1_rate >= threshold:
+                    await self.repo.insert_strategy_match(
+                        token_mint,
+                        sg.get('id', 0),
+                        sg.get('config_version', 1),
+                        recheck_snapshot_id,
+                        'second_top1_holder_check',
+                        False,
+                        _json_dumps({'top1_holder_rate': top1_rate, 'threshold': threshold}),
+                        _json_dumps({'top1_holder_rate': top1_rate, 'threshold': threshold}),
+                        discovery_event_id=discovery_event_id,
+                    )
+            holder_passed_groups = [sg for sg in precheck_passed_groups if top1_rate is not None and top1_rate < _top1_threshold(sg)]
+            if not holder_passed_groups:
+                await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_FAILED', fail_reason_json=_json_dumps({'reason': 'top1_holder_failed', 'top1_holder_rate': top1_rate}))
+                continue
+
+            fresh_snapshot['completed_1m_candles'] = sorted_klines
+            fresh_snapshot['completed_5m_candles'] = sorted_klines_5m
+            # Give downstream strategy code direct access to the derived 5m range.
+            sample_for_5m = (sorted_klines_5m[-1:] if sorted_klines_5m else []) or sorted_klines[-5:]
+            fresh_snapshot['high_5m'] = max((_to_float(_first_present(k, ['high', 'h'])) or 0.0) for k in sample_for_5m)
+            fresh_snapshot['low_5m'] = min((_to_float(_first_present(k, ['low', 'l'])) or 0.0) for k in sample_for_5m)
+
             buy_sell_1m = _extract_buy_sell_1m(sorted_klines, fresh_snapshot)
             passed_strategies: List[Dict[str, Any]] = []
 
-            for sg in recheck_passed_groups:
+            for sg in holder_passed_groups:
                 try:
                     res = await run_second_filter(fresh_snapshot, sg, latest, sorted_klines, buy_sell_1m)
                     await self.repo.insert_strategy_match(

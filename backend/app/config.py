@@ -166,19 +166,43 @@ class Settings(BaseSettings):
     LIVE_ROLLING_10_LOSS_LIMIT: float = Field(-0.20)
     MAX_REQUOTE_RETRY: int = Field(2)
 
-    # Risk Feature Scan Tiers (dynamic based on remaining position value in SOL)
-    RISK_FEATURE_SCAN_TIER_1_SOL: float = Field(1.5)
-    RISK_FEATURE_SCAN_TIER_1_SECONDS: int = Field(2)
-    RISK_FEATURE_SCAN_TIER_2_SOL: float = Field(1.0)
-    RISK_FEATURE_SCAN_TIER_2_SECONDS: int = Field(4)
-    RISK_FEATURE_SCAN_TIER_3_SOL: float = Field(0.5)
-    RISK_FEATURE_SCAN_TIER_3_SECONDS: int = Field(8)
-    RISK_FEATURE_SCAN_TIER_4_SOL: float = Field(0.25)
-    RISK_FEATURE_SCAN_TIER_4_SECONDS: int = Field(16)
-    RISK_FEATURE_SCAN_TIER_5_SECONDS: int = Field(32)
+    # Entry sizing (USD based): min(liquidity_usd * pct, max_usd)
+    ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.0125)
+    ENTRY_MAX_USD: float = Field(200.0)
 
-    # Dust Position Rules (in SOL, not USD)
+    # Risk Feature Scan Tiers (dynamic based on remaining position value in USD)
+    # Strategy: >=$150 every 2s; >=$100 every 3s; >=$50 every 6s;
+    # >=$25 every 12s; <$25 every 24s.
+    RISK_FEATURE_SCAN_TIER_1_USD: float = Field(150.0)
+    RISK_FEATURE_SCAN_TIER_1_SECONDS: int = Field(2)
+    RISK_FEATURE_SCAN_TIER_2_USD: float = Field(100.0)
+    RISK_FEATURE_SCAN_TIER_2_SECONDS: int = Field(3)
+    RISK_FEATURE_SCAN_TIER_3_USD: float = Field(50.0)
+    RISK_FEATURE_SCAN_TIER_3_SECONDS: int = Field(6)
+    RISK_FEATURE_SCAN_TIER_4_USD: float = Field(25.0)
+    RISK_FEATURE_SCAN_TIER_4_SECONDS: int = Field(12)
+    RISK_FEATURE_SCAN_TIER_5_SECONDS: int = Field(24)
+
+    # Top1 normal-holder scan tiers (USD based). 0 disables scanning below tier 4.
+    TOP1_HOLDER_SCAN_TIER_1_USD: float = Field(150.0)
+    TOP1_HOLDER_SCAN_TIER_1_SECONDS: int = Field(10)
+    TOP1_HOLDER_SCAN_TIER_2_USD: float = Field(100.0)
+    TOP1_HOLDER_SCAN_TIER_2_SECONDS: int = Field(15)
+    TOP1_HOLDER_SCAN_TIER_3_USD: float = Field(50.0)
+    TOP1_HOLDER_SCAN_TIER_3_SECONDS: int = Field(30)
+    TOP1_HOLDER_SCAN_TIER_4_USD: float = Field(25.0)
+    TOP1_HOLDER_SCAN_TIER_4_SECONDS: int = Field(60)
+    TOP1_HOLDER_SCAN_TIER_5_SECONDS: int = Field(0)
+
+    # Dust Position Rules (USD based; SOL kept as legacy fallback only)
+    DUST_FORCE_EXIT_USD: float = Field(12.5)
     DUST_FORCE_EXIT_SOL: float = Field(0.125)
+
+    # Legacy SOL-tier fields retained only so older modules do not break if imported.
+    RISK_FEATURE_SCAN_TIER_1_SOL: float = Field(1.5)
+    RISK_FEATURE_SCAN_TIER_2_SOL: float = Field(1.0)
+    RISK_FEATURE_SCAN_TIER_3_SOL: float = Field(0.5)
+    RISK_FEATURE_SCAN_TIER_4_SOL: float = Field(0.25)
 
     # Wallet Configuration
     WALLET_PUBLIC_KEY: Optional[str] = None
@@ -326,16 +350,58 @@ class Settings(BaseSettings):
     def get_wallet_private_key_base58(self) -> Optional[str]:
         return _secret_to_str(self.WALLET_PRIVATE_KEY_BASE58) or _secret_to_str(self.PRIVATE_KEY)
 
-    def get_risk_scan_interval_seconds(self, remaining_value_sol: float) -> int:
-        if remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_1_SOL:
-            return self.RISK_FEATURE_SCAN_TIER_1_SECONDS
-        if remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_2_SOL:
-            return self.RISK_FEATURE_SCAN_TIER_2_SECONDS
-        if remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_3_SOL:
-            return self.RISK_FEATURE_SCAN_TIER_3_SECONDS
-        if remaining_value_sol >= self.RISK_FEATURE_SCAN_TIER_4_SOL:
-            return self.RISK_FEATURE_SCAN_TIER_4_SECONDS
-        return self.RISK_FEATURE_SCAN_TIER_5_SECONDS
+    @staticmethod
+    def _tiered_interval(value: Optional[float], tiers: List[tuple[float, int]], fallback_seconds: int) -> int:
+        try:
+            v = max(float(value or 0.0), 0.0)
+        except (TypeError, ValueError):
+            v = 0.0
+        for threshold, seconds in tiers:
+            if v >= float(threshold):
+                return max(int(seconds), 0)
+        return max(int(fallback_seconds), 0)
+
+    def get_risk_scan_interval_seconds(
+        self,
+        remaining_value_usd: Optional[float] = None,
+        remaining_value_sol: Optional[float] = None,
+    ) -> int:
+        """Return the post-entry core-risk scan interval.
+
+        The current strategy is USD-denominated. ``remaining_value_sol`` is accepted
+        only for backwards-compatible call sites; it is not used for tiering unless
+        USD is absent and old code explicitly handles conversion before calling.
+        """
+        _ = remaining_value_sol
+        return self._tiered_interval(
+            remaining_value_usd,
+            [
+                (self.RISK_FEATURE_SCAN_TIER_1_USD, self.RISK_FEATURE_SCAN_TIER_1_SECONDS),
+                (self.RISK_FEATURE_SCAN_TIER_2_USD, self.RISK_FEATURE_SCAN_TIER_2_SECONDS),
+                (self.RISK_FEATURE_SCAN_TIER_3_USD, self.RISK_FEATURE_SCAN_TIER_3_SECONDS),
+                (self.RISK_FEATURE_SCAN_TIER_4_USD, self.RISK_FEATURE_SCAN_TIER_4_SECONDS),
+            ],
+            self.RISK_FEATURE_SCAN_TIER_5_SECONDS,
+        )
+
+    def get_top1_holder_scan_interval_seconds(
+        self,
+        remaining_value_usd: Optional[float] = None,
+        remaining_value_sol: Optional[float] = None,
+    ) -> Optional[int]:
+        """Return the Top1 addr_type=0 holder scan interval, or None when disabled."""
+        _ = remaining_value_sol
+        seconds = self._tiered_interval(
+            remaining_value_usd,
+            [
+                (self.TOP1_HOLDER_SCAN_TIER_1_USD, self.TOP1_HOLDER_SCAN_TIER_1_SECONDS),
+                (self.TOP1_HOLDER_SCAN_TIER_2_USD, self.TOP1_HOLDER_SCAN_TIER_2_SECONDS),
+                (self.TOP1_HOLDER_SCAN_TIER_3_USD, self.TOP1_HOLDER_SCAN_TIER_3_SECONDS),
+                (self.TOP1_HOLDER_SCAN_TIER_4_USD, self.TOP1_HOLDER_SCAN_TIER_4_SECONDS),
+            ],
+            self.TOP1_HOLDER_SCAN_TIER_5_SECONDS,
+        )
+        return seconds if seconds > 0 else None
 
     def get_provider_mode(self) -> ProviderMode:
         """Get effective provider mode, considering new and legacy switches."""

@@ -117,6 +117,11 @@ async def portfolio_table(request: Request, account_type: str = 'LIVE'):
             'mint': mint,
             'account_type': p.get('account_type', account_type),
             'updated_at': p.get('updated_at', p.get('opened_at', '')),
+            'risk_check_interval_seconds': p.get('risk_check_interval_seconds'),
+            'next_risk_check_at': p.get('next_risk_check_at'),
+            'top_holder_check_interval_seconds': p.get('top_holder_check_interval_seconds'),
+            'next_top_holder_check_at': p.get('next_top_holder_check_at'),
+            'last_top1_holder_rate': p.get('last_top1_holder_rate'),
         })
     return _json_response(result)
 

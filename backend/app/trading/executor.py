@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timezone
 
 from ..db.repositories import Repositories
-from ..strategy.sizing import compute_entry_size
+from ..strategy.sizing import compute_entry_size_usd
 from ..strategy.slippage import (
     compute_slippage_bps,
     BUY_SLIPPAGE_CAP_BPS,
@@ -22,6 +22,45 @@ WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL = 1_000_000_000
 DEFAULT_TOKEN_DECIMALS = 9
 
+
+
+
+def _finite_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _derive_sol_usd_price(snapshot: Dict[str, Any], latest: Dict[str, Any]) -> Optional[float]:
+    """Derive SOL/USD from GMGN token price fields or liquidity fields.
+
+    Preferred relation: token_price_usd / token_price_sol.  If that is absent,
+    fall back to liquidity_usd / sol_side_liquidity, which is less exact but
+    sufficient for simulation sizing.
+    """
+    latest = latest or {}
+    snapshot = snapshot or {}
+    price_usd = _finite_float(latest.get('price_usd') or snapshot.get('price_usd') or latest.get('latest_price_usd'))
+    price_sol = _finite_float(latest.get('price_sol') or snapshot.get('price_sol') or latest.get('latest_price_sol'))
+    if price_usd and price_usd > 0 and price_sol and price_sol > 0:
+        sol_usd = price_usd / price_sol
+        if sol_usd > 0:
+            return sol_usd
+
+    liq_usd = _finite_float(snapshot.get('liquidity_usd') or latest.get('liquidity_usd') or snapshot.get('liquidity'))
+    sol_side_liq = _finite_float(snapshot.get('sol_side_liquidity') or latest.get('sol_side_liquidity'))
+    if liq_usd and liq_usd > 0 and sol_side_liq and sol_side_liq > 0:
+        return liq_usd / sol_side_liq
+    return None
+
+
+def _usd_to_sol_amount(size_usd: float, snapshot: Dict[str, Any], latest: Dict[str, Any]) -> float:
+    sol_usd = _derive_sol_usd_price(snapshot, latest)
+    if not sol_usd or sol_usd <= 0:
+        return 0.0
+    return math.floor((size_usd / sol_usd) * 1_000_000_000) / 1_000_000_000
 
 class TradingPipeline:
     def __init__(
@@ -132,6 +171,13 @@ class TradingPipeline:
                 return v
         return 0.0
 
+    def _get_liquidity_usd(self, data: Dict[str, Any]) -> float:
+        for key in ("liquidity_usd", "latest_liquidity_usd", "liquidity", "usd_liquidity", "liquidityUsd"):
+            v = self._to_float(data.get(key))
+            if v is not None and v > 0:
+                return v
+        return 0.0
+
     def _extract_token_decimals(
         self,
         token_mint: str,
@@ -207,10 +253,13 @@ class TradingPipeline:
         token_decimals: int,
         entry_size_sol: float,
         discovery_event_id: Optional[int],
+        entry_size_usd: Optional[float] = None,
     ) -> str:
         locked = dict(strategy)
         locked["token_decimals"] = token_decimals
         locked["entry_size_sol"] = entry_size_sol
+        if entry_size_usd is not None:
+            locked["entry_size_usd"] = entry_size_usd
         locked["discovery_event_id"] = discovery_event_id
         locked.setdefault("buy_slippage_cap_bps", getattr(settings, "BUY_SLIPPAGE_CAP_BPS", BUY_SLIPPAGE_CAP_BPS))
         locked.setdefault("sell_slippage_cap_bps", getattr(settings, "SELL_SLIPPAGE_CAP_BPS", SELL_SLIPPAGE_CAP_BPS))
@@ -261,7 +310,7 @@ class TradingPipeline:
                 created.append(pos)
 
         if live_strategies:
-            live_enabled = (await self.repo.get_runtime_setting("live_trading_enabled")) == "true"
+            live_enabled = (await self.repo.get_runtime_setting("live_entries_enabled")) == "true"
             if not live_enabled:
                 await self.repo.append_system_event(
                     "WARN",
@@ -314,25 +363,26 @@ class TradingPipeline:
             latest = {}
 
         sol_side_liquidity = self._get_sol_side_liquidity(latest)
+        liquidity_usd = self._get_liquidity_usd(latest)
         price_usd = self._get_price_usd(latest)
         price_sol = self._get_price_sol(latest)
-        size_sol = await compute_entry_size(sol_side_liquidity)
-        if size_sol <= 0:
+        size_usd = await compute_entry_size_usd(liquidity_usd)
+        size_sol = _usd_to_sol_amount(size_usd, latest, latest)
+        if size_usd <= 0 or size_sol <= 0:
             await self.repo.append_system_event(
                 "WARN",
                 "TRADE",
                 "SIM entry skipped: invalid liquidity/size",
-                self._safe_json({"token": token_mint, "sol_side_liquidity": sol_side_liquidity}),
+                self._safe_json({"token": token_mint, "liquidity_usd": liquidity_usd, "size_usd": size_usd, "size_sol": size_sol}),
                 account_type="SIM",
             )
             return None
 
         token_decimals = self._extract_token_decimals(token_mint, latest=latest, strategy=strategy)
         # In simulation, there is no Jupiter outAmount, so estimate token amount
-        # from price_sol. If price_sol is missing, keep amount at 0 but still log
-        # why it cannot be valued precisely.
-        token_amount = size_sol / price_sol if price_sol > 0 else 0.0
-        remaining_value_usd = token_amount * price_usd if token_amount > 0 and price_usd > 0 else 0.0
+        # from USD price first, then SOL price as fallback.
+        token_amount = (size_usd / price_usd) if price_usd > 0 else (size_sol / price_sol if price_sol > 0 else 0.0)
+        remaining_value_usd = token_amount * price_usd if token_amount > 0 and price_usd > 0 else size_usd
 
         opened_at = datetime.now(timezone.utc).isoformat()
         idempotency_key = self._build_idempotency_key(
@@ -366,6 +416,7 @@ class TradingPipeline:
                 token_decimals=token_decimals,
                 entry_size_sol=size_sol,
                 discovery_event_id=discovery_event_id,
+                entry_size_usd=size_usd,
             ),
             "POSITION_OPEN",
             price_usd,
@@ -389,7 +440,7 @@ class TradingPipeline:
             token_mint,
             strategy.get("id", 0),
             False,
-            self._safe_json({"entry_price_sol": price_sol, "entry_price_usd": price_usd, "size_sol": size_sol}),
+            self._safe_json({"entry_price_sol": price_sol, "entry_price_usd": price_usd, "size_sol": size_sol, "size_usd": size_usd}),
             self._safe_json(strategy),
             position_id=pos_id,
             discovery_event_id=discovery_event_id,
@@ -441,15 +492,17 @@ class TradingPipeline:
             return {"ok": False, "error": "LATEST_PRICE_FAILED"}
 
         sol_side_liquidity = self._get_sol_side_liquidity(latest)
+        liquidity_usd = self._get_liquidity_usd(latest)
         price_usd = self._get_price_usd(latest)
         price_sol = self._get_price_sol(latest)
-        size_sol = await compute_entry_size(sol_side_liquidity)
-        if size_sol <= 0:
+        size_usd = await compute_entry_size_usd(liquidity_usd)
+        size_sol = _usd_to_sol_amount(size_usd, latest, latest)
+        if size_usd <= 0 or size_sol <= 0:
             await self.repo.append_system_event(
                 "WARN",
                 "TRADE",
                 "Buy skipped: invalid computed size",
-                self._safe_json({"token": token_mint, "sol_side_liquidity": sol_side_liquidity}),
+                self._safe_json({"token": token_mint, "liquidity_usd": liquidity_usd, "size_usd": size_usd, "size_sol": size_sol}),
                 account_type="LIVE",
             )
             return {"ok": False, "error": "INVALID_ENTRY_SIZE"}
@@ -568,6 +621,7 @@ class TradingPipeline:
                 token_decimals=token_decimals,
                 entry_size_sol=size_sol,
                 discovery_event_id=discovery_event_id,
+                entry_size_usd=size_usd,
             ),
             "POSITION_OPEN",
             price_usd,
@@ -591,7 +645,7 @@ class TradingPipeline:
             token_mint,
             sid,
             True,
-            self._safe_json({"entry_price_sol": price_sol, "entry_price_usd": price_usd, "size_sol": size_sol}),
+            self._safe_json({"entry_price_sol": price_sol, "entry_price_usd": price_usd, "size_sol": size_sol, "size_usd": size_usd}),
             self._safe_json(strategy),
             position_id=pos_id,
             discovery_event_id=discovery_event_id,

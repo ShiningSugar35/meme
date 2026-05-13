@@ -1060,15 +1060,17 @@ class Repositories:
               AND (
                 next_risk_check_at IS NULL
                 OR next_risk_check_at <= ?
+                OR next_top_holder_check_at IS NULL
+                OR next_top_holder_check_at <= ?
               )
         """
-        params: List[Any] = [now]
+        params: List[Any] = [now, now]
 
         if account_type:
             sql += " AND account_type = ?"
             params.append(account_type)
 
-        sql += " ORDER BY COALESCE(next_risk_check_at, opened_at) ASC, id ASC LIMIT ?"
+        sql += " ORDER BY MIN(COALESCE(next_risk_check_at, opened_at), COALESCE(next_top_holder_check_at, opened_at)) ASC, id ASC LIMIT ?"
         params.append(limit)
 
         async with self.db.execute(sql, tuple(params)) as cur:
@@ -1105,6 +1107,8 @@ class Repositories:
               updated_at, is_live,
               last_fill_at, last_fill_price_usd, last_fill_price_sol,
               last_risk_check_at, next_risk_check_at, risk_check_interval_seconds,
+              last_top_holder_check_at, next_top_holder_check_at,
+              top_holder_check_interval_seconds, last_top1_holder_rate,
               executed_exit_rules_json
             FROM positions
             WHERE account_type = ?
@@ -1223,34 +1227,57 @@ class Repositories:
     async def update_position_risk_schedule(
         self,
         position_id: int,
-        remaining_value_sol: Optional[float],
-        interval_seconds: int,
+        remaining_value_sol: Optional[float] = None,
+        interval_seconds: Optional[int] = None,
         last_risk_check_at: Optional[str] = None,
         next_risk_check_at: Optional[str] = None,
+        remaining_value_usd: Optional[float] = None,
+        top_holder_interval_seconds: Optional[int] = None,
+        last_top_holder_check_at: Optional[str] = None,
+        next_top_holder_check_at: Optional[str] = None,
+        last_top1_holder_rate: Optional[float] = None,
     ):
+        """Update risk/top-holder scan scheduling for a position.
+
+        Kept backward-compatible with the old SOL-based caller while allowing the
+        new USD-tier risk schedule and independent top1-holder cadence.
+        """
         now = utc_now_iso()
-        last_at = last_risk_check_at or now
-        next_at = next_risk_check_at or iso_after_seconds(interval_seconds)
+        updates: Dict[str, Any] = {"updated_at": now}
+
+        if remaining_value_sol is not None:
+            updates["remaining_value_sol"] = remaining_value_sol
+        if remaining_value_usd is not None:
+            updates["remaining_value_usd"] = remaining_value_usd
+
+        if interval_seconds is not None:
+            updates["last_risk_check_at"] = last_risk_check_at or now
+            updates["next_risk_check_at"] = next_risk_check_at or iso_after_seconds(int(interval_seconds))
+            updates["risk_check_interval_seconds"] = int(interval_seconds)
+
+        if top_holder_interval_seconds is not None:
+            top_interval = int(top_holder_interval_seconds)
+            updates["top_holder_check_interval_seconds"] = top_interval
+            if top_interval > 0:
+                updates["last_top_holder_check_at"] = last_top_holder_check_at or now
+                updates["next_top_holder_check_at"] = next_top_holder_check_at or iso_after_seconds(top_interval)
+            else:
+                # 0 disables the dedicated top-holder cadence for low-value positions.
+                # Keep next_top_holder_check_at non-null so DB due filtering does not
+                # keep returning the row solely because the top-holder schedule is empty.
+                updates["next_top_holder_check_at"] = next_top_holder_check_at or updates.get("next_risk_check_at") or iso_after_seconds(24)
+        elif next_top_holder_check_at is not None:
+            updates["next_top_holder_check_at"] = next_top_holder_check_at
+        if last_top1_holder_rate is not None:
+            updates["last_top1_holder_rate"] = last_top1_holder_rate
+
+        cols = [f"{k} = ?" for k in updates.keys()]
+        params = list(updates.values()) + [position_id]
 
         async def _do():
             await self.db.execute(
-                """
-                UPDATE positions
-                SET remaining_value_sol = COALESCE(?, remaining_value_sol),
-                    last_risk_check_at = ?,
-                    next_risk_check_at = ?,
-                    risk_check_interval_seconds = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    remaining_value_sol,
-                    last_at,
-                    next_at,
-                    interval_seconds,
-                    now,
-                    position_id,
-                ),
+                f"UPDATE positions SET {', '.join(cols)} WHERE id = ?",
+                tuple(params),
             )
 
         try:
