@@ -151,9 +151,7 @@ CREATE TABLE IF NOT EXISTS token_metric_snapshots (
   fresh_wallet_rate REAL,
   sell_tax REAL,
   has_social INTEGER,
-  has_at_least_one_social INTEGER,
   creator_token_status TEXT,
-  burn_status TEXT,
   dev_team_hold_rate REAL,
   dev_token_burn_ratio REAL,
   sniper_count INTEGER,
@@ -250,10 +248,6 @@ CREATE TABLE IF NOT EXISTS positions (
   last_risk_check_at TEXT,
   next_risk_check_at TEXT,
   risk_check_interval_seconds INTEGER,
-  last_top_holder_check_at TEXT,
-  next_top_holder_check_at TEXT,
-  top_holder_check_interval_seconds INTEGER,
-  last_top1_holder_rate REAL,
 
   executed_exit_rules_json TEXT NOT NULL DEFAULT '[]',
 
@@ -278,8 +272,6 @@ CREATE INDEX IF NOT EXISTS idx_positions_next_check
 ON positions(next_check_at, status);
 CREATE INDEX IF NOT EXISTS idx_positions_next_risk_check
 ON positions(next_risk_check_at, status, account_type);
-CREATE INDEX IF NOT EXISTS idx_positions_next_top_holder_check
-ON positions(next_top_holder_check_at, status, account_type);
 CREATE INDEX IF NOT EXISTS idx_positions_updated
 ON positions(updated_at);
 

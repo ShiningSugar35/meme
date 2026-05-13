@@ -117,11 +117,6 @@ async def portfolio_table(request: Request, account_type: str = 'LIVE'):
             'mint': mint,
             'account_type': p.get('account_type', account_type),
             'updated_at': p.get('updated_at', p.get('opened_at', '')),
-            'risk_check_interval_seconds': p.get('risk_check_interval_seconds'),
-            'next_risk_check_at': p.get('next_risk_check_at'),
-            'top_holder_check_interval_seconds': p.get('top_holder_check_interval_seconds'),
-            'next_top_holder_check_at': p.get('next_top_holder_check_at'),
-            'last_top1_holder_rate': p.get('last_top1_holder_rate'),
         })
     return _json_response(result)
 
@@ -319,3 +314,70 @@ def _check_live_readiness() -> dict:
     checks['warnings'] = warnings
     checks['ready'] = len(missing) == 0
     return checks
+
+
+class StrategyGroupRequest(BaseModel):
+    name: str | None = None
+    x: float
+    y: float
+    t_seconds: int
+    enabled: bool = True
+    is_live: bool = False
+    priority: int = 100
+
+
+@router.get('/strategies')
+async def list_runtime_strategies(request: Request):
+    rows = await request.app.state.repo.list_strategy_groups(include_disabled=True)
+    return _json_response({'strategies': rows})
+
+
+@router.post('/strategies')
+async def create_runtime_strategy(payload: StrategyGroupRequest, request: Request):
+    name = payload.name or f"x={payload.x}, y={payload.y}, t={payload.t_seconds}s"
+    row_id = await request.app.state.repo.create_strategy_group(
+        name=name,
+        x=payload.x,
+        y=payload.y,
+        t_seconds=payload.t_seconds,
+    )
+    await request.app.state.repo.update_strategy_group(
+        row_id,
+        name=name,
+        x=payload.x,
+        y=payload.y,
+        t_seconds=payload.t_seconds,
+        enabled=payload.enabled,
+        is_live=payload.is_live,
+        priority=payload.priority,
+    )
+    row = await request.app.state.repo.get_strategy_group(row_id)
+    return _json_response({'strategy': row})
+
+
+@router.put('/strategies/{strategy_id}')
+async def update_runtime_strategy(strategy_id: int, payload: StrategyGroupRequest, request: Request):
+    name = payload.name or f"x={payload.x}, y={payload.y}, t={payload.t_seconds}s"
+    await request.app.state.repo.update_strategy_group(
+        strategy_id,
+        name=name,
+        x=payload.x,
+        y=payload.y,
+        t_seconds=payload.t_seconds,
+        enabled=payload.enabled,
+        is_live=payload.is_live,
+        priority=payload.priority,
+    )
+    row = await request.app.state.repo.get_strategy_group(strategy_id)
+    if not row:
+        return _json_response({'ok': False, 'error': 'Strategy group not found'}, status_code=404)
+    return _json_response({'strategy': row})
+
+
+@router.delete('/strategies/{strategy_id}')
+async def delete_runtime_strategy(strategy_id: int, request: Request):
+    existing = await request.app.state.repo.get_strategy_group(strategy_id)
+    if not existing:
+        return _json_response({'ok': False, 'error': 'Strategy group not found'}, status_code=404)
+    await request.app.state.repo.delete_strategy_group(strategy_id)
+    return _json_response({'ok': True, 'deleted_id': strategy_id})

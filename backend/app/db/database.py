@@ -236,8 +236,6 @@ async def _migrate_token_metric_snapshots(db: aiosqlite.Connection):
     await _add_column_if_missing(db, "token_metric_snapshots", "pool_address", "TEXT")
     await _add_column_if_missing(db, "token_metric_snapshots", "platform", "TEXT")
     await _add_column_if_missing(db, "token_metric_snapshots", "launchpad", "TEXT")
-    await _add_column_if_missing(db, "token_metric_snapshots", "has_at_least_one_social", "INTEGER")
-    await _add_column_if_missing(db, "token_metric_snapshots", "burn_status", "TEXT")
     await _add_index_if_missing(
         db,
         "idx_token_metric_snapshots_token_time",
@@ -267,10 +265,6 @@ async def _migrate_positions(db: aiosqlite.Connection):
         "last_risk_check_at": "TEXT",
         "next_risk_check_at": "TEXT",
         "risk_check_interval_seconds": "INTEGER",
-        "last_top_holder_check_at": "TEXT",
-        "next_top_holder_check_at": "TEXT",
-        "top_holder_check_interval_seconds": "INTEGER",
-        "last_top1_holder_rate": "REAL",
         "executed_exit_rules_json": "TEXT NOT NULL DEFAULT '[]'",
         "last_exit_reason": "TEXT",
     }
@@ -282,7 +276,6 @@ async def _migrate_positions(db: aiosqlite.Connection):
     await _add_index_if_missing(db, "idx_positions_token", "positions", "token_mint, account_type")
     await _add_index_if_missing(db, "idx_positions_next_check", "positions", "next_check_at, status")
     await _add_index_if_missing(db, "idx_positions_next_risk_check", "positions", "next_risk_check_at, status, account_type")
-    await _add_index_if_missing(db, "idx_positions_next_top_holder_check", "positions", "next_top_holder_check_at, status, account_type")
     await _add_index_if_missing(db, "idx_positions_updated", "positions", "updated_at")
 
     await db.execute(

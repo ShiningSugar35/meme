@@ -1,6 +1,7 @@
 import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Tuple
 
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
@@ -34,9 +35,7 @@ SNAPSHOT_COLUMNS = [
     'fresh_wallet_rate',
     'sell_tax',
     'has_social',
-    'has_at_least_one_social',
     'creator_token_status',
-    'burn_status',
     'dev_team_hold_rate',
     'dev_token_burn_ratio',
     'sniper_count',
@@ -60,13 +59,110 @@ def _first_present(data: Dict[str, Any], *keys: str, default: Any = None) -> Any
     return default
 
 
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _csv_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(x).strip() for x in value if str(x).strip()]
+    return [x.strip() for x in str(value).split(',') if x.strip()]
+
+
 class DiscoveryRunner:
     def __init__(self, repo: Repositories, gmgn: MarketDataProvider, strategy_groups: List[dict]):
         self.repo = repo
         self.gmgn = gmgn
-        self.strategy_groups = strategy_groups
+        # Kept as an in-memory cache only. The runner refreshes from DB every run
+        # so front-end strategy add/edit/delete takes effect on the next trench poll.
+        self.strategy_groups = strategy_groups or []
         self.processed_count = 0
         self.last_elapsed_ms = 0
+
+    async def _load_enabled_strategy_groups(self) -> List[dict]:
+        try:
+            groups = await self.repo.get_enabled_strategy_groups()
+        except Exception as e:
+            logger.error(f"load enabled strategy groups failed: {e}")
+            groups = self.strategy_groups or []
+        self.strategy_groups = groups
+        return groups
+
+    def _build_trench_params(self, t_seconds: int) -> Dict[str, Any]:
+        """Build provider query params from runtime strategy timing.
+
+        ``min_created`` and ``max_created`` are provider-side discovery-window
+        params. They are not filter-stage features and therefore never appear in
+        initial/second-filter failure statistics.
+        """
+        params: Dict[str, Any] = {
+            'type': 'new_creation',
+            'min_created': t_seconds,
+            'max_created': t_seconds + 60,
+            'limit': _as_int(getattr(settings, 'GMGN_TRENCHES_LIMIT', 80), 80),
+        }
+
+        types = _csv_list(getattr(settings, 'GMGN_TRENCHES_TYPES', ''))
+        if types:
+            # Current strategy uses new_creation. If env has a single value, keep
+            # the official/simple `type` shape; if several are configured, keep
+            # all values available to providers that accept array-like filters.
+            params['type'] = types[0]
+            if len(types) > 1:
+                params['types'] = types
+
+        platforms = _csv_list(getattr(settings, 'GMGN_TRENCHES_PLATFORMS', ''))
+        if platforms:
+            params['platforms'] = platforms
+
+        return params
+
+    @staticmethod
+    def _group_by_t_seconds(strategy_groups: List[dict]) -> List[Tuple[int, List[dict]]]:
+        grouped: Dict[int, List[dict]] = defaultdict(list)
+        for sg in strategy_groups:
+            t_seconds = _as_int(sg.get('t_seconds'), 150)
+            grouped[t_seconds].append(sg)
+        return sorted(grouped.items(), key=lambda item: item[0])
+
+    async def _store_snapshot_and_token(self, token: Dict[str, Any], now: datetime) -> Tuple[str, str, Any, int]:
+        token_mint = token['token_mint']
+        pool_address = token.get('pool_address') or ''
+        pool_created_at = token.get('pool_created_at')
+
+        await self.repo.upsert_token_first_seen(
+            token_mint,
+            symbol=token.get('symbol'),
+            name=token.get('name'),
+            pool_address=pool_address,
+            launchpad=_first_present(token, 'launchpad', 'platform'),
+            pool_created_at=pool_created_at,
+            latest_state=token.get('type', 'discovered'),
+        )
+
+        snapshot_id = await self.repo.insert_token_metric_snapshot(
+            token_mint,
+            now.isoformat(),
+            _json_dumps(token),
+            **_snapshot_kwargs(token),
+        )
+
+        await self.repo.update_token_latest_snapshot(
+            token_mint,
+            latest_snapshot_id=snapshot_id,
+            latest_price_usd=token.get('price_usd'),
+            latest_price_sol=token.get('price_sol'),
+            latest_liquidity_usd=token.get('liquidity_usd'),
+            latest_sol_side_liquidity=token.get('sol_side_liquidity'),
+            latest_market_cap=token.get('market_cap'),
+            latest_type=token.get('type'),
+        )
+        return token_mint, pool_address, pool_created_at, snapshot_id
 
     async def run_once(self):
         now = datetime.now(timezone.utc)
@@ -74,144 +170,143 @@ class DiscoveryRunner:
         discovered_count = 0
         tracked_count = 0
         dedup_skipped = 0
+        total_fetched = 0
         mode = settings.get_provider_mode()
 
-        try:
-            trenches = await self.gmgn.fetch_trenches({})
-        except Exception as e:
+        strategy_groups = await self._load_enabled_strategy_groups()
+        if not strategy_groups:
             await self.repo.append_system_event(
-                'ERROR', 'DISCOVERY', 'GMGN fetch_trenches failed',
-                _json_dumps({'error': str(e)}), account_type='SIM'
+                'WARNING', 'DISCOVERY', 'No enabled strategy groups; skip trench discovery', '{}', account_type='SIM'
             )
-            await event_bus.publish('system', {
-                'level': 'ERROR', 'category': 'DISCOVERY', 'message': 'fetch_trenches failed'
-            })
+            self.processed_count = 0
+            self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
             return
 
-        for token in trenches:
-            token_mint = token.get('token_mint')
-            if not token_mint:
+        for t_seconds, groups_for_t in self._group_by_t_seconds(strategy_groups):
+            params = self._build_trench_params(t_seconds)
+            try:
+                trenches = await self.gmgn.fetch_trenches(params)
+            except Exception as e:
                 await self.repo.append_system_event(
-                    'WARNING', 'DISCOVERY', 'skip trench without token_mint',
-                    _json_dumps({'token': token}), account_type='SIM'
+                    'ERROR', 'DISCOVERY', 'GMGN fetch_trenches failed',
+                    _json_dumps({'t_seconds': t_seconds, 'params': params, 'error': str(e)}),
+                    account_type='SIM',
                 )
+                await event_bus.publish('system', {
+                    'level': 'ERROR', 'category': 'DISCOVERY', 'message': f'fetch_trenches failed for t={t_seconds}'
+                })
                 continue
 
-            source_mode = token.get('source_mode', 'MOCK')
+            total_fetched += len(trenches)
 
-            # 防止 online/live 模式误拿 mock mint 去打真实 GMGN 查询。
-            if mode != ProviderMode.MOCK and source_mode == 'MOCK' and token_mint in MOCK_MINTS:
-                continue
-
-            snapshot_id = token.get('snapshot_id')
-            pool_address = token.get('pool_address') or ''
-            pool_created_at = token.get('pool_created_at')
-
-            if snapshot_id is not None:
-                existing = await self.repo.get_discovery_event_by_snapshot_token_pool(
-                    snapshot_id, token_mint, pool_address
-                )
-                if existing:
-                    dedup_skipped += 1
+            for token in trenches:
+                token_mint = token.get('token_mint')
+                if not token_mint:
+                    await self.repo.append_system_event(
+                        'WARNING', 'DISCOVERY', 'skip trench without token_mint',
+                        _json_dumps({'token': token, 't_seconds': t_seconds}), account_type='SIM'
+                    )
                     continue
 
-            await self.repo.upsert_token_first_seen(
-                token_mint,
-                symbol=token.get('symbol'),
-                name=token.get('name'),
-                pool_address=pool_address,
-                launchpad=_first_present(token, 'launchpad', 'platform'),
-                pool_created_at=pool_created_at,
-                latest_state=token.get('type', 'discovered'),
-            )
+                source_mode = token.get('source_mode', 'MOCK')
+                if mode != ProviderMode.MOCK and source_mode == 'MOCK' and token_mint in MOCK_MINTS:
+                    continue
 
-            await self.repo.insert_token_metric_snapshot(
-                token_mint,
-                now.isoformat(),
-                _json_dumps(token),
-                **_snapshot_kwargs(token),
-            )
-
-            # tokens 表记录“最新快照”，不再只在初筛通过时才更新。
-            await self.repo.update_token_latest_snapshot(
-                token_mint,
-                latest_snapshot_id=snapshot_id,
-                latest_price_usd=token.get('price_usd'),
-                latest_price_sol=token.get('price_sol'),
-                latest_liquidity_usd=token.get('liquidity_usd'),
-                latest_sol_side_liquidity=token.get('sol_side_liquidity'),
-                latest_market_cap=token.get('market_cap'),
-                latest_type=token.get('type'),
-            )
-
-            discovery_id, created = await self.repo.create_discovery_event_idempotent(
-                token_mint=token_mint,
-                pool_address=pool_address,
-                pool_created_at=pool_created_at,
-                t_seconds=None,
-                snapshot_id=snapshot_id,
-            )
-            if not created:
-                dedup_skipped += 1
-                continue
-
-            passed_any_strategy = False
-            passed_strategy_ids: List[int] = []
-            failed_strategy_ids: List[int] = []
-
-            for sg in self.strategy_groups:
                 try:
-                    res = await run_initial_filter(token, sg, now)
-                    await self.repo.insert_strategy_match(
-                        token_mint,
-                        sg.get('id', 0),
-                        sg.get('config_version', 1),
-                        snapshot_id,
-                        'initial_filter',
-                        res.passed,
-                        _json_dumps([d.__dict__ for d in res.details]),
-                        _json_dumps(res.feature_vector),
-                        discovery_event_id=discovery_id,
-                    )
-                    if res.passed:
-                        passed_any_strategy = True
-                        passed_strategy_ids.append(sg.get('id', 0))
-                    else:
-                        failed_strategy_ids.append(sg.get('id', 0))
+                    token_mint, pool_address, pool_created_at, snapshot_id = await self._store_snapshot_and_token(token, now)
                 except Exception as e:
-                    failed_strategy_ids.append(sg.get('id', 0))
-                    logger.error(f"Initial filter exception for {token_mint} strategy {sg.get('id')}: {e}")
+                    logger.error(f"store discovery snapshot failed token={token_mint}: {e}")
                     await self.repo.append_system_event(
-                        'ERROR', 'DISCOVERY', 'initial filter exception',
-                        _json_dumps({'token': token_mint, 'strategy_id': sg.get('id'), 'error': str(e)}),
-                        account_type='SIM'
+                        'ERROR', 'DISCOVERY', 'store discovery snapshot failed',
+                        _json_dumps({'token': token_mint, 't_seconds': t_seconds, 'error': str(e)}),
+                        account_type='SIM',
                     )
+                    continue
 
-            if passed_any_strategy:
-                tracked_count += 1
-                await self.repo.update_discovery_event_status(discovery_id, 'INITIAL_PASSED')
-            else:
-                await self.repo.update_discovery_event_status(discovery_id, 'INITIAL_FAILED')
+                for sg in groups_for_t:
+                    sg_id = int(sg.get('id') or 0)
+                    config_version = int(sg.get('config_version') or 1)
+                    try:
+                        existing = await self.repo.get_discovery_event_by_snapshot_token_pool(
+                            snapshot_id, token_mint, pool_address, strategy_id=sg_id
+                        )
+                        if existing:
+                            dedup_skipped += 1
+                            continue
 
-            discovered_count += 1
-            await event_bus.publish('discovery', {
-                'token_mint': token_mint,
-                'discovery_event_id': discovery_id,
-                'status': 'INITIAL_PASSED' if passed_any_strategy else 'INITIAL_FAILED',
-                'passed_strategy_ids': passed_strategy_ids,
-                'failed_strategy_ids': failed_strategy_ids,
-            })
+                        res = await run_initial_filter(token, sg, now)
+                        next_second_check_at = (now + timedelta(seconds=60)).isoformat() if res.passed else None
+                        status = 'INITIAL_FILTER_PASSED' if res.passed else 'INITIAL_FILTER_FAILED'
 
-        self.processed_count = len(trenches)
+                        discovery_id, created = await self.repo.create_discovery_event_idempotent(
+                            token_mint=token_mint,
+                            pool_address=pool_address,
+                            pool_created_at=pool_created_at,
+                            t_seconds=t_seconds,
+                            snapshot_id=snapshot_id,
+                            strategy_id=sg_id,
+                            strategy_config_version=config_version,
+                            status=status,
+                            next_second_check_at=next_second_check_at,
+                            feature_vector_json=_json_dumps(res.feature_vector),
+                        )
+                        if not created:
+                            dedup_skipped += 1
+                            continue
+
+                        match_id = await self.repo.insert_strategy_match(
+                            token_mint,
+                            sg_id,
+                            config_version,
+                            snapshot_id,
+                            'initial_filter',
+                            res.passed,
+                            _json_dumps([d.__dict__ for d in res.details]),
+                            _json_dumps(res.feature_vector),
+                            discovery_event_id=discovery_id,
+                        )
+
+                        await self.repo.update_discovery_event_status(
+                            discovery_id,
+                            status,
+                            initial_match_id=match_id,
+                            next_second_check_at=next_second_check_at,
+                            feature_vector_json=_json_dumps(res.feature_vector),
+                            t_seconds=t_seconds,
+                        )
+
+                        discovered_count += 1
+                        if res.passed:
+                            tracked_count += 1
+
+                        await event_bus.publish('discovery', {
+                            'token_mint': token_mint,
+                            'discovery_event_id': discovery_id,
+                            'strategy_id': sg_id,
+                            't_seconds': t_seconds,
+                            'status': status,
+                            'passed_strategy_ids': [sg_id] if res.passed else [],
+                            'failed_strategy_ids': [] if res.passed else [sg_id],
+                        })
+                    except Exception as e:
+                        logger.error(f"Initial filter exception for {token_mint} strategy {sg_id}: {e}")
+                        await self.repo.append_system_event(
+                            'ERROR', 'DISCOVERY', 'initial filter exception',
+                            _json_dumps({'token': token_mint, 'strategy_id': sg_id, 't_seconds': t_seconds, 'error': str(e)}),
+                            account_type='SIM',
+                        )
+
+        self.processed_count = total_fetched
         self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
 
         await self.repo.append_system_event(
             'INFO', 'DISCOVERY', 'Discovery run complete',
             _json_dumps({
-                'count': len(trenches),
+                'count': total_fetched,
                 'discovered': discovered_count,
                 'tracked_initial_passed': tracked_count,
                 'dedup_skipped': dedup_skipped,
+                'enabled_strategy_groups': len(strategy_groups),
                 'elapsed_ms': self.last_elapsed_ms,
             }),
             account_type='SIM',
@@ -219,5 +314,5 @@ class DiscoveryRunner:
         await event_bus.publish('system', {
             'level': 'INFO',
             'category': 'DISCOVERY',
-            'message': f'Discovered {discovered_count} tokens, tracked {tracked_count}, skipped {dedup_skipped} duplicates',
+            'message': f'Discovered {discovered_count} strategy-token events, tracked {tracked_count}, skipped {dedup_skipped} duplicates',
         })

@@ -76,3 +76,41 @@ export const api = {
   backupDb: () => fetchJSON(`${BASE}/runtime/emergency/backup-db`, { method: 'POST' }),
   repairLegacyDb: () => fetchJSON(`${BASE}/runtime/emergency/repair-legacy-db`, { method: 'POST' }),
 }
+
+// Runtime-editable strategy groups used by Control Center. These endpoints avoid
+// relying on the older config router, and discovery/second-filter runners reload
+// the DB every poll so changes take effect on the next trench cycle.
+export type RuntimeStrategyPayload = {
+  name?: string;
+  x: number;
+  y: number;
+  t_seconds: number;
+  enabled?: boolean;
+  is_live?: boolean;
+  priority?: number;
+};
+
+export const runtimeStrategyApi = {
+  async list() {
+    return fetchJSON(`${BASE}/runtime/strategies`);
+  },
+  async create(payload: RuntimeStrategyPayload) {
+    return fetchJSON(`${BASE}/runtime/strategies`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  async update(id: number, payload: RuntimeStrategyPayload) {
+    return fetchJSON(`${BASE}/runtime/strategies/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  async remove(id: number) {
+    return fetchJSON(`${BASE}/runtime/strategies/${id}`, {
+      method: 'DELETE',
+    });
+  },
+};
