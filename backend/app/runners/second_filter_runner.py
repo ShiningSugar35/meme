@@ -134,6 +134,20 @@ class SecondFilterRunner:
         except Exception as e:
             logger.error(f"load enabled strategy groups for second filter failed: {e}")
             groups = self.strategy_groups or []
+
+        try:
+            runtime = await self.repo.get_all_runtime_settings()
+            user_mode = runtime.get('user_mode', 'IDLE')
+        except Exception:
+            user_mode = 'IDLE'
+
+        if user_mode == 'SIM_TEST':
+            groups = [g for g in groups if not bool(g.get('is_live'))]
+        elif user_mode == 'FORMAL_SIM_LIVE':
+            groups = list(groups)
+        else:
+            groups = []
+
         self.strategy_groups = groups
         return groups
 
@@ -289,14 +303,55 @@ class SecondFilterRunner:
                     )
 
             if passed_strategies:
-                await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_PASSED')
-                # 注意：这里故意不传 source_snapshot_id；executor 当前会先用 snapshot_id 做重复 discovery 检查，
-                # 传入初筛 snapshot_id 会把自己判成 duplicate，从而不买入/不建模拟仓。
-                await self.pipeline.handle_token_second_filter_result(
-                    token_mint,
-                    passed_strategies,
-                    snapshot_id=None,
-                    discovery_event_id=discovery_event_id,
-                )
+                # --- Top1 holder check (addr_type=0) before entry ---
+                try:
+                    holders = await self.gmgn.fetch_top_holders(token_mint, limit=20)
+                    top1_holders_passed: List[Dict[str, Any]] = []
+                    for sg in passed_strategies:
+                        x_val = float(sg.get("x", 0.2))
+                        top1_threshold = 0.048 + 0.01 * x_val
+                        top1_ok = True
+                        top1_rate = None
+                        for h in holders:
+                            if int(h.get("addr_type", 0)) == 0:
+                                top1_rate = _to_float(h.get("top1_holder_rate") or h.get("rate") or h.get("amount_percentage"))
+                                top1_ok = top1_rate is None or top1_rate < top1_threshold
+                                break
+                        await self.repo.insert_strategy_match(
+                            token_mint,
+                            sg.get('id', 0),
+                            sg.get('config_version', 1),
+                            recheck_snapshot_id,
+                            'top1_holder',
+                            top1_ok,
+                            _json_dumps({"top1_rate": top1_rate, "threshold": top1_threshold, "x": x_val}),
+                            _json_dumps({"top1_rate": top1_rate, "threshold": top1_threshold}),
+                            discovery_event_id=discovery_event_id,
+                        )
+                        if top1_ok:
+                            top1_holders_passed.append(sg)
+                        else:
+                            logger.info(f"top1_holder fail for {token_mint} sg={sg.get('id')}: " f"rate={top1_rate} threshold={top1_threshold}")
+                    passed_strategies = top1_holders_passed
+                except Exception as e:
+                    logger.error(f"top1 holder check failed for {token_mint}: {e}")
+                    await self.repo.append_system_event(
+                        'ERROR', 'SECOND_FILTER', 'top1 holder check exception',
+                        _json_dumps({'token': token_mint, 'discovery_event_id': discovery_event_id, 'error': str(e)}),
+                        account_type='SIM',
+                    )
+                    # Gracefully allow entry when top1 check fails (unblocked path)
+                    pass
+
+                if passed_strategies:
+                    await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_PASSED')
+                    await self.pipeline.handle_token_second_filter_result(
+                        token_mint,
+                        passed_strategies,
+                        snapshot_id=None,
+                        discovery_event_id=discovery_event_id,
+                    )
+                else:
+                    await self.repo.update_discovery_event_status(discovery_event_id, 'TOP1_HOLDER_FAILED')
             else:
                 await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_FAILED')

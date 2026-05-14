@@ -1,7 +1,9 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import settings
 from .logging_config import logger
@@ -28,6 +30,10 @@ from .api.routes_providers import router as providers_router
 from .api.routes_runtime import router as runtime_router
 
 
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting backend", env=settings.APP_ENV)
@@ -35,18 +41,16 @@ async def lifespan(app: FastAPI):
     repo = await Repositories.create()
     await repo.ensure_default_strategy_groups()
     app.state.repo = repo
+    app.state.session_started_at = _iso_now()
 
     providers = create_providers(repo)
     app.state.providers = providers
-    app.state.pause_new_entries = False
+    app.state.pause_new_entries = True
 
     subscriber = create_gmgn_subscriber()
     aggregator = PriceAggregator(repo, providers.gmgn, providers.jupiter, subscriber)
     app.state.price_aggregator = aggregator
 
-    # Shared execution pipeline for all live/sim entry and exit paths.
-    # Keeping a single app-scoped object prevents the risk runner from becoming
-    # a DB-only closer while the second-filter runner uses real executor wiring.
     trading_pipeline = TradingPipeline(repo, providers.gmgn, providers.jupiter, providers.jito, providers.rpc)
     app.state.trading_pipeline = trading_pipeline
 
@@ -54,7 +58,6 @@ async def lifespan(app: FastAPI):
     app.state.worker_manager = worker_mgr
 
     strategy_groups = await repo.list_strategy_groups()
-
     discovery = DiscoveryRunner(repo, providers.gmgn, strategy_groups)
     second = SecondFilterRunner(
         repo,
@@ -68,19 +71,17 @@ async def lifespan(app: FastAPI):
     risk = PositionRiskRunner(repo, providers.gmgn, trading_pipeline=trading_pipeline)
     kill = KillSwitchRunner(repo)
 
-    worker_mgr.register_worker('discovery', discovery.run_once, 60)
-    worker_mgr.register_worker('second_filter', second.run_once, 30)
-    worker_mgr.register_worker('price_monitor', price.run_once, 5)
-    # PositionRiskRunner has its own per-position next_check_at schedule.
-    # The worker interval must be <= the fastest risk interval (2s), otherwise
-    # >=1.5 SOL positions can never be checked every 2 seconds as intended.
+    worker_mgr.register_worker('discovery', discovery.run_once, int(settings.POLL_INTERVAL_SECONDS))
+    worker_mgr.register_worker('second_filter', second.run_once, max(1, min(30, int(settings.POLL_INTERVAL_SECONDS))))
+    worker_mgr.register_worker('price_monitor', price.run_once, int(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS))
     worker_mgr.register_worker('position_risk', risk.run_once, 1)
     worker_mgr.register_worker('kill_switch', kill.run_once, 30)
 
     await repo.set_runtime_setting('user_mode', 'IDLE', 'system')
     await repo.set_runtime_setting('workers_enabled', 'false', 'system')
     await repo.set_runtime_setting('live_entries_enabled', 'false', 'system')
-    # Workers start only when user clicks 模拟交易 or 实盘交易 button.
+    await repo.set_runtime_setting('session_started_at', app.state.session_started_at, 'system')
+    await repo.append_system_event('INFO', 'RUNTIME', 'Backend session started', app.state.session_started_at, account_type='SIM')
 
     try:
         yield
@@ -116,9 +117,8 @@ app.include_router(runtime_router)
 
 @app.get("/health")
 async def health():
-    from datetime import datetime, timezone
     return JSONResponse({
         "status": "ok",
-        "version": "1.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": "1.1.0-control-center-refactor",
+        "timestamp": _iso_now(),
     })

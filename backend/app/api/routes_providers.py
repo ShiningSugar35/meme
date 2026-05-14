@@ -58,13 +58,15 @@ def _provider_health_rows() -> Dict[str, Dict[str, Any]]:
     mode_text = _mode_value()
 
     gmgn_keys = settings.get_gmgn_api_keys()
+    gmgn_client_ids = settings.get_gmgn_client_ids() if hasattr(settings, "get_gmgn_client_ids") else []
+    gmgn_credentials = settings.get_gmgn_credentials() if hasattr(settings, "get_gmgn_credentials") else []
     gmgn_base = (settings.GMGN_API_BASE_URL or "").strip()
     gmgn_ok = bool(gmgn_base)
-    gmgn_summary = f"mode={mode_text}; base={gmgn_base or 'missing'}; keys={len(gmgn_keys)}"
+    gmgn_summary = f"mode={mode_text}; base={gmgn_base or 'missing'}; keys={len(gmgn_keys)}; client_ids={len(gmgn_client_ids)}"
     gmgn_error = None
-    if mode == ProviderMode.LIVE and not gmgn_keys:
+    if mode == ProviderMode.LIVE and not (gmgn_keys or gmgn_client_ids or gmgn_credentials):
         gmgn_ok = False
-        gmgn_error = "GMGN_API_KEY / GMGN_API_KEYS is required in LIVE mode"
+        gmgn_error = "GMGN_API_KEY_N or GMGN_CLIENT_ID_N/GMGN_PUBLIC_KEY_N is required in LIVE mode"
     elif not gmgn_base:
         gmgn_error = "GMGN_API_BASE_URL is missing"
 
@@ -118,14 +120,18 @@ async def test_gmgn():
     """Lightweight GMGN config test. This does not place trades."""
     mode = settings.get_provider_mode()
     keys = settings.get_gmgn_api_keys()
+    client_ids = settings.get_gmgn_client_ids() if hasattr(settings, "get_gmgn_client_ids") else []
+    credentials = settings.get_gmgn_credentials() if hasattr(settings, "get_gmgn_credentials") else []
     base = (settings.GMGN_API_BASE_URL or "").strip()
-    ok = bool(base) and (mode != ProviderMode.LIVE or bool(keys))
+    ok = bool(base) and (mode != ProviderMode.LIVE or bool(keys or client_ids or credentials))
     return _json_response(
         {
             "ok": ok,
             "mode": _mode_value(),
             "base_url": base,
             "api_key_count": len(keys),
+            "client_id_count": len(client_ids),
+            "credential_count": len(credentials),
             "message": "GMGN configuration looks usable" if ok else "GMGN configuration is incomplete",
         },
         status_code=200 if ok else 400,

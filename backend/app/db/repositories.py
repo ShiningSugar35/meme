@@ -1257,7 +1257,8 @@ class Repositories:
         self,
         position_id: int,
         remaining_value_sol: Optional[float],
-        interval_seconds: int,
+        remaining_value_usd: Optional[float] = None,
+        interval_seconds: int = 0,
         last_risk_check_at: Optional[str] = None,
         next_risk_check_at: Optional[str] = None,
     ):
@@ -1270,6 +1271,7 @@ class Repositories:
                 """
                 UPDATE positions
                 SET remaining_value_sol = COALESCE(?, remaining_value_sol),
+                    remaining_value_usd = COALESCE(?, remaining_value_usd),
                     last_risk_check_at = ?,
                     next_risk_check_at = ?,
                     risk_check_interval_seconds = ?,
@@ -1278,6 +1280,7 @@ class Repositories:
                 """,
                 (
                     remaining_value_sol,
+                    remaining_value_usd,
                     last_at,
                     next_at,
                     interval_seconds,

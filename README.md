@@ -25,7 +25,7 @@ pip install -r requirements.txt
 
 ### 2. 配置文件
 
-复制 `.env.template` 或直接创建 `.env`，参考以下结构：
+参考以下结构：
 
 ```
 # Environment Configuration for Solana Meme Trading Bot
@@ -52,53 +52,68 @@ GMGN_TOKEN_INFO_PATH=/v1/token/info
 GMGN_TOKEN_SECURITY_PATH=/v1/token/security
 GMGN_TOKEN_POOL_INFO_PATH=/v1/token/pool_info
 GMGN_KLINE_PATH=/v1/market/token_kline
+GMGN_TOKEN_HOLDERS_PATH=/v1/market/token_top_holders
 
+# GMGN 认证：不同 OpenAPI 部署可能要求 api_key 或 client_id。
+# 系统会同时支持 Header + query/body 传参，GMGN_CLIENT_ID_N 可不填；未填时默认使用 GMGN_PUBLIC_KEY_N 作为 client_id。
 GMGN_API_KEY_1=
 GMGN_PUBLIC_KEY_1=
+GMGN_CLIENT_ID_1=
 GMGN_PRIVATE_KEY_1=
 
 GMGN_API_KEY_2=
 GMGN_PUBLIC_KEY_2=
+GMGN_CLIENT_ID_2=
 GMGN_PRIVATE_KEY_2=
 
 GMGN_API_KEY_3=
 GMGN_PUBLIC_KEY_3=
+GMGN_CLIENT_ID_3=
 GMGN_PRIVATE_KEY_3=
 
 GMGN_API_KEY_4=
 GMGN_PUBLIC_KEY_4=
+GMGN_CLIENT_ID_4=
 GMGN_PRIVATE_KEY_4=
 
 GMGN_API_KEY_5=
 GMGN_PUBLIC_KEY_5=
+GMGN_CLIENT_ID_5=
 GMGN_PRIVATE_KEY_5=
 
 GMGN_API_KEY_6=
 GMGN_PUBLIC_KEY_6=
+GMGN_CLIENT_ID_6=
 GMGN_PRIVATE_KEY_6=
 
 GMGN_API_KEY_7=
 GMGN_PUBLIC_KEY_7=
+GMGN_CLIENT_ID_7=
 GMGN_PRIVATE_KEY_7=
 
 GMGN_API_KEY_8=
 GMGN_PUBLIC_KEY_8=
+GMGN_CLIENT_ID_8=
 GMGN_PRIVATE_KEY_8=
 
 GMGN_API_KEY_9=
 GMGN_PUBLIC_KEY_9=
+GMGN_CLIENT_ID_9=
 GMGN_PRIVATE_KEY_9=
 
 GMGN_API_KEY_10=
 GMGN_PUBLIC_KEY_10=
+GMGN_CLIENT_ID_10=
 GMGN_PRIVATE_KEY_10=
 
 GMGN_API_KEY_11=
 GMGN_PUBLIC_KEY_11=
+GMGN_CLIENT_ID_11=
 GMGN_PRIVATE_KEY_11=
 
 GMGN_API_KEY_12=
 GMGN_PUBLIC_KEY_12=
+GMGN_CLIENT_ID_12=
 GMGN_PRIVATE_KEY_12=
 
 # Jupiter API Configuration (Swap Provider)
@@ -295,10 +310,12 @@ K-line 条件通过后，最后才调用 Top Holders，校验 `addr_type=0` 的 
 `sizing.py` 使用统一 USD 口径计算入场本金：
 
 ```text
-entry_usd = min(liquidity_usd * ENTRY_SIZE_LIQUIDITY_PCT, ENTRY_MAX_USD)
+SIM entry_usd  = min(liquidity_usd * ENTRY_SIZE_LIQUIDITY_PCT, ENTRY_MAX_USD)
+LIVE entry_usd = min(liquidity_usd * ENTRY_SIZE_LIQUIDITY_PCT, ENTRY_MAX_USD, wallet_balance_usd)
+若 LIVE entry_usd < 10，则跳过本轮实盘买入。
 ```
 
-执行层根据 `price_usd / price_sol` 或价格聚合器推导 SOL/USD，将 USD 目标仓位换算为 SOL 数量。模拟模式只记录虚拟成交；实盘模式必须同时通过 Provider Mode、安全门、钱包、Jito、滑点和重报价检查。
+执行层根据 `price_usd / price_sol` 或价格聚合器推导 SOL/USD，将 USD 目标仓位换算为 SOL 数量。模拟模式只记录虚拟成交；实盘模式会先读取钱包 SOL 余额并换算为 USD，确保买入额不超过当前余额；若计算结果小于 10 美元，不再发起报价和交易，直到余额/池子规模恢复到阈值以上。
 
 ### 4. 持仓价格监控
 
@@ -348,6 +365,8 @@ entry_usd = min(liquidity_usd * ENTRY_SIZE_LIQUIDITY_PCT, ENTRY_MAX_USD)
 - `GET /v1/token/pool_info`：池子价格、流动性、open/migrated 状态。
 - `GET /v1/market/token_kline`：1m/5m K-line，二筛和动态止损使用。
 - `GET /v1/market/token_top_holders`：二筛末端与持仓期间低频 top1 holder 风控。
+
+若出现 `AUTH_INVALID: missing api key or client_id`，优先检查 `.env` 中 `GMGN_API_KEY_N` 是否有值；若 GMGN 控制台提供的是 client id，则填入 `GMGN_CLIENT_ID_N`。本版本会同时通过 `x-api-key`、`x-route-key`、`Authorization: Bearer`、`x-client-id`、`client-id` 以及 GET query / POST body 的 `api_key/client_id` 传递认证信息，以兼容不同 GMGN OpenAPI 网关。
 
 ### Jupiter / Jito / RPC
 

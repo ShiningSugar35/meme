@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
-from typing import Dict, Optional, Callable, Awaitable
+from typing import Awaitable, Callable, Dict
+
 from ..logging_config import logger
 
 
@@ -16,11 +17,17 @@ class WorkerManager:
         self._workers[name] = {
             'name': name,
             'target': target,
-            'interval_seconds': interval_seconds,
+            'interval_seconds': max(float(interval_seconds), 0.1),
             'last_run_at': None,
             'last_error': None,
             'processed_count': 0,
         }
+
+    def update_interval(self, name: str, interval_seconds: float):
+        if name not in self._workers:
+            return False
+        self._workers[name]['interval_seconds'] = max(float(interval_seconds), 0.1)
+        return True
 
     async def start_worker(self, name: str):
         if name not in self._workers:
@@ -92,7 +99,6 @@ class WorkerManager:
     async def _run_loop(self, name: str):
         worker = self._workers[name]
         target = worker['target']
-        interval = worker['interval_seconds']
 
         while self._running.get(name):
             try:
@@ -115,4 +121,6 @@ class WorkerManager:
                         'message': f'Worker error: {name} - {e}'
                     })
 
-            await asyncio.sleep(interval)
+            # Read the interval every loop so Control Center parameter changes take
+            # effect without restarting the backend process.
+            await asyncio.sleep(max(float(worker.get('interval_seconds', 1)), 0.1))

@@ -16,15 +16,6 @@ from ..config import settings
 from ..logging_config import logger
 
 
-RISK_INTERVALS = [
-    (1.5, 2),
-    (1.0, 4),
-    (0.5, 8),
-    (0.25, 16),
-    (0.0, 32),
-]
-
-
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -66,12 +57,8 @@ def _account_type(position: Dict[str, Any]) -> str:
     return position.get("account_type") or ("LIVE" if position.get("is_live") else "SIM")
 
 
-def risk_scan_interval_seconds(remaining_value_sol: float) -> int:
-    value = max(float(remaining_value_sol or 0.0), 0.0)
-    for threshold, interval in RISK_INTERVALS:
-        if value >= threshold:
-            return interval
-    return 32
+def risk_scan_interval_seconds(remaining_value_usd: float) -> int:
+    return int(settings.get_risk_scan_interval_seconds(float(remaining_value_usd or 0.0)))
 
 
 def _extract_price_sol(latest: Dict[str, Any], position: Optional[Dict[str, Any]] = None) -> Optional[float]:
@@ -130,6 +117,21 @@ def _remaining_value_sol(position: Dict[str, Any], current_price_sol: Optional[f
     entry_price_sol = _to_float(position.get("entry_price_sol"))
     if entry_price_sol and entry_price_sol > 0:
         return max(remaining_token * entry_price_sol, 0.0)
+
+    return fallback
+
+
+def _remaining_value_usd(position: Dict[str, Any], current_price_usd: Optional[float]) -> float:
+    remaining_value_usd = _to_float(position.get("remaining_value_usd"))
+    fallback = remaining_value_usd if remaining_value_usd is not None and remaining_value_usd >= 0 else 0.0
+
+    remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
+    if current_price_usd and current_price_usd > 0:
+        return max(remaining_token * current_price_usd, 0.0)
+
+    entry_price_usd = _to_float(position.get("entry_price_usd"))
+    if entry_price_usd and entry_price_usd > 0:
+        return max(remaining_token * entry_price_usd, 0.0)
 
     return fallback
 
@@ -207,14 +209,16 @@ class PositionRiskRunner:
         price_sol = _extract_price_sol(latest, position)
         price_usd = _extract_price_usd(latest)
         remaining_value_sol = _remaining_value_sol(position, price_sol)
+        remaining_value_usd = _remaining_value_usd(position, price_usd)
 
-        interval = risk_scan_interval_seconds(remaining_value_sol)
+        interval = risk_scan_interval_seconds(remaining_value_usd)
         next_check_at = now + timedelta(seconds=interval)
 
         if hasattr(self.repo, "update_position_risk_schedule"):
             await self.repo.update_position_risk_schedule(
                 position_id=pos_id,
                 remaining_value_sol=remaining_value_sol,
+                remaining_value_usd=remaining_value_usd,
                 interval_seconds=interval,
                 last_risk_check_at=_iso(now),
                 next_risk_check_at=_iso(next_check_at),
@@ -251,6 +255,7 @@ class PositionRiskRunner:
 
         position_for_decision = dict(position)
         position_for_decision["remaining_value_sol"] = remaining_value_sol
+        position_for_decision["remaining_value_usd"] = remaining_value_usd
         if token_info and token_info.get("latest_type"):
             position_for_decision["latest_token_type"] = token_info["latest_type"]
 
@@ -258,6 +263,7 @@ class PositionRiskRunner:
             "price_sol": price_sol,
             "price_usd": price_usd,
             "remaining_value_sol": remaining_value_sol,
+            "remaining_value_usd": remaining_value_usd,
         }
 
         # Risk recheck first: if security/risk thresholds degrade, full exit immediately.
@@ -280,7 +286,7 @@ class PositionRiskRunner:
             rolling,
             latest_snapshot,
             now=now,
-            dust_force_exit_sol=float(getattr(settings, "DUST_FORCE_EXIT_SOL", 0.125)),
+            dust_force_exit_sol=float(getattr(settings, "DUST_FORCE_EXIT_SOL", 0.15)),
         )
 
         if not decision.should_exit:
@@ -496,7 +502,7 @@ class PositionRiskRunner:
         is_live = bool(position.get("is_live"))
 
         remaining_value_sol = _remaining_value_sol(position, current_price_sol)
-        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_SOL", 0.125))
+        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_SOL", 0.15))
         if remaining_value_sol < dust_threshold:
             exit_pct = 1.0
             reason_code = "DUST_FORCE_EXIT"

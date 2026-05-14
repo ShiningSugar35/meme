@@ -12,34 +12,14 @@ from ..strategy.filters import run_initial_filter
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
 
-
 SNAPSHOT_COLUMNS = [
-    'type',
-    'liquidity_usd',
-    'sol_side_liquidity',
-    'volume_usd',
-    'market_cap',
-    'price_usd',
-    'price_sol',
-    'top_10_holder_rate',
-    'top1_holder_rate',
-    'renounced_mint',
-    'renounced_freeze_account',
-    'max_rug_ratio',
-    'max_insider_ratio',
-    'max_entrapment_ratio',
-    'is_wash_trading',
-    'rat_trader_amount_rate',
-    'suspected_insider_hold_rate',
-    'max_bundler_rate',
-    'fresh_wallet_rate',
-    'sell_tax',
-    'has_social',
-    'creator_token_status',
-    'dev_team_hold_rate',
-    'dev_token_burn_ratio',
-    'sniper_count',
-    'source_mode',
+    'type', 'liquidity_usd', 'sol_side_liquidity', 'volume_usd', 'market_cap',
+    'price_usd', 'price_sol', 'top_10_holder_rate', 'top1_holder_rate',
+    'renounced_mint', 'renounced_freeze_account', 'max_rug_ratio',
+    'max_insider_ratio', 'max_entrapment_ratio', 'is_wash_trading',
+    'rat_trader_amount_rate', 'suspected_insider_hold_rate', 'max_bundler_rate',
+    'fresh_wallet_rate', 'sell_tax', 'has_social', 'creator_token_status',
+    'dev_team_hold_rate', 'dev_token_burn_ratio', 'sniper_count', 'source_mode',
 ]
 
 
@@ -78,8 +58,6 @@ class DiscoveryRunner:
     def __init__(self, repo: Repositories, gmgn: MarketDataProvider, strategy_groups: List[dict]):
         self.repo = repo
         self.gmgn = gmgn
-        # Kept as an in-memory cache only. The runner refreshes from DB every run
-        # so front-end strategy add/edit/delete takes effect on the next trench poll.
         self.strategy_groups = strategy_groups or []
         self.processed_count = 0
         self.last_elapsed_ms = 0
@@ -90,28 +68,39 @@ class DiscoveryRunner:
         except Exception as e:
             logger.error(f"load enabled strategy groups failed: {e}")
             groups = self.strategy_groups or []
+
+        try:
+            runtime = await self.repo.get_all_runtime_settings()
+            user_mode = runtime.get('user_mode', 'IDLE')
+        except Exception:
+            user_mode = 'IDLE'
+
+        if user_mode == 'SIM_TEST':
+            groups = [g for g in groups if not bool(g.get('is_live'))]
+        elif user_mode == 'FORMAL_SIM_LIVE':
+            groups = list(groups)
+        else:
+            groups = []
+
         self.strategy_groups = groups
         return groups
 
     def _build_trench_params(self, t_seconds: int) -> Dict[str, Any]:
         """Build provider query params from runtime strategy timing.
 
-        ``min_created`` and ``max_created`` are provider-side discovery-window
-        params. They are not filter-stage features and therefore never appear in
-        initial/second-filter failure statistics.
+        No ``limit`` is sent.  The GMGN trenches API decides how many rows are
+        returned, matching the requirement that GMGN_TRENCHES_LIMIT is no longer
+        used anywhere in the system.
         """
         params: Dict[str, Any] = {
+            'chain': 'sol',
             'type': 'new_creation',
             'min_created': t_seconds,
             'max_created': t_seconds + 60,
-            'limit': _as_int(getattr(settings, 'GMGN_TRENCHES_LIMIT', 80), 80),
         }
 
         types = _csv_list(getattr(settings, 'GMGN_TRENCHES_TYPES', ''))
         if types:
-            # Current strategy uses new_creation. If env has a single value, keep
-            # the official/simple `type` shape; if several are configured, keep
-            # all values available to providers that accept array-like filters.
             params['type'] = types[0]
             if len(types) > 1:
                 params['types'] = types
@@ -176,7 +165,7 @@ class DiscoveryRunner:
         strategy_groups = await self._load_enabled_strategy_groups()
         if not strategy_groups:
             await self.repo.append_system_event(
-                'WARNING', 'DISCOVERY', 'No enabled strategy groups; skip trench discovery', '{}', account_type='SIM'
+                'WARNING', 'DISCOVERY', 'No enabled strategy groups for current runtime mode; skip trench discovery', '{}', account_type='SIM'
             )
             self.processed_count = 0
             self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)

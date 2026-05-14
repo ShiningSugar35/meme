@@ -278,6 +278,36 @@ class TradingPipeline:
             return await self.repo.get_open_live_position_by_token_and_cycle(token_mint, discovery_event_id)
         return await self.repo.get_open_live_position_by_token(token_mint)
 
+    async def _get_wallet_balance_usd(self, snapshot: Dict[str, Any], latest: Dict[str, Any]) -> Optional[float]:
+        wallet = settings.WALLET_PUBLIC_KEY
+        if not wallet:
+            return None
+        try:
+            balance = await self.rpc.get_balance(wallet)
+        except Exception as e:
+            await self.repo.append_system_event(
+                "ERROR",
+                "TRADE",
+                "Live buy blocked: wallet balance fetch failed",
+                self._safe_json({"error": str(e)}),
+                account_type="LIVE",
+            )
+            return None
+        sol_balance = self._to_float(balance.get("sol_balance") or balance.get("balance_sol") or balance.get("balance"), None)
+        if sol_balance is None or sol_balance <= 0:
+            return 0.0
+        sol_usd = _derive_sol_usd_price(snapshot, latest)
+        if sol_usd is None or sol_usd <= 0:
+            await self.repo.append_system_event(
+                "WARN",
+                "TRADE",
+                "Live buy blocked: cannot derive SOL/USD for wallet cap",
+                self._safe_json({"wallet_balance": balance, "latest": latest}),
+                account_type="LIVE",
+            )
+            return None
+        return max(sol_balance * sol_usd, 0.0)
+
     # ------------------------------------------------------------------
     # Entry orchestration
     # ------------------------------------------------------------------
@@ -340,9 +370,7 @@ class TradingPipeline:
                 )
                 return {"status": "SKIPPED_EXISTING_LIVE_POSITION", "created": created, "position_id": existing.get("id")}
 
-            # One live position per discovery cycle. If multiple live strategies
-            # pass, use the highest-priority one.
-            live_strategies.sort(key=lambda s: int(s.get("priority", 100)))
+            # Only one live strategy is allowed by Control Center validation.
             res = await self._execute_buy(token_mint, live_strategies[0], snapshot_id, discovery_event_id)
             if res:
                 created.append(res)
@@ -379,10 +407,33 @@ class TradingPipeline:
             return None
 
         token_decimals = self._extract_token_decimals(token_mint, latest=latest, strategy=strategy)
-        # In simulation, there is no Jupiter outAmount, so estimate token amount
-        # from USD price first, then SOL price as fallback.
-        token_amount = (size_usd / price_usd) if price_usd > 0 else (size_sol / price_sol if price_sol > 0 else 0.0)
-        remaining_value_usd = token_amount * price_usd if token_amount > 0 and price_usd > 0 else size_usd
+
+        # Try Jupiter quote for better token-amount estimation
+        token_amount = 0.0
+        jupiter_price_impact = None
+        try:
+            amount_lamports = int(size_sol * LAMPORTS_PER_SOL)
+            quote = await self._get_quote(
+                WRAPPED_SOL_MINT,
+                token_mint,
+                amount_lamports,
+                int(strategy.get("buy_slippage_cap_bps", getattr(settings, "BUY_SLIPPAGE_CAP_BPS", 1500))),
+                token_mint=token_mint,
+                strategy=strategy,
+                context_id=discovery_event_id,
+            )
+            if quote and not quote.get("error"):
+                token_decimals = self._extract_token_decimals(token_mint, quote=quote, latest=latest, strategy=strategy)
+                out_raw = self._to_float(quote.get("outAmount"), 0.0) or 0.0
+                token_amount = self._raw_to_human_amount(out_raw, token_decimals)
+                jupiter_price_impact = self._price_impact_fraction(quote)
+        except Exception:
+            token_amount = (size_usd / price_usd) if price_usd and price_usd > 0 else (size_sol / price_sol if price_sol and price_sol > 0 else 0.0)
+
+        if token_amount <= 0:
+            token_amount = (size_usd / price_usd) if price_usd and price_usd > 0 else (size_sol / price_sol if price_sol and price_sol > 0 else 0.0)
+
+        remaining_value_usd = token_amount * price_usd if token_amount > 0 and price_usd and price_usd > 0 else size_usd
 
         opened_at = datetime.now(timezone.utc).isoformat()
         idempotency_key = self._build_idempotency_key(
@@ -406,6 +457,7 @@ class TradingPipeline:
             executed_token_amount=token_amount,
             price_usd=price_usd,
             price_sol=price_sol,
+            price_impact_pct=(jupiter_price_impact * 100.0) if jupiter_price_impact else None,
         )
 
         pos_id = await self.repo.create_position(
@@ -440,7 +492,7 @@ class TradingPipeline:
             token_mint,
             strategy.get("id", 0),
             False,
-            self._safe_json({"entry_price_sol": price_sol, "entry_price_usd": price_usd, "size_sol": size_sol, "size_usd": size_usd}),
+            self._safe_json({"entry_price_sol": price_sol, "entry_price_usd": price_usd, "size_sol": size_sol, "size_usd": size_usd, "jupiter_impact": jupiter_price_impact}),
             self._safe_json(strategy),
             position_id=pos_id,
             discovery_event_id=discovery_event_id,
@@ -495,17 +547,29 @@ class TradingPipeline:
         liquidity_usd = self._get_liquidity_usd(latest)
         price_usd = self._get_price_usd(latest)
         price_sol = self._get_price_sol(latest)
-        size_usd = await compute_entry_size_usd(liquidity_usd)
+        wallet_balance_usd = await self._get_wallet_balance_usd(latest, latest)
+        size_usd = await compute_entry_size_usd(
+            liquidity_usd,
+            wallet_balance_usd=wallet_balance_usd,
+            is_live=True,
+        )
         size_sol = _usd_to_sol_amount(size_usd, latest, latest)
         if size_usd <= 0 or size_sol <= 0:
             await self.repo.append_system_event(
                 "WARN",
                 "TRADE",
-                "Buy skipped: invalid computed size",
-                self._safe_json({"token": token_mint, "liquidity_usd": liquidity_usd, "size_usd": size_usd, "size_sol": size_sol}),
+                "Buy skipped: live computed size is below minimum or invalid",
+                self._safe_json({
+                    "token": token_mint,
+                    "liquidity_usd": liquidity_usd,
+                    "wallet_balance_usd": wallet_balance_usd,
+                    "size_usd": size_usd,
+                    "size_sol": size_sol,
+                    "live_min_entry_usd": 10,
+                }),
                 account_type="LIVE",
             )
-            return {"ok": False, "error": "INVALID_ENTRY_SIZE"}
+            return {"ok": False, "error": "INVALID_ENTRY_SIZE_OR_BELOW_MIN"}
 
         buy_cap = int(strategy.get("buy_slippage_cap_bps", getattr(settings, "BUY_SLIPPAGE_CAP_BPS", BUY_SLIPPAGE_CAP_BPS)))
         slippage_bps = await compute_slippage_bps(

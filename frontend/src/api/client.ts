@@ -1,116 +1,124 @@
-const BASE = '/api'
+const viteEnv = (import.meta as unknown as { env?: { VITE_API_BASE?: string } }).env;
+export const API_BASE = (viteEnv?.VITE_API_BASE ?? '').replace(/\/$/, '');
 
-async function fetchJSON(url: string, init?: RequestInit) {
-  const r = await fetch(url, init)
-  return r.json()
+async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+    ...options,
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    const message = data?.error || data?.detail || response.statusText;
+    throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+  }
+  return data as T;
 }
 
-export const api = {
-  health: () => fetchJSON('/health'),
+export type RuntimeMode = 'IDLE' | 'SIM_TEST' | 'FORMAL_SIM_LIVE';
 
-  // Runtime
-  getRuntimeStatus: () => fetchJSON(`${BASE}/runtime/status`),
-  switchMode: (userMode: string) => fetchJSON(`${BASE}/runtime/mode`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_mode: userMode })
-  }),
-  startWorkers: () => fetchJSON(`${BASE}/runtime/workers/start`, { method: 'POST' }),
-  stopWorkers: () => fetchJSON(`${BASE}/runtime/workers/stop`, { method: 'POST' }),
-  getWorkersStatus: () => fetchJSON(`${BASE}/runtime/workers/status`),
-
-  // Portfolio
-  getPortfolioTable: (accountType: string) => fetchJSON(`${BASE}/runtime/portfolio/table?account_type=${accountType}`),
-  getPositionsSummary: () => fetchJSON(`${BASE}/runtime/positions/summary`),
-
-  // Config / Strategies
-  getStrategies: () => fetchJSON(`${BASE}/config/strategies`),
-  createStrategy: (body: object) => fetchJSON(`${BASE}/config/strategies`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-  }),
-  updateStrategy: (id: number, body: object) => fetchJSON(`${BASE}/config/strategies/${id}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-  }),
-  applyConfig: () => fetchJSON(`${BASE}/config/apply`, { method: 'POST' }),
-
-  // Tokens
-  getTokens: () => fetchJSON(`${BASE}/tokens`),
-
-  // Positions
-  getPositions: (accountType?: string) => {
-    const q = accountType ? `?account_type=${accountType}` : ''
-    return fetchJSON(`${BASE}/positions${q}`)
-  },
-  manualClose: (id: number) => fetchJSON(`${BASE}/positions/${id}/manual-close`, { method: 'POST' }),
-
-  // Trades
-  getTrades: (accountType?: string) => {
-    const q = accountType ? `?account_type=${accountType}` : ''
-    return fetchJSON(`${BASE}/trades${q}`)
-  },
-  getProviderRequests: () => fetchJSON(`${BASE}/trades/provider-requests`),
-
-  // Logs
-  getRecentLogs: (level?: string, category?: string) => {
-    const params = new URLSearchParams()
-    if (level) params.set('level', level)
-    if (category) params.set('category', category)
-    const q = params.toString() ? `?${params.toString()}` : ''
-    return fetchJSON(`${BASE}/logs/recent${q}`)
-  },
-  exportDiagnostic: () => fetchJSON(`${BASE}/logs/export-diagnostic`, { method: 'POST' }),
-
-  // Risk
-  getKillSwitch: () => fetchJSON(`${BASE}/risk/kill-switch`),
-
-  // Providers
-  getProviderHealth: () => fetchJSON(`${BASE}/providers/health`),
-
-  // Emergency
-  toggleKill: (enable: boolean) => fetchJSON(`${BASE}/runtime/emergency/kill-switch`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enable })
-  }),
-  stopLiveMode: () => fetchJSON(`${BASE}/runtime/emergency/stop-live`, { method: 'POST' }),
-  resumeLiveMode: () => fetchJSON(`${BASE}/runtime/emergency/resume-live`, { method: 'POST' }),
-  exportLosing: () => fetchJSON(`${BASE}/runtime/emergency/export-losing`, { method: 'POST' }),
-
-  toggleKillSwitch: (enable: boolean) => fetchJSON(`${BASE}/runtime/emergency/kill-switch?enable=${enable}`, { method: 'POST' }),
-  backupDb: () => fetchJSON(`${BASE}/runtime/emergency/backup-db`, { method: 'POST' }),
-  repairLegacyDb: () => fetchJSON(`${BASE}/runtime/emergency/repair-legacy-db`, { method: 'POST' }),
+export interface RuntimeStatus {
+  user_mode: RuntimeMode;
+  workers_enabled: boolean;
+  live_entries_enabled: boolean;
+  provider_mode: string;
+  pause_new_entries: boolean;
+  session_started_at?: string;
+  live_open_count: number;
+  has_live_positions: boolean;
+  can_live_trade: boolean;
+  live_readiness?: Record<string, unknown>;
 }
 
-// Runtime-editable strategy groups used by Control Center. These endpoints avoid
-// relying on the older config router, and discovery/second-filter runners reload
-// the DB every poll so changes take effect on the next trench cycle.
-export type RuntimeStrategyPayload = {
-  name?: string;
+export interface PositionSummary {
+  total_open?: number;
+  live_open?: number;
+  sim_open?: number;
+  total_pnl_usd?: number;
+  live_pnl_usd?: number;
+  [key: string]: unknown;
+}
+
+export interface StrategyGroup {
+  id: number;
+  name: string;
+  enabled: number | boolean;
+  is_live: number | boolean;
+  config_version?: number;
   x: number;
   y: number;
   t_seconds: number;
-  enabled?: boolean;
-  is_live?: boolean;
-  priority?: number;
-};
+  raw_config_json?: string;
+  created_at?: string;
+  updated_at?: string;
+}
 
-export const runtimeStrategyApi = {
-  async list() {
-    return fetchJSON(`${BASE}/runtime/strategies`);
-  },
-  async create(payload: RuntimeStrategyPayload) {
-    return fetchJSON(`${BASE}/runtime/strategies`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-  },
-  async update(id: number, payload: RuntimeStrategyPayload) {
-    return fetchJSON(`${BASE}/runtime/strategies/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-  },
-  async remove(id: number) {
-    return fetchJSON(`${BASE}/runtime/strategies/${id}`, {
-      method: 'DELETE',
-    });
-  },
+export interface StrategyPayload {
+  name?: string;
+  enabled: boolean;
+  is_live: boolean;
+  x: number;
+  y: number;
+  t_seconds: number;
+}
+
+export interface TradingParamSpec {
+  key: string;
+  label: string;
+  description: string;
+  value_type: 'int' | 'float';
+  default: number;
+  min_value?: number | null;
+}
+
+export interface TradingParamsResponse {
+  specs: TradingParamSpec[];
+  values: Record<string, number>;
+}
+
+export interface PortfolioRow {
+  id: number;
+  status: string;
+  ratio?: number;
+  remaining?: number;
+  remaining_value_usd?: number;
+  pnl_pct?: number;
+  mint_short?: string;
+  token_mint?: string;
+  account_type?: 'LIVE' | 'SIM';
+  strategy_id?: number;
+  strategy_name?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+export const api = {
+  getRuntimeStatus: () => apiFetch<RuntimeStatus>('/api/runtime/status'),
+  switchRuntimeMode: (user_mode: RuntimeMode) => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/mode', {
+    method: 'POST',
+    body: JSON.stringify({ user_mode }),
+  }),
+  getPositionsSummary: () => apiFetch<PositionSummary>('/api/runtime/positions/summary'),
+  getStrategies: () => apiFetch<{ strategies: StrategyGroup[] }>('/api/runtime/strategies'),
+  createStrategy: (payload: StrategyPayload) => apiFetch<{ strategy: StrategyGroup }>('/api/runtime/strategies', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+  updateStrategy: (id: number, payload: StrategyPayload) => apiFetch<{ strategy: StrategyGroup }>(`/api/runtime/strategies/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  }),
+  deleteStrategy: (id: number) => apiFetch<{ ok: boolean }>(`/api/runtime/strategies/${id}`, { method: 'DELETE' }),
+  getTradingParams: () => apiFetch<TradingParamsResponse>('/api/runtime/trading-params'),
+  updateTradingParams: (values: Record<string, number>) => apiFetch<{ ok: boolean; values: Record<string, number> }>('/api/runtime/trading-params', {
+    method: 'PUT',
+    body: JSON.stringify({ values }),
+  }),
+  getPortfolio: (account: 'LIVE' | 'SIM') => apiFetch<PortfolioRow[]>(`/api/runtime/portfolio/table?account_type=${account}`),
+  sellAllLive: () => apiFetch<{ ok: boolean; sold_count: number; user_mode: RuntimeMode }>('/api/runtime/emergency/sell-all-live', { method: 'POST' }),
+  stopLive: () => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/emergency/stop-live', { method: 'POST' }),
+  resumeLive: () => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/emergency/resume-live', { method: 'POST' }),
+  backupDb: () => apiFetch<{ ok: boolean; export_path: string }>('/api/runtime/emergency/backup-db', { method: 'POST' }),
+  exportLosing: () => apiFetch<{ ok: boolean; export_path: string; losing_count: number }>('/api/runtime/emergency/export-losing', { method: 'POST' }),
+  exportLogs: () => apiFetch<{ ok: boolean; export_path: string; error_count: number }>('/api/runtime/emergency/export-logs', { method: 'POST' }),
 };

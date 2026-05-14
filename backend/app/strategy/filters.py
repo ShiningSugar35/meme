@@ -234,13 +234,14 @@ def _evaluate_core_risk_rules(
         lambda v: v < 0.13 + 0.1 * x,
         f"< {0.13 + 0.1 * x:.6g}",
     )
-    _check_float(
-        details,
-        snapshot,
-        "sell_tax",
-        ["sell_tax", "sell_tax_rate"],
-        lambda v: v < 0.1 * x,
-        f"< {0.1 * x:.6g}",
+    raw_tax = _to_float(_first_present(snapshot, ["sell_tax", "sell_tax_rate"]))
+    if raw_tax is not None and raw_tax > 1:
+        raw_tax = raw_tax / 100.0
+    sell_tax_ok = True if raw_tax is None else raw_tax < 0.1 * x
+    details.append(
+        _mk_pass("sell_tax", raw_tax, f"< {0.1 * x:.6g} (raw={snapshot.get('sell_tax')})", f"< {0.1 * x:.6g}")
+        if sell_tax_ok
+        else _mk_failed("sell_tax", raw_tax, f">= {0.1 * x:.6g} (raw={snapshot.get('sell_tax')})", 0.1 * x, missing=(raw_tax is None))
     )
 
     if x < 0.15:

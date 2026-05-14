@@ -118,10 +118,29 @@ class Settings(BaseSettings):
     GMGN_API_KEY_12: Optional[SecretStr] = None
     GMGN_PUBLIC_KEY_12: Optional[str] = None
     GMGN_PRIVATE_KEY_12: Optional[SecretStr] = None
+    GMGN_CLIENT_ID_1: Optional[str] = None
+    GMGN_CLIENT_ID_2: Optional[str] = None
+    GMGN_CLIENT_ID_3: Optional[str] = None
+    GMGN_CLIENT_ID_4: Optional[str] = None
+    GMGN_CLIENT_ID_5: Optional[str] = None
+    GMGN_CLIENT_ID_6: Optional[str] = None
+    GMGN_CLIENT_ID_7: Optional[str] = None
+    GMGN_CLIENT_ID_8: Optional[str] = None
+    GMGN_CLIENT_ID_9: Optional[str] = None
+    GMGN_CLIENT_ID_10: Optional[str] = None
+    GMGN_CLIENT_ID_11: Optional[str] = None
+    GMGN_CLIENT_ID_12: Optional[str] = None
 
     GMGN_TRENCHES_PATH: str = Field('/api/v1/trenches')
-    GMGN_TOKEN_PRICE_PATH: str = Field('/api/v1/token/price')
-    GMGN_KLINE_PATH: str = Field('/api/v1/token/kline')
+    GMGN_TRENCHES_METHOD: str = Field('POST')
+    GMGN_TRENCHES_TYPES: str = Field('new_creation')
+    GMGN_TRENCHES_PLATFORMS: str = Field('')
+    GMGN_TOKEN_PRICE_PATH: str = Field('/v1/token/info')
+    GMGN_KLINE_PATH: str = Field('/v1/market/token_kline')
+    GMGN_TOKEN_INFO_PATH: str = Field('/v1/token/info')
+    GMGN_TOKEN_SECURITY_PATH: str = Field('/v1/token/security')
+    GMGN_TOKEN_POOL_INFO_PATH: str = Field('/v1/token/pool_info')
+    GMGN_TOKEN_HOLDERS_PATH: str = Field('/v1/market/token_top_holders')
 
     # Jupiter API Configuration
     JUPITER_API_BASE_URL: Optional[str] = None
@@ -167,7 +186,7 @@ class Settings(BaseSettings):
     MAX_REQUOTE_RETRY: int = Field(2)
 
     # Entry sizing (USD based): min(liquidity_usd * pct, max_usd)
-    ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.0125)
+    ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.015)
     ENTRY_MAX_USD: float = Field(200.0)
 
     # Risk Feature Scan Tiers (dynamic based on remaining position value in USD)
@@ -196,7 +215,7 @@ class Settings(BaseSettings):
 
     # Dust Position Rules (USD based; SOL kept as legacy fallback only)
     DUST_FORCE_EXIT_USD: float = Field(12.5)
-    DUST_FORCE_EXIT_SOL: float = Field(0.125)
+    DUST_FORCE_EXIT_SOL: float = Field(0.15)
 
     # Legacy SOL-tier fields retained only so older modules do not break if imported.
     RISK_FEATURE_SCAN_TIER_1_SOL: float = Field(1.5)
@@ -208,57 +227,128 @@ class Settings(BaseSettings):
     WALLET_PUBLIC_KEY: Optional[str] = None
     WALLET_PRIVATE_KEY_BASE58: Optional[SecretStr] = None
 
-    def _scan_numbered_secrets(self, prefix: str) -> List[SecretStr]:
-        """Dynamically scan os.environ for PREFIX_N patterns."""
-        numbered: Dict[int, SecretStr] = {}
-        pattern = re.compile(rf'^{re.escape(prefix)}_(\d+)$')
-        for key, value in os.environ.items():
-            match = pattern.match(key)
-            if match and value and value.strip():
-                numbered[int(match.group(1))] = SecretStr(value.strip())
-        return [numbered[i] for i in sorted(numbered)]
+    def _env_value(self, key: str) -> str:
+        """Return a real secret string from os.environ or a Settings field."""
+        value = os.environ.get(key)
+        if value is None and hasattr(self, key):
+            value = getattr(self, key)
+        if hasattr(value, "get_secret_value"):
+            value = value.get_secret_value()
+        return str(value or '').strip()
 
-    def _scan_gmgn_accounts(self) -> List[Dict[str, Any]]:
-        accounts: List[Dict[str, Any]] = []
-        pattern = re.compile(r'^GMGN_API_KEY_(\d+)$')
-        indexes: List[int] = []
-        for key, value in os.environ.items():
-            match = pattern.match(key)
-            if match and value and value.strip():
-                indexes.append(int(match.group(1)))
+    def _numbered_indices(self, prefix: str, suffix: Optional[str] = None, max_items: int = 12) -> List[int]:
+        """Return all configured numeric suffixes, including keys only present in .env/os.environ."""
+        indices = set(range(1, max_items + 1))
+        escaped_prefix = re.escape(prefix)
+        if suffix is None:
+            patterns = [re.compile(rf"^{escaped_prefix}_(\d+)$")]
+        else:
+            escaped_suffix = re.escape(suffix)
+            patterns = [
+                re.compile(rf"^{escaped_prefix}_(\d+)_{escaped_suffix}$"),
+                re.compile(rf"^{escaped_prefix}_{escaped_suffix}_(\d+)$"),
+            ]
+        for key in os.environ.keys():
+            for pattern in patterns:
+                m = pattern.match(key)
+                if m:
+                    indices.add(int(m.group(1)))
+        return sorted(indices)
 
-        for index in sorted(set(indexes)):
-            api_key_raw = os.environ.get(f'GMGN_API_KEY_{index}')
-            api_key = SecretStr(api_key_raw.strip()) if api_key_raw and api_key_raw.strip() else None
-            pub_key = (os.environ.get(f'GMGN_PUBLIC_KEY_{index}') or '').strip() or None
-            priv_key_raw = os.environ.get(f'GMGN_PRIVATE_KEY_{index}')
-            priv_key = SecretStr(priv_key_raw.strip()) if priv_key_raw and priv_key_raw.strip() else None
-            if not api_key:
-                continue
+    def _scan_numbered_secrets(self, prefix: str, suffix: Optional[str] = None, max_items: int = 12) -> List[str]:
+        """Scan numbered secrets in both legacy and new naming conventions.
 
-            account: Dict[str, Any] = {'index': index, 'api_key': api_key}
-            if (pub_key and not priv_key) or (not pub_key and priv_key):
-                account['invalid_config'] = (
-                    f"Mismatched keys: public_key={bool(pub_key)}, private_key={bool(priv_key)}"
-                )
-            else:
-                account['public_key'] = pub_key
-                account['private_key'] = priv_key
-            accounts.append(account)
+        - _scan_numbered_secrets('ANKR_API_KEY') -> ANKR_API_KEY_1..N
+        - _scan_numbered_secrets('GMGN', 'API_KEY') -> GMGN_1_API_KEY and GMGN_API_KEY_1
+
+        The first 12 slots are model fields for backwards compatibility, but
+        higher numbered values are also discovered from .env/os.environ.
+        """
+        values: List[str] = []
+        for i in self._numbered_indices(prefix, suffix, max_items=max_items):
+            keys = [f'{prefix}_{i}'] if suffix is None else [f'{prefix}_{i}_{suffix}', f'{prefix}_{suffix}_{i}']
+            for key in keys:
+                value = self._env_value(key)
+                if value:
+                    values.append(value)
+                    break
+        return values
+
+    def _scan_gmgn_accounts(self, max_items: int = 12) -> List[dict]:
+        """Return per-account GMGN credentials.
+
+        GMGN deployments in the wild use different auth names.  The project
+        originally only sent X-API-Key/X-Route-Key; the current OpenAPI error
+        explicitly mentions "api key or client_id", so we keep both api_key and
+        client_id per numbered account and let the provider send them through
+        headers plus query/body auth fields.
+        """
+        indices = set(range(1, max_items + 1))
+        for key in os.environ.keys():
+            for pattern in (
+                re.compile(r"^GMGN_(\d+)_(API_KEY|CLIENT_ID|PUBLIC_KEY|PRIVATE_KEY)$"),
+                re.compile(r"^GMGN_(API_KEY|CLIENT_ID|PUBLIC_KEY|PRIVATE_KEY)_(\d+)$"),
+            ):
+                m = pattern.match(key)
+                if m:
+                    idx = m.group(1) if m.group(1).isdigit() else m.group(2)
+                    indices.add(int(idx))
+        accounts: List[dict] = []
+        for i in sorted(indices):
+            api_key = self._env_value(f'GMGN_{i}_API_KEY') or self._env_value(f'GMGN_API_KEY_{i}')
+            public_key = self._env_value(f'GMGN_{i}_PUBLIC_KEY') or self._env_value(f'GMGN_PUBLIC_KEY_{i}')
+            client_id = (
+                self._env_value(f'GMGN_{i}_CLIENT_ID')
+                or self._env_value(f'GMGN_CLIENT_ID_{i}')
+                or public_key
+            )
+            private_key = self._env_value(f'GMGN_{i}_PRIVATE_KEY') or self._env_value(f'GMGN_PRIVATE_KEY_{i}')
+            if api_key or client_id or private_key:
+                accounts.append({
+                    'index': i,
+                    'api_key': api_key,
+                    'client_id': client_id,
+                    'public_key': public_key,
+                    'private_key': private_key,
+                })
         return accounts
 
-    def get_gmgn_accounts(self) -> List[Dict[str, Any]]:
+    def get_gmgn_accounts(self) -> List[dict]:
         return self._scan_gmgn_accounts()
 
-    def get_gmgn_api_keys(self) -> List[SecretStr]:
-        return [acc['api_key'] for acc in self.get_gmgn_accounts() if acc.get('api_key')]
+    def get_gmgn_api_keys(self) -> List[str]:
+        keys = [a.get('api_key', '') for a in self.get_gmgn_accounts() if a.get('api_key')]
+        if not keys:
+            # Backward compatibility with older .env examples.
+            keys = self._scan_numbered_secrets('GMGN', 'API_KEY')
+        return keys
 
-    def get_gmgn_api_key(self) -> Optional[SecretStr]:
-        keys = self.get_gmgn_api_keys()
-        return keys[0] if keys else None
+    def get_gmgn_client_ids(self) -> List[str]:
+        return [a.get('client_id', '') for a in self.get_gmgn_accounts() if a.get('client_id')]
+
+    def get_gmgn_private_keys(self) -> List[str]:
+        keys = [a.get('private_key', '') for a in self.get_gmgn_accounts() if a.get('private_key')]
+        if not keys:
+            keys = self._scan_numbered_secrets('GMGN', 'PRIVATE_KEY')
+        return keys
+
+    def get_gmgn_credentials(self) -> List[dict]:
+        accounts = self.get_gmgn_accounts()
+        if accounts:
+            return accounts
+        api_keys = self._scan_numbered_secrets('GMGN', 'API_KEY')
+        private_keys = self._scan_numbered_secrets('GMGN', 'PRIVATE_KEY')
+        return [
+            {'index': idx + 1, 'api_key': api_key, 'client_id': '', 'public_key': '', 'private_key': private_keys[idx] if idx < len(private_keys) else ''}
+            for idx, api_key in enumerate(api_keys)
+        ]
+
 
     def get_jupiter_api_keys(self) -> List[SecretStr]:
-        keys = self._scan_numbered_secrets('JUPITER_API_KEY')
+        keys: List[SecretStr] = []
+        for raw in self._scan_numbered_secrets('JUPITER_API_KEY'):
+            if raw:
+                keys.append(SecretStr(raw))
         legacy = [self.JUPITER_API_KEY_MEME1, self.JUPITER_API_KEY_MEME2, self.JUPITER_API_KEY_MEME3]
         existing_values = {_secret_to_str(k) for k in keys}
         for item in legacy:
@@ -436,8 +526,8 @@ class Settings(BaseSettings):
             missing: List[str] = []
             if not self.GMGN_API_BASE_URL:
                 missing.append('GMGN_API_BASE_URL')
-            if not self.get_gmgn_api_keys():
-                missing.append('GMGN_API_KEY_N')
+            if not (self.get_gmgn_api_keys() or self.get_gmgn_client_ids() or self.get_gmgn_credentials()):
+                missing.append('GMGN_API_KEY_N or GMGN_CLIENT_ID_N/GMGN_PUBLIC_KEY_N')
             if not self.get_jupiter_api_base_url():
                 missing.append('JUPITER_API_BASE_URL')
             if not self.get_jupiter_api_keys():
