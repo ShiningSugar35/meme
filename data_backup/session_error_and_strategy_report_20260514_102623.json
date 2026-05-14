@@ -1,0 +1,145 @@
+{
+  "export_type": "session_error_and_strategy_report",
+  "session_started_at": "2026-05-14T10:22:38.608481+00:00",
+  "exported_at": "2026-05-14T10:26:23.998135+00:00",
+  "errors_deduped": [
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"2jauXZHkuDRiiE7LNfTa9diGDTWQFLi9F1gk3trKpump\",\"discovery_event_id\":104,\"error\":\"GMGN API error: 404 - 404 page not found\\n\"}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:24:01.766719+00:00",
+      "last_seen_at": "2026-05-14T10:26:22.859283+00:00",
+      "count": 4,
+      "context": {
+        "token": "2jauXZHkuDRiiE7LNfTa9diGDTWQFLi9F1gk3trKpump",
+        "discovery_event_id": 104,
+        "error": "GMGN API error: 404 - 404 page not found\n"
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump\",\"discovery_event_id\":248,\"error\":\"GMGN API error: 404 - 404 page not found\\n\"}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:25:40.169387+00:00",
+      "last_seen_at": "2026-05-14T10:25:40.169387+00:00",
+      "count": 1,
+      "context": {
+        "token": "6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump",
+        "discovery_event_id": 248,
+        "error": "GMGN API error: 404 - 404 page not found\n"
+      }
+    }
+  ],
+  "screening_summary": {
+    "1": {
+      "strategy": "模拟盘1#1(模拟盘)",
+      "first_round": {
+        "screened": 320,
+        "passed": 2,
+        "failed": 318
+      },
+      "second_round": {
+        "screened": 0,
+        "passed": 0,
+        "failed": 0,
+        "core_recheck_screened": 0,
+        "core_recheck_passed": 0
+      }
+    },
+    "2": {
+      "strategy": "模拟盘2#2(模拟盘)",
+      "first_round": {
+        "screened": 320,
+        "passed": 4,
+        "failed": 316
+      },
+      "second_round": {
+        "screened": 0,
+        "passed": 0,
+        "failed": 0,
+        "core_recheck_screened": 0,
+        "core_recheck_passed": 0
+      }
+    }
+  },
+  "failure_top10": {
+    "1": {
+      "strategy": "模拟盘1#1(模拟盘)",
+      "first_round": [
+        {
+          "feature": "top_10_holder_rate_range",
+          "filtered_count": 305
+        },
+        {
+          "feature": "min_liquidity_usd",
+          "filtered_count": 304
+        },
+        {
+          "feature": "rug_ratio",
+          "filtered_count": 70
+        },
+        {
+          "feature": "bundler_trader_amount_rate",
+          "filtered_count": 19
+        },
+        {
+          "feature": "creator_token_status_or_dev_team_hold_rate",
+          "filtered_count": 10
+        },
+        {
+          "feature": "entrapment_ratio",
+          "filtered_count": 3
+        },
+        {
+          "feature": "suspected_insider_hold_rate",
+          "filtered_count": 3
+        }
+      ],
+      "second_round": []
+    },
+    "2": {
+      "strategy": "模拟盘2#2(模拟盘)",
+      "first_round": [
+        {
+          "feature": "top_10_holder_rate_range",
+          "filtered_count": 304
+        },
+        {
+          "feature": "min_liquidity_usd",
+          "filtered_count": 292
+        },
+        {
+          "feature": "rug_ratio",
+          "filtered_count": 67
+        },
+        {
+          "feature": "bundler_trader_amount_rate",
+          "filtered_count": 12
+        },
+        {
+          "feature": "creator_token_status_or_dev_team_hold_rate",
+          "filtered_count": 10
+        },
+        {
+          "feature": "entrapment_ratio",
+          "filtered_count": 3
+        },
+        {
+          "feature": "suspected_insider_hold_rate",
+          "filtered_count": 2
+        }
+      ],
+      "second_round": []
+    }
+  },
+  "trade_stats": {},
+  "notes": [
+    "first_round uses token_strategy_matches.stage='initial_filter'.",
+    "second_round uses stages 'second_core_recheck' and 'second_filter'.",
+    "max_simultaneous_exposure is reconstructed from confirmed BUY/SELL trade events and is best-effort when price_usd is missing."
+  ]
+}
