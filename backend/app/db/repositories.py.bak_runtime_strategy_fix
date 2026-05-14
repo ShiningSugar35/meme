@@ -229,24 +229,8 @@ class Repositories:
             self._safe_log("create_strategy_group failed", name=name, error=str(e))
             raise
 
-    async def list_strategy_groups(self, include_disabled: bool = True) -> List[Dict[str, Any]]:
-        """List strategy groups for runtime management.
-
-        include_disabled=True:
-            Return all rows, including disabled strategy groups. This is what the
-            management API `/api/runtime/strategies` needs so the frontend can
-            display and re-enable disabled groups.
-
-        include_disabled=False:
-            Return only enabled rows. This keeps the method useful for callers
-            that want a filtered strategy list without duplicating SQL.
-        """
-        sql = "SELECT * FROM strategy_groups"
-        if not include_disabled:
-            sql += " WHERE enabled = 1"
-        sql += " ORDER BY priority ASC, id ASC"
-
-        async with self.db.execute(sql) as cur:
+    async def list_strategy_groups(self) -> List[Dict[str, Any]]:
+        async with self.db.execute("SELECT * FROM strategy_groups ORDER BY priority ASC, id ASC") as cur:
             rows = await cur.fetchall()
         return [dict(row) for row in rows]
 
