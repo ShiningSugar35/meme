@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ..config import ProviderMode, settings
@@ -11,6 +11,8 @@ from ..strategy.second_filter import run_second_filter
 from ..trading.executor import TradingPipeline
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
+SECOND_FETCH_RETRY_SECONDS = 30
+TERMINAL_GMGN_STATUS_CODES = {400, 401, 403, 404, 405, 410, 422}
 
 SNAPSHOT_COLUMNS = [
     'type',
@@ -109,6 +111,24 @@ def _extract_buy_sell_1m(klines: List[Dict[str, Any]], snapshot: Dict[str, Any])
     }
 
 
+def _gmgn_fetch_error_meta(error: Exception) -> Dict[str, Any]:
+    status_code = getattr(error, 'status_code', None)
+    retryable = getattr(error, 'retryable', None)
+    terminal = bool(status_code in TERMINAL_GMGN_STATUS_CODES) if status_code is not None else False
+    if retryable is False:
+        terminal = True
+    if retryable is True:
+        terminal = False
+    return {
+        'error': str(error),
+        'status_code': status_code,
+        'path': getattr(error, 'path', None),
+        'method': getattr(error, 'method', None),
+        'retryable': retryable,
+        'terminal': terminal,
+    }
+
+
 class SecondFilterRunner:
     def __init__(
         self,
@@ -126,7 +146,6 @@ class SecondFilterRunner:
         self.rpc = rpc
         self.strategy_groups = strategy_groups or []
         self.pipeline = TradingPipeline(repo, gmgn, jupiter, jito, rpc)
-
 
     async def _load_enabled_strategy_groups(self) -> List[dict]:
         try:
@@ -171,6 +190,88 @@ class SecondFilterRunner:
         groups = [g for g in groups if g is not None]
         return groups
 
+    async def _record_second_fetch_failure(
+        self,
+        *,
+        event: Dict[str, Any],
+        token_mint: str,
+        discovery_event_id: int,
+        error: Exception,
+        now: datetime,
+    ) -> None:
+        """
+        Make fetch failures visible to second-round accounting.
+
+        Previous behavior appended a system event and immediately `continue`d.
+        That left the discovery_event in INITIAL_FILTER_PASSED with no
+        token_strategy_matches row for second_core_recheck/second_filter, so exports
+        showed second_round.screened=0 although the runner had already attempted the
+        due second round.  Terminal fetch failures are now written as failed
+        second_core_recheck rows, one per initial-passed strategy, and the event is
+        moved out of the pending queue. Retryable failures are delayed and retried.
+        """
+        meta = _gmgn_fetch_error_meta(error)
+        groups = await self._initial_passed_strategy_groups(discovery_event_id)
+
+        await self.repo.append_system_event(
+            'ERROR', 'SECOND_FILTER', 'GMGN second-filter fetch failed',
+            _json_dumps({'token': token_mint, 'discovery_event_id': discovery_event_id, **meta}),
+            account_type='SIM',
+        )
+
+        if not meta['terminal']:
+            retry_at = (now + timedelta(seconds=SECOND_FETCH_RETRY_SECONDS)).isoformat()
+            await self.repo.update_discovery_event_status(
+                discovery_event_id,
+                'INITIAL_FILTER_PASSED',
+                next_second_check_at=retry_at,
+                last_error=str(error),
+                fail_reason_json=_json_dumps({'stage': 'gmgn_second_fetch', **meta, 'retry_at': retry_at}),
+            )
+            return
+
+        # 404/400/401/403/422 等终止性错误：不要无限重试；计入二筛失败。
+        failure_detail = [{
+            'rule': 'gmgn_second_fetch',
+            'passed': False,
+            'reason': 'GMGN fetch failed before second core recheck',
+            **meta,
+        }]
+        feature_vector = {
+            'stage': 'gmgn_second_fetch',
+            'status_code': meta.get('status_code'),
+            'path': meta.get('path'),
+            'terminal': True,
+        }
+        snapshot_id = event.get('source_snapshot_id') or event.get('initial_snapshot_id')
+
+        for sg in groups:
+            try:
+                await self.repo.insert_strategy_match(
+                    token_mint,
+                    sg.get('id', 0),
+                    sg.get('config_version', 1),
+                    snapshot_id,
+                    'second_core_recheck',
+                    False,
+                    _json_dumps(failure_detail),
+                    _json_dumps(feature_vector),
+                    discovery_event_id=discovery_event_id,
+                )
+            except Exception as insert_error:
+                logger.error(
+                    f"record second fetch failure match failed for {token_mint} "
+                    f"strategy {sg.get('id')}: {insert_error}"
+                )
+
+        await self.repo.update_discovery_event_status(
+            discovery_event_id,
+            'SECOND_FETCH_FAILED',
+            second_filter_checked_at=now.isoformat(),
+            last_error=str(error),
+            fail_reason_json=_json_dumps({'stage': 'gmgn_second_fetch', **meta}),
+        )
+
     async def run_once(self):
         now = datetime.now(timezone.utc)
         mode = settings.get_provider_mode()
@@ -193,10 +294,12 @@ class SecondFilterRunner:
                 latest = await self.gmgn.fetch_latest_price(token_mint)
                 klines = await self.gmgn.fetch_kline(token_mint, '1m', 5)
             except Exception as e:
-                await self.repo.append_system_event(
-                    'ERROR', 'SECOND_FILTER', 'GMGN second-filter fetch failed',
-                    _json_dumps({'token': token_mint, 'discovery_event_id': discovery_event_id, 'error': str(e)}),
-                    account_type='SIM',
+                await self._record_second_fetch_failure(
+                    event=event,
+                    token_mint=token_mint,
+                    discovery_event_id=discovery_event_id,
+                    error=e,
+                    now=now,
                 )
                 continue
 
@@ -205,6 +308,14 @@ class SecondFilterRunner:
                     'WARNING', 'SECOND_FILTER', 'empty token snapshot; retry later',
                     _json_dumps({'token': token_mint, 'discovery_event_id': discovery_event_id}),
                     account_type='SIM',
+                )
+                retry_at = (now + timedelta(seconds=SECOND_FETCH_RETRY_SECONDS)).isoformat()
+                await self.repo.update_discovery_event_status(
+                    discovery_event_id,
+                    'INITIAL_FILTER_PASSED',
+                    next_second_check_at=retry_at,
+                    last_error='empty token snapshot',
+                    fail_reason_json=_json_dumps({'stage': 'gmgn_second_fetch', 'error': 'empty token snapshot', 'retry_at': retry_at}),
                 )
                 continue
 
@@ -271,7 +382,11 @@ class SecondFilterRunner:
                     )
 
             if not recheck_passed_groups:
-                await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_RECHECK_FAILED')
+                await self.repo.update_discovery_event_status(
+                    discovery_event_id,
+                    'SECOND_RECHECK_FAILED',
+                    second_filter_checked_at=now.isoformat(),
+                )
                 continue
 
             sorted_klines = _sort_klines(klines)
@@ -331,7 +446,10 @@ class SecondFilterRunner:
                         if top1_ok:
                             top1_holders_passed.append(sg)
                         else:
-                            logger.info(f"top1_holder fail for {token_mint} sg={sg.get('id')}: " f"rate={top1_rate} threshold={top1_threshold}")
+                            logger.info(
+                                f"top1_holder fail for {token_mint} sg={sg.get('id')}: "
+                                f"rate={top1_rate} threshold={top1_threshold}"
+                            )
                     passed_strategies = top1_holders_passed
                 except Exception as e:
                     logger.error(f"top1 holder check failed for {token_mint}: {e}")
@@ -340,11 +458,15 @@ class SecondFilterRunner:
                         _json_dumps({'token': token_mint, 'discovery_event_id': discovery_event_id, 'error': str(e)}),
                         account_type='SIM',
                     )
-                    # Gracefully allow entry when top1 check fails (unblocked path)
+                    # Gracefully allow entry when top1 check fails (unblocked path).
                     pass
 
                 if passed_strategies:
-                    await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_PASSED')
+                    await self.repo.update_discovery_event_status(
+                        discovery_event_id,
+                        'SECOND_PASSED',
+                        second_filter_checked_at=now.isoformat(),
+                    )
                     await self.pipeline.handle_token_second_filter_result(
                         token_mint,
                         passed_strategies,
@@ -352,6 +474,14 @@ class SecondFilterRunner:
                         discovery_event_id=discovery_event_id,
                     )
                 else:
-                    await self.repo.update_discovery_event_status(discovery_event_id, 'TOP1_HOLDER_FAILED')
+                    await self.repo.update_discovery_event_status(
+                        discovery_event_id,
+                        'TOP1_HOLDER_FAILED',
+                        second_filter_checked_at=now.isoformat(),
+                    )
             else:
-                await self.repo.update_discovery_event_status(discovery_event_id, 'SECOND_FAILED')
+                await self.repo.update_discovery_event_status(
+                    discovery_event_id,
+                    'SECOND_FAILED',
+                    second_filter_checked_at=now.isoformat(),
+                )

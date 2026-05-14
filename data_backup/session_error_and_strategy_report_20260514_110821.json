@@ -1,0 +1,547 @@
+{
+  "export_type": "session_error_and_strategy_report",
+  "session_started_at": "2026-05-14T10:53:11.661356+00:00",
+  "exported_at": "2026-05-14T11:08:22.046518+00:00",
+  "errors_deduped": [
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"7pu8RWtHMEvzbxY2tDTdF4WUrsir4ufQMhmujdrKpump\",\"discovery_event_id\":1884,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T11:05:16.584176+00:00",
+      "last_seen_at": "2026-05-14T11:08:18.650312+00:00",
+      "count": 2,
+      "context": {
+        "token": "7pu8RWtHMEvzbxY2tDTdF4WUrsir4ufQMhmujdrKpump",
+        "discovery_event_id": 1884,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"8G6qLQrzUdbuWsEwsAteFPfJ1m9zKxz6ZbiAhGVUpump\",\"discovery_event_id\":1725,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T11:02:18.505835+00:00",
+      "last_seen_at": "2026-05-14T11:08:10.670122+00:00",
+      "count": 3,
+      "context": {
+        "token": "8G6qLQrzUdbuWsEwsAteFPfJ1m9zKxz6ZbiAhGVUpump",
+        "discovery_event_id": 1725,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"BkaYoqnfbErPwHJ3VfiEfFt9aqGMDNyyy7LkWSEJpump\",\"discovery_event_id\":1710,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T11:02:11.548022+00:00",
+      "last_seen_at": "2026-05-14T11:08:02.992957+00:00",
+      "count": 3,
+      "context": {
+        "token": "BkaYoqnfbErPwHJ3VfiEfFt9aqGMDNyyy7LkWSEJpump",
+        "discovery_event_id": 1710,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"8G6qLQrzUdbuWsEwsAteFPfJ1m9zKxz6ZbiAhGVUpump\",\"discovery_event_id\":1644,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T11:02:05.298037+00:00",
+      "last_seen_at": "2026-05-14T11:07:50.210858+00:00",
+      "count": 3,
+      "context": {
+        "token": "8G6qLQrzUdbuWsEwsAteFPfJ1m9zKxz6ZbiAhGVUpump",
+        "discovery_event_id": 1644,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"BtJCd2wnumFMqRjN17ECVvvr52EP5NHKu8AasF5Wpump\",\"discovery_event_id\":1570,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T11:01:58.029060+00:00",
+      "last_seen_at": "2026-05-14T11:07:43.935888+00:00",
+      "count": 3,
+      "context": {
+        "token": "BtJCd2wnumFMqRjN17ECVvvr52EP5NHKu8AasF5Wpump",
+        "discovery_event_id": 1570,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"GCAXoRtQbK1AojLDovpwJqj7Gngj4MZPrveCTBKapump\",\"discovery_event_id\":1551,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T11:01:51.986624+00:00",
+      "last_seen_at": "2026-05-14T11:07:36.261069+00:00",
+      "count": 3,
+      "context": {
+        "token": "GCAXoRtQbK1AojLDovpwJqj7Gngj4MZPrveCTBKapump",
+        "discovery_event_id": 1551,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"BtJCd2wnumFMqRjN17ECVvvr52EP5NHKu8AasF5Wpump\",\"discovery_event_id\":1399,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:59:38.562592+00:00",
+      "last_seen_at": "2026-05-14T11:07:29.686011+00:00",
+      "count": 4,
+      "context": {
+        "token": "BtJCd2wnumFMqRjN17ECVvvr52EP5NHKu8AasF5Wpump",
+        "discovery_event_id": 1399,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"GCAXoRtQbK1AojLDovpwJqj7Gngj4MZPrveCTBKapump\",\"discovery_event_id\":1380,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:59:31.493036+00:00",
+      "last_seen_at": "2026-05-14T11:07:22.246815+00:00",
+      "count": 4,
+      "context": {
+        "token": "GCAXoRtQbK1AojLDovpwJqj7Gngj4MZPrveCTBKapump",
+        "discovery_event_id": 1380,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"BtJCd2wnumFMqRjN17ECVvvr52EP5NHKu8AasF5Wpump\",\"discovery_event_id\":1235,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:58:24.008078+00:00",
+      "last_seen_at": "2026-05-14T11:07:14.035685+00:00",
+      "count": 4,
+      "context": {
+        "token": "BtJCd2wnumFMqRjN17ECVvvr52EP5NHKu8AasF5Wpump",
+        "discovery_event_id": 1235,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"GCAXoRtQbK1AojLDovpwJqj7Gngj4MZPrveCTBKapump\",\"discovery_event_id\":1216,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:58:16.177428+00:00",
+      "last_seen_at": "2026-05-14T11:07:06.036450+00:00",
+      "count": 4,
+      "context": {
+        "token": "GCAXoRtQbK1AojLDovpwJqj7Gngj4MZPrveCTBKapump",
+        "discovery_event_id": 1216,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"4B6hgH8aGPEmzoEURmsqhZUsWbGB5EtzEwA3f8MGpump\",\"discovery_event_id\":1213,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:58:04.443167+00:00",
+      "last_seen_at": "2026-05-14T11:06:59.800710+00:00",
+      "count": 4,
+      "context": {
+        "token": "4B6hgH8aGPEmzoEURmsqhZUsWbGB5EtzEwA3f8MGpump",
+        "discovery_event_id": 1213,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"BTwASbAfMLPbCbx7rWh3vPfoPXGSQYPJJ2cH9775pump\",\"discovery_event_id\":884,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:55:49.577846+00:00",
+      "last_seen_at": "2026-05-14T11:06:53.620201+00:00",
+      "count": 6,
+      "context": {
+        "token": "BTwASbAfMLPbCbx7rWh3vPfoPXGSQYPJJ2cH9775pump",
+        "discovery_event_id": 884,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump\",\"discovery_event_id\":767,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:54:20.340782+00:00",
+      "last_seen_at": "2026-05-14T11:06:47.515655+00:00",
+      "count": 7,
+      "context": {
+        "token": "6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump",
+        "discovery_event_id": 767,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump\",\"discovery_event_id\":596,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:54:14.148890+00:00",
+      "last_seen_at": "2026-05-14T11:06:41.373242+00:00",
+      "count": 7,
+      "context": {
+        "token": "6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump",
+        "discovery_event_id": 596,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump\",\"discovery_event_id\":516,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:54:06.573381+00:00",
+      "last_seen_at": "2026-05-14T11:06:34.924807+00:00",
+      "count": 7,
+      "context": {
+        "token": "6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump",
+        "discovery_event_id": 516,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump\",\"discovery_event_id\":423,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:53:58.663077+00:00",
+      "last_seen_at": "2026-05-14T11:06:28.468586+00:00",
+      "count": 7,
+      "context": {
+        "token": "6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump",
+        "discovery_event_id": 423,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump\",\"discovery_event_id\":343,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:53:51.725152+00:00",
+      "last_seen_at": "2026-05-14T11:06:22.293252+00:00",
+      "count": 7,
+      "context": {
+        "token": "6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump",
+        "discovery_event_id": 343,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump\",\"discovery_event_id\":248,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:53:42.136223+00:00",
+      "last_seen_at": "2026-05-14T11:06:15.484826+00:00",
+      "count": 7,
+      "context": {
+        "token": "6pibr5G2s3fsVjhy51pLxQ4pzu9WX6omKQXPJuApump",
+        "discovery_event_id": 248,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"2jauXZHkuDRiiE7LNfTa9diGDTWQFLi9F1gk3trKpump\",\"discovery_event_id\":104,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T10:53:32.172836+00:00",
+      "last_seen_at": "2026-05-14T11:06:05.910994+00:00",
+      "count": 7,
+      "context": {
+        "token": "2jauXZHkuDRiiE7LNfTa9diGDTWQFLi9F1gk3trKpump",
+        "discovery_event_id": 104,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"DPpVAgSkLCjgc5Ss6E51XAX2TUTKK3TzQ3P33HyS4444\",\"discovery_event_id\":2071,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T11:05:28.561910+00:00",
+      "last_seen_at": "2026-05-14T11:05:28.561910+00:00",
+      "count": 1,
+      "context": {
+        "token": "DPpVAgSkLCjgc5Ss6E51XAX2TUTKK3TzQ3P33HyS4444",
+        "discovery_event_id": 2071,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    },
+    {
+      "level": "ERROR",
+      "category": "SECOND_FILTER",
+      "message": "GMGN second-filter fetch failed",
+      "context_json": "{\"token\":\"sBbpYv2XDjJZ6DA8Pfeb5xt6mhdaP7Am4qKrC6xpump\",\"discovery_event_id\":1916,\"error\":\"'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'\",\"status_code\":null,\"path\":null,\"method\":null,\"retryable\":null,\"terminal\":false}",
+      "account_type": "SIM",
+      "first_seen_at": "2026-05-14T11:05:22.621954+00:00",
+      "last_seen_at": "2026-05-14T11:05:22.621954+00:00",
+      "count": 1,
+      "context": {
+        "token": "sBbpYv2XDjJZ6DA8Pfeb5xt6mhdaP7Am4qKrC6xpump",
+        "discovery_event_id": 1916,
+        "error": "'Settings' object has no attribute 'GMGN_TOKEN_KLINE_PATH'",
+        "status_code": null,
+        "path": null,
+        "method": null,
+        "retryable": null,
+        "terminal": false
+      }
+    }
+  ],
+  "screening_summary": {
+    "1": {
+      "strategy": "模拟盘1#1(模拟盘)",
+      "first_round": {
+        "screened": 1040,
+        "passed": 1,
+        "failed": 1039
+      },
+      "second_round": {
+        "screened": 0,
+        "passed": 0,
+        "failed": 0,
+        "core_recheck_screened": 0,
+        "core_recheck_passed": 0
+      }
+    },
+    "2": {
+      "strategy": "模拟盘2#2(模拟盘)",
+      "first_round": {
+        "screened": 1040,
+        "passed": 16,
+        "failed": 1024
+      },
+      "second_round": {
+        "screened": 0,
+        "passed": 0,
+        "failed": 0,
+        "core_recheck_screened": 0,
+        "core_recheck_passed": 0
+      }
+    }
+  },
+  "failure_top10": {
+    "1": {
+      "strategy": "模拟盘1#1(模拟盘)",
+      "first_round": [
+        {
+          "feature": "min_liquidity_usd",
+          "filtered_count": 992
+        },
+        {
+          "feature": "top_10_holder_rate_range",
+          "filtered_count": 979
+        },
+        {
+          "feature": "rug_ratio",
+          "filtered_count": 155
+        },
+        {
+          "feature": "bundler_trader_amount_rate",
+          "filtered_count": 73
+        },
+        {
+          "feature": "creator_token_status_or_dev_team_hold_rate",
+          "filtered_count": 41
+        },
+        {
+          "feature": "fresh_wallet_rate",
+          "filtered_count": 9
+        },
+        {
+          "feature": "platform",
+          "filtered_count": 3
+        },
+        {
+          "feature": "entrapment_ratio",
+          "filtered_count": 3
+        },
+        {
+          "feature": "suspected_insider_hold_rate",
+          "filtered_count": 1
+        }
+      ],
+      "second_round": []
+    },
+    "2": {
+      "strategy": "模拟盘2#2(模拟盘)",
+      "first_round": [
+        {
+          "feature": "top_10_holder_rate_range",
+          "filtered_count": 968
+        },
+        {
+          "feature": "min_liquidity_usd",
+          "filtered_count": 939
+        },
+        {
+          "feature": "rug_ratio",
+          "filtered_count": 132
+        },
+        {
+          "feature": "bundler_trader_amount_rate",
+          "filtered_count": 44
+        },
+        {
+          "feature": "creator_token_status_or_dev_team_hold_rate",
+          "filtered_count": 41
+        },
+        {
+          "feature": "fresh_wallet_rate",
+          "filtered_count": 9
+        },
+        {
+          "feature": "platform",
+          "filtered_count": 3
+        },
+        {
+          "feature": "entrapment_ratio",
+          "filtered_count": 1
+        }
+      ],
+      "second_round": []
+    }
+  },
+  "trade_stats": {},
+  "notes": [
+    "first_round uses token_strategy_matches.stage='initial_filter'.",
+    "second_round uses stages 'second_core_recheck' and 'second_filter'.",
+    "max_simultaneous_exposure is reconstructed from confirmed BUY/SELL trade events and is best-effort when price_usd is missing."
+  ]
+}
