@@ -496,6 +496,90 @@ async def runtime_portfolio_table(request: Request, account_type: str = "SIM", l
             await repo.close()
 
 
+@router.get("/filter-stats")
+async def runtime_filter_stats(request: Request):
+    repo, owned = await _get_repo(request)
+    try:
+        # 近10次 discovery run 的 trenches 拉回数 & 初筛通过数
+        discovery_events = await _fetch_all(
+            repo,
+            """
+            SELECT context_json FROM system_events
+            WHERE category = 'DISCOVERY' AND message = 'Discovery run complete'
+            ORDER BY created_at DESC LIMIT 10
+            """,
+        )
+        trench_history: List[Dict[str, Any]] = []
+        for ev in reversed(discovery_events):
+            try:
+                ctx = json.loads(ev.get("context_json", "{}"))
+            except Exception:
+                ctx = {}
+            trench_history.append({
+                "count": ctx.get("count", 0),
+                "passed": ctx.get("tracked_initial_passed", 0),
+            })
+
+        # 初筛淘汰统计：取最近 initial_filter 未通过的记录，解析 pass_fail_detail_json
+        init_fails_raw = await _fetch_all(
+            repo,
+            """
+            SELECT pass_fail_detail_json FROM token_strategy_matches
+            WHERE stage = 'initial_filter' AND passed = 0
+            ORDER BY created_at DESC LIMIT 500
+            """,
+        )
+        init_fail_counts: Dict[str, int] = {}
+        for row in init_fails_raw:
+            try:
+                details = json.loads(row.get("pass_fail_detail_json", "[]"))
+            except Exception:
+                continue
+            for d in details:
+                if isinstance(d, dict) and not d.get("passed", True):
+                    name = str(d.get("name") or d.get("rule") or "unknown")
+                    init_fail_counts[name] = init_fail_counts.get(name, 0) + 1
+        init_fails = sorted(
+            [{"rule": k, "count": v} for k, v in init_fail_counts.items()],
+            key=lambda x: x["count"], reverse=True,
+        )
+
+        # 二筛淘汰统计
+        second_fails_raw = await _fetch_all(
+            repo,
+            """
+            SELECT pass_fail_detail_json FROM token_strategy_matches
+            WHERE stage = 'second_filter' AND passed = 0
+            ORDER BY created_at DESC LIMIT 500
+            """,
+        )
+        second_fail_counts: Dict[str, int] = {}
+        for row in second_fails_raw:
+            try:
+                details = json.loads(row.get("pass_fail_detail_json", "[]"))
+            except Exception:
+                continue
+            for d in details:
+                if isinstance(d, dict) and not d.get("passed", True):
+                    name = str(d.get("rule") or d.get("name") or "unknown")
+                    second_fail_counts[name] = second_fail_counts.get(name, 0) + 1
+        second_fails = sorted(
+            [{"rule": k, "count": v} for k, v in second_fail_counts.items()],
+            key=lambda x: x["count"], reverse=True,
+        )
+
+        return {
+            "trench_history": trench_history,
+            "initial_filter_fails": init_fails,
+            "second_filter_fails": second_fails,
+        }
+    except Exception as e:
+        return {"trench_history": [], "initial_filter_fails": [], "second_filter_fails": [], "error": str(e)}
+    finally:
+        if owned:
+            await repo.close()
+
+
 def _spec_by_key() -> Dict[str, Dict[str, Any]]:
     return {item["key"]: item for item in TRADING_PARAM_SPECS}
 

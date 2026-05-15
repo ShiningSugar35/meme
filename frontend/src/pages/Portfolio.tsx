@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { api, PortfolioRow, RuntimeStatus } from '../api/client';
+import { useEffect, useRef, useState } from 'react';
+import { api, FilterStats, PortfolioRow, RuntimeStatus } from '../api/client';
 
 type AccountTab = 'LIVE' | 'SIM';
 
@@ -13,30 +13,72 @@ function pct(value: unknown) {
   return Number.isFinite(n) ? `${(n * 100).toFixed(2)}%` : '-';
 }
 
+function ruleLabel(name: string): string {
+  const map: Record<string, string> = {
+    type_new_creation: 'type≠new_creation',
+    min_liquidity_usd: '流动性不足',
+    top_10_holder_rate_range: 'top10持仓比超限',
+    renounced_mint: 'mint未renounce',
+    renounced_freeze_account: 'freeze未renounce',
+    rug_ratio: 'rug比例超标',
+    entrapment_ratio: 'entrapment超标',
+    is_wash_trading: '疑似wash trading',
+    rat_trader_amount_rate: 'rat trader超标',
+    suspected_insider_hold_rate: '疑似内幕持仓',
+    bundler_trader_amount_rate: 'bundler比例超标',
+    fresh_wallet_rate: '新钱包比例超标',
+    sell_tax: 'sell_tax超标',
+    has_at_least_one_social: '缺少社交(仅x<0.15)',
+    creator_token_status_or_dev_team_hold_rate: 'creator未关仓/dev持币',
+    burn_status: 'burn状态不符',
+    sniper_count: 'sniper数量超标',
+    platform: '平台不在白名单',
+    volume_1m: 'volume_1m不达标',
+    close_gt_open_scaled: 'close未跑赢open',
+    candle_position: '1m candle位置偏低',
+    price_gt_high_over_y: '价格未突破high5/y',
+    price_lt_low_times_y: '价格未跌破low5*y',
+    fraction_range: '价格分位不在区间',
+    top1_holder: 'TOP1持仓超标',
+  };
+  return map[name] || name;
+}
+
 export default function Portfolio() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [tab, setTab] = useState<AccountTab>('LIVE');
   const [rows, setRows] = useState<PortfolioRow[]>([]);
+  const [fstats, setFstats] = useState<FilterStats | null>(null);
   const [message, setMessage] = useState('');
+  const tabRef = useRef<AccountTab>('LIVE');
+
+  // keep ref in sync with state so interval always passes current tab
+  useEffect(() => { tabRef.current = tab; }, [tab]);
 
   const load = async (preferred?: AccountTab) => {
     const runtime = await api.getRuntimeStatus();
     setStatus(runtime);
     const nextTab = preferred ?? (runtime.user_mode === 'SIM_TEST' ? 'SIM' : 'LIVE');
     setTab(nextTab);
-    const data = await api.getPortfolio(nextTab);
+
+    const [data, stats] = await Promise.all([
+      api.getPortfolio(nextTab),
+      api.getFilterStats().catch(() => null),
+    ]);
     setRows(data);
+    if (stats) setFstats(stats);
   };
 
   useEffect(() => {
     load().catch((e) => setMessage(e.message));
-    const timer = window.setInterval(() => load(tab).catch(() => undefined), 5000);
+    const timer = window.setInterval(() => load(tabRef.current).catch(() => undefined), 5000);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const switchTab = async (next: AccountTab) => {
     setTab(next);
+    tabRef.current = next;
     setMessage('');
     try {
       setRows(await api.getPortfolio(next));
@@ -44,6 +86,9 @@ export default function Portfolio() {
       setMessage((e as Error).message);
     }
   };
+
+  const trenchTotal = fstats?.trench_history?.reduce((s, i) => s + i.count, 0) ?? 0;
+  const passTotal = fstats?.trench_history?.reduce((s, i) => s + i.passed, 0) ?? 0;
 
   return (
     <section className="page-stack">
@@ -57,6 +102,14 @@ export default function Portfolio() {
           <button className={tab === 'SIM' ? 'primary' : ''} onClick={() => switchTab('SIM')}>SIM 模拟盘策略</button>
         </div>
         <p className="hint">当前系统状态：{status?.user_mode ?? '加载中'}</p>
+        <div className="metric-row">
+          <span>近{fstats?.trench_history?.length ?? 0}次 trench 拉回池子总数</span>
+          <strong>{trenchTotal}</strong>
+        </div>
+        <div className="metric-row">
+          <span>其中通过初筛数</span>
+          <strong>{passTotal}</strong>
+        </div>
         {message && <p className="message">{message}</p>}
       </div>
 
@@ -95,6 +148,37 @@ export default function Portfolio() {
           </tbody>
         </table>
       </div>
+
+      {fstats && (
+        <div className="grid two">
+          <div className="card">
+            <h2>初筛指标淘汰数</h2>
+            <p className="hint">近批初筛不通过的 token-strategy 组合中，各指标不满足次数（降序）</p>
+            {fstats.initial_filter_fails.length === 0 && (
+              <p className="empty">暂无初筛淘汰数据</p>
+            )}
+            {fstats.initial_filter_fails.map((item) => (
+              <div className="metric-row" key={item.rule}>
+                <span>{ruleLabel(item.rule)}</span>
+                <strong>{item.count}</strong>
+              </div>
+            ))}
+          </div>
+          <div className="card">
+            <h2>二筛指标淘汰数</h2>
+            <p className="hint">通过初筛的池子中，二筛各指标不满足次数（降序）</p>
+            {fstats.second_filter_fails.length === 0 && (
+              <p className="empty">暂无二筛淘汰数据</p>
+            )}
+            {fstats.second_filter_fails.map((item) => (
+              <div className="metric-row" key={item.rule}>
+                <span>{ruleLabel(item.rule)}</span>
+                <strong>{item.count}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

@@ -176,6 +176,7 @@ class DiscoveryRunner:
             try:
                 trenches = await self.gmgn.fetch_trenches(params)
             except Exception as e:
+                logger.error(f"fetch_trenches failed t={t_seconds}: {e}")
                 await self.repo.append_system_event(
                     'ERROR', 'DISCOVERY', 'GMGN fetch_trenches failed',
                     _json_dumps({'t_seconds': t_seconds, 'params': params, 'error': str(e)}),

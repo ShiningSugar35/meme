@@ -87,18 +87,35 @@ export interface TradingParamsResponse {
 
 export interface PortfolioRow {
   id: number;
+  token_mint: string;
+  mint_short?: string;
+  strategy_name?: string;
+  strategy_id?: number;
   status: string;
-  ratio?: number;
   remaining?: number;
   remaining_value_usd?: number;
+  remaining_value_sol?: number;
   pnl_pct?: number;
-  mint_short?: string;
-  token_mint?: string;
-  account_type?: 'LIVE' | 'SIM';
-  strategy_id?: number;
-  strategy_name?: string;
+  ratio?: number | string;
   updated_at?: string;
   [key: string]: unknown;
+}
+
+export interface TrenchHistoryItem {
+  count: number;
+  passed: number;
+}
+
+export interface RuleFailItem {
+  rule: string;
+  count: number;
+}
+
+export interface FilterStats {
+  trench_history: TrenchHistoryItem[];
+  initial_filter_fails: RuleFailItem[];
+  second_filter_fails: RuleFailItem[];
+  error?: string;
 }
 
 interface StrategiesResponseWire {
@@ -151,4 +168,5 @@ export const api = {
   backupDb: () => apiFetch<{ ok: boolean; export_path: string }>('/api/runtime/emergency/backup-db', { method: 'POST' }),
   exportLosing: () => apiFetch<{ ok: boolean; export_path: string; losing_count: number }>('/api/runtime/emergency/export-losing', { method: 'POST' }),
   exportLogs: () => apiFetch<{ ok: boolean; export_path: string; error_count: number }>('/api/runtime/emergency/export-logs', { method: 'POST' }),
+  getFilterStats: () => apiFetch<FilterStats>('/api/runtime/filter-stats'),
 };

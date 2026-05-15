@@ -157,7 +157,11 @@ class GMGNProvider(MarketDataProvider):
                 timeout = float(getattr(settings, "GMGN_TIMEOUT_SECONDS", 8.0) or 8.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     if method == "POST":
-                        resp = await client.post(url, params=auth_query, json=cleaned, headers=headers)
+                        post_params = dict(auth_query)
+                        post_body = dict(cleaned)
+                        if "chain" in post_body:
+                            post_params["chain"] = post_body.pop("chain")
+                        resp = await client.post(url, params=post_params, json=post_body, headers=headers)
                     else:
                         resp = await client.get(url, params=request_params, headers=headers)
                 latency = int((time.perf_counter() - started) * 1000)
