@@ -111,15 +111,21 @@ class WorkerManager:
             except Exception as e:
                 worker['last_error'] = str(e)
                 logger.error(f"Worker '{name}' error: {e}")
-                await self.repo.append_system_event(
-                    'ERROR', 'WORKER', f'Worker error: {name}',
-                    str({'name': name, 'error': str(e)})
-                )
+                try:
+                    await self.repo.append_system_event(
+                        'ERROR', 'WORKER', f'Worker error: {name}',
+                        str({'name': name, 'error': str(e)})
+                    )
+                except Exception:
+                    pass
                 if self.event_bus:
-                    await self.event_bus.publish('system', {
-                        'level': 'ERROR', 'category': 'WORKER',
-                        'message': f'Worker error: {name} - {e}'
-                    })
+                    try:
+                        await self.event_bus.publish('system', {
+                            'level': 'ERROR', 'category': 'WORKER',
+                            'message': f'Worker error: {name} - {e}'
+                        })
+                    except Exception:
+                        pass
 
             # Read the interval every loop so Control Center parameter changes take
             # effect without restarting the backend process.

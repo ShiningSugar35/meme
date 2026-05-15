@@ -207,54 +207,66 @@ python -m py_compile backend/app/runners/position_risk_runner.py
 ```text
 meme/
 ├── README.md
+├── 思路.md                       # 策略设计文档
 ├── requirements.txt
 ├── .env                         # 本地配置，严禁提交
 ├── .gitignore
-├── debug_counts.py              # 本地排查脚本，统计发现/初筛/持仓计数
 ├── backend/
 │   └── app/
 │       ├── main.py              # FastAPI 入口；注册路由；启动/停止后台 runners
 │       ├── config.py            # Pydantic Settings；动态扫描 API keys；Provider/RPC/风控参数
 │       │
 │       ├── api/
-│       │   ├── routes_runtime.py # 运行态、安全门、Provider 状态、前端控制相关接口
-│       │   └── ...              # tokens/positions/trades/logs/risk/config/mock 等 REST 路由
+│       │   ├── routes_runtime.py # 运行态、安全门、Provider 状态、前端控制、策略CRUD、数据导出
+│       │   ├── routes_strategies.py
+│       │   ├── routes_tokens.py
+│       │   ├── routes_positions.py
+│       │   ├── routes_trades.py
+│       │   ├── routes_logs.py
+│       │   ├── routes_risk.py
+│       │   ├── routes_providers.py
+│       │   └── routes_mock.py
 │       │
 │       ├── db/
-│       │   ├── schema.sql       # SQLite 表结构：tokens、snapshots、matches、positions、trades、provider_requests 等
+│       │   ├── schema.sql       # SQLite 表结构
 │       │   ├── database.py      # 连接管理、初始化 schema、轻量兼容迁移
-│       │   └── repositories.py  # 数据访问层；封装 token、snapshot、position、trade、runtime 状态读写
+│       │   └── repositories.py  # 数据访问层
 │       │
 │       ├── providers/
-│       │   ├── base.py          # Provider 抽象接口、数据结构、返回格式约定
-│       │   ├── gmgn_real.py     # GMGN OpenAPI：trenches、token info/security/pool、kline、top holders
-│       │   ├── jupiter_real.py  # Jupiter quote/swap 相关 Provider
-│       │   ├── jito_real.py     # Jito bundle/tip/广播确认相关 Provider
-│       │   ├── rpc_real.py      # Solana RPC HTTP 轮询、余额/交易确认等
-│       │   ├── gmgn_subscriber.py # GMGN WebSocket 订阅占位；当前未实装时回退 mock subscriber
-│       │   └── mock_data.py     # mock/仿真数据，用于本地闭环和测试
+│       │   ├── base.py          # Provider 抽象接口
+│       │   ├── gmgn_real.py     # GMGN OpenAPI：trenches/token info/security/pool/kline/holders
+│       │   ├── jupiter_real.py  # Jupiter quote/swap API
+│       │   ├── jito_real.py     # Jito bundle/tip/广播确认
+│       │   ├── rpc_real.py      # Solana RPC HTTP 轮询/余额/交易确认
+│       │   ├── jupiter.py / jito.py / rpc.py  # 测试用轻量 mock（仅 test_trading_pipeline 使用）
+│       │   ├── gmgn_subscriber.py # GMGN WebSocket 订阅占位
+│       │   └── mock_data.py     # mock/仿真数据
 │       │
 │       ├── runners/
-│       │   ├── discovery_runner.py      # 每分钟轮询 GMGN Trenches；初筛；入库候选池
-│       │   ├── second_filter_runner.py  # 一分钟后复核；K-line 二筛；最后调用 top1 holder；触发建仓
-│       │   ├── price_monitor_runner.py  # 活跃持仓价格监控；写入 tick/snapshot；触发退出规则
-│       │   ├── position_risk_runner.py  # 按 USD 持仓价值动态扫描风控与 top1 holder；触发风险全撤
-│       │   └── mock_lifecycle_runner.py # mock 生命周期推进，用于模拟演示和调试
+│       │   ├── discovery_runner.py      # 每分钟轮询 GMGN Trenches；初筛入库
+│       │   ├── second_filter_runner.py  # 一分钟后复核；K-line 二筛(7条规则)；top1 holder；建仓
+│       │   ├── price_monitor_runner.py  # 活跃持仓价格监控；tick/snapshot 写入；退出规则触发
+│       │   ├── position_risk_runner.py  # 按USD持仓分层扫描风控与 top1 holder；风险全撤
+│       │   ├── kill_switch_runner.py    # Kill switch 监控
+│       │   └── mock_lifecycle_runner.py # mock 生命周期推进
 │       │
 │       ├── services/
-│       │   ├── price_aggregator.py # 价格聚合与降级：GMGN/token pool/Jupiter quote 等
-│       │   ├── provider_factory.py # 根据 Provider Mode 创建 mock/readonly/live Provider
-│       │   └── event_bus.py        # 运行事件、日志与前端 SSE 推送
+│       │   ├── price_aggregator.py  # 价格聚合与降级
+│       │   ├── provider_factory.py  # 按 Provider Mode 创建 mock/readonly/live Provider
+│       │   ├── worker_manager.py    # Runner 生命周期管理（注册/启停/状态）
+│       │   ├── provider_call.py     # Provider 调用封装
+│       │   └── event_bus.py         # 运行事件/SSE 推送
 │       │
 │       ├── strategy/
-│       │   ├── filters.py       # 初筛风控规则：liquidity、holder、权限、rug、wash、bundler、sniper、平台、池龄
-│       │   ├── second_filter.py # 二筛规则：已完成 1m candle、5m 高低区间、volume、top1(addr_type=0)
-│       │   ├── sizing.py        # 入场 sizing：min(liquidity pct, ENTRY_MAX_USD)，统一 USD 口径
-│       │   ├── slippage.py      # 买入/卖出/紧急撤仓滑点上限与重报价约束
-│       │   └── exit_rules.py    # 止盈止损、动态止损、时间止损、completed 全撤、dust 全撤
+│       │   ├── filters.py       # 初筛风控(20条规则)：liquidity/holder/权限/rug/wash/bundler/sniper/平台/池龄
+│       │   ├── second_filter.py # 二筛(7条规则)：volume_1m/open-close/candle_position/price_5m等
+│       │   ├── sizing.py        # 入场 sizing
+│       │   ├── slippage.py      # 滑点上限与重报价约束
+│       │   └── exit_rules.py    # 止盈止损/动态止损/时间止损/completed/dust 全撤
 │       │
 │       ├── trading/
-│       │   └── executor.py      # 交易执行管线：模拟成交、Jupiter/Jito 实盘执行、安全门校验、交易入库
+│       │   ├── executor.py      # 交易执行管线：模拟/实盘、Jupiter quote、Jito bundle、安全门
+│       │   └── fee_tip.py       # Jito tip/fee 计算
 │       │
 │       └── tests/               # 单元测试、runner 测试、Provider smoke 测试
 │
@@ -265,15 +277,19 @@ meme/
 │       ├── api/
 │       │   └── client.ts        # 前端 API 封装
 │       ├── pages/
-│       │   ├── ControlCenter.tsx # 运行态控制、安全门、Provider 状态、启停/暂停入口
-│       │   ├── Portfolio.tsx     # 持仓、PnL、USD 价值、风险扫描间隔、top1 风控展示
-│       │   ├── Operations.tsx    # Provider 请求、系统日志、运行事件和排障信息
-│       │   └── ...               # tokens/trades/config/logs 等其他页面
+│       │   ├── ControlCenter.tsx # 运行态控制、策略组CRUD、交易参数编辑
+│       │   ├── Portfolio.tsx     # 持仓/PnL/USD价值/风险展示
+│       │   └── Operations.tsx    # 紧急操作/数据导出
 │       ├── components/
 │       └── main.tsx
 │
-└── docs/
-    └── API_FIELD_MAPPING_NOTES.md # GMGN 字段映射、风控字段来源和兼容说明
+├── scripts/
+│   ├── test_sim_chain.ps1       # 模拟交易链路测试脚本
+│   ├── start_all.ps1
+│   └── stop_all.ps1
+│
+├── data/                        # SQLite 数据库 & 导出
+└── logs/                        # 日志导出目录
 ```
 
 ## 核心运行链路

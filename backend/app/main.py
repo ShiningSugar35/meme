@@ -27,7 +27,7 @@ from .api.routes_trades import router as trades_router
 from .api.routes_logs import router as logs_router
 from .api.routes_risk import router as risk_router
 from .api.routes_providers import router as providers_router
-from .api.routes_runtime import router as runtime_router
+from .api.routes_runtime import router as runtime_router, ensure_runtime_defaults
 
 
 def _iso_now() -> str:
@@ -38,50 +38,71 @@ def _iso_now() -> str:
 async def lifespan(app: FastAPI):
     logger.info("Starting backend", env=settings.APP_ENV)
 
-    repo = await Repositories.create()
-    await repo.ensure_default_strategy_groups()
+    try:
+        repo = await Repositories.create()
+    except Exception as e:
+        logger.exception("Failed to create DB repo; backend aborting")
+        raise
+
+    try:
+        await ensure_runtime_defaults(repo)
+    except Exception as e:
+        logger.error(f"ensure_runtime_defaults failed (non-fatal): {e}")
+
     app.state.repo = repo
     app.state.session_started_at = _iso_now()
 
-    providers = create_providers(repo)
+    try:
+        providers = create_providers(repo)
+    except Exception as e:
+        logger.error(f"create_providers failed: {e}")
+        providers = None
     app.state.providers = providers
     app.state.pause_new_entries = True
 
     subscriber = create_gmgn_subscriber()
-    aggregator = PriceAggregator(repo, providers.gmgn, providers.jupiter, subscriber)
+    try:
+        aggregator = PriceAggregator(repo, providers.gmgn if providers else None, providers.jupiter if providers else None, subscriber)
+    except Exception as e:
+        logger.error(f"PriceAggregator init failed: {e}")
+        aggregator = None
     app.state.price_aggregator = aggregator
 
-    trading_pipeline = TradingPipeline(repo, providers.gmgn, providers.jupiter, providers.jito, providers.rpc)
+    try:
+        trading_pipeline = TradingPipeline(repo, providers.gmgn if providers else None, providers.jupiter if providers else None, providers.jito if providers else None, providers.rpc if providers else None)
+    except Exception as e:
+        logger.error(f"TradingPipeline init failed: {e}")
+        trading_pipeline = None
     app.state.trading_pipeline = trading_pipeline
 
     worker_mgr = WorkerManager(repo, event_bus=event_bus)
     app.state.worker_manager = worker_mgr
 
-    strategy_groups = await repo.list_strategy_groups()
-    discovery = DiscoveryRunner(repo, providers.gmgn, strategy_groups)
-    second = SecondFilterRunner(
-        repo,
-        providers.gmgn,
-        providers.jupiter,
-        providers.jito,
-        providers.rpc,
-        strategy_groups,
-    )
-    price = PriceMonitorRunner(repo, aggregator)
-    risk = PositionRiskRunner(repo, providers.gmgn, trading_pipeline=trading_pipeline)
+    try:
+        strategy_groups = await repo.list_strategy_groups()
+    except Exception:
+        strategy_groups = []
+    discovery = DiscoveryRunner(repo, providers.gmgn if providers else None, strategy_groups)
+    second = SecondFilterRunner(repo, providers.gmgn if providers else None, providers.jupiter if providers else None, providers.jito if providers else None, providers.rpc if providers else None, strategy_groups)
+    price = PriceMonitorRunner(repo, aggregator) if aggregator else None
+    risk = PositionRiskRunner(repo, providers.gmgn if providers else None, trading_pipeline=trading_pipeline)
     kill = KillSwitchRunner(repo)
 
     worker_mgr.register_worker('discovery', discovery.run_once, int(settings.POLL_INTERVAL_SECONDS))
     worker_mgr.register_worker('second_filter', second.run_once, max(1, min(30, int(settings.POLL_INTERVAL_SECONDS))))
-    worker_mgr.register_worker('price_monitor', price.run_once, int(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS))
+    if price:
+        worker_mgr.register_worker('price_monitor', price.run_once, int(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS))
     worker_mgr.register_worker('position_risk', risk.run_once, 1)
     worker_mgr.register_worker('kill_switch', kill.run_once, 30)
 
-    await repo.set_runtime_setting('user_mode', 'IDLE', 'system')
-    await repo.set_runtime_setting('workers_enabled', 'false', 'system')
-    await repo.set_runtime_setting('live_entries_enabled', 'false', 'system')
-    await repo.set_runtime_setting('session_started_at', app.state.session_started_at, 'system')
-    await repo.append_system_event('INFO', 'RUNTIME', 'Backend session started', app.state.session_started_at, account_type='SIM')
+    try:
+        await repo.set_runtime_setting('user_mode', 'IDLE', 'system')
+        await repo.set_runtime_setting('workers_enabled', 'false', 'system')
+        await repo.set_runtime_setting('live_entries_enabled', 'false', 'system')
+        await repo.set_runtime_setting('session_started_at', app.state.session_started_at, 'system')
+        await repo.append_system_event('INFO', 'RUNTIME', 'Backend session started', app.state.session_started_at, account_type='SIM')
+    except Exception as e:
+        logger.error(f"Init runtime settings/event failed (non-fatal): {e}")
 
     try:
         yield
@@ -119,6 +140,6 @@ app.include_router(runtime_router)
 async def health():
     return JSONResponse({
         "status": "ok",
-        "version": "1.1.0-control-center-refactor",
+        "version": "1.1.1-runtime-api-merged",
         "timestamp": _iso_now(),
     })

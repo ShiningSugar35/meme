@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -104,7 +105,7 @@ class GMGNProvider(MarketDataProvider):
 
     @staticmethod
     def _retryable_status(status_code: int) -> bool:
-        return status_code in (408, 425, 429, 500, 502, 503, 504)
+        return status_code in (401, 403, 408, 425, 429, 500, 502, 503, 504)
 
     def _next_credential(self) -> Dict[str, Any]:
         creds = self.credentials or [{"api_key": k, "client_id": ""} for k in self.api_keys] or [{"api_key": "", "client_id": c} for c in self.client_ids]
@@ -135,36 +136,30 @@ class GMGNProvider(MarketDataProvider):
         if not HAS_HTTPX:
             raise ImportError("httpx required for real API calls")
         method = (method or "GET").upper()
-        params = {k: v for k, v in dict(params or {}).items() if v is not None and v != ""}
+        cleaned = {k: v for k, v in dict(params or {}).items() if v is not None and v != ""}
         url = self._build_url(path)
         attempts = max(1, len(self.credentials) or len(self.api_keys) or len(self.client_ids) or 1)
         last_exc: Optional[BaseException] = None
 
         for _attempt in range(attempts):
             cred = self._next_credential()
+            if not cred:
+                continue
             api_key = cred.get("api_key") or ""
-            client_id = cred.get("client_id") or cred.get("public_key") or ""
-            headers = {"Accept": "application/json", "User-Agent": "GRW-GMGN-Provider/1.0"}
-            if api_key:
-                headers["x-api-key"] = api_key
-                headers["x-route-key"] = api_key
-            if client_id:
-                headers["x-client-id"] = client_id
-
-            auth_params = dict(params)
-            if api_key:
-                auth_params.setdefault("api_key", api_key)
-            if client_id:
-                auth_params.setdefault("client_id", client_id)
-
             started = time.perf_counter()
+
+            # auth: X-APIKEY header + timestamp + random client_id per request (matches gmgn-cli)
+            auth_query = {"timestamp": str(int(time.time())), "client_id": str(uuid.uuid4())}
+            headers = {"X-APIKEY": api_key, "Content-Type": "application/json"}
+            request_params = {**cleaned, **auth_query}
+
             try:
                 timeout = float(getattr(settings, "GMGN_TIMEOUT_SECONDS", 8.0) or 8.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     if method == "POST":
-                        resp = await client.post(url, json=auth_params, headers=headers)
+                        resp = await client.post(url, params=auth_query, json=cleaned, headers=headers)
                     else:
-                        resp = await client.request(method, url, params=auth_params, headers=headers)
+                        resp = await client.get(url, params=request_params, headers=headers)
                 latency = int((time.perf_counter() - started) * 1000)
 
                 try:
@@ -174,26 +169,26 @@ class GMGNProvider(MarketDataProvider):
 
                 if resp.status_code >= 400:
                     retryable = self._retryable_status(resp.status_code)
-                    await self._log_request(path, False, {**params, "api_key": api_key, "client_id": client_id}, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
+                    await self._log_request(path, False, request_params, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
                     err = GMGNAPIError(f"GMGN HTTP {resp.status_code}: {str(data)[:500]}", status_code=resp.status_code, path=path, method=method, retryable=retryable)
                     last_exc = err
                     if retryable:
                         continue
                     raise err
 
-                await self._log_request(path, True, {**params, "api_key": api_key, "client_id": client_id}, self._compact_response_summary(data), resp.status_code, latency, method=method)
+                await self._log_request(path, True, request_params, self._compact_response_summary(data), resp.status_code, latency, method=method)
                 return data if isinstance(data, dict) else {"data": data}
             except GMGNAPIError:
                 raise
             except Exception as exc:
                 latency = int((time.perf_counter() - started) * 1000)
                 last_exc = exc
-                await self._log_request(path, False, {**params, "api_key": api_key, "client_id": client_id}, {}, None, latency, "REQUEST_ERROR", str(exc), method)
+                await self._log_request(path, False, cleaned, {}, None, latency, "REQUEST_ERROR", str(exc), method)
                 continue
 
         if isinstance(last_exc, GMGNAPIError):
             raise last_exc
-        raise GMGNAPIError(f"GMGN request failed: {last_exc}", path=path, method=method, retryable=True)
+        raise GMGNAPIError(f"GMGN request failed: {str(last_exc or 'unknown')}", path=path, method=method, retryable=True)
 
     @staticmethod
     def _first_present(data: Dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
@@ -367,11 +362,7 @@ class GMGNProvider(MarketDataProvider):
                 if isinstance(val, dict):
                     merged.update(val)
             except GMGNAPIError as exc:
-                # Terminal auth/not-found on enrichment should be visible but not
-                # block the primary snapshot when token info was fetched.
                 raw_bundle[label] = {"error": str(exc), "status_code": exc.status_code, "path": exc.path}
-                if exc.status_code in (401, 403):
-                    raise
             except Exception as exc:
                 raw_bundle[label] = {"error": str(exc)}
 

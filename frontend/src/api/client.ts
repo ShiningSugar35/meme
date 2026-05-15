@@ -18,6 +18,7 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
 export type RuntimeMode = 'IDLE' | 'SIM_TEST' | 'FORMAL_SIM_LIVE';
 
 export interface RuntimeStatus {
+  ok?: boolean;
   user_mode: RuntimeMode;
   workers_enabled: boolean;
   live_entries_enabled: boolean;
@@ -28,14 +29,20 @@ export interface RuntimeStatus {
   has_live_positions: boolean;
   can_live_trade: boolean;
   live_readiness?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
 export interface PositionSummary {
   total_open?: number;
   live_open?: number;
   sim_open?: number;
+  live_open_count?: number;
+  sim_open_count?: number;
   total_pnl_usd?: number;
   live_pnl_usd?: number;
+  sim_pnl_usd?: number;
+  live_pnl_sol?: number;
+  sim_pnl_sol?: number;
   [key: string]: unknown;
 }
 
@@ -44,6 +51,7 @@ export interface StrategyGroup {
   name: string;
   enabled: number | boolean;
   is_live: number | boolean;
+  priority?: number;
   config_version?: number;
   x: number;
   y: number;
@@ -51,6 +59,7 @@ export interface StrategyGroup {
   raw_config_json?: string;
   created_at?: string;
   updated_at?: string;
+  [key: string]: unknown;
 }
 
 export interface StrategyPayload {
@@ -92,6 +101,27 @@ export interface PortfolioRow {
   [key: string]: unknown;
 }
 
+interface StrategiesResponseWire {
+  ok?: boolean;
+  strategies?: StrategyGroup[];
+  items?: StrategyGroup[];
+}
+
+interface StrategyResponseWire {
+  ok?: boolean;
+  strategy?: StrategyGroup;
+  id?: number;
+  status?: string;
+}
+
+function normalizeStrategies(data: StrategiesResponseWire): { strategies: StrategyGroup[] } {
+  return { strategies: data.strategies ?? data.items ?? [] };
+}
+
+function normalizeTradingParams(data: TradingParamsResponse & { ok?: boolean }): TradingParamsResponse {
+  return { specs: data.specs ?? [], values: data.values ?? {} };
+}
+
 export const api = {
   getRuntimeStatus: () => apiFetch<RuntimeStatus>('/api/runtime/status'),
   switchRuntimeMode: (user_mode: RuntimeMode) => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/mode', {
@@ -99,17 +129,17 @@ export const api = {
     body: JSON.stringify({ user_mode }),
   }),
   getPositionsSummary: () => apiFetch<PositionSummary>('/api/runtime/positions/summary'),
-  getStrategies: () => apiFetch<{ strategies: StrategyGroup[] }>('/api/runtime/strategies'),
-  createStrategy: (payload: StrategyPayload) => apiFetch<{ strategy: StrategyGroup }>('/api/runtime/strategies', {
+  getStrategies: async () => normalizeStrategies(await apiFetch<StrategiesResponseWire>('/api/runtime/strategies')),
+  createStrategy: async (payload: StrategyPayload) => apiFetch<StrategyResponseWire>('/api/runtime/strategies', {
     method: 'POST',
     body: JSON.stringify(payload),
   }),
-  updateStrategy: (id: number, payload: StrategyPayload) => apiFetch<{ strategy: StrategyGroup }>(`/api/runtime/strategies/${id}`, {
+  updateStrategy: async (id: number, payload: StrategyPayload) => apiFetch<StrategyResponseWire>(`/api/runtime/strategies/${id}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
   }),
   deleteStrategy: (id: number) => apiFetch<{ ok: boolean }>(`/api/runtime/strategies/${id}`, { method: 'DELETE' }),
-  getTradingParams: () => apiFetch<TradingParamsResponse>('/api/runtime/trading-params'),
+  getTradingParams: async () => normalizeTradingParams(await apiFetch<TradingParamsResponse & { ok?: boolean }>('/api/runtime/trading-params')),
   updateTradingParams: (values: Record<string, number>) => apiFetch<{ ok: boolean; values: Record<string, number> }>('/api/runtime/trading-params', {
     method: 'PUT',
     body: JSON.stringify({ values }),

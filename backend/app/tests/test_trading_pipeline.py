@@ -3,7 +3,7 @@ from datetime import datetime
 from ..db.repositories import Repositories
 from ..trading.executor import TradingPipeline
 from ..providers.mock_data import MockData
-from ..providers.gmgn import GMGNProvider
+from ..providers.gmgn_real import GMGNProvider
 from ..providers.jupiter import JupiterProvider
 from ..providers.jito import JitoProvider
 from ..providers.rpc import MockRpcProvider
