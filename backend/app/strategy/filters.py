@@ -1,14 +1,19 @@
 """Initial and risk-filter rules for GMGN trench candidates.
 
-The age/timing parameter ``t_seconds`` is intentionally *not* evaluated here.
-It belongs to the provider discovery query: each strategy group asks GMGN for
-pools whose age is in [t, t+60] seconds, then this module evaluates only the
-risk/platform/holder conditions on the returned pools.
+The discovery age/timing parameter ``t_seconds`` is used by the provider
+query to ask GMGN for pools whose age is in [t, t+60] seconds.  It is also
+used here by the liquidity rule because the strategy definition explicitly
+makes minimum liquidity a function of t:
+
+    min_liquidity_usd = 5000 + 4 * t_seconds
+
+All other rules evaluate only the risk/platform/holder conditions on the
+returned pools.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -108,7 +113,11 @@ def _check_float(
         details.append(_mk_failed(name, value, f"predicate error: {e}", threshold_desc))
         return value
 
-    details.append(_mk_pass(name, value, f"satisfies {threshold_desc}", threshold_desc) if ok else _mk_failed(name, value, f"violates {threshold_desc}", threshold_desc))
+    details.append(
+        _mk_pass(name, value, f"satisfies {threshold_desc}", threshold_desc)
+        if ok
+        else _mk_failed(name, value, f"violates {threshold_desc}", threshold_desc)
+    )
     return value
 
 
@@ -142,6 +151,20 @@ def _norm_str(v: Any) -> str:
     return str(v or "").strip()
 
 
+def _strategy_x(strategy_group: Dict[str, Any]) -> float:
+    return float(strategy_group.get("x", 0.2))
+
+
+def _strategy_t_seconds(strategy_group: Dict[str, Any]) -> int:
+    # Runtime strategy rows use t_seconds.  Keep t/age_seconds fallbacks for
+    # manually built tests or old payloads.
+    raw = _first_present(strategy_group, ["t_seconds", "t", "age_seconds"], 150)
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 150
+
+
 def _evaluate_core_risk_rules(
     snapshot: Dict[str, Any],
     strategy_group: Dict[str, Any],
@@ -149,26 +172,32 @@ def _evaluate_core_risk_rules(
     include_type: bool = True,
     include_platform: bool = True,
 ) -> tuple[List[FilterDetail], Dict[str, Any]]:
-    x = float(strategy_group.get("x", 0.2))
+    x = _strategy_x(strategy_group)
+    t_seconds = _strategy_t_seconds(strategy_group)
     details: List[FilterDetail] = []
 
     if include_type:
         typ = _norm_str(_first_present(snapshot, ["type", "trench_type", "category"]))
-        details.append(_mk_pass("type_new_creation", typ, "type == new_creation", "new_creation") if typ == "new_creation" else _mk_failed("type_new_creation", typ, "type must be new_creation", "new_creation", missing=(typ == "")))
+        details.append(
+            _mk_pass("type_new_creation", typ, "type == new_creation", "new_creation")
+            if typ == "new_creation"
+            else _mk_failed("type_new_creation", typ, "type must be new_creation", "new_creation", missing=(typ == ""))
+        )
     else:
         typ = _norm_str(_first_present(snapshot, ["type", "trench_type", "category"]))
 
+    min_liquidity_usd = 5000 + 4 * t_seconds
     liquidity = _check_float(
         details,
         snapshot,
         "min_liquidity_usd",
         ["liquidity_usd", "liquidity", "pool_liquidity_usd"],
-        lambda v: v >= 10000 - 20000 * x,
-        f">= {10000 - 20000 * x:.6g}",
+        lambda v: v >= min_liquidity_usd,
+        f">= {min_liquidity_usd:.6g}",
     )
 
-    low = 0.175 - 0.15 * x
-    high = 0.25 + 0.25 * x
+    low = 0.165 - 0.1 * x
+    high = 0.26 + 0.2 * x
     top10 = _check_float(
         details,
         snapshot,
@@ -234,6 +263,7 @@ def _evaluate_core_risk_rules(
         lambda v: v < 0.13 + 0.1 * x,
         f"< {0.13 + 0.1 * x:.6g}",
     )
+
     raw_tax = _to_float(_first_present(snapshot, ["sell_tax", "sell_tax_rate"]))
     if raw_tax is not None and raw_tax > 1:
         raw_tax = raw_tax / 100.0
@@ -253,14 +283,22 @@ def _evaluate_core_risk_rules(
             b = _to_int_bool(raw_social)
             ok = (b == 1)
             val = b
-        details.append(_mk_pass("has_at_least_one_social", val, "required when x < 0.15", 1) if ok else _mk_failed("has_at_least_one_social", val, "required when x < 0.15", 1, missing=(val is None)))
+        details.append(
+            _mk_pass("has_at_least_one_social", val, "required when x < 0.15", 1)
+            if ok
+            else _mk_failed("has_at_least_one_social", val, "required when x < 0.15", 1, missing=(val is None))
+        )
 
     creator_status = _norm_str(_first_present(snapshot, ["creator_token_status", "creator_status"])).lower()
     dev_hold = _to_float(_first_present(snapshot, ["dev_team_hold_rate", "dev_hold_rate", "creator_hold_rate"]))
     dev_threshold = 0.03 + 0.1 * x
     creator_ok = creator_status in CREATOR_CLOSE_VALUES or (dev_hold is not None and dev_hold < dev_threshold)
     creator_value = creator_status or dev_hold
-    details.append(_mk_pass("creator_token_status_or_dev_team_hold_rate", creator_value, f"creator_close OR dev_hold < {dev_threshold:.6g}", ("creator_close", dev_threshold)) if creator_ok else _mk_failed("creator_token_status_or_dev_team_hold_rate", creator_value, f"creator_close OR dev_hold < {dev_threshold:.6g}", ("creator_close", dev_threshold), missing=(creator_value in (None, ""))))
+    details.append(
+        _mk_pass("creator_token_status_or_dev_team_hold_rate", creator_value, f"creator_close OR dev_hold < {dev_threshold:.6g}", ("creator_close", dev_threshold))
+        if creator_ok
+        else _mk_failed("creator_token_status_or_dev_team_hold_rate", creator_value, f"creator_close OR dev_hold < {dev_threshold:.6g}", ("creator_close", dev_threshold), missing=(creator_value in (None, "")))
+    )
 
     burn_status = _norm_str(_first_present(snapshot, ["burn_status", "lp_burn_status", "burnt_status"])).lower()
     details.append(_mk_pass("burn_status", burn_status, "burn", "burn") if burn_status in BURN_VALUES else _mk_failed("burn_status", burn_status, "must be burn", "burn", missing=(burn_status == "")))
@@ -276,12 +314,20 @@ def _evaluate_core_risk_rules(
 
     if include_platform:
         platform = _norm_str(_first_present(snapshot, ["launchpad", "platform", "source_platform", "pool_platform"]))
-        details.append(_mk_pass("platform", platform, f"in {sorted(PLATFORMS)}", sorted(PLATFORMS)) if platform in PLATFORMS else _mk_failed("platform", platform, f"in {sorted(PLATFORMS)}", sorted(PLATFORMS), missing=(platform == "")))
+        details.append(
+            _mk_pass("platform", platform, f"in {sorted(PLATFORMS)}", sorted(PLATFORMS))
+            if platform in PLATFORMS
+            else _mk_failed("platform", platform, f"in {sorted(PLATFORMS)}", sorted(PLATFORMS), missing=(platform == ""))
+        )
     else:
         platform = _norm_str(_first_present(snapshot, ["launchpad", "platform", "source_platform", "pool_platform"]))
 
     feature_vector = {
         "x": x,
+        "t_seconds": t_seconds,
+        "min_liquidity_usd_threshold": min_liquidity_usd,
+        "top_10_holder_rate_low": low,
+        "top_10_holder_rate_high": high,
         "type": typ,
         "liquidity_usd": liquidity,
         "top_10_holder_rate": top10,
@@ -296,7 +342,7 @@ def _evaluate_core_risk_rules(
 async def run_initial_filter(snapshot: Dict[str, Any], strategy_group: Dict[str, Any], now: datetime | None = None) -> FilterResult:
     """First-stage filter for pools already returned by the strategy t-window query."""
     details, feature_vector = _evaluate_core_risk_rules(snapshot, strategy_group, include_type=True, include_platform=True)
-    feature_vector.update({"t_seconds": int(strategy_group.get("t_seconds", 150))})
+    feature_vector.update({"t_seconds": _strategy_t_seconds(strategy_group)})
     return FilterResult(all(d.passed for d in details), details, feature_vector)
 
 

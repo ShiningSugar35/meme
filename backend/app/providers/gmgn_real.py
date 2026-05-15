@@ -1,166 +1,84 @@
-"""
-GMGN Provider - Three Mode Support (mock/online_readonly/live)
+"""GMGN market-data provider.
 
-修复点：
-1. OpenAPI token/info/security/pool/kline/holders 均使用 query 参数 chain/address，
-   不再把 mint 拼到 path 后面，避免 /v1/token/info/<mint> 这类 404。
-2. 为非 2xx 响应抛出带 status_code/path/method 的 GMGNAPIError，方便 runner 区分
-   404/400 这类终止性错误与 429/5xx 这类可重试错误。
-3. 兼容 GMGN 多种返回结构，并把 token/security/pool 返回归一化到项目内部字段。
+Key fixes in this replacement:
+- K-line path uses the canonical settings.GMGN_KLINE_PATH / get_gmgn_kline_path().
+- It never references the removed/legacy field GMGN_TOKEN_KLINE_PATH directly.
+- K-line/token-info endpoints use query parameters (chain/address/limit) rather
+  than appending the token mint to the path, while still accepting legacy payload
+  shapes returned by GMGN.
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import math
 import time
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .base import MarketDataProvider
+try:
+    import httpx
+    HAS_HTTPX = True
+except Exception:  # pragma: no cover
+    httpx = None
+    HAS_HTTPX = False
+
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
-
-try:
-    import httpx
-
-    HAS_HTTPX = True
-except ImportError:  # pragma: no cover - runtime environment dependent
-    HAS_HTTPX = False
-    logger.warning("httpx not installed. online_readonly/live mode will not work for GMGN.")
+from .base import MarketDataProvider
+from .mock_data import MockData
 
 
 class GMGNAPIError(Exception):
-    """Structured GMGN request error used by runners for retry/terminal handling."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: Optional[int] = None,
-        path: Optional[str] = None,
-        method: str = "GET",
-        body: Optional[str] = None,
-        retryable: Optional[bool] = None,
-    ):
+    def __init__(self, message: str, *, status_code: Optional[int] = None, path: Optional[str] = None, method: str = "GET", retryable: Optional[bool] = None):
         super().__init__(message)
         self.status_code = status_code
         self.path = path
         self.method = method
-        self.body = body
         self.retryable = retryable
 
 
 class GMGNProvider(MarketDataProvider):
-    """
-    GMGN Provider with three modes:
-    - mock: Uses MockData
-    - online_readonly: Real API calls, read-only
-    - live: Real API calls for reading; trading writes are not implemented here
-
-    GMGN trenches note:
-    GMGN's `/v1/trenches` gateway commonly expects `chain` at request level.
-    The provider therefore sends `chain` in the POST query and body.
-    """
-
     def __init__(self, repo: Repositories, mode: Optional[ProviderMode] = None):
         self.repo = repo
         self.mode = mode or settings.get_provider_mode()
-        self.api_base_url = (settings.GMGN_API_BASE_URL or "https://api.gmgn.ai").rstrip("/")
+        self.api_base_url = (settings.GMGN_API_BASE_URL or "").rstrip("/")
+        self.credentials = settings.get_gmgn_credentials()
+        self.api_keys = [c.get("api_key", "") for c in self.credentials if c.get("api_key")]
+        self.client_ids = [c.get("client_id", "") for c in self.credentials if c.get("client_id")]
+        self._key_cursor = 0
+        self.mock_data = MockData()
 
-        self.accounts: List[Dict[str, str]] = []
-        for account in settings.get_gmgn_accounts():
-            api_key = str(account.get("api_key") or "").strip()
-            client_id = str(account.get("client_id") or account.get("public_key") or "").strip()
-            private_key = str(account.get("private_key") or "").strip()
-            if api_key or client_id:
-                self.accounts.append(
-                    {
-                        "index": str(account.get("index") or len(self.accounts) + 1),
-                        "api_key": api_key,
-                        "client_id": client_id,
-                        "private_key": private_key,
-                    }
-                )
-
-        # Legacy public attributes kept for older call sites/tests.
-        self.api_keys: List[str] = [a["api_key"] for a in self.accounts if a.get("api_key")]
-        self.api_key = self.api_keys[0] if self.api_keys else None
-        self._account_cursor = 0
-        self._key_cursor = 0  # backward-compatible name; mirrors _account_cursor
-        self._key_lock = asyncio.Lock()
-
-        self.mock_data = None
-        if self.mode == ProviderMode.MOCK:
-            from .mock_data import MockData
-
-            self.mock_data = MockData()
-            logger.info("GMGN Provider initialized in MOCK mode")
-        elif self.mode == ProviderMode.ONLINE_READONLY:
+        if self.mode in (ProviderMode.ONLINE_READONLY, ProviderMode.LIVE):
             if not HAS_HTTPX:
-                raise ImportError("httpx required for online_readonly mode. Install with: pip install httpx")
-            if not self.accounts:
-                logger.warning("GMGN credentials not set. online_readonly mode may fail if the endpoint requires credentials.")
-            logger.info(
-                "GMGN Provider initialized in ONLINE_READONLY mode",
-                api_base=self.api_base_url,
-                gmgn_account_count=len(self.accounts),
-            )
-        elif self.mode == ProviderMode.LIVE:
-            if not HAS_HTTPX:
-                raise ImportError("httpx required for live mode. Install with: pip install httpx")
-            if not self.accounts:
-                raise ValueError("GMGN_API_KEY_N or GMGN_CLIENT_ID_N/GMGN_PUBLIC_KEY_N required for live mode")
-            logger.info(
-                "GMGN Provider initialized in LIVE mode",
-                api_base=self.api_base_url,
-                gmgn_account_count=len(self.accounts),
-            )
+                raise ImportError("httpx required for live/online_readonly GMGN mode. Install with: pip install httpx")
+            if not self.api_base_url:
+                raise ValueError("GMGN_API_BASE_URL required for live/online_readonly mode")
+            if not (self.credentials or self.api_keys or self.client_ids):
+                raise ValueError("GMGN_API_KEY_N or GMGN_CLIENT_ID_N required for live/online_readonly mode")
+            logger.info("GMGN Provider initialized in real mode", api_base=self.api_base_url, credential_count=len(self.credentials))
 
     async def _log_request(
         self,
         endpoint: str,
         ok: bool,
-        request_summary: Dict[str, Any],
-        response_summary: Dict[str, Any],
-        status_code: int = 200,
-        latency_ms: int = 1,
+        request_summary: Dict[str, Any] | None,
+        response_summary: Dict[str, Any] | None,
+        status_code: Optional[int] = 200,
+        latency_ms: Optional[int] = 0,
         error_code: Optional[str] = None,
         error_summary: Optional[str] = None,
         method: str = "GET",
     ) -> None:
-        """Log provider request with masked credentials."""
-        safe_request = dict(request_summary or {})
+        def mask(v: Any) -> Any:
+            s = str(v or "")
+            if not s:
+                return s
+            return s[:4] + "..." + s[-4:] if len(s) > 8 else "***"
 
-        def _mask(value: Any) -> str:
-            key = str(value or "")
-            return key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
-
-        for secret_key in (
-            "api_key",
-            "client_id",
-            "private_key",
-            "x-api-key",
-            "x-route-key",
-            "x-apikey",
-            "authorization",
-            "X-APIKEY",
-            "Authorization",
-        ):
-            if secret_key in safe_request and safe_request[secret_key]:
-                safe_request[secret_key] = _mask(safe_request[secret_key])
-
-        for container_key in ("params", "query", "json", "body"):
-            nested = safe_request.get(container_key)
-            if isinstance(nested, dict):
-                nested = dict(nested)
-                for secret_key in ("api_key", "client_id", "private_key"):
-                    if nested.get(secret_key):
-                        nested[secret_key] = _mask(nested[secret_key])
-                safe_request[container_key] = nested
-
+        req = dict(request_summary or {})
+        for k in ("api_key", "x-api-key", "x-route-key", "client_id", "private_key"):
+            if k in req:
+                req[k] = mask(req[k])
         try:
             await self.repo.append_provider_request(
                 "GMGN",
@@ -168,770 +86,382 @@ class GMGNProvider(MarketDataProvider):
                 method.upper(),
                 status_code,
                 latency_ms,
-                ok,
+                bool(ok),
                 error_code,
                 error_summary,
-                json.dumps(safe_request, ensure_ascii=False, default=str),
+                json.dumps(req, ensure_ascii=False, default=str),
                 json.dumps(response_summary or {}, ensure_ascii=False, default=str),
             )
-        except Exception as e:  # provider logging must never break data path
-            logger.warning(f"append_provider_request failed: {e}")
-
-    async def _next_account(self) -> Tuple[Optional[int], Dict[str, str]]:
-        if not self.accounts:
-            return None, {}
-        async with self._key_lock:
-            idx = self._account_cursor % len(self.accounts)
-            self._account_cursor += 1
-            self._key_cursor = self._account_cursor
-            return idx, self.accounts[idx]
-
-    async def _next_api_key(self) -> Tuple[Optional[int], Optional[str]]:
-        """Backward-compatible wrapper used by older tests."""
-        idx, account = await self._next_account()
-        return idx, account.get("api_key") if account else None
+        except Exception:
+            pass
 
     def _build_url(self, path: str) -> str:
         if path.startswith("http://") or path.startswith("https://"):
             return path
+        if not self.api_base_url:
+            raise GMGNAPIError("GMGN_API_BASE_URL is not configured", path=path, retryable=False)
         return f"{self.api_base_url}/{path.lstrip('/')}"
 
     @staticmethod
     def _retryable_status(status_code: int) -> bool:
         return status_code in (408, 425, 429, 500, 502, 503, 504)
 
-    @staticmethod
-    def _terminal_status(status_code: int) -> bool:
-        return status_code in (400, 401, 403, 404, 405, 410, 422)
-
-    @staticmethod
-    def _auth_headers(account: Dict[str, str]) -> Dict[str, str]:
-        headers: Dict[str, str] = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "meme-trading-bot/1.0",
-        }
-        api_key = str(account.get("api_key") or "").strip()
-        client_id = str(account.get("client_id") or "").strip()
-        if api_key:
-            headers.update(
-                {
-                    "X-APIKEY": api_key,
-                    "X-API-Key": api_key,
-                    "x-api-key": api_key,
-                    "x-route-key": api_key,
-                    "Authorization": f"Bearer {api_key}",
-                }
-            )
-        if client_id:
-            headers.update({"X-Client-Id": client_id, "client-id": client_id})
-        return headers
-
-    @staticmethod
-    def _auth_query(account: Dict[str, str]) -> Dict[str, Any]:
-        api_key = str(account.get("api_key") or "").strip()
-        client_id = str(account.get("client_id") or "").strip()
-        query: Dict[str, Any] = {
-            "timestamp": str(int(time.time())),
-            "client_id": client_id or str(uuid.uuid4()),
-        }
-        if api_key:
-            query["api_key"] = api_key
-        return query
+    def _next_credential(self) -> Dict[str, Any]:
+        creds = self.credentials or [{"api_key": k, "client_id": ""} for k in self.api_keys] or [{"api_key": "", "client_id": c} for c in self.client_ids]
+        if not creds:
+            return {}
+        item = creds[self._key_cursor % len(creds)]
+        self._key_cursor += 1
+        return item
 
     @staticmethod
     def _compact_response_summary(data: Any) -> Dict[str, Any]:
-        """Avoid writing huge API payloads into provider_requests while preserving diagnostics."""
-        if not isinstance(data, dict):
-            return {"type": type(data).__name__}
-        summary: Dict[str, Any] = {"keys": list(data.keys())[:20]}
-        payload = data.get("data")
-        if isinstance(payload, dict):
-            summary["data_keys"] = list(payload.keys())[:20]
-            for key in ("tokens", "token", "list", "rows", "rank", "new", "pump", "complete", "completed"):
-                val = payload.get(key)
-                if isinstance(val, list):
-                    summary[f"data.{key}.count"] = len(val)
-        elif isinstance(payload, list):
-            summary["data_count"] = len(payload)
-        return summary
+        if isinstance(data, dict):
+            summary: Dict[str, Any] = {"keys": list(data.keys())[:30]}
+            inner = data.get("data")
+            if isinstance(inner, list):
+                summary["data_count"] = len(inner)
+            elif isinstance(inner, dict):
+                summary["data_keys"] = list(inner.keys())[:30]
+                for k in ("items", "list", "rows", "klines", "holders"):
+                    if isinstance(inner.get(k), list):
+                        summary[f"{k}_count"] = len(inner[k])
+            return summary
+        if isinstance(data, list):
+            return {"list_count": len(data)}
+        return {"type": type(data).__name__}
 
-    async def _make_request(
-        self,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        *,
-        method: str = "GET",
-        query_params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    async def _make_request(self, path: str, params: Optional[Dict[str, Any]] = None, *, method: str = "GET") -> Dict[str, Any]:
         if not HAS_HTTPX:
             raise ImportError("httpx required for real API calls")
-
-        url = self._build_url(path)
         method = (method or "GET").upper()
-        max_attempts = max(1, len(self.accounts))
-        last_error: Optional[BaseException] = None
-        base_params = {k: v for k, v in dict(params or {}).items() if v is not None and v != ""}
-        extra_query = {k: v for k, v in dict(query_params or {}).items() if v is not None and v != ""}
-        timeout = float(getattr(settings, "GMGN_TIMEOUT_SECONDS", 8.0) or 8.0)
+        params = {k: v for k, v in dict(params or {}).items() if v is not None and v != ""}
+        url = self._build_url(path)
+        attempts = max(1, len(self.credentials) or len(self.api_keys) or len(self.client_ids) or 1)
+        last_exc: Optional[BaseException] = None
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            for attempt in range(max_attempts):
-                key_index, account = await self._next_account()
-                headers = self._auth_headers(account)
-                auth_query = self._auth_query(account)
-                query = {**auth_query, **extra_query}
+        for _attempt in range(attempts):
+            cred = self._next_credential()
+            api_key = cred.get("api_key") or ""
+            client_id = cred.get("client_id") or cred.get("public_key") or ""
+            headers = {"Accept": "application/json", "User-Agent": "GRW-GMGN-Provider/1.0"}
+            if api_key:
+                headers["x-api-key"] = api_key
+                headers["x-route-key"] = api_key
+            if client_id:
+                headers["x-client-id"] = client_id
 
-                request_summary: Dict[str, Any] = {
-                    "attempt": attempt + 1,
-                    "max_attempts": max_attempts,
-                    "method": method,
-                    "path": path,
-                    "account_index": (key_index + 1) if key_index is not None else None,
-                    "has_api_key": bool(account.get("api_key")) if account else False,
-                    "query": dict(query),
-                    "params" if method != "POST" else "json": dict(base_params),
-                }
-                if account.get("api_key"):
-                    request_summary["api_key"] = account.get("api_key")
-                if account.get("client_id"):
-                    request_summary["client_id"] = account.get("client_id")
+            auth_params = dict(params)
+            if api_key:
+                auth_params.setdefault("api_key", api_key)
+            if client_id:
+                auth_params.setdefault("client_id", client_id)
 
-                start = time.time()
-                try:
+            started = time.perf_counter()
+            try:
+                timeout = float(getattr(settings, "GMGN_TIMEOUT_SECONDS", 8.0) or 8.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     if method == "POST":
-                        response = await client.post(url, params=query, json=base_params, headers=headers)
+                        resp = await client.post(url, json=auth_params, headers=headers)
                     else:
-                        merged = {**query, **base_params}
-                        response = await client.get(url, params=merged, headers=headers)
-                    latency_ms = int((time.time() - start) * 1000)
+                        resp = await client.request(method, url, params=auth_params, headers=headers)
+                latency = int((time.perf_counter() - started) * 1000)
 
-                    if response.status_code < 200 or response.status_code >= 300:
-                        body = response.text[:1000]
-                        retryable = self._retryable_status(response.status_code)
-                        error_msg = f"GMGN API error: {response.status_code} - {body}"
-                        await self._log_request(
-                            path,
-                            False,
-                            request_summary,
-                            {"error": error_msg, "body": body},
-                            status_code=response.status_code,
-                            latency_ms=latency_ms,
-                            error_code="GMGN_HTTP_ERROR",
-                            error_summary=error_msg,
-                            method=method,
-                        )
-                        last_error = GMGNAPIError(
-                            error_msg,
-                            status_code=response.status_code,
-                            path=path,
-                            method=method,
-                            body=body,
-                            retryable=retryable,
-                        )
-                        if retryable and attempt < max_attempts - 1:
-                            await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
-                            continue
-                        raise last_error
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {"raw_text": resp.text[:2000]}
 
-                    try:
-                        data = response.json()
-                    except Exception as e:
-                        body = response.text[:1000]
-                        raise GMGNAPIError(
-                            f"GMGN API returned non-json response: {body}",
-                            status_code=response.status_code,
-                            path=path,
-                            method=method,
-                            body=body,
-                            retryable=False,
-                        ) from e
-
-                    # Some GMGN JSON errors still arrive with HTTP 200.
-                    if isinstance(data, dict):
-                        code = data.get("code")
-                        if code not in (None, 0, "0", 200, "200") and (data.get("error") or data.get("message")):
-                            msg = str(data.get("message") or data.get("error") or code)
-                            retryable = str(code) in {"429", "RATE_LIMIT_EXCEEDED", "RATE_LIMIT_BANNED"}
-                            error_msg = f"GMGN API logical error: {code} - {msg}"
-                            await self._log_request(
-                                path,
-                                False,
-                                request_summary,
-                                self._compact_response_summary(data),
-                                status_code=200,
-                                latency_ms=latency_ms,
-                                error_code=str(code),
-                                error_summary=error_msg,
-                                method=method,
-                            )
-                            last_error = GMGNAPIError(
-                                error_msg,
-                                status_code=429 if retryable else 400,
-                                path=path,
-                                method=method,
-                                body=json.dumps(data, ensure_ascii=False, default=str)[:1000],
-                                retryable=retryable,
-                            )
-                            if retryable and attempt < max_attempts - 1:
-                                await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
-                                continue
-                            raise last_error
-
-                    await self._log_request(
-                        path,
-                        True,
-                        request_summary,
-                        self._compact_response_summary(data),
-                        status_code=response.status_code,
-                        latency_ms=latency_ms,
-                        method=method,
-                    )
-                    return data
-
-                except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException) as e:
-                    latency_ms = int((time.time() - start) * 1000)
-                    error_msg = "GMGN API timeout"
-                    await self._log_request(
-                        path,
-                        False,
-                        request_summary,
-                        {"error": error_msg},
-                        status_code=504,
-                        latency_ms=latency_ms,
-                        error_code="GMGN_TIMEOUT",
-                        error_summary=error_msg,
-                        method=method,
-                    )
-                    last_error = GMGNAPIError(error_msg, status_code=504, path=path, method=method, retryable=True)
-                    if attempt < max_attempts - 1:
+                if resp.status_code >= 400:
+                    retryable = self._retryable_status(resp.status_code)
+                    await self._log_request(path, False, {**params, "api_key": api_key, "client_id": client_id}, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
+                    err = GMGNAPIError(f"GMGN HTTP {resp.status_code}: {str(data)[:500]}", status_code=resp.status_code, path=path, method=method, retryable=retryable)
+                    last_exc = err
+                    if retryable:
                         continue
-                    raise last_error from e
-                except GMGNAPIError as e:
-                    last_error = e
-                    if e.retryable and attempt < max_attempts - 1:
-                        continue
-                    raise
-                except Exception as e:
-                    last_error = e
-                    if attempt < max_attempts - 1:
-                        continue
-                    raise
+                    raise err
 
-        if isinstance(last_error, BaseException):
-            raise last_error
-        raise GMGNAPIError("GMGN API request failed", path=path, method=method, retryable=True)
+                await self._log_request(path, True, {**params, "api_key": api_key, "client_id": client_id}, self._compact_response_summary(data), resp.status_code, latency, method=method)
+                return data if isinstance(data, dict) else {"data": data}
+            except GMGNAPIError:
+                raise
+            except Exception as exc:
+                latency = int((time.perf_counter() - started) * 1000)
+                last_exc = exc
+                await self._log_request(path, False, {**params, "api_key": api_key, "client_id": client_id}, {}, None, latency, "REQUEST_ERROR", str(exc), method)
+                continue
 
-    # ------------------------- normalization helpers -------------------------
+        if isinstance(last_exc, GMGNAPIError):
+            raise last_exc
+        raise GMGNAPIError(f"GMGN request failed: {last_exc}", path=path, method=method, retryable=True)
+
+    @staticmethod
+    def _first_present(data: Dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
+        for key in keys:
+            value = data.get(key)
+            if value is not None and value != "":
+                return value
+        return default
 
     @staticmethod
     def _to_float(value: Any) -> Optional[float]:
         if value is None or value == "":
             return None
         try:
-            f = float(value)
-            if math.isnan(f) or math.isinf(f):
-                return None
-            return f
-        except (TypeError, ValueError):
+            return float(value)
+        except Exception:
             return None
 
     @staticmethod
-    def _ratio(value: Any) -> Optional[float]:
-        f = GMGNProvider._to_float(value)
-        if f is None:
-            return None
-        # GMGN sometimes returns percentages as 24.5 instead of 0.245.
-        if f > 1 and f <= 100:
-            return f / 100.0
-        return f
+    def _unwrap_data(data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        cur: Any = data.get("data", data)
+        # GMGN variants sometimes wrap useful payload one more level.
+        if isinstance(cur, dict):
+            for key in ("token", "info", "pool", "security", "result"):
+                if isinstance(cur.get(key), dict):
+                    return cur[key]
+        return cur
 
     @staticmethod
-    def _as_bool(value: Any) -> int:
-        if value is None or value == "":
-            return 0
-        if isinstance(value, bool):
-            return 1 if value else 0
-        if isinstance(value, (int, float)):
-            return 1 if value else 0
-        if isinstance(value, str):
-            return 1 if value.strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "y",
-                "renounced",
-                "locked",
-                "lock",
-                "burn",
-                "burned",
-                "burnt",
-                "creator_close",
-                "closed",
-            } else 0
-        return 0
-
-    @staticmethod
-    def _first_present(raw: Dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
-        for key in keys:
-            if key in raw and raw.get(key) is not None and raw.get(key) != "":
-                return raw.get(key)
-        return default
-
-    @staticmethod
-    def _payload(data: Any) -> Any:
-        if isinstance(data, dict) and "data" in data:
-            return data.get("data")
-        return data
-
-    @classmethod
-    def _payload_dict(cls, data: Any) -> Dict[str, Any]:
-        payload = cls._payload(data)
-        if isinstance(payload, dict):
-            return payload
-        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-            return payload[0]
-        return {}
-
-    @classmethod
-    def _extract_list_from_response(cls, data: Any, list_keys: Iterable[str]) -> List[Dict[str, Any]]:
+    def _extract_items(data: Any, preferred_keys: Iterable[str] = ("items", "list", "rows", "tokens", "data")) -> List[Any]:
         if isinstance(data, list):
-            return [x for x in data if isinstance(x, dict)]
+            return data
         if not isinstance(data, dict):
             return []
-        payload = data.get("data", data)
-        if isinstance(payload, list):
-            return [x for x in payload if isinstance(x, dict)]
-        if isinstance(payload, dict):
-            for key in list_keys:
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return [x for x in value if isinstance(x, dict)]
-            for value in payload.values():
-                if isinstance(value, list):
-                    dict_items = [x for x in value if isinstance(x, dict)]
-                    if dict_items:
-                        return dict_items
+        for key in preferred_keys:
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                nested = GMGNProvider._extract_items(value, preferred_keys)
+                if nested:
+                    return nested
+        inner = data.get("data")
+        if inner is not data:
+            return GMGNProvider._extract_items(inner, preferred_keys)
         return []
 
-    @staticmethod
-    def _merge_nested(raw: Dict[str, Any]) -> Dict[str, Any]:
-        merged: Dict[str, Any] = {}
-        for key in ("token", "pool", "price", "stat", "security", "dev", "link", "wallet_tags_stat"):
-            value = raw.get(key)
-            if isinstance(value, dict):
-                merged.update(value)
-        merged.update(raw)
-        return merged
+    @classmethod
+    def _normalize_token_data(cls, raw: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(raw, dict):
+            return {}
+        out: Dict[str, Any] = {
+            "token_mint": cls._first_present(raw, ["token_mint", "token_address", "address", "mint", "base_address"]),
+            "pool_address": cls._first_present(raw, ["pool_address", "pair_address", "pool", "pair", "address_pair"]),
+            "pool_created_at": cls._first_present(raw, ["pool_created_at", "creation_time", "created_at", "open_time", "launch_time"]),
+            "type": cls._first_present(raw, ["type", "trench_type", "category"]),
+            "launchpad": cls._first_present(raw, ["launchpad", "platform", "source_platform", "pool_platform"]),
+            "platform": cls._first_present(raw, ["platform", "launchpad", "source_platform", "pool_platform"]),
+            "symbol": cls._first_present(raw, ["symbol", "base_symbol"]),
+            "name": cls._first_present(raw, ["name", "base_name"]),
+            "liquidity_usd": cls._to_float(cls._first_present(raw, ["liquidity_usd", "liquidity", "pool_liquidity_usd", "reserve_usd"])),
+            "sol_side_liquidity": cls._to_float(cls._first_present(raw, ["sol_side_liquidity", "sol_liquidity", "quote_reserve", "quote_liquidity"])),
+            "volume_usd": cls._to_float(cls._first_present(raw, ["volume_usd", "volume", "volume_24h", "volume_h24"])),
+            "market_cap": cls._to_float(cls._first_present(raw, ["market_cap", "marketcap", "fdv", "fully_diluted_valuation"])),
+            "price_usd": cls._to_float(cls._first_present(raw, ["price_usd", "price", "usd_price"])),
+            "price_sol": cls._to_float(cls._first_present(raw, ["price_sol", "sol_price", "native_price"])),
+            "top_10_holder_rate": cls._to_float(cls._first_present(raw, ["top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate"])),
+            "top1_holder_rate": cls._to_float(cls._first_present(raw, ["top1_holder_rate", "top_1_holder_rate", "top_holder_rate"])),
+            "renounced_mint": cls._first_present(raw, ["renounced_mint", "mint_renounced", "is_mint_renounced"]),
+            "renounced_freeze_account": cls._first_present(raw, ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced", "freeze_authority_renounced"]),
+            "max_rug_ratio": cls._to_float(cls._first_present(raw, ["max_rug_ratio", "rug_ratio", "max_rugged_ratio"])),
+            "max_insider_ratio": cls._to_float(cls._first_present(raw, ["max_insider_ratio", "insider_ratio"])),
+            "max_entrapment_ratio": cls._to_float(cls._first_present(raw, ["max_entrapment_ratio", "entrapment_ratio"])),
+            "is_wash_trading": cls._first_present(raw, ["is_wash_trading", "wash_trading", "wash_trading_detected"]),
+            "rat_trader_amount_rate": cls._to_float(cls._first_present(raw, ["rat_trader_amount_rate", "rat_trader_rate"])),
+            "suspected_insider_hold_rate": cls._to_float(cls._first_present(raw, ["suspected_insider_hold_rate", "insider_hold_rate"])),
+            "max_bundler_rate": cls._to_float(cls._first_present(raw, ["max_bundler_rate", "bundler_rate", "bundler_trader_amount_rate"])),
+            "fresh_wallet_rate": cls._to_float(cls._first_present(raw, ["fresh_wallet_rate", "fresh_wallets_rate"])),
+            "sell_tax": cls._to_float(cls._first_present(raw, ["sell_tax", "sell_tax_rate"])),
+            "has_social": cls._first_present(raw, ["has_social", "has_at_least_one_social", "has_twitter_or_telegram"]),
+            "creator_token_status": cls._first_present(raw, ["creator_token_status", "creator_status"]),
+            "dev_team_hold_rate": cls._to_float(cls._first_present(raw, ["dev_team_hold_rate", "dev_hold_rate", "creator_hold_rate"])),
+            "dev_token_burn_ratio": cls._to_float(cls._first_present(raw, ["dev_token_burn_ratio", "burn_ratio", "lp_burn_ratio"])),
+            "burn_status": cls._first_present(raw, ["burn_status", "lp_burn_status", "burnt_status"]),
+            "sniper_count": cls._to_float(cls._first_present(raw, ["sniper_count", "snipers", "sniper_trader_count"])),
+        }
+        # Keep explicit falsy values; drop only None/empty for DB columns except raw_json.
+        out = {k: v for k, v in out.items() if v is not None and v != ""}
+        out["raw_json"] = json.dumps(raw, ensure_ascii=False, default=str)
+        return out
 
-    def _normalized_tax(self, value: Any) -> Optional[float]:
-        tax = self._to_float(value)
-        if tax is not None and tax > 1:
-            tax = tax / 100.0
-        return tax
-
-    @staticmethod
-    def _has_social(base: Dict[str, Any]) -> int:
-        social_count = base.get("social_count")
-        try:
-            if social_count is not None and float(social_count) > 0:
-                return 1
-        except Exception:
-            pass
-        for key in (
-            "has_social",
-            "has_at_least_one_social",
-            "has_twitter_or_telegram",
-            "twitter_username",
-            "twitter",
-            "telegram",
-            "website",
-        ):
-            value = base.get(key)
-            if isinstance(value, bool):
-                return 1 if value else 0
-            if value not in (None, "", 0, "0", False):
-                return 1
-        return 0
-
-    def _normalize_token_data(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize GMGN token/trenches-style responses to the internal schema."""
-        raw = raw or {}
-        base = self._merge_nested(raw)
-
-        token_mint = self._first_present(
-            base,
-            (
-                "token_mint",
-                "token_address",
-                "address",
-                "mint",
-                "ca",
-                "contract_address",
-                "base_address",
-            ),
-        )
-        pool_address = self._first_present(base, ("pool_address", "pair_address", "pool_id", "biggest_pool_address"))
-        pool_created_at = self._first_present(
-            base,
-            ("pool_created_at", "pool_created_timestamp", "creation_timestamp", "created_at", "open_timestamp"),
-        )
-        token_type = self._first_present(base, ("type", "trench_type", "category"), default="new_creation")
-        latest_price_usd = self._to_float(self._first_present(base, ("price_usd", "price", "usd_price", "last_price")))
-        price_sol = self._to_float(self._first_present(base, ("price_sol", "sol_price")))
-        liquidity_usd = self._to_float(
-            self._first_present(base, ("liquidity_usd", "liquidity", "usd_liquidity", "liquidity_in_usd", "pool_liquidity_usd"))
-        )
-        volume_usd = self._to_float(self._first_present(base, ("volume_usd", "volume", "volume_24h", "volume_1h")))
-        market_cap = self._to_float(self._first_present(base, ("market_cap", "marketcap", "fdv", "fully_diluted_valuation")))
-        launchpad = self._first_present(base, ("launchpad", "launchpad_platform", "platform", "source_platform", "pool_platform"))
-        creator_status = self._first_present(base, ("creator_token_status", "creator_status"))
-
+    @classmethod
+    def normalize_gmgn_kline(cls, raw: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(raw, dict):
+            return {}
+        ts = cls._first_present(raw, ["open_time", "time", "timestamp", "t"])
+        if isinstance(ts, (int, float)):
+            # GMGN may return seconds or milliseconds.
+            sec = ts / 1000 if ts > 10_000_000_000 else ts
+            try:
+                ts = datetime.fromtimestamp(float(sec), timezone.utc).isoformat()
+            except Exception:
+                ts = str(ts)
         return {
-            "token_mint": token_mint,
-            "pool_address": pool_address,
-            "pool_created_at": pool_created_at,
-            "type": token_type,
-            "trench_type": token_type,
-            "latest_price_usd": latest_price_usd,
-            "price_usd": latest_price_usd,
-            "price_sol": price_sol,
-            "liquidity_usd": liquidity_usd,
-            "sol_side_liquidity": self._to_float(
-                self._first_present(base, ("sol_side_liquidity", "base_reserve_value", "base_reserve_usd", "quote_reserve_usd"))
-            ),
-            "volume_usd": volume_usd,
-            "market_cap": market_cap,
-            "symbol": self._first_present(base, ("symbol", "ticker")),
-            "name": self._first_present(base, ("name", "token_name")),
-            "launchpad": launchpad,
-            "platform": launchpad,
-            "top_10_holder_rate": self._ratio(
-                self._first_present(base, ("top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate", "top_10_holder_ratio"))
-            ),
-            "top1_holder_rate": self._ratio(
-                self._first_present(base, ("top1_holder_rate", "top_1_holder_rate", "creator_balance_rate", "top_holder_rate"))
-            ),
-            "renounced_mint": self._as_bool(
-                self._first_present(base, ("renounced_mint", "mint_renounced", "mint_authority_renounced", "is_mint_renounced"))
-            ),
-            "renounced_freeze_account": self._as_bool(
-                self._first_present(base, ("renounced_freeze_account", "freeze_renounced", "freeze_authority_renounced", "is_freeze_renounced"))
-            ),
-            "rug_ratio": self._ratio(self._first_present(base, ("rug_ratio", "max_rug_ratio", "max_rugged_ratio"))),
-            "max_rug_ratio": self._ratio(self._first_present(base, ("max_rug_ratio", "rug_ratio", "max_rugged_ratio"))),
-            "entrapment_ratio": self._ratio(self._first_present(base, ("entrapment_ratio", "max_entrapment_ratio"))),
-            "max_entrapment_ratio": self._ratio(self._first_present(base, ("max_entrapment_ratio", "entrapment_ratio"))),
-            "is_wash_trading": self._as_bool(self._first_present(base, ("is_wash_trading", "wash_trading", "wash_trading_detected"))),
-            "rat_trader_amount_rate": self._ratio(
-                self._first_present(base, ("rat_trader_amount_rate", "rat_trader_rate", "top_rat_trader_percentage"))
-            ),
-            "suspected_insider_hold_rate": self._ratio(
-                self._first_present(base, ("suspected_insider_hold_rate", "insider_hold_rate", "max_insider_ratio"))
-            ),
-            "max_insider_ratio": self._ratio(
-                self._first_present(base, ("max_insider_ratio", "suspected_insider_hold_rate", "insider_hold_rate"))
-            ),
-            "bundler_trader_amount_rate": self._ratio(
-                self._first_present(base, ("bundler_trader_amount_rate", "bundler_rate", "max_bundler_rate"))
-            ),
-            "max_bundler_rate": self._ratio(
-                self._first_present(base, ("max_bundler_rate", "bundler_trader_amount_rate", "bundler_rate"))
-            ),
-            "fresh_wallet_rate": self._ratio(self._first_present(base, ("fresh_wallet_rate", "fresh_wallets_rate"))),
-            "sell_tax": self._normalized_tax(self._first_present(base, ("sell_tax", "sell_tax_rate"), default=0)),
-            "buy_tax": self._normalized_tax(self._first_present(base, ("buy_tax", "buy_tax_rate"), default=0)),
-            "has_social": self._has_social(base),
-            "has_at_least_one_social": self._has_social(base),
-            "creator_token_status": creator_status,
-            "dev_team_hold_rate": self._ratio(self._first_present(base, ("dev_team_hold_rate", "dev_hold_rate", "creator_hold_rate"))),
-            "dev_token_burn_ratio": self._ratio(self._first_present(base, ("dev_token_burn_ratio", "creator_token_burn_ratio"))),
-            "burn_status": self._first_present(base, ("burn_status", "lp_burn_status", "burnt_status")),
-            "sniper_count": self._to_float(self._first_present(base, ("sniper_count", "snipers", "sniper_trader_count"))),
-            "raw_json": json.dumps(raw, ensure_ascii=False, default=str) if raw else None,
+            "open_time": str(ts or ""),
+            "open": cls._to_float(cls._first_present(raw, ["open", "o"])),
+            "high": cls._to_float(cls._first_present(raw, ["high", "h"])),
+            "low": cls._to_float(cls._first_present(raw, ["low", "l"])),
+            "close": cls._to_float(cls._first_present(raw, ["close", "c"])),
+            "buy_volume": cls._to_float(cls._first_present(raw, ["buy_volume", "buyVolume", "buy_vol", "buyVol"])),
+            "sell_volume": cls._to_float(cls._first_present(raw, ["sell_volume", "sellVolume", "sell_vol", "sellVol"])),
+            "volume_usd": cls._to_float(cls._first_present(raw, ["volume_usd", "volume", "vol_usd", "v"])),
+            "raw_json": json.dumps(raw, ensure_ascii=False, default=str),
         }
-
-    def normalize_gmgn_trenches(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        return self._normalize_token_data(raw)
-
-    def normalize_gmgn_token_snapshot(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        return self._normalize_token_data(raw)
-
-    def normalize_gmgn_kline(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        raw = raw or {}
-        return {
-            "open_time": raw.get("open_time") or raw.get("timestamp") or raw.get("time") or raw.get("t"),
-            "time": raw.get("time") or raw.get("timestamp") or raw.get("open_time") or raw.get("t"),
-            "open": raw.get("open") or raw.get("o"),
-            "high": raw.get("high") or raw.get("h"),
-            "low": raw.get("low") or raw.get("l"),
-            "close": raw.get("close") or raw.get("c"),
-            "buy_volume": raw.get("buy_volume") or raw.get("buy_vol") or raw.get("buyVolume"),
-            "sell_volume": raw.get("sell_volume") or raw.get("sell_vol") or raw.get("sellVolume"),
-            "volume_usd": raw.get("volume_usd") or raw.get("volume") or raw.get("v"),
-            "volume": raw.get("volume") or raw.get("volume_usd") or raw.get("v"),
-            "amount": raw.get("amount"),
-            "raw_json": json.dumps(raw, ensure_ascii=False, default=str) if raw else None,
-        }
-
-    @staticmethod
-    def _extract_trench_items(data: Any) -> List[Dict[str, Any]]:
-        if isinstance(data, list):
-            return [x for x in data if isinstance(x, dict)]
-        if not isinstance(data, dict):
-            return []
-
-        payload = data.get("data", data)
-        if isinstance(payload, list):
-            return [x for x in payload if isinstance(x, dict)]
-        if not isinstance(payload, dict):
-            return []
-
-        for key in ("tokens", "token", "rank", "list", "rows", "items", "pairs", "results"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [x for x in value if isinstance(x, dict)]
-
-        grouped: List[Dict[str, Any]] = []
-        category_alias = {
-            "new": "new_creation",
-            "new_creation": "new_creation",
-            "pump": "near_completion",
-            "near_completion": "near_completion",
-            "complete": "completed",
-            "completed": "completed",
-        }
-        for key, category in category_alias.items():
-            value = payload.get(key)
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        if "trench_type" not in item and "type" not in item and "category" not in item:
-                            item = {**item, "trench_type": category, "type": category}
-                        grouped.append(item)
-        return grouped
-
-    def _build_trenches_v2_body(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        chain = str(params.get("chain") or "sol")
-        trench_type = str(params.get("type") or "new_creation")
-        platforms_raw = params.get("platforms") or params.get("launchpad_platform") or []
-        if isinstance(platforms_raw, str):
-            launchpad_platform = [p.strip() for p in platforms_raw.split(",") if p.strip()]
-        else:
-            launchpad_platform = [str(p).strip() for p in platforms_raw if p]
-
-        if not launchpad_platform and chain == "sol":
-            launchpad_platform = [
-                "Pump.fun",
-                "pump_mayhem",
-                "pump_mayhem_agent",
-                "pump_agent",
-                "letsbonk",
-                "bonkers",
-                "bags",
-                "memoo",
-                "liquid",
-                "bankr",
-                "zora",
-                "surge",
-                "anoncoin",
-                "moonshot_app",
-                "Moonshot",
-                "wendotdev",
-                "heaven",
-                "sugar",
-                "token_mill",
-                "believe",
-                "trendsfun",
-                "trends_fun",
-                "jup_studio",
-                "boop",
-                "ray_launchpad",
-                "meteora_virtual_curve",
-                "xstocks",
-            ]
-
-        section: Dict[str, Any] = {
-            "filters": ["offchain", "onchain"],
-            "quote_address_type": [4, 5, 3, 1, 13, 0],
-            "launchpad_platform_v2": True,
-            "limit": int(params.get("limit") or 80),
-        }
-        if launchpad_platform:
-            section["launchpad_platform"] = launchpad_platform
-
-        min_created = params.get("min_created")
-        max_created = params.get("max_created")
-        if min_created is not None:
-            section["min_created"] = str(min_created)
-        if max_created is not None:
-            section["max_created"] = str(max_created)
-
-        body: Dict[str, Any] = {"version": "v2", "chain": chain}
-        body[trench_type] = section
-        return body
-
-    # ------------------------------ public API ------------------------------
 
     async def fetch_trenches(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         path = settings.GMGN_TRENCHES_PATH
-        try:
-            if self.mode == ProviderMode.MOCK:
-                self.mock_data._maybe_refresh()
-                tokens = list(self.mock_data.tokens.values())
-                for t in tokens:
-                    t["source_mode"] = "MOCK"
-                await self._log_request(path, True, params, {"count": len(tokens)}, method="MOCK")
-                return tokens
+        if self.mode == ProviderMode.MOCK:
+            self.mock_data._maybe_refresh()
+            tokens = list(self.mock_data.tokens.values())
+            for t in tokens:
+                t["source_mode"] = "MOCK"
+            await self._log_request(path, True, params, {"count": len(tokens)}, method="MOCK")
+            return tokens
 
-            if self.mode in (ProviderMode.ONLINE_READONLY, ProviderMode.LIVE):
-                method = getattr(settings, "GMGN_TRENCHES_METHOD", "POST") or "POST"
-                chain = str(params.get("chain") or "sol")
-                body = self._build_trenches_v2_body(params)
-                data = await self._make_request(path, body, method=method, query_params={"chain": chain})
-
-                tokens: List[Dict[str, Any]] = []
-                for item in self._extract_trench_items(data):
-                    normalized = self._normalize_token_data(item)
+        method = getattr(settings, "GMGN_TRENCHES_METHOD", "POST") or "POST"
+        request_params = {"chain": "sol", **(params or {})}
+        data = await self._make_request(path, request_params, method=method)
+        items = self._extract_items(data, ("items", "list", "rows", "tokens", "data"))
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            if isinstance(item, dict):
+                normalized = self._normalize_token_data(item)
+                if normalized:
                     normalized["source_mode"] = "REAL"
-                    tokens.append(normalized)
-
-                await self._log_request(path, True, {"query": {"chain": chain}, "json": body}, {"count": len(tokens)}, method=method)
-                return tokens
-
-            return []
-        except Exception as e:
-            await self._log_request(path, False, params, {}, 500, 0, "GMGN_ERROR", str(e))
-            logger.error(f"fetch_trenches failed, skipping round: {e}")
-            return []
+                    out.append(normalized)
+        return out
 
     async def fetch_token_snapshot(self, token_mint: str) -> Dict[str, Any]:
         if self.mode == ProviderMode.MOCK:
             self.mock_data._maybe_refresh()
-            t = self.mock_data.tokens.get(token_mint)
-            if t:
-                t = dict(t)
-                t["source_mode"] = "MOCK"
-                await self._log_request("mock/token_snapshot", True, {"token": token_mint}, {"found": True}, method="MOCK")
-                return t
-            await self._log_request("mock/token_snapshot", False, {"token": token_mint}, {"found": False}, method="MOCK")
-            return {}
+            token = dict(self.mock_data.tokens.get(token_mint) or {})
+            if token:
+                token["source_mode"] = "MOCK"
+                await self._log_request("mock/token_snapshot", True, {"token_mint": token_mint}, {"token": token_mint}, method="MOCK")
+            return token
 
         params = {"chain": "sol", "address": token_mint}
-        info = await self._make_request(settings.GMGN_TOKEN_INFO_PATH, params, method="GET")
-        security = await self._make_request(settings.GMGN_TOKEN_SECURITY_PATH, params, method="GET")
-        pool = await self._make_request(settings.GMGN_TOKEN_POOL_INFO_PATH, params, method="GET")
+        raw_bundle: Dict[str, Any] = {}
+        # Main info is required. Security/pool enrichments are best-effort because
+        # some GMGN plans expose only a subset of endpoints.
+        info_path = getattr(settings, "GMGN_TOKEN_INFO_PATH", None) or settings.GMGN_TOKEN_PRICE_PATH
+        info = await self._make_request(info_path, params, method="GET")
+        raw_bundle["token_info"] = info
+        merged: Dict[str, Any] = {}
+        if isinstance(self._unwrap_data(info), dict):
+            merged.update(self._unwrap_data(info))
 
-        info_payload = self._payload_dict(info)
-        security_payload = self._payload_dict(security)
-        pool_payload = self._payload_dict(pool)
-        combined = {
-            **self._merge_nested(info_payload),
-            **self._merge_nested(security_payload),
-            **self._merge_nested(pool_payload),
-            "token_mint": token_mint,
-        }
-        normalized = self._normalize_token_data(combined)
-        normalized["token_mint"] = token_mint
-        normalized["source_mode"] = "REAL"
-        normalized["raw_json"] = json.dumps(
-            {"info": info, "security": security, "pool_info": pool},
-            ensure_ascii=False,
-            default=str,
-        )
-        return normalized
+        for label, path in (
+            ("security", getattr(settings, "GMGN_TOKEN_SECURITY_PATH", "")),
+            ("pool_info", getattr(settings, "GMGN_TOKEN_POOL_INFO_PATH", "")),
+        ):
+            if not path:
+                continue
+            try:
+                data = await self._make_request(path, params, method="GET")
+                raw_bundle[label] = data
+                val = self._unwrap_data(data)
+                if isinstance(val, dict):
+                    merged.update(val)
+            except GMGNAPIError as exc:
+                # Terminal auth/not-found on enrichment should be visible but not
+                # block the primary snapshot when token info was fetched.
+                raw_bundle[label] = {"error": str(exc), "status_code": exc.status_code, "path": exc.path}
+                if exc.status_code in (401, 403):
+                    raise
+            except Exception as exc:
+                raw_bundle[label] = {"error": str(exc)}
+
+        snapshot = self._normalize_token_data(merged)
+        snapshot.setdefault("token_mint", token_mint)
+        snapshot["source_mode"] = "REAL"
+        snapshot["raw_json"] = json.dumps(raw_bundle, ensure_ascii=False, default=str)
+        return snapshot
+
+    async def fetch_kline(self, token_mint: str, interval: str, limit: int) -> List[Dict[str, Any]]:
+        if self.mode == ProviderMode.MOCK:
+            self.mock_data._maybe_refresh()
+            klines = [dict(k) for k in self.mock_data.klines.get(token_mint, [])]
+            for item in klines:
+                item["source_mode"] = "MOCK"
+            await self._log_request("mock/kline", True, {"token_mint": token_mint, "interval": interval, "limit": limit}, {"count": len(klines)}, method="MOCK")
+            return klines
+
+        path = settings.get_gmgn_kline_path() if hasattr(settings, "get_gmgn_kline_path") else (getattr(settings, "GMGN_KLINE_PATH", None) or "/v1/market/token_kline")
+        params = {"chain": "sol", "address": token_mint, "interval": interval, "limit": int(limit)}
+        data = await self._make_request(path, params, method="GET")
+        root = data.get("data", data) if isinstance(data, dict) else data
+        raw_klines = self._extract_items(root, ("klines", "list", "items", "rows", "data"))
+        klines: List[Dict[str, Any]] = []
+        for item in raw_klines:
+            if isinstance(item, dict):
+                normalized = self.normalize_gmgn_kline(item)
+                normalized["source_mode"] = "REAL"
+                klines.append(normalized)
+        return klines
 
     async def fetch_latest_price(self, token_mint: str) -> Dict[str, Any]:
         if self.mode == ProviderMode.MOCK:
-            snap = await self.fetch_token_snapshot(token_mint)
+            self.mock_data._maybe_refresh()
+            info = self.mock_data.latest.get(token_mint)
+            if not info:
+                raise GMGNAPIError("token not found", status_code=404, path="mock/latest", retryable=False)
+            info["calls"] = int(info.get("calls", 0)) + 1
+            price = info.get("price_usd") or info.get("price") or 0.0
+            await self._log_request("mock/latest", True, {"token_mint": token_mint}, {"price": price}, method="MOCK")
             return {
-                "price": snap.get("price_usd"),
-                "price_usd": snap.get("price_usd"),
-                "price_sol": snap.get("price_sol"),
-                "liquidity_usd": snap.get("liquidity_usd"),
+                "price": price,
+                "price_usd": price,
+                "price_sol": info.get("price_sol") or info.get("sol_price") or 0.0,
+                "liquidity_usd": info.get("liquidity_usd") or 0.0,
+                "sol_side_liquidity": info.get("sol_side_liquidity") or info.get("sol_liquidity") or 0.0,
+                "market_cap": info.get("market_cap"),
+                "source_mode": "MOCK",
             }
 
-        data = await self._make_request(settings.GMGN_TOKEN_INFO_PATH, {"chain": "sol", "address": token_mint}, method="GET")
-        payload = self._payload_dict(data)
-        normalized = self._normalize_token_data({**self._merge_nested(payload), "token_mint": token_mint})
+        path = getattr(settings, "GMGN_TOKEN_PRICE_PATH", None) or getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
+        params = {"chain": "sol", "address": token_mint}
+        data = await self._make_request(path, params, method="GET")
+        raw = self._unwrap_data(data)
+        raw = raw if isinstance(raw, dict) else {}
         return {
-            "price": normalized.get("price_usd"),
-            "price_usd": normalized.get("price_usd"),
-            "price_sol": normalized.get("price_sol"),
-            "liquidity_usd": normalized.get("liquidity_usd"),
-            "market_cap": normalized.get("market_cap"),
+            "price": self._to_float(self._first_present(raw, ["price_usd", "price", "usd_price"])) or 0.0,
+            "price_usd": self._to_float(self._first_present(raw, ["price_usd", "price", "usd_price"])),
+            "price_sol": self._to_float(self._first_present(raw, ["price_sol", "sol_price", "native_price"])) or 0.0,
+            "liquidity_usd": self._to_float(self._first_present(raw, ["liquidity_usd", "liquidity", "reserve_usd"])),
+            "sol_side_liquidity": self._to_float(self._first_present(raw, ["sol_side_liquidity", "sol_liquidity", "quote_reserve"])),
+            "market_cap": self._to_float(self._first_present(raw, ["market_cap", "marketcap", "fdv"])),
             "raw_json": json.dumps(data, ensure_ascii=False, default=str),
-        }
-
-    @staticmethod
-    def _interval_to_seconds(interval: str) -> int:
-        text = str(interval or "1m").strip().lower()
-        if text.endswith("m"):
-            return max(1, int(float(text[:-1] or 1) * 60))
-        if text.endswith("h"):
-            return max(1, int(float(text[:-1] or 1) * 3600))
-        if text.endswith("d"):
-            return max(1, int(float(text[:-1] or 1) * 86400))
-        return 60
-
-    async def fetch_kline(self, token_mint: str, interval: str = "1m", limit: int = 5) -> List[Dict[str, Any]]:
-        if self.mode == ProviderMode.MOCK:
-            self.mock_data._maybe_refresh()
-            klines = list(self.mock_data.klines.get(token_mint, []))[-limit:]
-            await self._log_request("mock/kline", True, {"token": token_mint, "interval": interval, "limit": limit}, {"count": len(klines)}, method="MOCK")
-            return klines
-
-        now_s = int(time.time())
-        seconds = self._interval_to_seconds(interval)
-        from_s = now_s - max(1, int(limit or 5)) * seconds - seconds
-        params = {
-            "chain": "sol",
-            "address": token_mint,
-            "resolution": interval,
-            "from": from_s,
-            "to": now_s,
-        }
-        data = await self._make_request(settings.GMGN_TOKEN_KLINE_PATH, params, method="GET")
-        rows = self._extract_list_from_response(data, ("list", "rows", "items", "klines", "data"))
-        normalized = [self.normalize_gmgn_kline(row) for row in rows]
-        normalized = normalized[-limit:] if limit else normalized
-        return normalized
-
-    def _normalize_holder_data(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        raw = raw or {}
-        amount = self._first_present(raw, ("amount", "balance", "token_amount", "ui_amount"))
-        rate = self._first_present(
-            raw,
-            ("top1_holder_rate", "holder_rate", "rate", "amount_percentage", "percent", "percentage", "balance_rate"),
-        )
-        rate_norm = self._ratio(rate)
-        return {
-            "address": self._first_present(raw, ("address", "wallet", "owner", "holder_address")),
-            "addr_type": self._first_present(raw, ("addr_type", "type", "address_type")) or 0,
-            "amount": amount,
-            "rate": rate_norm,
-            "top1_holder_rate": rate_norm,
-            "amount_percentage": rate_norm,
-            "raw_json": json.dumps(raw, ensure_ascii=False, default=str) if raw else None,
+            "source_mode": "REAL",
         }
 
     async def fetch_top_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:
         if self.mode == ProviderMode.MOCK:
-            self.mock_data._maybe_refresh()
-            holders = list(self.mock_data.top_holders.get(token_mint, []))[:limit]
-            await self._log_request("mock/top_holders", True, {"token": token_mint, "limit": limit}, {"count": len(holders)}, method="MOCK")
-            return holders
+            return [{"addr_type": 0, "top1_holder_rate": 0.04, "rate": 0.04, "source_mode": "MOCK"}]
 
-        data = await self._make_request(
-            settings.GMGN_TOKEN_HOLDERS_PATH,
-            {
-                "chain": "sol",
-                "address": token_mint,
-                "limit": min(int(limit or 20), 100),
-                "order_by": "amount_percentage",
-                "direction": "desc",
-            },
-            method="GET",
-        )
-        rows = self._extract_list_from_response(data, ("list", "holders", "rows", "items", "data"))
-        return [self._normalize_holder_data(row) for row in rows[:limit]]
+        path = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
+        params = {"chain": "sol", "address": token_mint, "limit": int(limit)}
+        data = await self._make_request(path, params, method="GET")
+        items = self._extract_items(data, ("holders", "list", "items", "rows", "data"))
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            rate = self._to_float(self._first_present(item, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"]))
+            addr_type = self._first_present(item, ["addr_type", "address_type", "type"], 0)
+            try:
+                addr_type = int(addr_type)
+            except Exception:
+                addr_type = 0
+            out.append({
+                **item,
+                "addr_type": addr_type,
+                "top1_holder_rate": rate,
+                "rate": rate,
+                "source_mode": "REAL",
+                "raw_json": json.dumps(item, ensure_ascii=False, default=str),
+            })
+        return out
