@@ -132,7 +132,7 @@ class GMGNProvider(MarketDataProvider):
             return {"list_count": len(data)}
         return {"type": type(data).__name__}
 
-    async def _make_request(self, path: str, params: Optional[Dict[str, Any]] = None, *, method: str = "GET") -> Dict[str, Any]:
+    async def _make_request(self, path: str, params: Optional[Dict[str, Any]] = None, *, method: str = "GET", json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not HAS_HTTPX:
             raise ImportError("httpx required for real API calls")
         method = (method or "GET").upper()
@@ -158,9 +158,14 @@ class GMGNProvider(MarketDataProvider):
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     if method == "POST":
                         post_params = dict(auth_query)
-                        post_body = dict(cleaned)
-                        if "chain" in post_body:
-                            post_params["chain"] = post_body.pop("chain")
+                        if json_body is not None:
+                            post_body = json_body
+                            if "chain" in cleaned:
+                                post_params["chain"] = cleaned["chain"]
+                        else:
+                            post_body = dict(cleaned)
+                            if "chain" in post_body:
+                                post_params["chain"] = post_body.pop("chain")
                         resp = await client.post(url, params=post_params, json=post_body, headers=headers)
                     else:
                         resp = await client.get(url, params=request_params, headers=headers)
@@ -249,7 +254,7 @@ class GMGNProvider(MarketDataProvider):
         out: Dict[str, Any] = {
             "token_mint": cls._first_present(raw, ["token_mint", "token_address", "address", "mint", "base_address"]),
             "pool_address": cls._first_present(raw, ["pool_address", "pair_address", "pool", "pair", "address_pair"]),
-            "pool_created_at": cls._first_present(raw, ["pool_created_at", "creation_time", "created_at", "open_time", "launch_time"]),
+            "pool_created_at": cls._first_present(raw, ["pool_created_at", "creation_time", "created_at", "open_time", "launch_time", "created_timestamp"]),
             "type": cls._first_present(raw, ["type", "trench_type", "category"]),
             "launchpad": cls._first_present(raw, ["launchpad", "platform", "source_platform", "pool_platform"]),
             "platform": cls._first_present(raw, ["platform", "launchpad", "source_platform", "pool_platform"]),
@@ -257,8 +262,8 @@ class GMGNProvider(MarketDataProvider):
             "name": cls._first_present(raw, ["name", "base_name"]),
             "liquidity_usd": cls._to_float(cls._first_present(raw, ["liquidity_usd", "liquidity", "pool_liquidity_usd", "reserve_usd"])),
             "sol_side_liquidity": cls._to_float(cls._first_present(raw, ["sol_side_liquidity", "sol_liquidity", "quote_reserve", "quote_liquidity"])),
-            "volume_usd": cls._to_float(cls._first_present(raw, ["volume_usd", "volume", "volume_24h", "volume_h24"])),
-            "market_cap": cls._to_float(cls._first_present(raw, ["market_cap", "marketcap", "fdv", "fully_diluted_valuation"])),
+            "volume_usd": cls._to_float(cls._first_present(raw, ["volume_usd", "volume", "volume_24h", "volume_h24", "volume_1h"])),
+            "market_cap": cls._to_float(cls._first_present(raw, ["market_cap", "marketcap", "fdv", "fully_diluted_valuation", "usd_market_cap"])),
             "price_usd": cls._to_float(cls._first_present(raw, ["price_usd", "price", "usd_price"])),
             "price_sol": cls._to_float(cls._first_present(raw, ["price_sol", "sol_price", "native_price"])),
             "top_10_holder_rate": cls._to_float(cls._first_present(raw, ["top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate"])),
@@ -310,6 +315,22 @@ class GMGNProvider(MarketDataProvider):
             "raw_json": json.dumps(raw, ensure_ascii=False, default=str),
         }
 
+    @staticmethod
+    def _extract_v2_trench_items(data: Any) -> List[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return []
+        inner = data.get("data")
+        if not isinstance(inner, dict):
+            return []
+        items: List[Dict[str, Any]] = []
+        for key in ("new_creation", "pump", "completed"):
+            category = inner.get(key)
+            if isinstance(category, list):
+                for item in category:
+                    if isinstance(item, dict):
+                        items.append(item)
+        return items
+
     async def fetch_trenches(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         path = settings.GMGN_TRENCHES_PATH
         if self.mode == ProviderMode.MOCK:
@@ -320,16 +341,36 @@ class GMGNProvider(MarketDataProvider):
             await self._log_request(path, True, params, {"count": len(tokens)}, method="MOCK")
             return tokens
 
-        method = getattr(settings, "GMGN_TRENCHES_METHOD", "POST") or "POST"
-        request_params = {"chain": "sol", **(params or {})}
-        data = await self._make_request(path, request_params, method=method)
-        items = self._extract_items(data, ("items", "list", "rows", "tokens", "data"))
+        chain = params.get("chain", "sol")
+        min_created = params.get("min_created")
+        max_created = params.get("max_created")
+        platforms = params.get("platforms", [])
+
+        body: Dict[str, Any] = {
+            "version": "v2",
+            "new_creation": {
+                "filters": ["offchain", "onchain"],
+                "launchpad_platform_v2": True,
+                "quote_address_type": [4, 5, 3, 1, 13, 0],
+                "limit": 80,
+            }
+        }
+        if platforms:
+            body["new_creation"]["launchpad_platform"] = list(platforms) if isinstance(platforms, list) else [str(platforms)]
+        if min_created is not None:
+            body["new_creation"]["min_created"] = f"{int(min_created)}s"
+        if max_created is not None:
+            body["new_creation"]["max_created"] = f"{int(max_created)}s"
+
+        data = await self._make_request(path, {"chain": chain}, method="POST", json_body=body)
+        items = self._extract_v2_trench_items(data)
         out: List[Dict[str, Any]] = []
         for item in items:
             if isinstance(item, dict):
                 normalized = self._normalize_token_data(item)
                 if normalized:
                     normalized["source_mode"] = "REAL"
+                    normalized["type"] = "new_creation"
                     out.append(normalized)
         return out
 

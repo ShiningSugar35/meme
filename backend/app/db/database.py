@@ -106,6 +106,7 @@ async def _run_migrations(db: aiosqlite.Connection):
         await _migrate_tokens(db)
         await _migrate_kline_snapshots(db)
         await _migrate_tick_snapshots(db)
+        await _migrate_strategy_groups(db)
 
         await db.commit()
 
@@ -173,6 +174,14 @@ async def _add_index_if_missing(
         f"CREATE {unique_sql}INDEX IF NOT EXISTS {index_name} "
         f"ON {table}({columns}){where_sql}"
     )
+
+
+async def _rename_column(db: aiosqlite.Connection, table: str, old_name: str, new_name: str):
+    """Rename a column using SQLite 3.25+ ALTER TABLE RENAME COLUMN."""
+    columns = await _table_columns(db, table)
+    if old_name in columns and new_name not in columns:
+        logger.info("Renaming column", table=table, old=old_name, new=new_name)
+        await db.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
 
 
 async def _drop_index_if_exists(db: aiosqlite.Connection, index_name: str):
@@ -414,6 +423,12 @@ async def _migrate_tick_snapshots(db: aiosqlite.Connection):
         "tick_snapshots",
         "token_mint, observed_at",
     )
+
+
+async def _migrate_strategy_groups(db: aiosqlite.Connection):
+    await _rename_column(db, "strategy_groups", "t_seconds", "min_created")
+    await _add_column_if_missing(db, "strategy_groups", "max_created", "INTEGER NOT NULL DEFAULT 240")
+    await _rename_column(db, "discovery_events", "t_seconds", "min_created")
 
 
 def get_db_sync():

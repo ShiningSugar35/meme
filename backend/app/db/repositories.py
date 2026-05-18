@@ -197,7 +197,8 @@ class Repositories:
         name: str,
         x: float,
         y: float,
-        t_seconds: int,
+        min_created: int,
+        max_created: int = 240,
         is_live: bool = False,
         priority: int = 100,
         raw_config_json: str = "{}",
@@ -206,7 +207,7 @@ class Repositories:
 
         async def _do():
             cur = await self.db.execute(
-                "INSERT INTO strategy_groups(name, enabled, is_live, priority, config_version, x, y, t_seconds, raw_config_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO strategy_groups(name, enabled, is_live, priority, config_version, x, y, min_created, max_created, raw_config_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     name,
                     1,
@@ -215,7 +216,8 @@ class Repositories:
                     1,
                     x,
                     y,
-                    t_seconds,
+                    min_created,
+                    max_created,
                     raw_config_json,
                     created_at,
                     created_at,
@@ -261,7 +263,7 @@ class Repositories:
 
         allowed = {
             "name", "enabled", "is_live", "priority", "config_version",
-            "x", "y", "t_seconds",
+            "x", "y", "min_created", "max_created",
             "buy_slippage_cap_bps", "sell_slippage_cap_bps",
             "emergency_slippage_cap_bps", "price_impact_hard_cap_pct",
             "raw_config_json",
@@ -342,20 +344,12 @@ class Repositories:
         if row and row[0] == 0:
             await self.create_strategy_group(
                 "模拟盘1",
-                0.15,
+                0.20,
                 2.25,
                 150,
+                max_created=240,
                 is_live=False,
                 priority=10,
-                raw_config_json="{}",
-            )
-            await self.create_strategy_group(
-                "模拟盘2",
-                0.20,
-                2.75,
-                510,
-                is_live=False,
-                priority=20,
                 raw_config_json="{}",
             )
 
@@ -672,7 +666,7 @@ class Repositories:
         token_mint: str,
         pool_address: Optional[str] = None,
         pool_created_at: Optional[str] = None,
-        t_seconds: Optional[int] = None,
+        min_created: Optional[int] = None,
         snapshot_id: Optional[int] = None,
         strategy_id: Optional[int] = None,
         strategy_config_version: Optional[int] = None,
@@ -698,7 +692,7 @@ class Repositories:
                 """
                 INSERT INTO discovery_events(
                   token_mint, pool_address, strategy_id, strategy_config_version,
-                  first_seen_at, pool_created_at, t_seconds, status,
+                  first_seen_at, pool_created_at, min_created, status,
                   source_snapshot_id, initial_snapshot_id,
                   next_second_check_at, feature_vector_json,
                   created_at, updated_at
@@ -712,7 +706,7 @@ class Repositories:
                     strategy_config_version,
                     now,
                     pool_created_at,
-                    t_seconds,
+                    min_created,
                     status,
                     snapshot_id,
                     snapshot_id,
@@ -746,7 +740,7 @@ class Repositories:
         token_mint: str,
         pool_address: Optional[str] = None,
         pool_created_at: Optional[str] = None,
-        t_seconds: Optional[int] = None,
+        min_created: Optional[int] = None,
         source_snapshot_id: Optional[int] = None,
         strategy_id: Optional[int] = None,
         strategy_config_version: Optional[int] = None,
@@ -761,7 +755,7 @@ class Repositories:
                 """
                 INSERT INTO discovery_events(
                   token_mint, pool_address, strategy_id, strategy_config_version,
-                  first_seen_at, pool_created_at, t_seconds, status,
+                  first_seen_at, pool_created_at, min_created, status,
                   source_snapshot_id, initial_snapshot_id,
                   next_second_check_at, created_at, updated_at
                 )
@@ -774,7 +768,7 @@ class Repositories:
                     strategy_config_version,
                     now,
                     pool_created_at,
-                    t_seconds,
+                    min_created,
                     status,
                     source_snapshot_id,
                     source_snapshot_id,
@@ -825,7 +819,7 @@ class Repositories:
             "last_error",
             "fail_reason_json",
             "feature_vector_json",
-            "t_seconds",
+            "min_created",
         }
 
         updates: Dict[str, Any] = {"status": status, "updated_at": utc_now_iso()}

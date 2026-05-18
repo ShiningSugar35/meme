@@ -61,18 +61,26 @@ export default function Portfolio() {
     const nextTab = preferred ?? (runtime.user_mode === 'SIM_TEST' ? 'SIM' : 'LIVE');
     setTab(nextTab);
 
-    const [data, stats] = await Promise.all([
-      api.getPortfolio(nextTab),
-      api.getFilterStats().catch(() => null),
-    ]);
+    const data = await api.getPortfolio(nextTab);
     setRows(data);
-    if (stats) setFstats(stats);
+  };
+
+  const loadFilterStats = async () => {
+    try {
+      const stats = await api.getFilterStats();
+      setFstats(stats);
+    } catch {
+      // stats load is best-effort
+    }
   };
 
   useEffect(() => {
     load().catch((e) => setMessage(e.message));
+    loadFilterStats();
     const timer = window.setInterval(() => load(tabRef.current).catch(() => undefined), 5000);
-    return () => window.clearInterval(timer);
+    // filter stats only change when discovery runs (every POLL_INTERVAL_SECONDS)
+    const statsTimer = window.setInterval(loadFilterStats, 60000);
+    return () => { window.clearInterval(timer); window.clearInterval(statsTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

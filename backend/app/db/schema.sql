@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS strategy_groups (
 
   x REAL NOT NULL,
   y REAL NOT NULL,
-  t_seconds INTEGER NOT NULL,
+  min_created INTEGER NOT NULL,
+  max_created INTEGER NOT NULL DEFAULT 240,
 
   buy_slippage_cap_bps INTEGER NOT NULL DEFAULT 1500,
   sell_slippage_cap_bps INTEGER NOT NULL DEFAULT 2000,
@@ -320,7 +321,7 @@ CREATE TABLE IF NOT EXISTS discovery_events (
 
   first_seen_at TEXT NOT NULL,
   pool_created_at TEXT,
-  t_seconds INTEGER,
+  min_created INTEGER,
 
   status TEXT NOT NULL DEFAULT 'DISCOVERED',
 

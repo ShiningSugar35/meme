@@ -55,7 +55,8 @@ export interface StrategyGroup {
   config_version?: number;
   x: number;
   y: number;
-  t_seconds: number;
+  min_created: number;
+  max_created: number;
   raw_config_json?: string;
   created_at?: string;
   updated_at?: string;
@@ -68,7 +69,8 @@ export interface StrategyPayload {
   is_live: boolean;
   x: number;
   y: number;
-  t_seconds: number;
+  min_created: number;
+  max_created?: number;
 }
 
 export interface TradingParamSpec {

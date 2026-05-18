@@ -85,7 +85,7 @@ class DiscoveryRunner:
         self.strategy_groups = groups
         return groups
 
-    def _build_trench_params(self, t_seconds: int) -> Dict[str, Any]:
+    def _build_trench_params(self, min_created: int, max_created: int) -> Dict[str, Any]:
         """Build provider query params from runtime strategy timing.
 
         No ``limit`` is sent.  The GMGN trenches API decides how many rows are
@@ -95,8 +95,8 @@ class DiscoveryRunner:
         params: Dict[str, Any] = {
             'chain': 'sol',
             'type': 'new_creation',
-            'min_created': t_seconds,
-            'max_created': t_seconds + 60,
+            'min_created': min_created,
+            'max_created': max_created,
         }
 
         types = _csv_list(getattr(settings, 'GMGN_TRENCHES_TYPES', ''))
@@ -112,11 +112,12 @@ class DiscoveryRunner:
         return params
 
     @staticmethod
-    def _group_by_t_seconds(strategy_groups: List[dict]) -> List[Tuple[int, List[dict]]]:
-        grouped: Dict[int, List[dict]] = defaultdict(list)
+    def _group_by_timing(strategy_groups: List[dict]) -> List[Tuple[Tuple[int, int], List[dict]]]:
+        grouped: Dict[Tuple[int, int], List[dict]] = defaultdict(list)
         for sg in strategy_groups:
-            t_seconds = _as_int(sg.get('t_seconds'), 150)
-            grouped[t_seconds].append(sg)
+            min_created = _as_int(sg.get('min_created'), 150)
+            max_created = _as_int(sg.get('max_created'), 240)
+            grouped[(min_created, max_created)].append(sg)
         return sorted(grouped.items(), key=lambda item: item[0])
 
     async def _store_snapshot_and_token(self, token: Dict[str, Any], now: datetime) -> Tuple[str, str, Any, int]:
@@ -171,19 +172,19 @@ class DiscoveryRunner:
             self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
             return
 
-        for t_seconds, groups_for_t in self._group_by_t_seconds(strategy_groups):
-            params = self._build_trench_params(t_seconds)
+        for (min_created, max_created), groups_for_t in self._group_by_timing(strategy_groups):
+            params = self._build_trench_params(min_created, max_created)
             try:
                 trenches = await self.gmgn.fetch_trenches(params)
             except Exception as e:
-                logger.error(f"fetch_trenches failed t={t_seconds}: {e}")
+                logger.error(f"fetch_trenches failed min_created={min_created} max_created={max_created}: {e}")
                 await self.repo.append_system_event(
                     'ERROR', 'DISCOVERY', 'GMGN fetch_trenches failed',
-                    _json_dumps({'t_seconds': t_seconds, 'params': params, 'error': str(e)}),
+                    _json_dumps({'min_created': min_created, 'max_created': max_created, 'params': params, 'error': str(e)}),
                     account_type='SIM',
                 )
                 await event_bus.publish('system', {
-                    'level': 'ERROR', 'category': 'DISCOVERY', 'message': f'fetch_trenches failed for t={t_seconds}'
+                    'level': 'ERROR', 'category': 'DISCOVERY', 'message': f'fetch_trenches failed for min_created={min_created}'
                 })
                 continue
 
@@ -194,7 +195,7 @@ class DiscoveryRunner:
                 if not token_mint:
                     await self.repo.append_system_event(
                         'WARNING', 'DISCOVERY', 'skip trench without token_mint',
-                        _json_dumps({'token': token, 't_seconds': t_seconds}), account_type='SIM'
+                        _json_dumps({'token': token, 'min_created': min_created}), account_type='SIM'
                     )
                     continue
 
@@ -208,7 +209,7 @@ class DiscoveryRunner:
                     logger.error(f"store discovery snapshot failed token={token_mint}: {e}")
                     await self.repo.append_system_event(
                         'ERROR', 'DISCOVERY', 'store discovery snapshot failed',
-                        _json_dumps({'token': token_mint, 't_seconds': t_seconds, 'error': str(e)}),
+                        _json_dumps({'token': token_mint, 'min_created': min_created, 'error': str(e)}),
                         account_type='SIM',
                     )
                     continue
@@ -232,7 +233,7 @@ class DiscoveryRunner:
                             token_mint=token_mint,
                             pool_address=pool_address,
                             pool_created_at=pool_created_at,
-                            t_seconds=t_seconds,
+                            min_created=min_created,
                             snapshot_id=snapshot_id,
                             strategy_id=sg_id,
                             strategy_config_version=config_version,
@@ -262,7 +263,7 @@ class DiscoveryRunner:
                             initial_match_id=match_id,
                             next_second_check_at=next_second_check_at,
                             feature_vector_json=_json_dumps(res.feature_vector),
-                            t_seconds=t_seconds,
+                            min_created=min_created,
                         )
 
                         discovered_count += 1
@@ -273,7 +274,7 @@ class DiscoveryRunner:
                             'token_mint': token_mint,
                             'discovery_event_id': discovery_id,
                             'strategy_id': sg_id,
-                            't_seconds': t_seconds,
+                            'min_created': min_created,
                             'status': status,
                             'passed_strategy_ids': [sg_id] if res.passed else [],
                             'failed_strategy_ids': [] if res.passed else [sg_id],
@@ -282,7 +283,7 @@ class DiscoveryRunner:
                         logger.error(f"Initial filter exception for {token_mint} strategy {sg_id}: {e}")
                         await self.repo.append_system_event(
                             'ERROR', 'DISCOVERY', 'initial filter exception',
-                            _json_dumps({'token': token_mint, 'strategy_id': sg_id, 't_seconds': t_seconds, 'error': str(e)}),
+                            _json_dumps({'token': token_mint, 'strategy_id': sg_id, 'min_created': min_created, 'error': str(e)}),
                             account_type='SIM',
                         )
 

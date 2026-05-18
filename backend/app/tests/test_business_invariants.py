@@ -37,7 +37,7 @@ async def test_no_global_x_in_strategy_config(repo):
         # x, y, t should only be in strategy_groups, not global
         assert g.get('x') is not None, "x must be in strategy_groups"
         assert g.get('y') is not None, "y must be in strategy_groups"
-        assert g.get('t_seconds') is not None, "t_seconds must be in strategy_groups"
+        assert g.get('min_created') is not None, "min_created must be in strategy_groups"
 
 
 @pytest.mark.asyncio

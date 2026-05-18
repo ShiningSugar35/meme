@@ -1,11 +1,11 @@
 """Initial and risk-filter rules for GMGN trench candidates.
 
-The discovery age/timing parameter ``t_seconds`` is used by the provider
-query to ask GMGN for pools whose age is in [t, t+60] seconds.  It is also
-used here by the liquidity rule because the strategy definition explicitly
-makes minimum liquidity a function of t:
+The discovery age/timing parameter ``min_created`` is used by the provider
+query to ask GMGN for pools whose age is in [min_created, max_created] seconds.
+It is also used here by the liquidity rule because the strategy definition
+explicitly makes minimum liquidity a function of min_created:
 
-    min_liquidity_usd = 5000 + 4 * t_seconds
+    min_liquidity_usd = 5000 + 4 * min_created
 
 All other rules evaluate only the risk/platform/holder conditions on the
 returned pools.
@@ -155,10 +155,8 @@ def _strategy_x(strategy_group: Dict[str, Any]) -> float:
     return float(strategy_group.get("x", 0.2))
 
 
-def _strategy_t_seconds(strategy_group: Dict[str, Any]) -> int:
-    # Runtime strategy rows use t_seconds.  Keep t/age_seconds fallbacks for
-    # manually built tests or old payloads.
-    raw = _first_present(strategy_group, ["t_seconds", "t", "age_seconds"], 150)
+def _strategy_min_created(strategy_group: Dict[str, Any]) -> int:
+    raw = _first_present(strategy_group, ["min_created", "t_seconds", "t", "age_seconds"], 150)
     try:
         return int(float(raw))
     except (TypeError, ValueError):
@@ -173,7 +171,7 @@ def _evaluate_core_risk_rules(
     include_platform: bool = True,
 ) -> tuple[List[FilterDetail], Dict[str, Any]]:
     x = _strategy_x(strategy_group)
-    t_seconds = _strategy_t_seconds(strategy_group)
+    min_created = _strategy_min_created(strategy_group)
     details: List[FilterDetail] = []
 
     if include_type:
@@ -186,7 +184,7 @@ def _evaluate_core_risk_rules(
     else:
         typ = _norm_str(_first_present(snapshot, ["type", "trench_type", "category"]))
 
-    min_liquidity_usd = 5000 + 4 * t_seconds
+    min_liquidity_usd = 5000 + 4 * min_created
     liquidity = _check_float(
         details,
         snapshot,
@@ -324,7 +322,7 @@ def _evaluate_core_risk_rules(
 
     feature_vector = {
         "x": x,
-        "t_seconds": t_seconds,
+        "min_created": min_created,
         "min_liquidity_usd_threshold": min_liquidity_usd,
         "top_10_holder_rate_low": low,
         "top_10_holder_rate_high": high,
@@ -342,7 +340,7 @@ def _evaluate_core_risk_rules(
 async def run_initial_filter(snapshot: Dict[str, Any], strategy_group: Dict[str, Any], now: datetime | None = None) -> FilterResult:
     """First-stage filter for pools already returned by the strategy t-window query."""
     details, feature_vector = _evaluate_core_risk_rules(snapshot, strategy_group, include_type=True, include_platform=True)
-    feature_vector.update({"t_seconds": _strategy_t_seconds(strategy_group)})
+    feature_vector.update({"min_created": _strategy_min_created(strategy_group)})
     return FilterResult(all(d.passed for d in details), details, feature_vector)
 
 
