@@ -358,29 +358,6 @@ class TestGMGNSubscriber:
 
 
 # =============================================================================
-# SecondFilterRunner Tests (pool_created_at window)
-# =============================================================================
-
-class TestSecondFilterRunner:
-    @pytest.mark.asyncio
-    async def test_second_filter_runner_handles_provider_errors(self, repo):
-        from ..runners.second_filter_runner import SecondFilterRunner
-        from ..providers.gmgn_real import GMGNProvider
-        from ..providers.jupiter_real import JupiterProvider
-        from ..providers.jito_real import JitoProvider
-        from ..providers.rpc_real import RpcRealProvider
-
-        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-        jup = JupiterProvider(repo, mode=ProviderMode.MOCK)
-        jito = JitoProvider(repo, mode=ProviderMode.MOCK)
-        rpc = RpcRealProvider(repo, mode=ProviderMode.MOCK)
-
-        groups = await repo.get_enabled_strategy_groups()
-        runner = SecondFilterRunner(repo, gmgn, jup, jito, rpc, groups)
-        await runner.run_once()
-
-
-# =============================================================================
 # End-to-End: MockLifecycleRunner
 # =============================================================================
 

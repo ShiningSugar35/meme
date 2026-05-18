@@ -14,7 +14,6 @@ from .services.price_aggregator import PriceAggregator
 from .providers.gmgn_subscriber import create_gmgn_subscriber
 from .services.event_bus import event_bus
 from .runners.discovery_runner import DiscoveryRunner
-from .runners.second_filter_runner import SecondFilterRunner
 from .runners.price_monitor_runner import PriceMonitorRunner
 from .runners.position_risk_runner import PositionRiskRunner
 from .runners.kill_switch_runner import KillSwitchRunner
@@ -82,14 +81,12 @@ async def lifespan(app: FastAPI):
         strategy_groups = await repo.list_strategy_groups()
     except Exception:
         strategy_groups = []
-    discovery = DiscoveryRunner(repo, providers.gmgn if providers else None, strategy_groups)
-    second = SecondFilterRunner(repo, providers.gmgn if providers else None, providers.jupiter if providers else None, providers.jito if providers else None, providers.rpc if providers else None, strategy_groups)
+    discovery = DiscoveryRunner(repo, providers.gmgn if providers else None, strategy_groups, providers.jupiter if providers else None, providers.jito if providers else None, providers.rpc if providers else None)
     price = PriceMonitorRunner(repo, aggregator) if aggregator else None
     risk = PositionRiskRunner(repo, providers.gmgn if providers else None, trading_pipeline=trading_pipeline)
     kill = KillSwitchRunner(repo)
 
     worker_mgr.register_worker('discovery', discovery.run_once, int(settings.POLL_INTERVAL_SECONDS))
-    worker_mgr.register_worker('second_filter', second.run_once, max(1, min(30, int(settings.POLL_INTERVAL_SECONDS))))
     if price:
         worker_mgr.register_worker('price_monitor', price.run_once, int(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS))
     worker_mgr.register_worker('position_risk', risk.run_once, 1)

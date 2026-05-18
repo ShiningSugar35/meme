@@ -6,9 +6,10 @@ from typing import Any, Dict, List, Tuple
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
-from ..providers.base import MarketDataProvider
+from ..providers.base import MarketDataProvider, SwapProvider, ExecutionProvider, RpcProvider
 from ..services.event_bus import event_bus
-from ..strategy.filters import run_initial_filter
+from ..strategy.filters import run_risk_filter, run_price_filter, sort_klines, extract_buy_sell_1m
+from ..trading.executor import TradingPipeline
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
 
@@ -46,6 +47,15 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def _to_float(value: Any):
+    if value is None or value == '':
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _csv_list(value: Any) -> List[str]:
     if value is None:
         return []
@@ -55,12 +65,21 @@ def _csv_list(value: Any) -> List[str]:
 
 
 class DiscoveryRunner:
-    def __init__(self, repo: Repositories, gmgn: MarketDataProvider, strategy_groups: List[dict]):
+    def __init__(
+        self,
+        repo: Repositories,
+        gmgn: MarketDataProvider,
+        strategy_groups: List[dict],
+        jupiter: SwapProvider = None,
+        jito: ExecutionProvider = None,
+        rpc: RpcProvider = None,
+    ):
         self.repo = repo
         self.gmgn = gmgn
         self.strategy_groups = strategy_groups or []
         self.processed_count = 0
         self.last_elapsed_ms = 0
+        self.pipeline = TradingPipeline(repo, gmgn, jupiter, jito, rpc)
 
     async def _load_enabled_strategy_groups(self) -> List[dict]:
         try:
@@ -86,12 +105,6 @@ class DiscoveryRunner:
         return groups
 
     def _build_trench_params(self, min_created: int, max_created: int) -> Dict[str, Any]:
-        """Build provider query params from runtime strategy timing.
-
-        No ``limit`` is sent.  The GMGN trenches API decides how many rows are
-        returned, matching the requirement that GMGN_TRENCHES_LIMIT is no longer
-        used anywhere in the system.
-        """
         params: Dict[str, Any] = {
             'chain': 'sol',
             'type': 'new_creation',
@@ -115,8 +128,8 @@ class DiscoveryRunner:
     def _group_by_timing(strategy_groups: List[dict]) -> List[Tuple[Tuple[int, int], List[dict]]]:
         grouped: Dict[Tuple[int, int], List[dict]] = defaultdict(list)
         for sg in strategy_groups:
-            min_created = _as_int(sg.get('min_created'), 150)
-            max_created = _as_int(sg.get('max_created'), 240)
+            min_created = _as_int(sg.get('min_created'), 180)
+            max_created = _as_int(sg.get('max_created'), 300)
             grouped[(min_created, max_created)].append(sg)
         return sorted(grouped.items(), key=lambda item: item[0])
 
@@ -154,6 +167,86 @@ class DiscoveryRunner:
         )
         return token_mint, pool_address, pool_created_at, snapshot_id
 
+    async def _run_price_screen(
+        self,
+        token_mint: str,
+        token: Dict[str, Any],
+        risk_passed_groups: List[dict],
+        snapshot_id: int,
+        discovery_event_ids: Dict[int, int],
+        now: datetime,
+    ) -> List[dict]:
+        """Fetch klines + latest price, run price filter + top1 check, return strategies that pass everything."""
+        try:
+            klines = await self.gmgn.fetch_kline(token_mint, '1m', 5)
+            latest = await self.gmgn.fetch_latest_price(token_mint)
+        except Exception as e:
+            logger.error(f"price screen fetch failed for {token_mint}: {e}")
+            await self.repo.append_system_event(
+                'ERROR', 'DISCOVERY', 'GMGN price screen fetch failed',
+                _json_dumps({'token': token_mint, 'error': str(e)}),
+                account_type='SIM',
+            )
+            return []
+
+        if not klines or not latest:
+            return []
+
+        sorted_klines = sort_klines(klines)
+        buy_sell_1m = extract_buy_sell_1m(sorted_klines, token)
+
+        price_passed: List[dict] = []
+        for sg in risk_passed_groups:
+            sg_id = int(sg.get('id') or 0)
+            config_version = int(sg.get('config_version') or 1)
+            discovery_id = discovery_event_ids.get(sg_id)
+            try:
+                res = await run_price_filter(token, sg, latest, sorted_klines, buy_sell_1m)
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, config_version, snapshot_id,
+                    'price_filter', res.passed,
+                    _json_dumps(res.details), _json_dumps(res.feature_vector),
+                    discovery_event_id=discovery_id,
+                )
+                if res.passed:
+                    price_passed.append(sg)
+            except Exception as e:
+                logger.error(f"price filter exception for {token_mint} strategy {sg_id}: {e}")
+
+        if not price_passed:
+            return []
+
+        # top1 holder check
+        try:
+            holders = await self.gmgn.fetch_top_holders(token_mint, limit=20)
+            top1_passed: List[dict] = []
+            for sg in price_passed:
+                sg_id = int(sg.get('id') or 0)
+                config_version = int(sg.get('config_version') or 1)
+                discovery_id = discovery_event_ids.get(sg_id)
+                x_val = float(sg.get("x", 0.2))
+                top1_threshold = 0.048 + 0.01 * x_val
+                top1_ok = True
+                top1_rate = None
+                for h in holders:
+                    if int(h.get("addr_type", 0)) == 0:
+                        top1_rate = _to_float(h.get("top1_holder_rate") or h.get("rate") or h.get("amount_percentage"))
+                        top1_ok = top1_rate is None or top1_rate < top1_threshold
+                        break
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, config_version, snapshot_id,
+                    'top1_holder', top1_ok,
+                    _json_dumps({"top1_rate": top1_rate, "threshold": top1_threshold, "x": x_val}),
+                    _json_dumps({"top1_rate": top1_rate, "threshold": top1_threshold}),
+                    discovery_event_id=discovery_id,
+                )
+                if top1_ok:
+                    top1_passed.append(sg)
+            return top1_passed
+        except Exception as e:
+            logger.error(f"top1 holder check failed for {token_mint}: {e}")
+            return price_passed  # unblock when top1 check fails
+
     async def run_once(self):
         now = datetime.now(timezone.utc)
         t0 = now.timestamp()
@@ -166,7 +259,8 @@ class DiscoveryRunner:
         strategy_groups = await self._load_enabled_strategy_groups()
         if not strategy_groups:
             await self.repo.append_system_event(
-                'WARNING', 'DISCOVERY', 'No enabled strategy groups for current runtime mode; skip trench discovery', '{}', account_type='SIM'
+                'WARNING', 'DISCOVERY', 'No enabled strategy groups for current runtime mode; skip trench discovery',
+                '{}', account_type='SIM'
             )
             self.processed_count = 0
             self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
@@ -184,7 +278,8 @@ class DiscoveryRunner:
                     account_type='SIM',
                 )
                 await event_bus.publish('system', {
-                    'level': 'ERROR', 'category': 'DISCOVERY', 'message': f'fetch_trenches failed for min_created={min_created}'
+                    'level': 'ERROR', 'category': 'DISCOVERY',
+                    'message': f'fetch_trenches failed for min_created={min_created}'
                 })
                 continue
 
@@ -214,6 +309,10 @@ class DiscoveryRunner:
                     )
                     continue
 
+                # --- risk filter per strategy ---
+                risk_passed: List[dict] = []
+                discovery_event_ids: Dict[int, int] = {}
+
                 for sg in groups_for_t:
                     sg_id = int(sg.get('id') or 0)
                     config_version = int(sg.get('config_version') or 1)
@@ -225,9 +324,8 @@ class DiscoveryRunner:
                             dedup_skipped += 1
                             continue
 
-                        res = await run_initial_filter(token, sg, now)
-                        next_second_check_at = (now + timedelta(seconds=60)).isoformat() if res.passed else None
-                        status = 'INITIAL_FILTER_PASSED' if res.passed else 'INITIAL_FILTER_FAILED'
+                        res = await run_risk_filter(token, sg, now)
+                        status = 'RISK_PASSED' if res.passed else 'RISK_FAILED'
 
                         discovery_id, created = await self.repo.create_discovery_event_idempotent(
                             token_mint=token_mint,
@@ -238,7 +336,6 @@ class DiscoveryRunner:
                             strategy_id=sg_id,
                             strategy_config_version=config_version,
                             status=status,
-                            next_second_check_at=next_second_check_at,
                             feature_vector_json=_json_dumps(res.feature_vector),
                         )
                         if not created:
@@ -246,28 +343,24 @@ class DiscoveryRunner:
                             continue
 
                         match_id = await self.repo.insert_strategy_match(
-                            token_mint,
-                            sg_id,
-                            config_version,
-                            snapshot_id,
-                            'initial_filter',
-                            res.passed,
+                            token_mint, sg_id, config_version, snapshot_id,
+                            'risk_filter', res.passed,
                             _json_dumps([d.__dict__ for d in res.details]),
                             _json_dumps(res.feature_vector),
                             discovery_event_id=discovery_id,
                         )
 
                         await self.repo.update_discovery_event_status(
-                            discovery_id,
-                            status,
+                            discovery_id, status,
                             initial_match_id=match_id,
-                            next_second_check_at=next_second_check_at,
                             feature_vector_json=_json_dumps(res.feature_vector),
                             min_created=min_created,
                         )
 
                         discovered_count += 1
                         if res.passed:
+                            risk_passed.append(sg)
+                            discovery_event_ids[sg_id] = discovery_id
                             tracked_count += 1
 
                         await event_bus.publish('discovery', {
@@ -280,12 +373,29 @@ class DiscoveryRunner:
                             'failed_strategy_ids': [] if res.passed else [sg_id],
                         })
                     except Exception as e:
-                        logger.error(f"Initial filter exception for {token_mint} strategy {sg_id}: {e}")
+                        logger.error(f"Risk filter exception for {token_mint} strategy {sg_id}: {e}")
                         await self.repo.append_system_event(
-                            'ERROR', 'DISCOVERY', 'initial filter exception',
+                            'ERROR', 'DISCOVERY', 'risk filter exception',
                             _json_dumps({'token': token_mint, 'strategy_id': sg_id, 'min_created': min_created, 'error': str(e)}),
                             account_type='SIM',
                         )
+
+                # --- price screen + entry for tokens that passed risk ---
+                if risk_passed:
+                    try:
+                        passed_strategies = await self._run_price_screen(
+                            token_mint, token, risk_passed, snapshot_id,
+                            discovery_event_ids, now,
+                        )
+                        if passed_strategies:
+                            await self.pipeline.handle_token_second_filter_result(
+                                token_mint, passed_strategies,
+                                snapshot_id=None, discovery_event_id=discovery_event_ids.get(
+                                    int(passed_strategies[0].get('id') or 0)
+                                ),
+                            )
+                    except Exception as e:
+                        logger.error(f"price screen entry failed for {token_mint}: {e}")
 
         self.processed_count = total_fetched
         self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
@@ -303,7 +413,6 @@ class DiscoveryRunner:
             account_type='SIM',
         )
         await event_bus.publish('system', {
-            'level': 'INFO',
-            'category': 'DISCOVERY',
+            'level': 'INFO', 'category': 'DISCOVERY',
             'message': f'Discovered {discovered_count} strategy-token events, tracked {tracked_count}, skipped {dedup_skipped} duplicates',
         })

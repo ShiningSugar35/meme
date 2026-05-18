@@ -115,8 +115,7 @@ export interface RuleFailItem {
 
 export interface FilterStats {
   trench_history: TrenchHistoryItem[];
-  initial_filter_fails: RuleFailItem[];
-  second_filter_fails: RuleFailItem[];
+  filter_fails: RuleFailItem[];
   error?: string;
 }
 

@@ -198,7 +198,7 @@ class Repositories:
         x: float,
         y: float,
         min_created: int,
-        max_created: int = 240,
+        max_created: int = 300,
         is_live: bool = False,
         priority: int = 100,
         raw_config_json: str = "{}",
@@ -346,8 +346,8 @@ class Repositories:
                 "模拟盘1",
                 0.20,
                 2.25,
-                150,
-                max_created=240,
+                180,
+                max_created=300,
                 is_live=False,
                 priority=10,
                 raw_config_json="{}",
@@ -671,7 +671,6 @@ class Repositories:
         strategy_id: Optional[int] = None,
         strategy_config_version: Optional[int] = None,
         status: str = "DISCOVERED",
-        next_second_check_at: Optional[str] = None,
         feature_vector_json: Optional[str] = None,
     ) -> tuple[int, bool]:
         if snapshot_id is not None:
@@ -694,10 +693,10 @@ class Repositories:
                   token_mint, pool_address, strategy_id, strategy_config_version,
                   first_seen_at, pool_created_at, min_created, status,
                   source_snapshot_id, initial_snapshot_id,
-                  next_second_check_at, feature_vector_json,
+                  feature_vector_json,
                   created_at, updated_at
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     token_mint,
@@ -710,7 +709,6 @@ class Repositories:
                     status,
                     snapshot_id,
                     snapshot_id,
-                    next_second_check_at,
                     feature_vector_json,
                     now,
                     now,
@@ -745,7 +743,6 @@ class Repositories:
         strategy_id: Optional[int] = None,
         strategy_config_version: Optional[int] = None,
         status: str = "DISCOVERED",
-        next_second_check_at: Optional[str] = None,
     ) -> int:
         normalized_pool = self.normalize_pool_address(pool_address)
         now = utc_now_iso()
@@ -757,9 +754,9 @@ class Repositories:
                   token_mint, pool_address, strategy_id, strategy_config_version,
                   first_seen_at, pool_created_at, min_created, status,
                   source_snapshot_id, initial_snapshot_id,
-                  next_second_check_at, created_at, updated_at
+                  created_at, updated_at
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     token_mint,
@@ -772,7 +769,6 @@ class Repositories:
                     status,
                     source_snapshot_id,
                     source_snapshot_id,
-                    next_second_check_at,
                     now,
                     now,
                 ),
@@ -812,9 +808,6 @@ class Repositories:
             "recheck_snapshot_id",
             "initial_match_id",
             "recheck_match_id",
-            "second_filter_match_id",
-            "next_second_check_at",
-            "second_filter_checked_at",
             "entry_position_id",
             "last_error",
             "fail_reason_json",
@@ -844,22 +837,6 @@ class Repositories:
             self._safe_log("update_discovery_event_status failed", id=event_id, error=str(e))
             raise
 
-    async def list_pending_second_filter_events(self, limit: int = 100) -> List[Dict[str, Any]]:
-        now = utc_now_iso()
-        async with self.db.execute(
-            """
-            SELECT *
-            FROM discovery_events
-            WHERE status = 'INITIAL_FILTER_PASSED'
-              AND next_second_check_at IS NOT NULL
-              AND next_second_check_at <= ?
-            ORDER BY next_second_check_at ASC, id ASC
-            LIMIT ?
-            """,
-            (now, limit),
-        ) as cur:
-            rows = await cur.fetchall()
-        return [dict(r) for r in rows]
 
     async def list_discovery_events(
         self,

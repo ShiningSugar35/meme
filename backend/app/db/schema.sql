@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS strategy_groups (
   x REAL NOT NULL,
   y REAL NOT NULL,
   min_created INTEGER NOT NULL,
-  max_created INTEGER NOT NULL DEFAULT 240,
+  max_created INTEGER NOT NULL DEFAULT 300,
 
   buy_slippage_cap_bps INTEGER NOT NULL DEFAULT 1500,
   sell_slippage_cap_bps INTEGER NOT NULL DEFAULT 2000,
@@ -331,10 +331,6 @@ CREATE TABLE IF NOT EXISTS discovery_events (
 
   initial_match_id INTEGER,
   recheck_match_id INTEGER,
-  second_filter_match_id INTEGER,
-
-  next_second_check_at TEXT,
-  second_filter_checked_at TEXT,
 
   entry_position_id INTEGER,
   last_error TEXT,
@@ -346,8 +342,6 @@ CREATE TABLE IF NOT EXISTS discovery_events (
 );
 CREATE INDEX IF NOT EXISTS idx_discovery_events_token
 ON discovery_events(token_mint, status);
-CREATE INDEX IF NOT EXISTS idx_discovery_events_status_next
-ON discovery_events(status, next_second_check_at);
 CREATE INDEX IF NOT EXISTS idx_discovery_events_strategy
 ON discovery_events(strategy_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_discovery_events_token_strategy

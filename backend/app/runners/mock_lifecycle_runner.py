@@ -1,5 +1,4 @@
 from .discovery_runner import DiscoveryRunner
-from .second_filter_runner import SecondFilterRunner
 from .price_monitor_runner import PriceMonitorRunner
 from .position_risk_runner import PositionRiskRunner
 from .kill_switch_runner import KillSwitchRunner
@@ -13,10 +12,8 @@ from ..trading.executor import TradingPipeline
 class MockLifecycleRunner:
     """Single-pass lifecycle runner used by mock/dev flows.
 
-    The object mirrors main.py wiring: discovery -> second filter/entry -> price
-    monitor -> position risk exits -> kill-switch housekeeping.  It deliberately
-    passes the same provider set into TradingPipeline so this runner does not
-    diverge from the app-scoped workers used in normal runtime mode.
+    The object mirrors main.py wiring: discovery (risk + price filter + entry)
+    -> price monitor -> position risk exits -> kill-switch housekeeping.
     """
 
     def __init__(self, repo: Repositories, providers: ProviderContainer, strategy_groups: list):
@@ -28,14 +25,9 @@ class MockLifecycleRunner:
         self.aggregator = PriceAggregator(repo, providers.gmgn, providers.jupiter, subscriber)
         self.trading_pipeline = TradingPipeline(repo, providers.gmgn, providers.jupiter, providers.jito, providers.rpc)
 
-        self.discovery = DiscoveryRunner(repo, providers.gmgn, strategy_groups)
-        self.second = SecondFilterRunner(
-            repo,
-            providers.gmgn,
-            providers.jupiter,
-            providers.jito,
-            providers.rpc,
-            strategy_groups,
+        self.discovery = DiscoveryRunner(
+            repo, providers.gmgn, strategy_groups,
+            providers.jupiter, providers.jito, providers.rpc,
         )
         self.price = PriceMonitorRunner(repo, self.aggregator)
         self.risk = PositionRiskRunner(repo, providers.gmgn, trading_pipeline=self.trading_pipeline)
@@ -43,7 +35,6 @@ class MockLifecycleRunner:
 
     async def run_once(self):
         await self.discovery.run_once()
-        await self.second.run_once()
         await self.price.run_once()
         await self.risk.run_once()
         await self.kill.run_once()

@@ -158,33 +158,18 @@ export default function Portfolio() {
       </div>
 
       {fstats && (
-        <div className="grid two">
-          <div className="card">
-            <h2>初筛指标淘汰数</h2>
-            <p className="hint">近批初筛不通过的 token-strategy 组合中，各指标不满足次数（降序）</p>
-            {fstats.initial_filter_fails.length === 0 && (
-              <p className="empty">暂无初筛淘汰数据</p>
-            )}
-            {fstats.initial_filter_fails.map((item) => (
-              <div className="metric-row" key={item.rule}>
-                <span>{ruleLabel(item.rule)}</span>
-                <strong>{item.count}</strong>
-              </div>
-            ))}
-          </div>
-          <div className="card">
-            <h2>二筛指标淘汰数</h2>
-            <p className="hint">通过初筛的池子中，二筛各指标不满足次数（降序）</p>
-            {fstats.second_filter_fails.length === 0 && (
-              <p className="empty">暂无二筛淘汰数据</p>
-            )}
-            {fstats.second_filter_fails.map((item) => (
-              <div className="metric-row" key={item.rule}>
-                <span>{ruleLabel(item.rule)}</span>
-                <strong>{item.count}</strong>
-              </div>
-            ))}
-          </div>
+        <div className="card">
+          <h2>淘汰指标排行</h2>
+          <p className="hint">风控+价格面筛选各指标不满足次数（降序）</p>
+          {fstats.filter_fails.length === 0 && (
+            <p className="empty">暂无淘汰数据</p>
+          )}
+          {fstats.filter_fails.map((item) => (
+            <div className="metric-row" key={item.rule}>
+              <span>{ruleLabel(item.rule)}</span>
+              <strong>{item.count}</strong>
+            </div>
+          ))}
         </div>
       )}
     </section>

@@ -190,6 +190,13 @@ async def _drop_index_if_exists(db: aiosqlite.Connection, index_name: str):
         await db.execute(f"DROP INDEX IF EXISTS {index_name}")
 
 
+async def _drop_column_if_exists(db: aiosqlite.Connection, table: str, column: str):
+    columns = await _table_columns(db, table)
+    if column in columns:
+        logger.info("Dropping obsolete column", table=table, column=column)
+        await db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+
+
 async def _migrate_system_events(db: aiosqlite.Connection):
     await _add_column_if_missing(db, "system_events", "account_type", "TEXT NOT NULL DEFAULT 'SIM'")
     await _add_index_if_missing(db, "idx_system_events_level", "system_events", "level")
@@ -348,9 +355,6 @@ async def _migrate_discovery_events(db: aiosqlite.Connection):
         "recheck_snapshot_id": "INTEGER",
         "initial_match_id": "INTEGER",
         "recheck_match_id": "INTEGER",
-        "second_filter_match_id": "INTEGER",
-        "next_second_check_at": "TEXT",
-        "second_filter_checked_at": "TEXT",
         "entry_position_id": "INTEGER",
         "last_error": "TEXT",
         "fail_reason_json": "TEXT",
@@ -427,8 +431,13 @@ async def _migrate_tick_snapshots(db: aiosqlite.Connection):
 
 async def _migrate_strategy_groups(db: aiosqlite.Connection):
     await _rename_column(db, "strategy_groups", "t_seconds", "min_created")
-    await _add_column_if_missing(db, "strategy_groups", "max_created", "INTEGER NOT NULL DEFAULT 240")
+    await _add_column_if_missing(db, "strategy_groups", "max_created", "INTEGER NOT NULL DEFAULT 300")
     await _rename_column(db, "discovery_events", "t_seconds", "min_created")
+    # Drop columns that were used by the now-removed second_filter runner.
+    await _drop_column_if_exists(db, "discovery_events", "next_second_check_at")
+    await _drop_column_if_exists(db, "discovery_events", "second_filter_checked_at")
+    await _drop_column_if_exists(db, "discovery_events", "second_filter_match_id")
+    await _drop_index_if_exists(db, "idx_discovery_events_status_next")
 
 
 def get_db_sync():

@@ -20,7 +20,7 @@ async def _ensure_live(repo):
     groups = await repo.list_strategy_groups()
     live = [g for g in groups if g['is_live']]
     if not live:
-        await repo.create_strategy_group("test_live", 0.15, 2.25, 150, is_live=True, priority=10, raw_config_json='{}')
+        await repo.create_strategy_group("test_live", 0.15, 2.25, 180, max_created=300, is_live=True, priority=10, raw_config_json='{}')
         groups = await repo.list_strategy_groups()
     return [g for g in groups if g['is_live']]
 

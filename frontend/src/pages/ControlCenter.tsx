@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, RuntimeStatus, StrategyGroup, TradingParamSpec } from '../api/client';
 
-const emptyStrategy = { name: '', x: 10, y: 20, min_created: 150, max_created: 240, enabled: true, is_live: false };
+const emptyStrategy = { name: '', x: 10, y: 20, min_created: 180, max_created: 300, enabled: true, is_live: false };
 
 function asBool(value: number | boolean | undefined) {
   return value === true || value === 1;

@@ -22,11 +22,11 @@ OPEN_POSITION_EXCLUDED_STATUSES = ("CLOSED", "LEGACY_INVALID_CONFIG", "MIGRATION
 
 
 DEFAULT_SIM_STRATEGIES: List[Dict[str, Any]] = [
-    {"name": "模拟盘1", "x": 0.20, "y": 2.25, "min_created": 150, "max_created": 240, "is_live": False, "priority": 10},
+    {"name": "模拟盘1", "x": 0.20, "y": 2.25, "min_created": 180, "max_created": 300, "is_live": False, "priority": 10},
 ]
 
 TRADING_PARAM_SPECS: List[Dict[str, Any]] = [
-    {"key": "POLL_INTERVAL_SECONDS", "label": "主轮询间隔", "description": "discovery/second_filter 主轮询间隔，单位秒。", "value_type": "int", "default": settings.POLL_INTERVAL_SECONDS, "min_value": 1},
+    {"key": "POLL_INTERVAL_SECONDS", "label": "主轮询间隔", "description": "discovery 主轮询间隔，单位秒。", "value_type": "int", "default": settings.POLL_INTERVAL_SECONDS, "min_value": 1},
     {"key": "ACTIVE_POSITION_PRICE_POLL_SECONDS", "label": "持仓价格轮询", "description": "活跃持仓价格监控间隔，单位秒。", "value_type": "int", "default": settings.ACTIVE_POSITION_PRICE_POLL_SECONDS, "min_value": 1},
     {"key": "TIP_FLOOR_REFRESH_SECONDS", "label": "Jito tip刷新", "description": "Jito tip floor 刷新间隔，单位秒。", "value_type": "int", "default": settings.TIP_FLOOR_REFRESH_SECONDS, "min_value": 1},
     {"key": "BUY_SLIPPAGE_CAP_BPS", "label": "买入滑点上限", "description": "买入报价滑点上限，单位 bps。", "value_type": "int", "default": settings.BUY_SLIPPAGE_CAP_BPS, "min_value": 0},
@@ -396,7 +396,7 @@ async def create_strategy(request: Request, payload: Dict[str, Any] = Body(...))
             x=float(payload.get("x", 0.2)),
             y=float(payload.get("y", 2.25)),
             min_created=int(payload.get("min_created", payload.get("t", 150))),
-            max_created=int(payload.get("max_created", 240)),
+            max_created=int(payload.get("max_created", 300)),
             is_live=bool(payload.get("is_live", False)),
             priority=int(payload.get("priority", 100)),
             raw_config_json=raw_config_json,
@@ -524,17 +524,17 @@ async def runtime_filter_stats(request: Request):
                 "passed": ctx.get("tracked_initial_passed", 0),
             })
 
-        # 初筛淘汰统计：取最近 initial_filter 未通过的记录，解析 pass_fail_detail_json
-        init_fails_raw = await _fetch_all(
+        # 淘汰统计：取最近 risk_filter + price_filter 未通过的记录
+        fail_rows_raw = await _fetch_all(
             repo,
             """
             SELECT pass_fail_detail_json FROM token_strategy_matches
-            WHERE stage = 'initial_filter' AND passed = 0
-            ORDER BY created_at DESC LIMIT 500
+            WHERE stage IN ('risk_filter', 'price_filter') AND passed = 0
+            ORDER BY created_at DESC LIMIT 1000
             """,
         )
-        init_fail_counts: Dict[str, int] = {}
-        for row in init_fails_raw:
+        fail_counts: Dict[str, int] = {}
+        for row in fail_rows_raw:
             try:
                 details = json.loads(row.get("pass_fail_detail_json", "[]"))
             except Exception:
@@ -542,43 +542,18 @@ async def runtime_filter_stats(request: Request):
             for d in details:
                 if isinstance(d, dict) and not d.get("passed", True):
                     name = str(d.get("name") or d.get("rule") or "unknown")
-                    init_fail_counts[name] = init_fail_counts.get(name, 0) + 1
-        init_fails = sorted(
-            [{"rule": k, "count": v} for k, v in init_fail_counts.items()],
-            key=lambda x: x["count"], reverse=True,
-        )
-
-        # 二筛淘汰统计
-        second_fails_raw = await _fetch_all(
-            repo,
-            """
-            SELECT pass_fail_detail_json FROM token_strategy_matches
-            WHERE stage = 'second_filter' AND passed = 0
-            ORDER BY created_at DESC LIMIT 500
-            """,
-        )
-        second_fail_counts: Dict[str, int] = {}
-        for row in second_fails_raw:
-            try:
-                details = json.loads(row.get("pass_fail_detail_json", "[]"))
-            except Exception:
-                continue
-            for d in details:
-                if isinstance(d, dict) and not d.get("passed", True):
-                    name = str(d.get("rule") or d.get("name") or "unknown")
-                    second_fail_counts[name] = second_fail_counts.get(name, 0) + 1
-        second_fails = sorted(
-            [{"rule": k, "count": v} for k, v in second_fail_counts.items()],
+                    fail_counts[name] = fail_counts.get(name, 0) + 1
+        filter_fails = sorted(
+            [{"rule": k, "count": v} for k, v in fail_counts.items()],
             key=lambda x: x["count"], reverse=True,
         )
 
         return {
             "trench_history": trench_history,
-            "initial_filter_fails": init_fails,
-            "second_filter_fails": second_fails,
+            "filter_fails": filter_fails,
         }
     except Exception as e:
-        return {"trench_history": [], "initial_filter_fails": [], "second_filter_fails": [], "error": str(e)}
+        return {"trench_history": [], "filter_fails": [], "error": str(e)}
     finally:
         if owned:
             await repo.close()
@@ -650,7 +625,6 @@ async def update_trading_params(request: Request, payload: Dict[str, Any] = Body
             if "POLL_INTERVAL_SECONDS" in updates:
                 interval = int(updates["POLL_INTERVAL_SECONDS"])
                 worker_mgr.update_interval("discovery", interval)
-                worker_mgr.update_interval("second_filter", max(1, min(30, interval)))
             if "ACTIVE_POSITION_PRICE_POLL_SECONDS" in updates:
                 worker_mgr.update_interval("price_monitor", int(updates["ACTIVE_POSITION_PRICE_POLL_SECONDS"]))
 
@@ -839,22 +813,19 @@ async def _screening_summary(repo: Repositories, strategies: List[Dict[str, Any]
             (sid,),
         )
         by_stage = {r["stage"]: r for r in rows}
-        initial = by_stage.get("initial_filter", {})
-        second = by_stage.get("second_filter", {})
-        core = by_stage.get("second_core_recheck", {})
+        risk = by_stage.get("risk_filter", {})
+        price = by_stage.get("price_filter", {})
         out[str(sid)] = {
             "strategy": _strategy_label(sg),
-            "first_round": {
-                "screened": int(initial.get("screened") or 0),
-                "passed": int(initial.get("passed") or 0),
-                "failed": int(initial.get("failed") or 0),
+            "risk_filter": {
+                "screened": int(risk.get("screened") or 0),
+                "passed": int(risk.get("passed") or 0),
+                "failed": int(risk.get("failed") or 0),
             },
-            "second_round": {
-                "screened": int(second.get("screened") or 0),
-                "passed": int(second.get("passed") or 0),
-                "failed": int(second.get("failed") or 0),
-                "core_recheck_screened": int(core.get("screened") or 0),
-                "core_recheck_passed": int(core.get("passed") or 0),
+            "price_filter": {
+                "screened": int(price.get("screened") or 0),
+                "passed": int(price.get("passed") or 0),
+                "failed": int(price.get("failed") or 0),
             },
         }
     return out
@@ -892,17 +863,19 @@ async def _failure_top10(repo: Repositories, strategies: List[Dict[str, Any]]) -
             """,
             (sid,),
         )
-        initial_counts: Counter[str] = Counter()
-        second_counts: Counter[str] = Counter()
+        risk_counts: Counter[str] = Counter()
+        price_counts: Counter[str] = Counter()
         for row in rows:
             stage = row.get("stage") or "unknown"
             names = _extract_failed_features(row.get("pass_fail_detail_json"), stage) or [stage]
-            counter = initial_counts if stage == "initial_filter" else second_counts
-            counter.update(names)
+            if stage == "price_filter":
+                price_counts.update(names)
+            else:
+                risk_counts.update(names)
         out[str(sid)] = {
             "strategy": _strategy_label(sg),
-            "first_round": [{"feature": k, "filtered_count": v} for k, v in initial_counts.most_common(10)],
-            "second_round": [{"feature": k, "filtered_count": v} for k, v in second_counts.most_common(10)],
+            "risk_fails": [{"feature": k, "filtered_count": v} for k, v in risk_counts.most_common(10)],
+            "price_fails": [{"feature": k, "filtered_count": v} for k, v in price_counts.most_common(10)],
         }
     return out
 
@@ -1009,14 +982,14 @@ async def _raw_pool_payload(repo: Repositories, strategy_id: int, discovery_even
     }
 
 
-async def _sample_event(repo: Repositories, strategy_id: int, *, second_passed: bool) -> Optional[int]:
-    if second_passed:
+async def _sample_event(repo: Repositories, strategy_id: int, *, price_passed: bool) -> Optional[int]:
+    if price_passed:
         row = await _fetch_one(
             repo,
             """
             SELECT discovery_event_id
             FROM token_strategy_matches
-            WHERE strategy_id=? AND stage='second_filter' AND passed=1 AND discovery_event_id IS NOT NULL
+            WHERE strategy_id=? AND stage='price_filter' AND passed=1 AND discovery_event_id IS NOT NULL
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -1029,7 +1002,7 @@ async def _sample_event(repo: Repositories, strategy_id: int, *, second_passed: 
         SELECT im.discovery_event_id
         FROM token_strategy_matches im
         WHERE im.strategy_id=?
-          AND im.stage='initial_filter'
+          AND im.stage='risk_filter'
           AND im.passed=1
           AND im.discovery_event_id IS NOT NULL
           AND NOT EXISTS (
@@ -1037,7 +1010,7 @@ async def _sample_event(repo: Repositories, strategy_id: int, *, second_passed: 
               FROM token_strategy_matches sm
               WHERE sm.discovery_event_id = im.discovery_event_id
                 AND sm.strategy_id = im.strategy_id
-                AND sm.stage = 'second_filter'
+                AND sm.stage = 'price_filter'
                 AND sm.passed = 1
           )
         ORDER BY im.id DESC
@@ -1054,13 +1027,13 @@ async def _raw_samples(repo: Repositories, strategies: List[Dict[str, Any]]) -> 
         return out
     for sg in strategies:
         sid = int(sg.get("id"))
-        failed_event_id = await _sample_event(repo, sid, second_passed=False)
-        passed_event_id = await _sample_event(repo, sid, second_passed=True)
-        out[str(sid)] = {"strategy": _strategy_label(sg), "initial_passed_but_not_second_passed": None, "second_passed_pool": None}
+        failed_event_id = await _sample_event(repo, sid, price_passed=False)
+        passed_event_id = await _sample_event(repo, sid, price_passed=True)
+        out[str(sid)] = {"strategy": _strategy_label(sg), "risk_passed_but_not_price_passed": None, "price_passed_pool": None}
         if failed_event_id is not None:
-            out[str(sid)]["initial_passed_but_not_second_passed"] = await _raw_pool_payload(repo, sid, failed_event_id)
+            out[str(sid)]["risk_passed_but_not_price_passed"] = await _raw_pool_payload(repo, sid, failed_event_id)
         if passed_event_id is not None:
-            out[str(sid)]["second_passed_pool"] = await _raw_pool_payload(repo, sid, passed_event_id)
+            out[str(sid)]["price_passed_pool"] = await _raw_pool_payload(repo, sid, passed_event_id)
     return out
 
 
@@ -1078,9 +1051,9 @@ async def _session_error_and_strategy_report(repo: Repositories) -> Dict[str, An
         "trade_stats": await _trade_stats(repo),
         "gmgn_raw_samples_by_strategy": await _raw_samples(repo, strategies),
         "notes": [
-            "first_round uses token_strategy_matches.stage='initial_filter'.",
-            "second_round uses stages 'second_core_recheck' and 'second_filter'.",
-            "gmgn_raw_samples_by_strategy chooses one pool per strategy that passed initial_filter but did not pass second_filter, plus one pool that passed second_filter when available.",
+            "risk_filter uses token_strategy_matches.stage='risk_filter'.",
+            "price_filter uses stage 'price_filter'.",
+            "gmgn_raw_samples_by_strategy chooses one pool per strategy that passed risk_filter but did not pass price_filter, plus one pool that passed price_filter when available.",
             "Raw GMGN data is exported from persisted raw_json columns; the export endpoint does not call GMGN again.",
             "Logs/reports are written under ./logs instead of ./data_backup.",
         ],
