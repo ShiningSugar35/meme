@@ -169,6 +169,7 @@ class PositionRiskRunner:
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
         self._legacy_warned: set[int] = set()
+        self._last_top1_check: Dict[int, datetime] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -273,6 +274,20 @@ class PositionRiskRunner:
                 position=position_for_decision,
                 exit_pct=1.0,
                 reason_code="RISK_RECHECK_FAILED",
+                emergency=True,
+                latest=latest,
+                current_price_sol=price_sol,
+                current_price_usd=price_usd,
+            )
+            return
+
+        # Top1 holder continuous monitoring: check addr_type=0 share against threshold
+        top1_failed = await self._check_top1_holder(position_for_decision, now)
+        if top1_failed:
+            await self._request_exit(
+                position=position_for_decision,
+                exit_pct=1.0,
+                reason_code="TOP1_HOLDER_RISK",
                 emergency=True,
                 latest=latest,
                 current_price_sol=price_sol,
@@ -475,6 +490,72 @@ class PositionRiskRunner:
             details=details,
             feature_vector=getattr(res, "feature_vector", {}),
         )
+
+    async def _check_top1_holder(self, position: Dict[str, Any], now: datetime) -> bool:
+        """Check top1 holder (addr_type=0) share against threshold per tiered schedule.
+
+        Returns True if risk is triggered (full exit needed), False otherwise.
+        """
+        pos_id = int(position["id"])
+        remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
+        interval = settings.get_top1_holder_scan_interval_seconds(remaining_value_usd)
+        if interval is None or interval <= 0:
+            return False
+
+        last_check = self._last_top1_check.get(pos_id)
+        if last_check is not None and now < last_check + timedelta(seconds=interval):
+            return False
+
+        self._last_top1_check[pos_id] = now
+
+        token = position["token_mint"]
+        account_type = _account_type(position)
+
+        locked = position.get("locked_strategy_config_json")
+        cfg: Dict[str, Any] = {}
+        if locked:
+            try:
+                cfg = json.loads(locked)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        x_val = float(cfg.get("x", 0.2))
+        threshold = 0.048 + 0.01 * x_val
+
+        try:
+            holders = await self.gmgn.fetch_top_holders(token, limit=20)
+        except Exception as e:
+            # Best-effort: if holder fetch fails, do not force exit
+            await self.repo.append_system_event(
+                "WARN",
+                "RISK",
+                "Top1 holder fetch failed, skipping check",
+                _safe_json_dumps({"position_id": pos_id, "token": token, "error": str(e)}),
+                account_type=account_type,
+            )
+            return False
+
+        for h in holders:
+            if int(h.get("addr_type", 0)) == 0:
+                top1_rate = _to_float(h.get("top1_holder_rate") or h.get("rate") or h.get("amount_percentage"))
+                if top1_rate is not None and top1_rate >= threshold:
+                    await self.repo.append_system_event(
+                        "WARN",
+                        "RISK",
+                        "Top1 holder rate exceeds threshold; requesting full exit",
+                        _safe_json_dumps({
+                            "position_id": pos_id,
+                            "token": token,
+                            "top1_rate": top1_rate,
+                            "threshold": threshold,
+                            "x": x_val,
+                        }),
+                        account_type=account_type,
+                    )
+                    return True
+                break
+
+        return False
 
     def _primary_reason(self, decision) -> str:
         if not decision.reasons:

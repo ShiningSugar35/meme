@@ -138,8 +138,10 @@ class GMGNProvider(MarketDataProvider):
         method = (method or "GET").upper()
         cleaned = {k: v for k, v in dict(params or {}).items() if v is not None and v != ""}
         url = self._build_url(path)
-        attempts = max(1, len(self.credentials) or len(self.api_keys) or len(self.client_ids) or 1)
+        creds_available = len(self.credentials or []) or len(self.api_keys or []) or len(self.client_ids or [])
+        attempts = max(1, creds_available or 1)
         last_exc: Optional[BaseException] = None
+        last_status: Optional[int] = None
 
         for _attempt in range(attempts):
             cred = self._next_credential()
@@ -176,6 +178,7 @@ class GMGNProvider(MarketDataProvider):
                 except Exception:
                     data = {"raw_text": resp.text[:2000]}
 
+                last_status = resp.status_code
                 if resp.status_code >= 400:
                     retryable = self._retryable_status(resp.status_code)
                     await self._log_request(path, False, request_params, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
@@ -192,12 +195,22 @@ class GMGNProvider(MarketDataProvider):
             except Exception as exc:
                 latency = int((time.perf_counter() - started) * 1000)
                 last_exc = exc
-                await self._log_request(path, False, cleaned, {}, None, latency, "REQUEST_ERROR", str(exc), method)
+                await self._log_request(path, False, cleaned, {}, None, latency, "REQUEST_ERROR", str(exc) or repr(exc), method)
                 continue
 
         if isinstance(last_exc, GMGNAPIError):
             raise last_exc
-        raise GMGNAPIError(f"GMGN request failed: {str(last_exc or 'unknown')}", path=path, method=method, retryable=True)
+
+        detail = str(last_exc) if last_exc else 'unknown'
+        if not detail or detail.strip() == '':
+            detail = repr(last_exc) if last_exc else 'unknown'
+        if not detail or detail.strip() == '':
+            detail = type(last_exc).__name__ if last_exc else 'unknown'
+        raise GMGNAPIError(
+            f"GMGN request failed after {attempts} attempt(s) "
+            f"(creds={creds_available}, last_status={last_status}): {detail}",
+            path=path, method=method, retryable=True,
+        )
 
     @staticmethod
     def _first_present(data: Dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
@@ -427,7 +440,7 @@ class GMGNProvider(MarketDataProvider):
             return klines
 
         path = settings.get_gmgn_kline_path() if hasattr(settings, "get_gmgn_kline_path") else (getattr(settings, "GMGN_KLINE_PATH", None) or "/v1/market/token_kline")
-        params = {"chain": "sol", "address": token_mint, "interval": interval, "limit": int(limit)}
+        params = {"chain": "sol", "address": token_mint, "resolution": interval, "limit": int(limit)}
         data = await self._make_request(path, params, method="GET")
         root = data.get("data", data) if isinstance(data, dict) else data
         raw_klines = self._extract_items(root, ("klines", "list", "items", "rows", "data"))
@@ -461,15 +474,43 @@ class GMGNProvider(MarketDataProvider):
         path = getattr(settings, "GMGN_TOKEN_PRICE_PATH", None) or getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
         params = {"chain": "sol", "address": token_mint}
         data = await self._make_request(path, params, method="GET")
-        raw = self._unwrap_data(data)
+        # Use data.data directly instead of _unwrap_data: the info response has a
+        # nested "price":{…} object at the top level and _unwrap_data may return
+        # the wrong sub-object (e.g. "pool") instead of the full data payload.
+        raw = data.get("data", data) if isinstance(data, dict) else data
         raw = raw if isinstance(raw, dict) else {}
+
+        # GMGN /v1/token/info returns price as a nested object: data.price.price
+        price_nested = raw.get("price")
+        if isinstance(price_nested, dict):
+            price_usd = self._to_float(self._first_present(price_nested, ["price_usd", "price", "usd_price"]))
+            price_sol = self._to_float(self._first_present(price_nested, ["price_sol", "sol_price", "native_price"]))
+        else:
+            price_usd = self._to_float(self._first_present(raw, ["price_usd", "price", "usd_price"]))
+            price_sol = self._to_float(self._first_present(raw, ["price_sol", "sol_price", "native_price"]))
+
+        # Some fields (e.g. quote_reserve) live only inside the nested pool object
+        pool_obj = raw.get("pool") if isinstance(raw, dict) else None
+        if not isinstance(pool_obj, dict):
+            pool_obj = {}
+
+        liquidity_usd = (
+            self._to_float(self._first_present(raw, ["liquidity_usd", "liquidity", "reserve_usd"]))
+            or self._to_float(self._first_present(pool_obj, ["liquidity_usd", "liquidity", "reserve_usd"]))
+        )
+        sol_side_liquidity = (
+            self._to_float(self._first_present(raw, ["sol_side_liquidity", "sol_liquidity", "quote_reserve"]))
+            or self._to_float(self._first_present(pool_obj, ["sol_side_liquidity", "sol_liquidity", "quote_reserve"]))
+        )
+        market_cap = self._to_float(self._first_present(raw, ["market_cap", "marketcap", "fdv"]))
+
         return {
-            "price": self._to_float(self._first_present(raw, ["price_usd", "price", "usd_price"])) or 0.0,
-            "price_usd": self._to_float(self._first_present(raw, ["price_usd", "price", "usd_price"])),
-            "price_sol": self._to_float(self._first_present(raw, ["price_sol", "sol_price", "native_price"])) or 0.0,
-            "liquidity_usd": self._to_float(self._first_present(raw, ["liquidity_usd", "liquidity", "reserve_usd"])),
-            "sol_side_liquidity": self._to_float(self._first_present(raw, ["sol_side_liquidity", "sol_liquidity", "quote_reserve"])),
-            "market_cap": self._to_float(self._first_present(raw, ["market_cap", "marketcap", "fdv"])),
+            "price": price_usd or 0.0,
+            "price_usd": price_usd,
+            "price_sol": price_sol or 0.0,
+            "liquidity_usd": liquidity_usd,
+            "sol_side_liquidity": sol_side_liquidity,
+            "market_cap": market_cap,
             "raw_json": json.dumps(data, ensure_ascii=False, default=str),
             "source_mode": "REAL",
         }

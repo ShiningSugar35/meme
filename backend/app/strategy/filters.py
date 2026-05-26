@@ -13,7 +13,6 @@ Price screen — y-scaling rules on 1m/5m candles and current price.
 """
 from __future__ import annotations
 
-import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -442,42 +441,20 @@ async def run_price_filter(
     low_1m = _kline_low(latest_1m)
     volume_1m = _kline_volume_usd(latest_1m) or 0.0
 
-    # rule 1: volume_1m > max(liquidity_usd*(0.07-0.02*y), median_volume_prev_5m*(1.3-0.1*y))
+    # rule 1: volume_1m > liquidity_usd * (0.07 - 0.02 * y)
     liquidity_usd = _to_float(_first_present(token, ["liquidity_usd", "liquidity"]))
-    prev_volumes: List[float] = []
-    for k in klines[:-1]:
-        v = _kline_volume_usd(k)
-        if v is not None and v > 0:
-            prev_volumes.append(v)
-    median_prev = statistics.median(prev_volumes) if prev_volumes else 0.0
-    threshold_a = (liquidity_usd or 0.0) * (0.07 - 0.02 * y)
-    threshold_b = median_prev * (1.3 - 0.1 * y)
-    threshold_1 = max(threshold_a, threshold_b)
+    threshold_1 = (liquidity_usd or 0.0) * (0.07 - 0.02 * y)
     cond1 = volume_1m > threshold_1
     details.append({
         "rule": "volume_1m", "passed": cond1,
         "volume_1m": volume_1m, "liquidity_usd": liquidity_usd,
-        "threshold_liquidity": threshold_a, "median_volume_prev": median_prev,
-        "threshold_median": threshold_b, "threshold": threshold_1, "y": y,
+        "threshold": threshold_1, "y": y,
     })
 
-    # rule 2: close_1m > open_1m * (1 - 0.002 * y)
-    if open_1m and open_1m > 0 and close_1m:
-        threshold_2 = open_1m * (1.0 - 0.002 * y)
-        cond2 = close_1m > threshold_2
-    else:
-        cond2 = False
-        threshold_2 = None
-    details.append({
-        "rule": "close_gt_open_scaled", "passed": cond2,
-        "open_1m": open_1m, "close_1m": close_1m,
-        "threshold": threshold_2, "y": y,
-    })
-
-    # rule 3: (close_1m - low_1m) / (high_1m - low_1m) > (0.80 - 0.01 * y)
+    # rule 2: (close_1m - low_1m) / (high_1m - low_1m) > (0.80 - 0.1 * y)
     if high_1m and low_1m and close_1m and high_1m > low_1m:
         candle_ratio = (close_1m - low_1m) / (high_1m - low_1m)
-        threshold_3 = 0.80 - 0.01 * y
+        threshold_3 = 0.80 - 0.1 * y
         cond3 = candle_ratio > threshold_3
     else:
         candle_ratio = None
@@ -490,8 +467,8 @@ async def run_price_filter(
         "high_1m": high_1m, "low_1m": low_1m, "y": y,
     })
 
-    # rule 4: current_price > high_5m / y
-    high_over_y = high_5m / y
+    # rule 3: current_price > high_5m / (y - 0.5)
+    high_over_y = high_5m / (y - 0.5)
     cond4 = current_price > high_over_y
     details.append({
         "rule": "price_gt_high_over_y", "passed": cond4,
@@ -499,7 +476,7 @@ async def run_price_filter(
         "threshold_value": high_over_y, "y": y,
     })
 
-    # rule 5: current_price < low_5m * y
+    # rule 4: current_price < low_5m * y
     low_times_y = low_5m * y
     cond5 = current_price < low_times_y
     details.append({
@@ -508,10 +485,10 @@ async def run_price_filter(
         "threshold_value": low_times_y, "y": y,
     })
 
-    # rule 6: 0.8-0.2*y < frac < 0.35+0.2*y
+    # rule 5: 0.8-0.2*y < frac < 0.4+0.2*y
     frac = (current_price - low_5m) / (high_5m - low_5m)
     low_frac = 0.8 - 0.2 * y
-    high_frac = 0.35 + 0.2 * y
+    high_frac = 0.4 + 0.2 * y
     cond6 = low_frac < frac < high_frac
     details.append({
         "rule": "fraction_range", "passed": cond6,
@@ -525,7 +502,6 @@ async def run_price_filter(
         "y": y, "current_price": current_price,
         "high_5m": high_5m, "low_5m": low_5m, "frac": frac,
         "volume_1m": volume_1m, "liquidity_usd": liquidity_usd,
-        "median_volume_prev": median_prev,
         "open_1m": open_1m, "close_1m": close_1m,
         "high_1m": high_1m, "low_1m": low_1m,
         "kline_count_used": kline_count,

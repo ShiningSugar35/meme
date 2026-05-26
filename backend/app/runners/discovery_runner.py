@@ -1,7 +1,7 @@
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
@@ -177,19 +177,38 @@ class DiscoveryRunner:
         now: datetime,
     ) -> List[dict]:
         """Fetch klines + latest price, run price filter + top1 check, return strategies that pass everything."""
+        kline_error: Optional[str] = None
+        price_error: Optional[str] = None
+
         try:
             klines = await self.gmgn.fetch_kline(token_mint, '1m', 5)
+        except Exception as e:
+            kline_error = str(e)
+            klines = []
+            logger.warning(f"kline fetch failed for {token_mint}: {e}")
+
+        try:
             latest = await self.gmgn.fetch_latest_price(token_mint)
         except Exception as e:
-            logger.error(f"price screen fetch failed for {token_mint}: {e}")
+            price_error = str(e)
+            latest = {}
+            logger.warning(f"latest price fetch failed for {token_mint}: {e}")
+
+        if not latest:
             await self.repo.append_system_event(
                 'ERROR', 'DISCOVERY', 'GMGN price screen fetch failed',
-                _json_dumps({'token': token_mint, 'error': str(e)}),
+                _json_dumps({'token': token_mint, 'error': price_error or 'latest price missing', 'stage': 'latest_price'}),
                 account_type='SIM',
             )
             return []
 
-        if not klines or not latest:
+        if not klines:
+            if kline_error:
+                await self.repo.append_system_event(
+                    'ERROR', 'DISCOVERY', 'GMGN price screen fetch failed',
+                    _json_dumps({'token': token_mint, 'error': kline_error, 'stage': 'kline'}),
+                    account_type='SIM',
+                )
             return []
 
         sorted_klines = sort_klines(klines)
@@ -390,7 +409,7 @@ class DiscoveryRunner:
                         if passed_strategies:
                             await self.pipeline.handle_token_second_filter_result(
                                 token_mint, passed_strategies,
-                                snapshot_id=None, discovery_event_id=discovery_event_ids.get(
+                                snapshot_id=snapshot_id, discovery_event_id=discovery_event_ids.get(
                                     int(passed_strategies[0].get('id') or 0)
                                 ),
                             )

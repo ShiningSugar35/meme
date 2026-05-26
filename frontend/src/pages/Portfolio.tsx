@@ -34,9 +34,8 @@ function ruleLabel(name: string): string {
     sniper_count: 'sniper数量超标',
     platform: '平台不在白名单',
     volume_1m: 'volume_1m不达标',
-    close_gt_open_scaled: 'close未跑赢open',
     candle_position: '1m candle位置偏低',
-    price_gt_high_over_y: '价格未突破high5/y',
+    price_gt_high_over_y: '价格未突破high5/(y-0.5)',
     price_lt_low_times_y: '价格未跌破low5*y',
     fraction_range: '价格分位不在区间',
     top1_holder: 'TOP1持仓超标',
@@ -115,7 +114,7 @@ export default function Portfolio() {
           <strong>{trenchTotal}</strong>
         </div>
         <div className="metric-row">
-          <span>其中通过初筛数</span>
+          <span>其中通过风控指标</span>
           <strong>{passTotal}</strong>
         </div>
         {message && <p className="message">{message}</p>}

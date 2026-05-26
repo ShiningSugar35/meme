@@ -384,6 +384,33 @@ class TradingPipeline:
         snapshot_id: Optional[int],
         discovery_event_id: Optional[int],
     ) -> Optional[Dict[str, Any]]:
+        # Per-strategy dedup: if an open SIM position already exists for this strategy+token, skip
+        try:
+            existing_positions = await self.repo.list_positions_by_token(token_mint)
+            for ep in existing_positions:
+                if ep.get("account_type") == "SIM" and ep.get("status") not in ("CLOSED",):
+                    locked = ep.get("locked_strategy_config_json")
+                    if locked:
+                        try:
+                            cfg = json.loads(locked)
+                            if int(cfg.get("id", 0)) == int(strategy.get("id", 0)):
+                                await self.repo.append_system_event(
+                                    "INFO",
+                                    "TRADE",
+                                    "SIM entry skipped: open position already exists for this strategy+token",
+                                    self._safe_json({
+                                        "token": token_mint,
+                                        "strategy_id": strategy.get("id"),
+                                        "existing_position_id": ep.get("id"),
+                                    }),
+                                    account_type="SIM",
+                                )
+                                return None
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            pass
+        except Exception:
+            pass
+
         latest: Dict[str, Any] = {}
         try:
             latest = await self.gmgn.fetch_latest_price(token_mint)

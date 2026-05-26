@@ -372,7 +372,6 @@ async def _migrate_discovery_events(db: aiosqlite.Connection):
     await _drop_index_if_exists(db, "ux_discovery_snapshot_token_pool")
 
     await _add_index_if_missing(db, "idx_discovery_events_token", "discovery_events", "token_mint, status")
-    await _add_index_if_missing(db, "idx_discovery_events_status_next", "discovery_events", "status, next_second_check_at")
     await _add_index_if_missing(db, "idx_discovery_events_strategy", "discovery_events", "strategy_id, status, updated_at")
     await _add_index_if_missing(db, "idx_discovery_events_token_strategy", "discovery_events", "token_mint, pool_address, strategy_id, status")
 

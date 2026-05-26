@@ -241,26 +241,21 @@ function Run-SecondFilter {
     $th1 = if ($tA -gt $tB) { $tA } else { $tB }
     if ($vol1 -le $th1) { $fails += "vol_1m($vol1) <= max($tA,$tB)" }
 
-    # rule 2: close_1m > open_1m * (1 - 0.002*y)
-    if ($open1 -and $close1) {
-        if ($close1 -le $open1 * (1 - 0.002*$y)) { $fails += "close($close1) <= open($open1)*{0}" -f ((1-0.002*$y).ToString("F4")) }
-    } else { $fails += "no open/close 1m" }
-
-    # rule 3: candle_ratio > 0.80 - 0.01*y
+    # rule 2: candle_ratio > 0.80 - 0.01*y
     if ($hi1 -and $lo1 -and $hi1 -gt $lo1 -and $close1) {
         $cr = ($close1 - $lo1) / ($hi1 - $lo1)
         if ($cr -le (0.80 - 0.01*$y)) { $fails += "candle_ratio($cr) <= $((0.80-0.01*$y).ToString('F4'))" }
     } else { $fails += "no candle range" }
 
-    # rule 4: current > high_5m / y
+    # rule 3: current > high_5m / (y - 0.5)
     if ($curPrice -le ($hi5 / $y)) { $fails += "cur($curPrice) <= high5m/y($(($hi5/$y).ToString('F6')))" }
 
-    # rule 5: current < low_5m * y
+    # rule 4: current < low_5m * y
     if ($curPrice -ge ($lo5 * $y)) { $fails += "cur($curPrice) >= low5m*y($(($lo5*$y).ToString('F6')))" }
 
-    # rule 6: 0.8-0.2*y < frac < 0.35+0.2*y
+    # rule 5: 0.8-0.2*y < frac < 0.35+0.2*y
     $frac = ($curPrice - $lo5) / ($hi5 - $lo5)
-    $lf = 0.8 - 0.2 * $y; $hf = 0.35 + 0.2 * $y
+    $lf = 0.8 - 0.2 * $y; $hf = 0.4 + 0.2 * $y
     if ($frac -le $lf -or $frac -ge $hf) { $fails += "frac($frac) not in ($lf,$hf)" }
 
     return @{ passed = ($fails.Count -eq 0); fails = $fails }

@@ -508,12 +508,13 @@ async def runtime_filter_stats(request: Request):
         discovery_events = await _fetch_all(
             repo,
             """
-            SELECT context_json FROM system_events
+            SELECT id, context_json FROM system_events
             WHERE category = 'DISCOVERY' AND message = 'Discovery run complete'
             ORDER BY created_at DESC LIMIT 10
             """,
         )
         trench_history: List[Dict[str, Any]] = []
+        discovery_event_ids: List[int] = []
         for ev in reversed(discovery_events):
             try:
                 ctx = json.loads(ev.get("context_json", "{}"))
@@ -523,16 +524,21 @@ async def runtime_filter_stats(request: Request):
                 "count": ctx.get("count", 0),
                 "passed": ctx.get("tracked_initial_passed", 0),
             })
+            discovery_event_ids.append(int(ev["id"]))
 
-        # 淘汰统计：取最近 risk_filter + price_filter 未通过的记录
-        fail_rows_raw = await _fetch_all(
-            repo,
-            """
-            SELECT pass_fail_detail_json FROM token_strategy_matches
-            WHERE stage IN ('risk_filter', 'price_filter') AND passed = 0
-            ORDER BY created_at DESC LIMIT 1000
-            """,
-        )
+        # 淘汰统计：仅统计近10次 discovery run 中风险/价格面未通过的记录
+        fail_rows_raw: List[Dict[str, Any]] = []
+        if discovery_event_ids:
+            placeholders = ",".join(["?"] * len(discovery_event_ids))
+            fail_rows_raw = await _fetch_all(
+                repo,
+                f"""
+                SELECT pass_fail_detail_json FROM token_strategy_matches
+                WHERE stage IN ('risk_filter', 'price_filter') AND passed = 0
+                  AND discovery_event_id IN ({placeholders})
+                """,
+                tuple(discovery_event_ids),
+            )
         fail_counts: Dict[str, int] = {}
         for row in fail_rows_raw:
             try:
@@ -739,15 +745,30 @@ async def export_logs(request: Request):
             LIMIT 500
             """,
         )
-        strategies = await repo.list_strategy_groups(include_disabled=True) if hasattr(repo, "list_strategy_groups") else []
+        all_strategies = await repo.list_strategy_groups(include_disabled=True) if hasattr(repo, "list_strategy_groups") else []
+        enabled_strategies = [s for s in all_strategies if int(s.get("enabled", 1))]
         summary = await _positions_summary(repo)
+        session_started = (await _runtime_settings(repo)).get("session_started_at")
+
+        # per-strategy screening stats (current session only)
+        screening_summary = await _screening_summary(repo, enabled_strategies, since=session_started)
+
+        # raw sample: one risk-passed-price-failed pool per enabled strategy
+        raw_samples = await _raw_samples(repo, enabled_strategies)
+
         payload = {
             "export_type": "runtime_error_logs",
             "exported_at": utc_now_iso(),
-            "session_started_at": (await _runtime_settings(repo)).get("session_started_at"),
+            "session_started_at": session_started,
             "errors_deduped": errors,
             "positions_summary": summary,
-            "strategy_groups": strategies,
+            "strategy_groups": all_strategies,
+            "screening_summary": screening_summary,
+            "gmgn_raw_samples_by_strategy": raw_samples,
+            "notes": [
+                "screening_summary: per-strategy risk_filter & price_filter pass/fail counts scoped to current session (since session_started_at).",
+                "gmgn_raw_samples_by_strategy: one pool per strategy that passed risk_filter but did not pass price_filter (most recent).",
+            ],
         }
         out = LOG_EXPORT_DIR / f"runtime_error_logs_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
         text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
@@ -793,24 +814,26 @@ def _strategy_label(sg: Dict[str, Any]) -> str:
     return f"{sg.get('name') or '策略'}#{sg.get('id')}({acct})"
 
 
-async def _screening_summary(repo: Repositories, strategies: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def _screening_summary(repo: Repositories, strategies: List[Dict[str, Any]], since: Optional[str] = None) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if not await _table_exists(repo, "token_strategy_matches"):
         return out
+    time_clause = "AND created_at >= ?" if since else ""
     for sg in strategies:
         sid = int(sg.get("id"))
+        params: tuple = (sid,) if not since else (sid, since)
         rows = await _fetch_all(
             repo,
-            """
+            f"""
             SELECT stage,
                    COUNT(*) AS screened,
                    SUM(CASE WHEN passed = 1 THEN 1 ELSE 0 END) AS passed,
                    SUM(CASE WHEN passed = 0 THEN 1 ELSE 0 END) AS failed
             FROM token_strategy_matches
-            WHERE strategy_id = ?
+            WHERE strategy_id = ? {time_clause}
             GROUP BY stage
             """,
-            (sid,),
+            params,
         )
         by_stage = {r["stage"]: r for r in rows}
         risk = by_stage.get("risk_filter", {})
