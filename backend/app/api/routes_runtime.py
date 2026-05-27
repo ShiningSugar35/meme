@@ -306,8 +306,6 @@ async def _set_runtime_mode(request: Request, repo: Repositories, user_mode: str
         live_entries_enabled = False
         request.app.state.pause_new_entries = True
     else:
-        if worker_mgr is not None:
-            await worker_mgr.start_all()
         workers_enabled = True
         live_entries_enabled = user_mode == "FORMAL_SIM_LIVE" and bool(readiness["ok"])
         request.app.state.pause_new_entries = False
@@ -315,6 +313,9 @@ async def _set_runtime_mode(request: Request, repo: Repositories, user_mode: str
     await repo.set_runtime_setting("user_mode", user_mode, updated_by="api")
     await repo.set_runtime_setting("workers_enabled", "true" if workers_enabled else "false", updated_by="api")
     await repo.set_runtime_setting("live_entries_enabled", "true" if live_entries_enabled else "false", updated_by="api")
+
+    if user_mode != "IDLE" and worker_mgr is not None:
+        await worker_mgr.start_all()
     await repo.append_system_event(
         "INFO",
         "RUNTIME",

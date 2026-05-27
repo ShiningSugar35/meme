@@ -134,7 +134,7 @@ class Settings(BaseSettings):
     GMGN_DISCOVERY_MODE: str = Field("two_group")
     GMGN_DISCOVERY_GROUP_DELAY_SECONDS: float = Field(2.0)
     GMGN_MIN_CREATED_SECONDS: int = Field(1800)
-    GMGN_MAX_CREATED_SECONDS: int = Field(14400)
+    GMGN_MAX_CREATED_SECONDS: int = Field(2100)
     GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
 
     def get_discovery_primary_slot(self) -> int:

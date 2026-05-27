@@ -32,7 +32,7 @@ SNAPSHOT_COLUMNS = [
 ]
 
 MIN_CREATED = getattr(settings, 'GMGN_MIN_CREATED_SECONDS', 1800) or 1800
-MAX_CREATED = getattr(settings, 'GMGN_MAX_CREATED_SECONDS', 14400) or 14400
+MAX_CREATED = getattr(settings, 'GMGN_MAX_CREATED_SECONDS', 2100) or 2100
 
 DISCOVERY_GROUPS = [
     {"group_name": "pump_fun", "platforms": ["Pump.fun"]},

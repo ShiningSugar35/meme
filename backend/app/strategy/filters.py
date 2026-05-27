@@ -1,7 +1,7 @@
 """Risk + price filter rules for GMGN trench candidates.
 
 Risk screen — minimum liquidity depends on x:
-    min_liquidity_usd = 40000 - 100000 * x
+    min_liquidity_usd = 6500 - 5000 * x
 
 Price screen — y-scaling swap/price rules and smart degen check.
 """
@@ -311,7 +311,7 @@ def _evaluate_core_risk_rules(
     else:
         typ = _norm_str(_first_present(snapshot, ["type", "trench_type", "category"]))
 
-    min_liquidity_usd = 40000 - 100000 * x
+    min_liquidity_usd = 6500 - 5000 * x
     liquidity = _check_float(
         details, snapshot, "min_liquidity_usd",
         ["liquidity_usd", "liquidity", "pool_liquidity_usd"],
