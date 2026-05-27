@@ -200,73 +200,74 @@ export default function Portfolio() {
         {dsh && (
           <div className="card">
             <h2>数据源健康诊断</h2>
+            {/* Summary */}
             {dsh.summary && Object.keys(dsh.summary).length > 0 && (
               <>
+                <div className="metric-row"><span>模式</span><strong>{String(dsh.summary.discovery_mode || 'two_group_discovery')}</strong></div>
                 <div className="metric-row"><span>窗口轮次</span><strong>{String(dsh.summary.window_run_count || 0)}</strong></div>
-                <div className="metric-row"><span>危险筛选数</span><strong>{String(dsh.summary.risk_match_count ?? '-')}</strong></div>
-                <div className="metric-row"><span>危险通过</span><strong>{String(dsh.summary.risk_pass_count ?? '-')}</strong></div>
-                <div className="metric-row"><span>价格筛选数</span><strong>{String(dsh.summary.price_match_count ?? '-')}</strong></div>
-                <div className="metric-row"><span>价格通过</span><strong>{String(dsh.summary.price_pass_count ?? '-')}</strong></div>
-                {(dsh.summary.primary_failed_count as number) > 0 && (
-                  <div className="metric-row"><span>Primary API 失败数</span><strong style={{color:'#f85149'}}>{String(dsh.summary.primary_failed_count)}</strong></div>
-                )}
-                {Array.isArray(dsh.summary.failed_slots) && (dsh.summary.failed_slots as string[]).length > 0 && (
-                  <div className="metric-row"><span>失败 slots</span><strong style={{color:'#f85149'}}>{(dsh.summary.failed_slots as string[]).join(', ')}</strong></div>
+                <div className="metric-row"><span>风险筛选</span><strong>{String(dsh.summary.risk_filter_count ?? '-')} / 通过 {String(dsh.summary.risk_filter_pass_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>价格筛选</span><strong>{String(dsh.summary.price_filter_count ?? '-')} / 通过 {String(dsh.summary.price_filter_pass_count ?? '-')}</strong></div>
+                {dsh.summary.total_429_count as number > 0 && (
+                  <div className="metric-row"><span>429 总次数</span><strong style={{color:'#f85149'}}>{String(dsh.summary.total_429_count)}</strong></div>
                 )}
               </>)}
-            {dsh.endpoint_health && dsh.endpoint_health.length > 0 && (
+
+            {/* Discovery fetch */}
+            {dsh.discovery_fetch_health && dsh.discovery_fetch_health.length > 0 && (
               <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>API 端点（按 slot）</h3>
-                {dsh.endpoint_health.slice(0, 8).map((ep) => (
-                  <div className="metric-row" key={ep.endpoint + (ep.credential_slot || '')}>
-                    <span>{severityDot(ep.severity)} {ep.endpoint}
-                      {ep.credential_slot && <span style={{fontSize:11,color:'#58a6ff'}}> [slot {ep.credential_slot}]</span>}
-                      <br/><small className="hint">{ep.method} · {ep.calls}次 · {rateFmt(ep.ok_rate)} · {ep.avg_latency_ms}ms</small>
-                    </span>
-                    <strong>{rateFmt(ep.ok_rate)}</strong>
-                  </div>
-                ))}</>)}
-            {dsh.credential_summary && dsh.credential_summary.length > 0 && (
-              <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>Credential 统计</h3>
-                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>Slot</th><th>总次数</th><th>失败</th><th>成功率</th></tr></thead><tbody>
-                {dsh.credential_summary.map((cs, i) => (
-                  <tr key={i}><td>{cs.slot}</td><td>{cs.total_calls}</td><td style={{color: cs.failed_calls > 0 ? '#f85149' : '#8892ae'}}>{cs.failed_calls}</td><td>{rateFmt(cs.ok_rate)}</td></tr>
-                ))}</tbody></table></>)}
-            {dsh.platform_health && dsh.platform_health.length > 0 && (
-              <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>Platform 分片（最新轮）</h3>
-                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>Platform</th><th>状态</th><th>原始</th><th>备注</th></tr></thead><tbody>
-                {dsh.platform_health.map((ph, idx) => (
-                  <tr key={idx}><td>{ph.platform}</td>
-                    <td>{severityDot(ph.severity)} {ph.ok ? (ph.fallback_used ? '备用接管' : 'OK') : 'FAIL'}</td>
-                    <td>{ph.raw_count >= 0 ? ph.raw_count : '-'}</td>
-                    <td style={{fontSize:11,color:'#8892ae'}}>{ph.error ? String(ph.error).substring(0,50) : (ph.raw_count===0&&ph.ok ? '返回0条' : '')}</td>
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>Discovery 拉取（最新轮）</h3>
+                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>分组</th><th>状态</th><th>原始</th><th>去重</th><th>备注</th></tr></thead><tbody>
+                {dsh.discovery_fetch_health.map((dh, idx) => (
+                  <tr key={idx}><td>{dh.group_name}{dh.slot != null ? ` [slot ${dh.slot}]` : ''}</td>
+                    <td>{severityDot(dh.severity)} {dh.ok ? 'OK' : 'FAIL'}</td>
+                    <td>{dh.raw_count}</td><td>{dh.unique_count ?? '-'}</td>
+                    <td style={{fontSize:11,color:'#8892ae'}}>{dh.error ? String(dh.error).substring(0,50) : ''}{dh.raw_count===0&&dh.ok?'返回0条':''}</td>
                   </tr>))}</tbody></table></>)}
+
+            {/* Credential health */}
+            {dsh.credential_health && dsh.credential_health.length > 0 && (
+              <>
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>API Slot 状态</h3>
+                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>S</th><th>角色</th><th>调用</th><th>成功</th><th>429</th><th>冷却</th></tr></thead><tbody>
+                {dsh.credential_health.map((ch) => (
+                  <tr key={ch.slot}>
+                    <td>{severityDot(ch.severity)} {ch.slot}</td>
+                    <td style={{fontSize:11}}>{ch.role}</td>
+                    <td>{ch.total_calls}</td>
+                    <td>{rateFmt(ch.ok_rate)}</td>
+                    <td style={{color: ch.rate_limited_count>0?'#f85149':''}}>{ch.rate_limited_count}</td>
+                    <td style={{color: ch.cooldown_until?'#f85149':'#8892ae',fontSize:11}}>{ch.cooldown_until ? `${ch.cooldown_remaining_s ?? 0}s` : '-'}</td>
+                  </tr>))}</tbody></table></>)}
+
+            {/* Feature stage health */}
+            {dsh.feature_stage_health && dsh.feature_stage_health.length > 0 && (
+              <>
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>特征阶段流水线</h3>
+                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>阶段</th><th>候选</th><th>通过</th><th>失败</th><th>API次数</th><th>429</th></tr></thead><tbody>
+                {dsh.feature_stage_health.map((fs) => (
+                  <tr key={fs.stage}><td>{severityDot(fs.severity)} {fs.label}{fs.weight ? ` (w${fs.weight})` : ''}</td>
+                    <td>{fs.candidates_in}</td><td>{fs.passed_count}</td><td>{fs.failed_count}</td>
+                    <td>{fs.api_calls}</td>
+                    <td style={{color:fs.rate_limited_count>0?'#f85149':''}}>{fs.rate_limited_count}</td>
+                  </tr>))}</tbody></table></>)}
+
+            {/* Field health */}
             {dsh.field_health && dsh.field_health.length > 0 && (
               <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>字段异常（critical + warn）</h3>
-                {dsh.field_health.filter((fh) => fh.severity !== 'ok').map((fh, idx) => (
-                  <div className="metric-row" key={idx}><span>{severityDot(fh.severity)} {fh.label} ({fh.field})
-                    <br/><small className="hint">缺失 {rateFmt(fh.missing_rate)}{fh.note ? ` · ${fh.note.substring(0,50)}` : ''}</small>
-                  </span><strong>{rateFmt(fh.missing_rate)}</strong></div>))} </>)}
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>字段异常</h3>
+                {dsh.field_health.filter(fh => fh.severity !== 'ok').slice(0, 6).map((fh, idx) => (
+                  <div className="metric-row" key={idx}><span>{severityDot(fh.severity)} {fh.label}<br/><small className="hint">缺失{rateFmt(fh.missing_rate)}</small></span><strong>{rateFmt(fh.missing_rate)}</strong></div>))}</>)}
+
+            {/* Price age */}
             {dsh.price_age_health && (
               <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>价格年龄诊断</h3>
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>价格年龄</h3>
                 {dsh.price_age_health.price_screen_not_reached_reason && <p className="message" style={{fontSize:12}}>{dsh.price_age_health.price_screen_not_reached_reason}</p>}
                 <div className="metric-row"><span>到达价格面</span><strong>{dsh.price_age_health.price_screen_reached_count ?? 0}</strong></div>
-                <div className="metric-row"><span>风险失败未进</span><strong>{dsh.price_age_health.risk_only_failed_count ?? 0}</strong></div>
                 <div className="metric-row"><span>未满60分钟</span><strong>{dsh.price_age_health.under_60m_count ?? 0}</strong></div>
-                {dsh.price_age_health.warnings?.map((w, idx) => <p className="message" key={idx} style={{fontSize:12}}>{w}</p>)}</>)}
-            {dsh.price_face_health && (
-              <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>价格面API诊断</h3>
-                <div className="metric-row"><span>latest_price token/info ok</span><strong>{dsh.price_face_health.latest_price_ok_rate != null ? rateFmt(dsh.price_face_health.latest_price_ok_rate) : '-'}</strong></div>
-                <div className="metric-row"><span>holder endpoint ok</span><strong>{dsh.price_face_health.holder_endpoint_ok_rate != null ? rateFmt(dsh.price_face_health.holder_endpoint_ok_rate) : '-'}</strong></div>
-                {Object.entries(dsh.price_face_health.pass_fail_stats || {}).map(([rule, stats]) => (
-                  <div className="metric-row" key={rule}><span>{rule}<br/><small className="hint">{stats.total}条 · 失败{stats.failed} · 缺失{stats.missing}</small></span>
-                    <strong>{rateFmt(stats.fail_rate)}</strong></div>))}
-                {dsh.price_face_health.warnings?.map((w, idx) => <p className="message" key={idx} style={{fontSize:12}}>{w}</p>)}</>)}
+              </>)}
+
+            {/* System events */}
             {dsh.system_event_warnings && dsh.system_event_warnings.length > 0 && (
               <>
                 <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#f85149'}}>系统错误</h3>

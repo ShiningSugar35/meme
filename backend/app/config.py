@@ -127,6 +127,25 @@ class Settings(BaseSettings):
     GMGN_TOKEN_HOLDERS_PATH: str = Field("/v1/market/token_top_holders")
     GMGN_TIMEOUT_SECONDS: float = Field(8.0)
 
+    # Rate limiter / credential role configuration
+    GMGN_DISCOVERY_PRIMARY_SLOT: int = Field(0)
+    GMGN_DISCOVERY_RESERVE_SLOT: int = Field(1)
+    GMGN_FEATURE_SLOTS: str = Field("2,3,4,5,6,7,8,9,10,11")
+    GMGN_DISCOVERY_MODE: str = Field("two_group")
+    GMGN_DISCOVERY_GROUP_DELAY_SECONDS: float = Field(2.0)
+    GMGN_MIN_CREATED_SECONDS: int = Field(1800)
+    GMGN_MAX_CREATED_SECONDS: int = Field(14400)
+    GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
+
+    def get_discovery_primary_slot(self) -> int:
+        return self.GMGN_DISCOVERY_PRIMARY_SLOT
+
+    def get_discovery_reserve_slot(self) -> int:
+        return self.GMGN_DISCOVERY_RESERVE_SLOT
+
+    def get_feature_slots(self) -> List[int]:
+        return [int(x.strip()) for x in self.GMGN_FEATURE_SLOTS.split(",") if x.strip().isdigit()]
+
     # Jupiter API Configuration
     JUPITER_API_BASE_URL: Optional[str] = None
     JUPITER_API_KEY_1: Optional[SecretStr] = None

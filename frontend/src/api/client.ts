@@ -191,14 +191,65 @@ export interface CredentialSummaryItem {
   ok_rate: number;
 }
 
+export interface DiscoveryFetchHealthItem {
+  group_name: string;
+  platforms: string[];
+  slot?: number;
+  role?: string;
+  ok: boolean;
+  raw_count: number;
+  unique_count?: number;
+  duplicate_count?: number;
+  status_code?: number;
+  error?: string | null;
+  cooldown_until?: string | null;
+  latency_ms?: number;
+  severity: 'ok' | 'warn' | 'critical';
+}
+
+export interface CredentialHealthItem {
+  slot: number;
+  role: string;
+  total_calls: number;
+  total_weight: number;
+  ok_calls: number;
+  failed_calls: number;
+  rate_limited_count: number;
+  cooldown_until?: number | null;
+  cooldown_remaining_s?: number;
+  ok_rate: number;
+  endpoints: Record<string, number>;
+  severity: 'ok' | 'warn' | 'critical';
+}
+
+export interface FeatureStageHealthItem {
+  stage: string;
+  label: string;
+  endpoint: string;
+  weight: number;
+  candidates_in: number;
+  checked_count: number;
+  passed_count: number;
+  failed_count: number;
+  skipped_count: number;
+  api_calls: number;
+  ok_rate?: number | null;
+  rate_limited_count: number;
+  avg_latency_ms: number;
+  severity: 'ok' | 'warn' | 'critical';
+}
+
 export interface DataSourceHealth {
   summary: Record<string, unknown>;
   endpoint_health: EndpointHealthItem[];
   credential_summary?: CredentialSummaryItem[];
+  credential_health?: CredentialHealthItem[];
+  discovery_fetch_health?: DiscoveryFetchHealthItem[];
+  feature_stage_health?: FeatureStageHealthItem[];
   field_health: FieldHealthItem[];
   price_age_health: PriceAgeHealth;
   price_face_health?: PriceFaceHealth;
-  platform_health: PlatformHealthItem[];
+  platform_health?: PlatformHealthItem[];
   system_event_warnings?: Record<string, unknown>[];
 }
 

@@ -27,6 +27,7 @@ from ..db.repositories import Repositories
 from ..logging_config import logger
 from .base import MarketDataProvider
 from .mock_data import MockData
+from .rate_limiter import get_rate_limiter, _endpoint_weight
 
 
 class GMGNAPIError(Exception):
@@ -48,6 +49,7 @@ class GMGNProvider(MarketDataProvider):
         self.client_ids = [c.get("client_id", "") for c in self.credentials if c.get("client_id")]
         self._key_cursor = 0
         self.mock_data = MockData()
+        self.rate_limiter = get_rate_limiter(credential_count=max(len(self.credentials or []), 12))
 
         if self.mode in (ProviderMode.ONLINE_READONLY, ProviderMode.LIVE):
             if not HAS_HTTPX:
@@ -163,6 +165,17 @@ class GMGNProvider(MarketDataProvider):
             if not cred:
                 continue
             api_key = cred.get("api_key") or ""
+
+            # Rate limiter check
+            if slot < 999:
+                ok_to_proceed = await self.rate_limiter.acquire(slot, path)
+                if not ok_to_proceed:
+                    msg = f"slot {slot} in cooldown, skipping request to {path}"
+                    if credential_slot is not None:
+                        raise GMGNAPIError(msg, path=path, method=method, retryable=True, status_code=429)
+                    last_exc = GMGNAPIError(msg, path=path, method=method, retryable=True, status_code=429)
+                    continue
+
             started = time.perf_counter()
 
             auth_query = {"timestamp": str(int(time.time())), "client_id": str(uuid.uuid4())}
@@ -170,12 +183,12 @@ class GMGNProvider(MarketDataProvider):
             request_params = {**cleaned, **auth_query}
             logged_request = dict(request_params)
             logged_request["credential_slot"] = slot
+            cred_meta = self.rate_limiter.slots.get(slot)
+            logged_request["credential_role"] = cred_meta.role if cred_meta else "unknown"
             if credential_slot is not None:
-                logged_request["credential_role"] = "explicit"
-            else:
-                logged_request["credential_role"] = "round_robin"
-            if "api_key" in logged_request:
-                logged_request["api_key"] = "***"
+                logged_request["credential_role"] += " (explicit)"
+            logged_request["endpoint_weight"] = _endpoint_weight(path) if '_endpoint_weight' in dir() else 1
+            logged_request["api_key"] = "***"
 
             try:
                 timeout = float(getattr(settings, "GMGN_TIMEOUT_SECONDS", 8.0) or 8.0)
@@ -208,8 +221,13 @@ class GMGNProvider(MarketDataProvider):
 
                 last_status = resp.status_code
                 if resp.status_code >= 400:
+                    if resp.status_code == 429 and slot < 999:
+                        cooldown_s = await self.rate_limiter.report_429(slot, path, headers=dict(resp.headers), body=data if isinstance(data, dict) else None)
+                        logged_request["rate_limit_reset"] = True
+                        logged_request["cooldown_until"] = cooldown_s
                     retryable = self._retryable_status(resp.status_code)
                     await self._log_request(path, False, logged_request, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
+                    await self.rate_limiter.report_failure(slot)
                     err = GMGNAPIError(f"GMGN HTTP {resp.status_code}: {str(data)[:500]}", status_code=resp.status_code, path=path, method=method, retryable=retryable)
                     last_exc = err
                     if credential_slot is not None:
@@ -218,6 +236,7 @@ class GMGNProvider(MarketDataProvider):
                         continue
                     raise err
 
+                await self.rate_limiter.report_success(slot)
                 await self._log_request(path, True, logged_request, self._compact_response_summary(data), resp.status_code, latency, method=method)
                 return data if isinstance(data, dict) else {"data": data}
             except GMGNAPIError:
@@ -225,6 +244,8 @@ class GMGNProvider(MarketDataProvider):
             except Exception as exc:
                 latency = int((time.perf_counter() - started) * 1000)
                 last_exc = exc
+                if slot < 999:
+                    await self.rate_limiter.report_failure(slot)
                 await self._log_request(path, False, logged_request, {}, None, latency, "REQUEST_ERROR", str(exc) or repr(exc), method)
                 if credential_slot is not None:
                     raise GMGNAPIError(f"GMGN request failed (slot={credential_slot}): {exc}", path=path, method=method, retryable=True)

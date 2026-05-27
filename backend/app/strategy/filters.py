@@ -599,3 +599,183 @@ async def run_price_filter(
         "age_missing": age_missing,
     }
     return PriceFilterResult(passed, details, feature_vector)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 & 3: Price activity rules (swaps + price_change, no smart_degen)
+# ---------------------------------------------------------------------------
+
+async def evaluate_price_activity_rules(
+    token: Dict[str, Any],
+    strategy_group: Dict[str, Any],
+    latest_price: Dict[str, Any],
+    klines: Optional[List[Dict[str, Any]]] = None,
+) -> PriceFilterResult:
+    details: List[Dict[str, Any]] = []
+    x = float(strategy_group.get("x", 0.2))
+    y = float(strategy_group.get("y", 2.25))
+    divisor = 12.0
+
+    current_price = _current_price(latest_price, token)
+    if not latest_price:
+        current_price = _to_float(_first_present(token, ["price_usd", "price", "latest_price_usd"]))
+    if current_price is None or current_price <= 0:
+        details.append({"rule": "latest_price_present", "passed": False, "reason": "missing latest price",
+                        "source": "missing", "current_price": current_price})
+        return PriceFilterResult(False, details, {})
+
+    swaps_5m = _to_float(_first_present(latest_price, ["swaps_5m", "swaps5m"]))
+    swaps_1h = _to_float(_first_present(latest_price, ["swaps_1h", "swaps1h"]))
+    if swaps_5m is None or swaps_1h is None:
+        for nest_key in ("price", "pool"):
+            nested = latest_price.get(nest_key)
+            if isinstance(nested, dict):
+                if swaps_5m is None:
+                    swaps_5m = _to_float(_first_present(nested, ["swaps_5m", "swaps5m"]))
+                if swaps_1h is None:
+                    swaps_1h = _to_float(_first_present(nested, ["swaps_1h", "swaps1h"]))
+    swaps_source = "latest_price"
+    if swaps_5m is None or swaps_1h is None:
+        swaps_5m = swaps_5m or _to_float(_first_present(token, ["swaps_5m", "swaps5m"]))
+        swaps_1h = swaps_1h or _to_float(_first_present(token, ["swaps_1h", "swaps1h"]))
+        swaps_source = "token_snapshot"
+
+    creation_ts, creation_source, age_missing = _parse_creation_ts(token)
+    age_minutes = _compute_age_minutes(creation_ts)
+    if age_minutes is None and not age_missing:
+        age_missing = True
+
+    if swaps_1h and swaps_1h > 0:
+        if age_minutes is not None and age_minutes < 60:
+            divisor = min(12.0, max(1.0, age_minutes / 5.0))
+        else:
+            divisor = 12.0
+        swaps_threshold = max(0, (4.0 - y) * (swaps_1h / divisor))
+        cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
+    else:
+        swaps_threshold = None
+        cond_swaps = False
+    details.append({
+        "rule": "swaps_5m_scaled", "passed": cond_swaps,
+        "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
+        "threshold": swaps_threshold, "y": y, "age_minutes": age_minutes,
+        "divisor": divisor, "source": swaps_source, "age_missing": age_missing,
+    })
+
+    pct_threshold = (0.7 - 0.2 * y) * 100.0
+    pct_change_1h: Optional[float] = None
+    price_change_source: str = "missing"
+    price_change_age_mode: str = "unknown"
+    cond_pct: bool = False
+
+    if age_minutes is not None and age_minutes < 60 and klines:
+        sorted_klines = sort_klines(klines)
+        if sorted_klines:
+            open_price = _kline_open(sorted_klines[0])
+            if open_price is not None and open_price > 0:
+                pct_change_1h = ((current_price - open_price) / open_price) * 100.0
+                price_change_source = "kline_since_open"
+                price_change_age_mode = "young_kline_priority"
+                cond_pct = pct_change_1h > pct_threshold
+        if pct_change_1h is None:
+            price_change_age_mode = "young_no_kline_fallback"
+    else:
+        price_change_age_mode = "mature_computed"
+
+    if pct_change_1h is None:
+        price_1h = _to_float(_first_present(latest_price, ["price_1h", "price1h"]))
+        if price_1h is None:
+            for nest_key in ("price", "pool"):
+                nested = latest_price.get(nest_key)
+                if isinstance(nested, dict):
+                    price_1h = _to_float(_first_present(nested, ["price_1h", "price1h"]))
+                    if price_1h is not None:
+                        break
+        if price_1h and price_1h > 0:
+            pct_change_1h = ((current_price - price_1h) / price_1h) * 100.0
+            price_change_source = "computed_from_price_1h"
+            cond_pct = pct_change_1h > pct_threshold
+
+    details.append({
+        "rule": "price_change_1h", "passed": cond_pct,
+        "current": current_price, "pct_change": pct_change_1h,
+        "threshold": pct_threshold, "y": y, "source": price_change_source,
+        "age_mode": price_change_age_mode, "age_minutes": age_minutes,
+        "age_missing": age_missing, "price_change_unit": "percent_points",
+        "creation_ts": creation_ts if creation_ts is not None else None,
+    })
+
+    passed = all(d.get("passed") for d in details)
+    feature_vector = {
+        "x": x, "y": y, "current_price": current_price,
+        "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
+        "price_change_1h_pct": pct_change_1h, "price_change_source": price_change_source,
+        "price_change_age_mode": price_change_age_mode, "price_change_unit": "percent_points",
+        "age_minutes": age_minutes, "creation_ts": creation_ts,
+        "swaps_divisor": divisor, "swaps_source": swaps_source, "age_missing": age_missing,
+    }
+    return PriceFilterResult(passed, details, feature_vector)
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: Smart degen holders evaluation
+# ---------------------------------------------------------------------------
+
+async def evaluate_smart_degen(
+    strategy_group: Dict[str, Any],
+    smart_degen_holders: List[Dict[str, Any]],
+) -> PriceFilterResult:
+    details: List[Dict[str, Any]] = []
+    x = float(strategy_group.get("x", 0.2))
+
+    required_count = max(1, math.ceil(4.0 - 10.0 * x))
+    degen_count = len(smart_degen_holders)
+    cond_degen = degen_count >= required_count
+
+    degen_hold_ok = False
+    degen_hold_detail: Dict[str, Any] = {}
+    if smart_degen_holders and cond_degen:
+        holders_sorted = sorted(smart_degen_holders, key=lambda h: _to_float(h.get("amount_percentage")) or 0.0, reverse=True)
+        top_n = holders_sorted[:required_count]
+        max_holder = top_n[0]
+        max_pct = _to_float(max_holder.get("amount_percentage"))
+        max_usd = _to_float(max_holder.get("usd_value"))
+        if max_pct is not None:
+            max_pct_normalized = max_pct / 100.0 if max_pct > 1.0 else max_pct
+        else:
+            max_pct_normalized = None
+        max_ok = (max_pct_normalized is not None and max_pct_normalized > 0.015) or (max_usd is not None and max_usd > 200)
+
+        min_holder = top_n[-1] if len(top_n) > 1 else top_n[0]
+        min_pct = _to_float(min_holder.get("amount_percentage"))
+        if min_pct is not None:
+            min_pct_normalized = min_pct / 100.0 if min_pct > 1.0 else min_pct
+        else:
+            min_pct_normalized = None
+        min_ok = (min_pct_normalized is not None and min_pct_normalized > 0.010) or (min_usd is not None and min_usd > 100)
+        min_usd = _to_float(min_holder.get("usd_value"))
+
+        degen_hold_ok = max_ok and min_ok
+        degen_hold_detail = {
+            "required_count": required_count, "actual_count": len(top_n),
+            "max_holder_pct": max_pct, "max_holder_pct_normalized": max_pct_normalized,
+            "max_holder_usd": max_usd, "max_ok": max_ok,
+            "min_holder_pct": min_pct, "min_holder_pct_normalized": min_pct_normalized,
+            "min_holder_usd": min_usd, "min_ok": min_ok,
+            "threshold_max_pct": 0.015, "threshold_min_pct": 0.010,
+            "normalization_note": "values > 1.0 treated as percentage and divided by 100",
+        }
+
+    cond_degen_full = cond_degen and degen_hold_ok
+    details.append({
+        "rule": "smart_degen", "passed": cond_degen_full,
+        "degen_count": degen_count, "required_count": required_count,
+        "holdings": degen_hold_detail, "x": x,
+    })
+
+    passed = all(d.get("passed") for d in details)
+    feature_vector = {
+        "x": x, "degen_count": degen_count, "required_count": required_count,
+        "degen_hold_ok": degen_hold_ok,
+    }
+    return PriceFilterResult(passed, details, feature_vector)

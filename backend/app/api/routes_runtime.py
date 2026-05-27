@@ -571,9 +571,25 @@ async def runtime_filter_stats(request: Request):
 
         recent_10 = list(reversed(discovery_events[:10]))
         if len(discovery_events) >= 11:
-            lower_bound = str(discovery_events[10].get("created_at") or "")
+            ctx11 = json.loads(str(discovery_events[10].get("context_json") or "{}")) if isinstance(discovery_events[10].get("context_json"), str) else (discovery_events[10].get("context_json") or {})
+            if not isinstance(ctx11, dict):
+                ctx11 = {}
+            lower_bound = str(ctx11.get("run_started_at") or discovery_events[10].get("created_at") or "")
         elif recent_10:
-            lower_bound = str(recent_10[0].get("created_at") or "")
+            ctx0 = json.loads(str(recent_10[0].get("context_json") or "{}")) if isinstance(recent_10[0].get("context_json"), str) else (recent_10[0].get("context_json") or {})
+            if not isinstance(ctx0, dict):
+                ctx0 = {}
+            fb = ctx0.get("run_started_at") or recent_10[0].get("created_at") or ""
+            if fb:
+                from datetime import timedelta
+                try:
+                    dt = datetime.fromisoformat(str(fb).replace("Z", "+00:00"))
+                    dt = dt - timedelta(seconds=max(getattr(settings, 'POLL_INTERVAL_SECONDS', 60), 120))
+                    lower_bound = dt.isoformat()
+                except Exception:
+                    lower_bound = fb
+            else:
+                lower_bound = ""
         else:
             lower_bound = ""
         upper_bound = utc_now_iso()
@@ -595,15 +611,16 @@ async def runtime_filter_stats(request: Request):
             })
 
         has_window = bool(lower_bound)
+        ALL_STAGES = ['risk_filter', 'top_holder_filter', 'price_filter', 'kline_fallback', 'smart_degen_filter']
         if has_window:
             match_rows = await _fetch_all(
                 repo,
-                """
+                f"""
                 SELECT pass_fail_detail_json, stage FROM token_strategy_matches
                 WHERE created_at >= ? AND created_at <= ?
-                  AND stage IN ('risk_filter', 'price_filter')
+                  AND stage IN ({','.join(['?']*len(ALL_STAGES))})
                 """,
-                (lower_bound, upper_bound),
+                (lower_bound, upper_bound, *ALL_STAGES),
             )
         else:
             match_rows = await _fetch_all(
@@ -682,7 +699,7 @@ async def runtime_filter_stats(request: Request):
 
 
 async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, trench_history: List[Dict[str, Any]]) -> Dict[str, Any]:
-    summary: Dict[str, Any] = {"window_run_count": len(trench_history)}
+    summary: Dict[str, Any] = {"window_run_count": len(trench_history), "discovery_mode": "two_group_discovery"}
 
     raw_fetched_total = 0
     unique_fetched_total = 0
@@ -700,51 +717,157 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
     })
 
     if has_window:
-        risk_match_count_row = await _fetch_one(repo,
-            "SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage='risk_filter' AND created_at>=? AND created_at<=?",
+        for stage in ['risk_filter', 'top_holder_filter', 'price_filter', 'kline_fallback', 'smart_degen_filter']:
+            match_row = await _fetch_one(repo,
+                f"SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage=? AND created_at>=? AND created_at<=?",
+                (stage, lower_bound, upper_bound))
+            pass_row = await _fetch_one(repo,
+                f"SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage=? AND passed=1 AND created_at>=? AND created_at<=?",
+                (stage, lower_bound, upper_bound))
+            summary[f"{stage}_count"] = int((match_row or {}).get("c", 0))
+            summary[f"{stage}_pass_count"] = int((pass_row or {}).get("c", 0))
+
+        rl_429 = await _fetch_one(repo,
+            "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND status_code=429 AND created_at>=? AND created_at<=?",
             (lower_bound, upper_bound))
-        risk_pass_count_row = await _fetch_one(repo,
-            "SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage='risk_filter' AND passed=1 AND created_at>=? AND created_at<=?",
-            (lower_bound, upper_bound))
-        price_match_count_row = await _fetch_one(repo,
-            "SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage='price_filter' AND created_at>=? AND created_at<=?",
-            (lower_bound, upper_bound))
-        price_pass_count_row = await _fetch_one(repo,
-            "SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage='price_filter' AND passed=1 AND created_at>=? AND created_at<=?",
-            (lower_bound, upper_bound))
-        summary["risk_match_count"] = int((risk_match_count_row or {}).get("c", 0))
-        summary["risk_pass_count"] = int((risk_pass_count_row or {}).get("c", 0))
-        summary["price_match_count"] = int((price_match_count_row or {}).get("c", 0))
-        summary["price_pass_count"] = int((price_pass_count_row or {}).get("c", 0))
+        summary["total_429_count"] = int((rl_429 or {}).get("c", 0))
 
     endpoint_health, credential_summary = await _build_endpoint_health(repo, lower_bound, upper_bound, has_window)
     field_health = await _build_field_health(repo, lower_bound, upper_bound, has_window)
     price_age_health = await _build_price_age_health(repo, lower_bound, upper_bound, has_window)
     price_face_health = await _build_price_face_health(repo, lower_bound, upper_bound, has_window)
-    platform_health = await _build_platform_health(repo, lower_bound, upper_bound, has_window, trench_history)
+
+    discovery_fetch_health = await _build_discovery_fetch_health(trench_history)
+    credential_health = await _build_credential_health()
+    feature_stage_health = await _build_feature_stage_health(repo, lower_bound, upper_bound, has_window, summary)
 
     system_event_warnings = await _build_system_event_warnings(repo, lower_bound, upper_bound, has_window)
 
-    primary_failed = sum(1 for p in platform_health if not p.get("ok") and p.get("used_role") == "primary")
-    reserve_used = sum(1 for p in platform_health if p.get("fallback_used"))
-    failed_slots = sorted(set(str(p.get("primary_slot", "")) for p in platform_health if not p.get("ok")))
-    reserve_slots = sorted(set(str(p.get("used_slot", "")) for p in platform_health if p.get("fallback_used")))
-
-    summary["primary_failed_count"] = primary_failed
-    summary["reserve_used_count"] = reserve_used
-    summary["failed_slots"] = failed_slots
-    summary["reserve_slots_used"] = reserve_slots
+    ok_groups = [g for g in discovery_fetch_health if g.get("ok")]
+    summary["discovery_groups_ok"] = len(ok_groups)
+    summary["discovery_groups_total"] = len(discovery_fetch_health)
 
     return {
         "summary": summary,
         "endpoint_health": endpoint_health,
         "credential_summary": credential_summary,
+        "credential_health": credential_health,
+        "discovery_fetch_health": discovery_fetch_health,
+        "feature_stage_health": feature_stage_health,
         "field_health": field_health,
         "price_age_health": price_age_health,
         "price_face_health": price_face_health,
-        "platform_health": platform_health,
         "system_event_warnings": system_event_warnings,
     }
+
+
+async def _build_discovery_fetch_health(trench_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for th in reversed(trench_history):
+        groups = th.get("trench_groups")
+        if isinstance(groups, list) and groups:
+            for g in groups:
+                if isinstance(g, dict):
+                    ok = bool(g.get("ok", False))
+                    raw_count = g.get("raw_count", 0)
+                    items.append({
+                        "group_name": g.get("group_name", ""),
+                        "platforms": g.get("platforms", []),
+                        "slot": g.get("slot"),
+                        "role": g.get("role"),
+                        "ok": ok,
+                        "raw_count": raw_count,
+                        "unique_count": g.get("unique_count", 0),
+                        "duplicate_count": g.get("duplicate_count", 0),
+                        "status_code": g.get("status_code"),
+                        "error": g.get("error"),
+                        "cooldown_until": g.get("cooldown_until"),
+                        "latency_ms": g.get("latency_ms"),
+                        "severity": "critical" if not ok else ("warn" if raw_count == 0 else "ok"),
+                    })
+            break
+    return items
+
+
+async def _build_credential_health() -> List[Dict[str, Any]]:
+    try:
+        from ..providers.rate_limiter import get_rate_limiter
+        rl = get_rate_limiter()
+        result = []
+        for slot, cred in rl.slots.items():
+            calls = max(cred.total_calls, 1)
+            ok_rate = cred.ok_calls / calls
+            if ok_rate < 0.5:
+                severity = "critical"
+            elif ok_rate < 0.9 or cred.is_cooldown():
+                severity = "warn"
+            else:
+                severity = "ok"
+            result.append({
+                "slot": slot,
+                "role": cred.role,
+                "total_calls": cred.total_calls,
+                "total_weight": cred.total_weight,
+                "ok_calls": cred.ok_calls,
+                "failed_calls": cred.failed_calls,
+                "rate_limited_count": cred.rate_limited_count,
+                "cooldown_until": cred.cooldown_until if cred.is_cooldown() else None,
+                "cooldown_remaining_s": round(cred.cooldown_remaining(), 1),
+                "ok_rate": round(ok_rate, 3),
+                "endpoints": dict(cred.endpoints),
+                "severity": severity,
+            })
+        return sorted(result, key=lambda x: x["slot"])
+    except Exception:
+        return []
+
+
+async def _build_feature_stage_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from ..providers.rate_limiter import _endpoint_weight
+    stages = [
+        {"stage": "risk_filter", "label": "Trenches本地风控(Stage 0)", "endpoint": "/v1/trenches", "weight": _endpoint_weight("/v1/trenches")},
+        {"stage": "top_holder_filter", "label": "Top1 Holder(Stage 1)", "endpoint": "/v1/market/token_top_holders", "weight": _endpoint_weight("/v1/market/token_top_holders")},
+        {"stage": "price_filter", "label": "Token Info价格面(Stage 2)", "endpoint": "/v1/token/info", "weight": _endpoint_weight("/v1/token/info")},
+        {"stage": "kline_fallback", "label": "Kline回退(Stage 3)", "endpoint": "/v1/market/token_kline", "weight": _endpoint_weight("/v1/market/token_kline")},
+        {"stage": "smart_degen_filter", "label": "Smart Degen(Stage 4)", "endpoint": "/v1/market/token_top_holders", "weight": _endpoint_weight("/v1/market/token_top_holders")},
+    ]
+    result: List[Dict[str, Any]] = []
+    for s in stages:
+        stage = s["stage"]
+        total = summary.get(f"{stage}_count", 0)
+        passed = summary.get(f"{stage}_pass_count", 0)
+        failed = total - passed
+        api_calls = 0
+        ok_rate_val = None
+        rate_limited = 0
+        if has_window:
+            api_row = await _fetch_one(repo,
+                "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND created_at>=? AND created_at<=?",
+                (f"%{stage.replace('_filter','')}%", lower_bound, upper_bound))
+            api_calls = int((api_row or {}).get("c", 0))
+            if api_calls > 0:
+                ok_row = await _fetch_one(repo,
+                    "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND ok=1 AND created_at>=? AND created_at<=?",
+                    (f"%{stage.replace('_filter','')}%", lower_bound, upper_bound))
+                ok_rate_val = round(int((ok_row or {}).get("c", 0)) / max(api_calls, 1), 3)
+            rl_row = await _fetch_one(repo,
+                "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND status_code=429 AND created_at>=? AND created_at<=?",
+                (f"%{stage.replace('_filter','')}%", lower_bound, upper_bound))
+            rate_limited = int((rl_row or {}).get("c", 0))
+        if total > 0 and failed == total:
+            severity = "critical"
+        elif rate_limited > 0 or (ok_rate_val is not None and ok_rate_val < 0.9):
+            severity = "warn"
+        else:
+            severity = "ok"
+        result.append({
+            "stage": stage, "label": s["label"], "endpoint": s["endpoint"], "weight": s["weight"],
+            "candidates_in": total, "checked_count": total, "passed_count": passed,
+            "failed_count": failed, "skipped_count": 0,
+            "api_calls": api_calls, "ok_rate": ok_rate_val, "rate_limited_count": rate_limited,
+            "avg_latency_ms": 0, "severity": severity,
+        })
+    return result
 
 
 async def _build_endpoint_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:

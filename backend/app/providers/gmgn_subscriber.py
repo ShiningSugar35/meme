@@ -72,5 +72,5 @@ def create_gmgn_subscriber() -> GMGNSubscriberBase:
     if mode == ProviderMode.MOCK:
         return GMGNMockSubscriber()
     else:
-        logger.warning("GMGN WebSocket subscription not yet implemented, using mock subscriber")
+        logger.info("GMGN WebSocket subscriber is not used by current REST discovery/filter pipeline; using mock subscriber placeholder.")
         return GMGNMockSubscriber()

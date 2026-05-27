@@ -9,8 +9,12 @@ from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
 from ..providers.base import MarketDataProvider, SwapProvider, ExecutionProvider, RpcProvider
+from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
-from ..strategy.filters import run_risk_filter, run_price_filter, sort_klines
+from ..strategy.filters import (
+    run_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
+    _parse_creation_ts, _compute_age_minutes, sort_klines,
+)
 from ..trading.executor import TradingPipeline
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
@@ -26,6 +30,21 @@ SNAPSHOT_COLUMNS = [
     'dev_team_hold_rate', 'dev_token_burn_ratio', 'sniper_count', 'burn_status',
     'source_mode',
 ]
+
+MIN_CREATED = getattr(settings, 'GMGN_MIN_CREATED_SECONDS', 1800) or 1800
+MAX_CREATED = getattr(settings, 'GMGN_MAX_CREATED_SECONDS', 14400) or 14400
+
+DISCOVERY_GROUPS = [
+    {"group_name": "pump_fun", "platforms": ["Pump.fun"]},
+    {"group_name": "other_platforms", "platforms": [
+        "Moonshot", "moonshot_app", "letsbonk", "memoo",
+        "token_mill", "jup_studio", "bags", "believe", "heaven"
+    ]},
+]
+
+PRIMARY_SLOT = settings.get_discovery_primary_slot()
+RESERVE_SLOT = settings.get_discovery_reserve_slot()
+FEATURE_SLOTS = settings.get_feature_slots()
 
 
 def _json_dumps(obj: Any) -> str:
@@ -69,14 +88,6 @@ def _csv_list(value: Any) -> List[str]:
 
 
 class DiscoveryRunner:
-    TRENCH_PLATFORMS = [
-        "Pump.fun", "Moonshot", "moonshot_app", "letsbonk", "memoo",
-        "token_mill", "jup_studio", "bags", "believe", "heaven"
-    ]
-
-    FIXED_MIN_CREATED = 1800
-    FIXED_MAX_CREATED = 14400
-
     def __init__(
         self,
         repo: Repositories,
@@ -92,7 +103,7 @@ class DiscoveryRunner:
         self.processed_count = 0
         self.last_elapsed_ms = 0
         self.pipeline = TradingPipeline(repo, gmgn, jupiter, jito, rpc)
-        self._credential_count = self._count_credentials()
+        self._run_lock = asyncio.Lock()
 
     async def _load_enabled_strategy_groups(self) -> List[dict]:
         try:
@@ -117,182 +128,19 @@ class DiscoveryRunner:
         self.strategy_groups = groups
         return groups
 
-    def _count_credentials(self) -> int:
-        try:
-            if hasattr(self.gmgn, 'credentials'):
-                return len(self.gmgn.credentials or [])
-            if hasattr(self.gmgn, 'api_keys'):
-                return len(self.gmgn.api_keys or [])
-            if hasattr(self.gmgn, 'client_ids'):
-                return len(self.gmgn.client_ids or [])
-        except Exception:
-            pass
-        return 0
-
-    def _build_trench_params(self, platform: Optional[str] = None) -> Dict[str, Any]:
+    def _build_trench_params(self, platforms: Optional[List[str]] = None) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             'chain': 'sol',
             'type': 'new_creation',
-            'min_created': self.FIXED_MIN_CREATED,
-            'max_created': self.FIXED_MAX_CREATED,
+            'min_created': MIN_CREATED,
+            'max_created': MAX_CREATED,
         }
-
         types = _csv_list(getattr(settings, 'GMGN_TRENCHES_TYPES', ''))
         if types:
             params['type'] = types[0]
-            if len(types) > 1:
-                params['types'] = types
-
-        if platform:
-            params['platforms'] = [platform]
-        else:
-            platforms = _csv_list(getattr(settings, 'GMGN_TRENCHES_PLATFORMS', ''))
-            if platforms:
-                params['platforms'] = platforms
-
+        if platforms:
+            params['platforms'] = platforms
         return params
-
-    def _can_use_platform_sharding(self) -> bool:
-        return self._credential_count >= 10
-
-    async def _fetch_trenches_by_platforms(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        mode = settings.get_provider_mode()
-        if mode == ProviderMode.MOCK:
-            params = self._build_trench_params()
-            trenches = await self.gmgn.fetch_trenches(params)
-            diag: Dict[str, Any] = {
-                "mode": "mock_single_request",
-                "raw_fetched_count": len(trenches),
-                "unique_fetched_count": len(trenches),
-                "duplicate_count_estimate": 0,
-                "platform_fetch": {"mode": "mock", "platform_count": 0},
-            }
-            return trenches, diag
-
-        if not self._can_use_platform_sharding():
-            logger.warning(f"Credentials={self._credential_count} insufficient for platform sharding; falling back to single request")
-            await self.repo.append_system_event(
-                'WARNING', 'DISCOVERY',
-                f'platform sharding disabled: only {self._credential_count} credentials (need >= 10)',
-                json.dumps({"credential_count": self._credential_count}),
-                account_type='SIM',
-            )
-            params = self._build_trench_params()
-            trenches = await self.gmgn.fetch_trenches(params)
-            diag = {
-                "mode": "fallback_single_request",
-                "raw_fetched_count": len(trenches),
-                "unique_fetched_count": len(trenches),
-                "duplicate_count_estimate": 0,
-                "platform_fetch": {"mode": "fallback", "platform_count": 0},
-            }
-            return trenches, diag
-
-        primary_slots = list(range(10))
-        PRIMARY_COUNT = 10
-        primary_slots = list(range(PRIMARY_COUNT))
-        reserve_slots = list(range(PRIMARY_COUNT, min(self._credential_count, 12)))
-
-        async def _fetch_one_platform(idx: int, platform_name: str) -> Dict[str, Any]:
-            t0 = time.perf_counter()
-            last_error: Optional[Exception] = None
-            result: Dict[str, Any] = {
-                "platform": platform_name,
-                "primary_slot": idx,
-                "used_slot": idx,
-                "used_role": "primary",
-                "ok": False,
-                "raw_count": 0,
-                "unique_count": 0,
-                "duplicate_count": 0,
-                "fallback_used": False,
-                "error": None,
-                "latency_ms": 0,
-                "items": [],
-            }
-
-            params = self._build_trench_params(platform=platform_name)
-            provider = self.gmgn
-
-            try:
-                items = await provider.fetch_trenches(params, credential_slot=idx)
-                result["ok"] = True
-                result["raw_count"] = len(items)
-                result["items"] = items
-            except Exception as e:
-                last_error = e
-                logger.warning(f"primary fetch failed for {platform_name} (slot={idx}): {e}")
-                for reserve_slot in reserve_slots:
-                    try:
-                        items = await provider.fetch_trenches(params, credential_slot=reserve_slot)
-                        result["ok"] = True
-                        result["raw_count"] = len(items)
-                        result["items"] = items
-                        result["used_slot"] = reserve_slot
-                        result["used_role"] = "reserve"
-                        result["fallback_used"] = True
-                        result["fallback_from_slot"] = idx
-                        logger.info(f"reserve credential {reserve_slot} succeeded for {platform_name}")
-                        last_error = None
-                        break
-                    except Exception as re:
-                        last_error = re
-                        logger.warning(f"reserve credential {reserve_slot} also failed for {platform_name}: {re}")
-
-            result["error"] = str(last_error) if last_error is not None else None
-            result["latency_ms"] = int((time.perf_counter() - t0) * 1000)
-            return result
-
-        tasks = [_fetch_one_platform(i, p) for i, p in enumerate(self.TRENCH_PLATFORMS)]
-        platform_results = []
-        for i in range(0, len(tasks), 10):
-            batch = tasks[i:i+10]
-            batch_results = await asyncio.gather(*batch, return_exceptions=True)
-            for r in batch_results:
-                if isinstance(r, Exception):
-                    platform_results.append({"ok": False, "error": str(r), "raw_count": 0, "items": []})
-                elif isinstance(r, dict):
-                    platform_results.append(r)
-                else:
-                    platform_results.append({"ok": False, "error": f"unexpected: {r}", "raw_count": 0, "items": []})
-
-        all_items: List[Dict[str, Any]] = []
-        dedup_key: Dict[Tuple[str, str], int] = {}
-        for pr in platform_results:
-            items = pr.get("items", [])
-            pr.pop("items", None)
-            raw_before = len(items)
-            unique_items: List[Dict[str, Any]] = []
-            for item in items:
-                pool_addr = str(item.get("pool_address") or "")
-                token_mint = str(item.get("token_mint") or "")
-                key = (token_mint, pool_addr)
-                if key not in dedup_key:
-                    dedup_key[key] = 0
-                    unique_items.append(item)
-                dedup_key[key] += 1
-            pr["unique_count"] = len(unique_items)
-            pr["duplicate_count"] = raw_before - len(unique_items)
-            all_items.extend(unique_items)
-
-        raw_fetched_count = sum(p.get("raw_count", 0) for p in platform_results)
-        unique_fetched_count = len(all_items)
-        duplicate_count_estimate = raw_fetched_count - unique_fetched_count
-
-        diag = {
-            "mode": "platform_sharded",
-            "raw_fetched_count": raw_fetched_count,
-            "unique_fetched_count": unique_fetched_count,
-            "duplicate_count_estimate": duplicate_count_estimate,
-            "platform_fetch": {
-                "mode": "platform_sharded",
-                "platform_count": len(self.TRENCH_PLATFORMS),
-                "primary_credential_count": PRIMARY_COUNT,
-                "reserve_credential_count": len(reserve_slots),
-                "items": platform_results,
-            },
-        }
-        return all_items, diag
 
     @staticmethod
     def _group_by_timing(strategy_groups: List[dict]) -> List[Tuple[str, List[dict]]]:
@@ -336,32 +184,178 @@ class DiscoveryRunner:
         )
         return token_mint, pool_address, pool_created_at, snapshot_id
 
-    async def _run_price_screen(
-        self,
-        token_mint: str,
-        token: Dict[str, Any],
-        risk_passed_groups: List[dict],
-        snapshot_id: int,
-        discovery_event_ids: Dict[int, int],
-        now: datetime,
-    ) -> List[dict]:
-        """Fetch latest price + smart degen holders, run new price filter, return strategies that pass."""
-        price_error: Optional[str] = None
-        holder_error: Optional[str] = None
+    async def _fetch_trenches_two_group(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        mode = settings.get_provider_mode()
+        groups_results: List[Dict[str, Any]] = []
+        all_items: List[Dict[str, Any]] = []
+        dedup: Dict[Tuple[str, str], int] = {}
 
+        for ginfo in DISCOVERY_GROUPS:
+            group_name = ginfo["group_name"]
+            platforms = ginfo["platforms"]
+            gres: Dict[str, Any] = {
+                "group_name": group_name, "platforms": platforms,
+                "slot": None, "role": None, "ok": False,
+                "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
+                "status_code": None, "error": None, "cooldown_until": None,
+                "latency_ms": 0,
+            }
+
+            t0 = time.perf_counter()
+            params = self._build_trench_params(platforms=platforms)
+
+            if mode == ProviderMode.MOCK:
+                items = await self.gmgn.fetch_trenches(params)
+                gres["ok"] = True
+                gres["raw_count"] = len(items)
+                gres["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+                groups_results.append(gres)
+                for item in items:
+                    key = (str(item.get("token_mint", "")), str(item.get("pool_address", "")))
+                    if key not in dedup:
+                        dedup[key] = 0
+                        all_items.append(item)
+                    dedup[key] += 1
+                continue
+
+            rl = get_rate_limiter()
+            selected_slot = None
+
+            for try_slot in [PRIMARY_SLOT, RESERVE_SLOT]:
+                if not rl.is_slot_cooldown(try_slot):
+                    selected_slot = try_slot
+                    break
+
+            if selected_slot is None:
+                gres["error"] = "both primary and reserve slots in cooldown"
+                gres["cooldown_until"] = "N/A"
+                groups_results.append(gres)
+                await self.repo.append_system_event(
+                    'ERROR', 'DISCOVERY', f'Discovery slots cooldown, skip trenches group {group_name}',
+                    _json_dumps(gres), account_type='SIM',
+                )
+                continue
+
+            gres["slot"] = selected_slot
+            gres["role"] = "primary" if selected_slot == PRIMARY_SLOT else "reserve"
+
+            try:
+                items = await self.gmgn.fetch_trenches(params, credential_slot=selected_slot)
+                gres["ok"] = True
+                gres["raw_count"] = len(items)
+            except Exception as e:
+                gres["error"] = str(e)[:300]
+                gres["status_code"] = getattr(e, 'status_code', None)
+                logger.warning(f"trenches fetch failed for {group_name} slot={selected_slot}: {e}")
+
+            gres["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+            groups_results.append(gres)
+
+            if gres["ok"] and items:
+                for item in items:
+                    key = (str(item.get("token_mint", "")), str(item.get("pool_address", "")))
+                    if key not in dedup:
+                        dedup[key] = 0
+                        all_items.append(item)
+                    dedup[key] += 1
+            elif selected_slot == RESERVE_SLOT and PRIMARY_SLOT > 0:
+                await asyncio.sleep(settings.GMGN_DISCOVERY_GROUP_DELAY_SECONDS)
+
+        for gr in groups_results:
+            gr["unique_count"] = gr["raw_count"] - gr.get("duplicate_count", 0)
+
+        raw_total = sum(g.get("raw_count", 0) for g in groups_results)
+        unique_total = len(all_items)
+        dup_total = raw_total - unique_total
+
+        diag = {
+            "mode": "two_group_discovery",
+            "raw_fetched_count": raw_total,
+            "unique_fetched_count": unique_total,
+            "duplicate_count_estimate": dup_total,
+            "groups": groups_results,
+        }
+        return all_items, diag
+
+    async def _run_stage0_risk_filter(
+        self, token: Dict[str, Any], groups_for_t: List[dict], now: datetime,
+        snapshot_id: int, token_mint: str, pool_address: str,
+    ) -> Tuple[List[dict], Dict[int, int], int, int]:
+        """Stage 0: Risk filter using only trenches/snapshot data (zero extra API calls)."""
+        risk_passed: List[dict] = []
+        discovery_event_ids: Dict[int, int] = {}
+        discovered_count = 0
+        tracked_count = 0
+
+        for sg in groups_for_t:
+            sg_id = int(sg.get('id') or 0)
+            config_version = int(sg.get('config_version') or 1)
+            try:
+                existing = await self.repo.get_discovery_event_by_snapshot_token_pool(
+                    snapshot_id, token_mint, pool_address, strategy_id=sg_id
+                )
+                if existing:
+                    continue
+
+                res = await run_risk_filter(token, sg, now)
+                status = 'RISK_PASSED' if res.passed else 'RISK_FAILED'
+
+                discovery_id, created = await self.repo.create_discovery_event_idempotent(
+                    token_mint=token_mint, pool_address=pool_address,
+                    pool_created_at=token.get('pool_created_at'),
+                    snapshot_id=snapshot_id, strategy_id=sg_id,
+                    strategy_config_version=config_version, status=status,
+                    feature_vector_json=_json_dumps(res.feature_vector),
+                )
+                if not created:
+                    continue
+
+                match_id = await self.repo.insert_strategy_match(
+                    token_mint, sg_id, config_version, snapshot_id,
+                    'risk_filter', res.passed,
+                    _json_dumps([d.__dict__ for d in res.details]),
+                    _json_dumps(res.feature_vector),
+                    discovery_event_id=discovery_id,
+                )
+                await self.repo.update_discovery_event_status(
+                    discovery_id, status, initial_match_id=match_id,
+                    feature_vector_json=_json_dumps(res.feature_vector),
+                )
+
+                discovered_count += 1
+                if res.passed:
+                    risk_passed.append(sg)
+                    discovery_event_ids[sg_id] = discovery_id
+                    tracked_count += 1
+
+                await event_bus.publish('discovery', {
+                    'token_mint': token_mint, 'discovery_event_id': discovery_id,
+                    'strategy_id': sg_id, 'status': status,
+                    'passed_strategy_ids': [sg_id] if res.passed else [],
+                    'failed_strategy_ids': [] if res.passed else [sg_id],
+                })
+            except Exception as e:
+                logger.error(f"Stage 0 risk filter exception for {token_mint} sg={sg_id}: {e}")
+
+        return risk_passed, discovery_event_ids, discovered_count, tracked_count
+
+    async def _run_stage1_top_holder(
+        self, token_mint: str, token: Dict[str, Any], risk_passed_groups: List[dict],
+        snapshot_id: int, discovery_event_ids: Dict[int, int],
+    ) -> Tuple[List[dict], Dict[str, Any]]:
+        """Stage 1: top1 holder check via holders API (weight=5)."""
+        stage_diag: Dict[str, Any] = {"candidates_in": len(risk_passed_groups), "checked": 0, "passed": 0, "failed": 0, "skipped": 0}
+        passed_groups: List[dict] = []
+
+        if not risk_passed_groups:
+            return passed_groups, stage_diag
+
+        feature_slot = FEATURE_SLOTS[0] if FEATURE_SLOTS else 2
         try:
-            latest = await self.gmgn.fetch_latest_price(token_mint)
+            holders = await self.gmgn.fetch_top_holders(token_mint, limit=20)
         except Exception as e:
-            price_error = str(e)
-            latest = {}
-            logger.warning(f"latest price fetch failed for {token_mint}: {e}")
-
-        if not latest:
-            await self.repo.append_system_event(
-                'ERROR', 'DISCOVERY', 'GMGN price screen fetch failed',
-                _json_dumps({'token': token_mint, 'error': price_error or 'latest price missing', 'stage': 'latest_price'}),
-                account_type='SIM',
-            )
+            logger.warning(f"top holders fetch failed for {token_mint}: {e}")
+            feature_vector = {"error": str(e), "stage": "top_holder_filter"}
             for sg in risk_passed_groups:
                 sg_id = int(sg.get('id') or 0)
                 config_version = int(sg.get('config_version') or 1)
@@ -369,66 +363,252 @@ class DiscoveryRunner:
                 try:
                     await self.repo.insert_strategy_match(
                         token_mint, sg_id, config_version, snapshot_id,
-                        'price_filter', False,
-                        _json_dumps([{"rule": "latest_price_present", "passed": False, "reason": str(price_error or "latest price missing")}]),
-                        _json_dumps({"error": price_error or "latest price missing"}),
-                        discovery_event_id=discovery_id,
+                        'top_holder_filter', False,
+                        _json_dumps([{"rule": "top1_holder_addr_type0", "passed": False, "reason": f"holders API failed: {e}","missing": True}]),
+                        _json_dumps(feature_vector), discovery_event_id=discovery_id,
                     )
                 except Exception:
                     pass
-            return []
+            stage_diag["failed"] = len(risk_passed_groups)
+            return passed_groups, stage_diag
 
-        try:
-            smart_degen_holders = await self.gmgn.fetch_smart_degen_holders(token_mint, limit=30)
-        except Exception as e:
-            holder_error = str(e)
-            smart_degen_holders = []
-            logger.warning(f"smart degen holders fetch failed for {token_mint}: {e}")
-
-        from ..strategy.filters import _parse_creation_ts, _compute_age_minutes
-        creation_ts, _creation_source, age_missing = _parse_creation_ts(token)
-        age_minutes = _compute_age_minutes(creation_ts)
-        klines: Optional[List[Dict[str, Any]]] = None
-        if age_minutes is not None and age_minutes < 60 and creation_ts is not None:
-            try:
-                klines = await self.gmgn.fetch_kline(
-                    token_mint, "1m", 60,
-                    from_ts=int(creation_ts), to_ts=int(datetime.now(timezone.utc).timestamp()),
+        if not holders:
+            for sg in risk_passed_groups:
+                sg_id = int(sg.get('id') or 0)
+                feature_vector = {"stage": "top_holder_filter", "holders_count": 0}
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
+                    'top_holder_filter', False,
+                    _json_dumps([{"rule": "top1_holder_addr_type0", "passed": False, "reason": "no holders returned","missing": True}]),
+                    _json_dumps(feature_vector), discovery_event_id=discovery_event_ids.get(sg_id),
                 )
-            except Exception as e:
-                logger.warning(f"kline fetch failed for {token_mint}: {e}")
+            stage_diag["failed"] = len(risk_passed_groups)
+            return passed_groups, stage_diag
 
-        price_passed: List[dict] = []
         for sg in risk_passed_groups:
             sg_id = int(sg.get('id') or 0)
             config_version = int(sg.get('config_version') or 1)
             discovery_id = discovery_event_ids.get(sg_id)
-            try:
-                res = await run_price_filter(token, sg, latest, smart_degen_holders, klines=klines)
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, config_version, snapshot_id,
-                    'price_filter', res.passed,
-                    _json_dumps(res.details), _json_dumps(res.feature_vector),
-                    discovery_event_id=discovery_id,
-                )
-                if res.passed:
-                    price_passed.append(sg)
-            except Exception as e:
-                logger.error(f"price filter exception for {token_mint} strategy {sg_id}: {e}")
+            x = float(sg.get("x", 0.2))
+            top1_threshold = 0.049 + 0.01 * x
 
-        return price_passed
+            top1_holder = None
+            for h in holders:
+                try:
+                    at = int(h.get("addr_type", -1))
+                except Exception:
+                    at = -1
+                if at == 0:
+                    top1_holder = h
+                    break
+
+            rate = None
+            if top1_holder:
+                rate = _to_float(_first_present(top1_holder, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"]))
+
+            passed = rate is not None and rate < top1_threshold
+            detail = {"rule": "top1_holder_addr_type0", "passed": passed,
+                      "value": rate, "threshold": top1_threshold,
+                      "missing": rate is None,
+                      "reason": f"top1 rate={rate}, threshold={top1_threshold}" if not passed else ""}
+            feature_vector = {"top1_holder_rate": rate, "top1_threshold": top1_threshold, "stage": "top_holder_filter"}
+
+            await self.repo.insert_strategy_match(
+                token_mint, sg_id, config_version, snapshot_id,
+                'top_holder_filter', passed,
+                _json_dumps([detail]), _json_dumps(feature_vector),
+                discovery_event_id=discovery_id,
+            )
+            stage_diag["checked"] += 1
+            if passed:
+                stage_diag["passed"] += 1
+                passed_groups.append(sg)
+            else:
+                stage_diag["failed"] += 1
+
+        return passed_groups, stage_diag
+
+    async def _run_stage2_price_info(
+        self, token_mint: str, token: Dict[str, Any], groups: List[dict],
+        snapshot_id: int, discovery_event_ids: Dict[int, int],
+    ) -> Tuple[List[dict], Dict[str, Any]]:
+        """Stage 2: token info / latest price for swaps & price_change rules (weight=1)."""
+        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "passed": 0, "failed": 0, "skipped": 0}
+        passed_groups: List[dict] = []
+
+        if not groups:
+            return passed_groups, stage_diag
+
+        try:
+            latest = await self.gmgn.fetch_latest_price(token_mint)
+        except Exception as e:
+            logger.warning(f"latest price fetch failed for {token_mint}: {e}")
+            feature_vector = {"error": str(e), "stage": "price_info"}
+            for sg in groups:
+                sg_id = int(sg.get('id') or 0)
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
+                    'price_filter', False,
+                    _json_dumps([{"rule": "latest_price_present", "passed": False, "reason": str(e),"missing": True}]),
+                    _json_dumps(feature_vector), discovery_event_id=discovery_event_ids.get(sg_id),
+                )
+            stage_diag["failed"] = len(groups)
+            return passed_groups, stage_diag
+
+        if not latest:
+            for sg in groups:
+                sg_id = int(sg.get('id') or 0)
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
+                    'price_filter', False,
+                    _json_dumps([{"rule": "latest_price_present", "passed": False, "reason": "latest price empty","missing": True}]),
+                    _json_dumps({"error": "latest price empty", "stage": "price_info"}),
+                    discovery_event_id=discovery_event_ids.get(sg_id),
+                )
+            stage_diag["failed"] = len(groups)
+            return passed_groups, stage_diag
+
+        for sg in groups:
+            sg_id = int(sg.get('id') or 0)
+            config_version = int(sg.get('config_version') or 1)
+            discovery_id = discovery_event_ids.get(sg_id)
+            res = await evaluate_price_activity_rules(token, sg, latest, klines=None)
+            await self.repo.insert_strategy_match(
+                token_mint, sg_id, config_version, snapshot_id,
+                'price_filter', res.passed,
+                _json_dumps(res.details), _json_dumps(res.feature_vector),
+                discovery_event_id=discovery_id,
+            )
+            stage_diag["checked"] += 1
+            if res.passed:
+                stage_diag["passed"] += 1
+                passed_groups.append(sg)
+            else:
+                stage_diag["failed"] += 1
+
+        return passed_groups, stage_diag
+
+    async def _run_stage3_kline_fallback(
+        self, token_mint: str, token: Dict[str, Any], groups: List[dict],
+        snapshot_id: int, discovery_event_ids: Dict[int, int],
+    ) -> Tuple[List[dict], Dict[str, Any]]:
+        """Stage 3: Kline fallback for young tokens where price_change couldn't be computed."""
+        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "kline_used": 0, "passed": 0, "failed": 0, "skipped": 0}
+        passed_groups: List[dict] = []
+
+        if not groups:
+            return passed_groups, stage_diag
+
+        creation_ts, _, age_missing = _parse_creation_ts(token)
+        age_minutes = _compute_age_minutes(creation_ts)
+
+        if age_minutes is None or age_minutes >= 60:
+            stage_diag["skipped_reason"] = f"age={age_minutes}, no kline needed"
+            stage_diag["passed"] = len(groups)
+            return groups, stage_diag
+
+        try:
+            klines = await self.gmgn.fetch_kline(
+                token_mint, "1m", 60,
+                from_ts=int(creation_ts) if creation_ts else None,
+                to_ts=int(datetime.now(timezone.utc).timestamp()),
+            )
+            stage_diag["kline_used"] = 1
+        except Exception as e:
+            logger.warning(f"kline fetch failed for {token_mint}: {e}")
+            for sg in groups:
+                sg_id = int(sg.get('id') or 0)
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
+                    'kline_fallback', False,
+                    _json_dumps([{"rule": "price_change_1h", "passed": False, "reason": f"kline API failed: {e}","source": "kline_failed", "age_minutes": age_minutes}]),
+                    _json_dumps({"error": str(e), "stage": "kline_fallback"}),
+                    discovery_event_id=discovery_event_ids.get(sg_id),
+                )
+            stage_diag["failed"] = len(groups)
+            return passed_groups, stage_diag
+
+        for sg in groups:
+            sg_id = int(sg.get('id') or 0)
+            config_version = int(sg.get('config_version') or 1)
+            discovery_id = discovery_event_ids.get(sg_id)
+            res = await evaluate_price_activity_rules(token, sg, {}, klines=klines)
+            await self.repo.insert_strategy_match(
+                token_mint, sg_id, config_version, snapshot_id,
+                'kline_fallback', res.passed,
+                _json_dumps(res.details), _json_dumps(res.feature_vector),
+                discovery_event_id=discovery_id,
+            )
+            stage_diag["checked"] += 1
+            if res.passed:
+                stage_diag["passed"] += 1
+                passed_groups.append(sg)
+            else:
+                stage_diag["failed"] += 1
+
+        return passed_groups, stage_diag
+
+    async def _run_stage4_smart_degen(
+        self, token_mint: str, token: Dict[str, Any], groups: List[dict],
+        snapshot_id: int, discovery_event_ids: Dict[int, int],
+    ) -> Tuple[List[dict], Dict[str, Any]]:
+        """Stage 4: Smart degen holders check (weight=5)."""
+        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "passed": 0, "failed": 0, "skipped": 0}
+        passed_groups: List[dict] = []
+
+        if not groups:
+            return passed_groups, stage_diag
+
+        try:
+            smart_degen_holders = await self.gmgn.fetch_smart_degen_holders(token_mint, limit=30)
+        except Exception as e:
+            logger.warning(f"smart degen fetch failed for {token_mint}: {e}")
+            for sg in groups:
+                sg_id = int(sg.get('id') or 0)
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
+                    'smart_degen_filter', False,
+                    _json_dumps([{"rule": "smart_degen", "passed": False, "reason": f"API failed: {e}","missing": True}]),
+                    _json_dumps({"error": str(e), "stage": "smart_degen_filter"}),
+                    discovery_event_id=discovery_event_ids.get(sg_id),
+                )
+            stage_diag["failed"] = len(groups)
+            return passed_groups, stage_diag
+
+        for sg in groups:
+            sg_id = int(sg.get('id') or 0)
+            config_version = int(sg.get('config_version') or 1)
+            discovery_id = discovery_event_ids.get(sg_id)
+            res = await evaluate_smart_degen(sg, smart_degen_holders)
+            await self.repo.insert_strategy_match(
+                token_mint, sg_id, config_version, snapshot_id,
+                'smart_degen_filter', res.passed,
+                _json_dumps(res.details), _json_dumps(res.feature_vector),
+                discovery_event_id=discovery_id,
+            )
+            stage_diag["checked"] += 1
+            if res.passed:
+                stage_diag["passed"] += 1
+                passed_groups.append(sg)
+            else:
+                stage_diag["failed"] += 1
+
+        return passed_groups, stage_diag
 
     async def run_once(self):
+        async with self._run_lock:
+            await self._run_once_locked()
+
+    async def _run_once_locked(self):
         now = datetime.now(timezone.utc)
+        run_started_at = now.isoformat()
         t0 = now.timestamp()
+        total_fetched = 0
         discovered_count = 0
         tracked_count = 0
         dedup_skipped = 0
-        total_fetched = 0
-        raw_fetched_count = 0
-        duplicate_count_estimate = 0
-        platform_fetch_meta: Dict[str, Any] = {}
         mode = settings.get_provider_mode()
+        stage_diags: Dict[str, Any] = {}
 
         strategy_groups = await self._load_enabled_strategy_groups()
         if not strategy_groups:
@@ -441,32 +621,12 @@ class DiscoveryRunner:
             return
 
         for timing_key, groups_for_t in self._group_by_timing(strategy_groups):
-            try:
-                trenches, trench_diag = await self._fetch_trenches_by_platforms()
-                raw_fetched_count = trench_diag.get("raw_fetched_count", 0)
-                total_fetched = trench_diag.get("unique_fetched_count", len(trenches))
-                duplicate_count_estimate = trench_diag.get("duplicate_count_estimate", 0)
-                platform_fetch_meta = trench_diag.get("platform_fetch", {})
-            except Exception as e:
-                logger.error(f"fetch_trenches failed: {e}")
-                await self.repo.append_system_event(
-                    'ERROR', 'DISCOVERY', 'GMGN fetch_trenches failed',
-                    _json_dumps({'error': str(e)}),
-                    account_type='SIM',
-                )
-                await event_bus.publish('system', {
-                    'level': 'ERROR', 'category': 'DISCOVERY',
-                    'message': 'fetch_trenches failed'
-                })
-                continue
+            trenches, trench_diag = await self._fetch_trenches_two_group()
+            total_fetched = trench_diag.get("unique_fetched_count", 0)
 
             for token in trenches:
                 token_mint = token.get('token_mint')
                 if not token_mint:
-                    await self.repo.append_system_event(
-                        'WARNING', 'DISCOVERY', 'skip trench without token_mint',
-                        _json_dumps({'token': token}), account_type='SIM'
-                    )
                     continue
 
                 source_mode = token.get('source_mode', 'MOCK')
@@ -477,112 +637,80 @@ class DiscoveryRunner:
                     token_mint, pool_address, pool_created_at, snapshot_id = await self._store_snapshot_and_token(token, now)
                 except Exception as e:
                     logger.error(f"store discovery snapshot failed token={token_mint}: {e}")
-                    await self.repo.append_system_event(
-                        'ERROR', 'DISCOVERY', 'store discovery snapshot failed',
-                        _json_dumps({'token': token_mint, 'error': str(e)}),
-                        account_type='SIM',
-                    )
                     continue
 
-                risk_passed: List[dict] = []
-                discovery_event_ids: Dict[int, int] = {}
+                risk_passed, discovery_event_ids, dc, tc = await self._run_stage0_risk_filter(
+                    token, groups_for_t, now, snapshot_id, token_mint, pool_address,
+                )
+                discovered_count += dc
+                tracked_count += tc
 
-                for sg in groups_for_t:
-                    sg_id = int(sg.get('id') or 0)
-                    config_version = int(sg.get('config_version') or 1)
+                stage_diags.setdefault("stage0_risk", {"candidates": len(trenches), "passed_to_stage1": 0})
+                stage_diags["stage0_risk"]["passed_to_stage1"] += len(risk_passed)
+
+                top1_passed, top1_diag = await self._run_stage1_top_holder(
+                    token_mint, token, risk_passed, snapshot_id, discovery_event_ids,
+                )
+                stage_diags.setdefault("stage1_top_holder", {"checked": 0, "passed": 0, "failed": 0})
+                stage_diags["stage1_top_holder"]["checked"] += top1_diag["checked"]
+                stage_diags["stage1_top_holder"]["passed"] += top1_diag["passed"]
+                stage_diags["stage1_top_holder"]["failed"] += top1_diag["failed"]
+
+                price_info_passed, price_diag = await self._run_stage2_price_info(
+                    token_mint, token, top1_passed, snapshot_id, discovery_event_ids,
+                )
+                stage_diags.setdefault("stage2_price_info", {"checked": 0, "passed": 0, "failed": 0})
+                stage_diags["stage2_price_info"]["checked"] += price_diag["checked"]
+                stage_diags["stage2_price_info"]["passed"] += price_diag["passed"]
+                stage_diags["stage2_price_info"]["failed"] += price_diag["failed"]
+
+                kline_passed, kline_diag = await self._run_stage3_kline_fallback(
+                    token_mint, token, price_info_passed, snapshot_id, discovery_event_ids,
+                )
+                stage_diags.setdefault("stage3_kline", {"checked": 0, "kline_used": 0, "passed": 0, "failed": 0})
+                stage_diags["stage3_kline"]["checked"] += kline_diag["checked"]
+                stage_diags["stage3_kline"]["passed"] += kline_diag["passed"]
+                stage_diags["stage3_kline"]["failed"] += kline_diag["failed"]
+                stage_diags["stage3_kline"]["kline_used"] += kline_diag.get("kline_used", 0)
+
+                final_passed, degen_diag = await self._run_stage4_smart_degen(
+                    token_mint, token, kline_passed, snapshot_id, discovery_event_ids,
+                )
+                stage_diags.setdefault("stage4_smart_degen", {"checked": 0, "passed": 0, "failed": 0})
+                stage_diags["stage4_smart_degen"]["checked"] += degen_diag["checked"]
+                stage_diags["stage4_smart_degen"]["passed"] += degen_diag["passed"]
+                stage_diags["stage4_smart_degen"]["failed"] += degen_diag["failed"]
+
+                if final_passed:
                     try:
-                        existing = await self.repo.get_discovery_event_by_snapshot_token_pool(
-                            snapshot_id, token_mint, pool_address, strategy_id=sg_id
-                        )
-                        if existing:
-                            dedup_skipped += 1
-                            continue
-
-                        res = await run_risk_filter(token, sg, now)
-                        status = 'RISK_PASSED' if res.passed else 'RISK_FAILED'
-
-                        discovery_id, created = await self.repo.create_discovery_event_idempotent(
-                            token_mint=token_mint,
-                            pool_address=pool_address,
-                            pool_created_at=pool_created_at,
+                        await self.pipeline.handle_token_second_filter_result(
+                            token_mint, final_passed,
                             snapshot_id=snapshot_id,
-                            strategy_id=sg_id,
-                            strategy_config_version=config_version,
-                            status=status,
-                            feature_vector_json=_json_dumps(res.feature_vector),
+                            discovery_event_id=discovery_event_ids.get(int(final_passed[0].get('id') or 0)),
                         )
-                        if not created:
-                            dedup_skipped += 1
-                            continue
-
-                        match_id = await self.repo.insert_strategy_match(
-                            token_mint, sg_id, config_version, snapshot_id,
-                            'risk_filter', res.passed,
-                            _json_dumps([d.__dict__ for d in res.details]),
-                            _json_dumps(res.feature_vector),
-                            discovery_event_id=discovery_id,
-                        )
-
-                        await self.repo.update_discovery_event_status(
-                            discovery_id, status,
-                            initial_match_id=match_id,
-                            feature_vector_json=_json_dumps(res.feature_vector),
-                        )
-
-                        discovered_count += 1
-                        if res.passed:
-                            risk_passed.append(sg)
-                            discovery_event_ids[sg_id] = discovery_id
-                            tracked_count += 1
-
-                        await event_bus.publish('discovery', {
-                            'token_mint': token_mint,
-                            'discovery_event_id': discovery_id,
-                            'strategy_id': sg_id,
-                            'status': status,
-                            'passed_strategy_ids': [sg_id] if res.passed else [],
-                            'failed_strategy_ids': [] if res.passed else [sg_id],
-                        })
                     except Exception as e:
-                        logger.error(f"Risk filter exception for {token_mint} strategy {sg_id}: {e}")
-                        await self.repo.append_system_event(
-                            'ERROR', 'DISCOVERY', 'risk filter exception',
-                            _json_dumps({'token': token_mint, 'strategy_id': sg_id, 'error': str(e)}),
-                            account_type='SIM',
-                        )
-
-                if risk_passed:
-                    try:
-                        passed_strategies = await self._run_price_screen(
-                            token_mint, token, risk_passed, snapshot_id,
-                            discovery_event_ids, now,
-                        )
-                        if passed_strategies:
-                            await self.pipeline.handle_token_second_filter_result(
-                                token_mint, passed_strategies,
-                                snapshot_id=snapshot_id, discovery_event_id=discovery_event_ids.get(
-                                    int(passed_strategies[0].get('id') or 0)
-                                ),
-                            )
-                    except Exception as e:
-                        logger.error(f"price screen entry failed for {token_mint}: {e}")
+                        logger.error(f"pipeline entry failed for {token_mint}: {e}")
 
         self.processed_count = total_fetched
         self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
 
+        run_finished_at = datetime.now(timezone.utc).isoformat()
         context = {
             'count': total_fetched,
-            'raw_fetched_count': raw_fetched_count,
+            'raw_fetched_count': trench_diag.get("raw_fetched_count", 0),
             'unique_fetched_count': total_fetched,
-            'duplicate_count_estimate': duplicate_count_estimate,
+            'duplicate_count_estimate': trench_diag.get("duplicate_count_estimate", 0),
             'discovered': discovered_count,
             'tracked_initial_passed': tracked_count,
             'dedup_skipped': dedup_skipped,
             'enabled_strategy_groups': len(strategy_groups),
             'elapsed_ms': self.last_elapsed_ms,
+            'run_started_at': run_started_at,
+            'run_finished_at': run_finished_at,
+            'fetch_mode': 'two_group_discovery',
+            'trench_groups': trench_diag.get("groups", []),
+            'stage_diagnostics': stage_diags,
         }
-        if platform_fetch_meta:
-            context['platform_fetch'] = platform_fetch_meta
 
         await self.repo.append_system_event(
             'INFO', 'DISCOVERY', 'Discovery run complete',
@@ -591,5 +719,5 @@ class DiscoveryRunner:
         )
         await event_bus.publish('system', {
             'level': 'INFO', 'category': 'DISCOVERY',
-            'message': f'Discovered {discovered_count} strategy-token events, tracked {tracked_count}, skipped {dedup_skipped} duplicates',
+            'message': f'Discovered {discovered_count} events, tracked {tracked_count}, skipped {dedup_skipped}',
         })
