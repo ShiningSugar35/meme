@@ -39,6 +39,7 @@ RULE_META: Dict[str, Dict[str, str]] = {
     "burn_status": {"label": "burn状态不符", "stage": "risk_filter", "section": "风控指标"},
     "sniper_count": {"label": "sniper数量超标", "stage": "risk_filter", "section": "风控指标"},
     "top1_holder": {"label": "TOP1持仓超标", "stage": "risk_filter", "section": "风控指标"},
+    "top1_holder_addr_type0": {"label": "TOP1普通地址持仓超标", "stage": "top_holder_filter", "section": "风控指标"},
     "latest_price_present": {"label": "最新价格缺失", "stage": "price_filter", "section": "价格面及其他指标"},
     "swaps_5m_scaled": {"label": "swaps_5m不达标", "stage": "price_filter", "section": "价格面及其他指标"},
     "price_change_1h": {"label": "1h价格涨幅不足", "stage": "price_filter", "section": "价格面及其他指标"},
@@ -74,7 +75,7 @@ CRITICAL_NUMERIC_FIELDS = {"liquidity_usd", "market_cap", "price_usd", "volume_u
 def _resolve_rule_meta(rule: str) -> Dict[str, str]:
     if rule in RULE_META:
         meta = dict(RULE_META[rule])
-        if meta.get("section") == "observed_only":
+        if meta.get("section") in ("observed_only", "data_unavailable"):
             meta["exclude_from_ranking"] = "true"
         return meta
     return {"label": rule, "stage": "unknown", "section": "未知/其他指标"}
@@ -814,6 +815,7 @@ async def _build_credential_health() -> List[Dict[str, Any]]:
                 "ok_calls": cred.ok_calls,
                 "failed_calls": cred.failed_calls,
                 "rate_limited_count": cred.rate_limited_count,
+                "local_rate_limited_count": cred.rate_limited_count,
                 "cooldown_until": cred.cooldown_until if cred.is_cooldown() else None,
                 "cooldown_remaining_s": round(cred.cooldown_remaining(), 1),
                 "ok_rate": round(ok_rate, 3),
@@ -831,8 +833,8 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
         {"stage": "risk_filter", "label": "Trenches本地(Stage 0)", "endpoint_filter": "%v1/trenches%", "weight": 3},
         {"stage": "price_filter", "label": "Token Info价格(Stage 1)", "endpoint_filter": "%v1/token/info%", "weight": 1},
         {"stage": "kline_fallback", "label": "Kline回退(Stage 2)", "endpoint_filter": "%v1/market/token_kline%", "weight": 2},
-        {"stage": "top_holder_filter", "label": "Top1 Holder(Stage 3)", "endpoint_filter": "%v1/market/token_top_holders%", "weight": 5},
-        {"stage": "smart_degen_filter", "label": "Smart Degen(Stage 4)", "endpoint_filter": "%v1/market/token_top_holders%", "weight": 5},
+        {"stage": "top_holder_filter", "label": "Top1 Holder(Stage 3)", "endpoint_filter": "%v1/market/token_top_holders%", "weight": 5, "exclude_tag": "smart_degen"},
+        {"stage": "smart_degen_filter", "label": "Smart Degen(Stage 4)", "endpoint_filter": "%v1/market/token_top_holders%", "weight": 5, "require_tag": "smart_degen"},
     ]
     result: List[Dict[str, Any]] = []
     for s in stages:
@@ -845,18 +847,24 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
         rate_limited = 0
         if has_window:
             ep_filter = s["endpoint_filter"]
+            tag_extra = ""
+            if s.get("exclude_tag"):
+                tag_extra = " AND (request_summary_json NOT LIKE ?)"
+            elif s.get("require_tag"):
+                tag_extra = " AND (request_summary_json LIKE ?)"
+            tag_param = f"%{s.get('exclude_tag') or s.get('require_tag') or ''}%" if (s.get("exclude_tag") or s.get("require_tag")) else ""
             api_row = await _fetch_one(repo,
-                "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND created_at>=? AND created_at<=?",
-                (ep_filter, lower_bound, upper_bound))
+                f"SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ?{tag_extra} AND created_at>=? AND created_at<=?",
+                (ep_filter, tag_param, lower_bound, upper_bound) if tag_param else (ep_filter, lower_bound, upper_bound))
             api_calls = int((api_row or {}).get("c", 0))
             if api_calls > 0:
                 ok_row = await _fetch_one(repo,
-                    "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND ok=1 AND created_at>=? AND created_at<=?",
-                    (ep_filter, lower_bound, upper_bound))
+                    f"SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ?{tag_extra} AND ok=1 AND created_at>=? AND created_at<=?",
+                    (ep_filter, tag_param, lower_bound, upper_bound) if tag_param else (ep_filter, lower_bound, upper_bound))
                 ok_rate_val = round(int((ok_row or {}).get("c", 0)) / max(api_calls, 1), 3)
             rl_row = await _fetch_one(repo,
-                "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND status_code=429 AND created_at>=? AND created_at<=?",
-                (ep_filter, lower_bound, upper_bound))
+                f"SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ?{tag_extra} AND status_code=429 AND created_at>=? AND created_at<=?",
+                (ep_filter, tag_param, lower_bound, upper_bound) if tag_param else (ep_filter, lower_bound, upper_bound))
             rate_limited = int((rl_row or {}).get("c", 0))
         if total > 0 and failed == total:
             severity = "critical"

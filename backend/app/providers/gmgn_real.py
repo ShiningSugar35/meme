@@ -170,7 +170,24 @@ class GMGNProvider(MarketDataProvider):
             if slot < 999:
                 ok_to_proceed = await self.rate_limiter.acquire(slot, path)
                 if not ok_to_proceed:
-                    msg = f"slot {slot} in cooldown, skipping request to {path}"
+                    cred_meta = self.rate_limiter.slots.get(slot)
+                    block_reason = "slot_cooldown" if (cred_meta and cred_meta.is_cooldown()) else "bucket_empty"
+                    self.rate_limiter.slots[slot].rate_limited_count += 1
+                    logged_block = {
+                        "credential_slot": slot,
+                        "credential_role": cred_meta.role if cred_meta else "unknown",
+                        "endpoint_weight": _endpoint_weight(path),
+                        "block_reason": block_reason,
+                        "path": path,
+                    }
+                    await self._log_request(
+                        path, False, logged_block, {},
+                        status_code=429, latency_ms=0,
+                        error_code="RATE_LIMIT_LOCAL",
+                        error_summary=f"local rate limiter: {block_reason}",
+                        method=method,
+                    )
+                    msg = f"slot {slot} local rate limited ({block_reason}) for {path}"
                     if credential_slot is not None:
                         raise GMGNAPIError(msg, path=path, method=method, retryable=True, status_code=429)
                     last_exc = GMGNAPIError(msg, path=path, method=method, retryable=True, status_code=429)
@@ -187,8 +204,11 @@ class GMGNProvider(MarketDataProvider):
             logged_request["credential_role"] = cred_meta.role if cred_meta else "unknown"
             if credential_slot is not None:
                 logged_request["credential_role"] += " (explicit)"
-            logged_request["endpoint_weight"] = _endpoint_weight(path) if '_endpoint_weight' in dir() else 1
+            logged_request["endpoint_weight"] = _endpoint_weight(path)
             logged_request["api_key"] = "***"
+            tag = request_params.get("tag") or (json_body or {}).get("tag") or (cleaned or {}).get("tag")
+            if tag:
+                logged_request["feature_stage"] = "smart_degen_filter" if str(tag) == "smart_degen" else str(tag)
 
             try:
                 timeout = float(getattr(settings, "GMGN_TIMEOUT_SECONDS", 8.0) or 8.0)

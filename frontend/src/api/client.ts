@@ -215,6 +215,7 @@ export interface CredentialHealthItem {
   ok_calls: number;
   failed_calls: number;
   rate_limited_count: number;
+  local_rate_limited_count?: number;
   cooldown_until?: number | null;
   cooldown_remaining_s?: number;
   ok_rate: number;

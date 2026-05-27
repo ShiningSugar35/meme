@@ -106,12 +106,36 @@ class DiscoveryRunner:
         self._run_lock = asyncio.Lock()
         self._feature_slot_cursor = 0
 
-    def _next_feature_slot(self) -> int:
+    def _next_feature_slot(self, stage: str = "") -> Optional[int]:
+        rl = get_rate_limiter()
         if not FEATURE_SLOTS:
-            return 2
-        slot = FEATURE_SLOTS[self._feature_slot_cursor % len(FEATURE_SLOTS)]
-        self._feature_slot_cursor += 1
-        return slot
+            return None
+        cursor = self._feature_slot_cursor
+        for offset in range(len(FEATURE_SLOTS)):
+            idx = (cursor + offset) % len(FEATURE_SLOTS)
+            slot = FEATURE_SLOTS[idx]
+            if not rl.is_slot_cooldown(slot):
+                self._feature_slot_cursor = (cursor + offset + 1) % len(FEATURE_SLOTS)
+                return slot
+        return None
+
+    async def _insert_match_data_unavailable(
+        self, token_mint: str, groups: List[dict], snapshot_id: int,
+        discovery_event_ids: Dict[int, int], stage: str, reason: str,
+    ):
+        for sg in groups:
+            sg_id = int(sg.get('id') or 0)
+            try:
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
+                    stage, False,
+                    _json_dumps([{"rule": "data_unavailable", "passed": False,
+                                  "reason": reason, "stage": stage, "missing": True}]),
+                    _json_dumps({"error": reason, "stage": stage}),
+                    discovery_event_id=discovery_event_ids.get(sg_id),
+                )
+            except Exception:
+                pass
 
     async def _load_enabled_strategy_groups(self) -> List[dict]:
         try:
@@ -377,32 +401,28 @@ class DiscoveryRunner:
         if not groups:
             return passed_groups, needs_kline_groups, stage_diag
 
-        slot = self._next_feature_slot()
+        slot = self._next_feature_slot("price_info")
+        if slot is None:
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'price_filter', 'all feature slots cooldown or bucket empty')
+            stage_diag["failed"] = len(groups)
+            return passed_groups, needs_kline_groups, stage_diag
+
         try:
             latest = await self.gmgn.fetch_latest_price(token_mint, credential_slot=slot)
         except Exception as e:
             logger.warning(f"latest price fetch failed for {token_mint}: {e}")
-            feature_vector = {"error": str(e), "stage": "price_info"}
-            for sg in groups:
-                sg_id = int(sg.get('id') or 0)
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
-                    'price_filter', False,
-                    _json_dumps([{"rule": "latest_price_present", "passed": False, "reason": str(e), "missing": True}]),
-                    _json_dumps(feature_vector), discovery_event_id=discovery_event_ids.get(sg_id),
-                )
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'price_filter', f"API failed: {e}")
             stage_diag["failed"] = len(groups)
             return passed_groups, needs_kline_groups, stage_diag
 
         if not latest:
-            for sg in groups:
-                sg_id = int(sg.get('id') or 0)
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
-                    'price_filter', False,
-                    _json_dumps([{"rule": "latest_price_present", "passed": False, "reason": "empty", "missing": True}]),
-                    _json_dumps({"stage": "price_info"}), discovery_event_id=discovery_event_ids.get(sg_id),
-                )
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'price_filter', 'latest price response empty')
             stage_diag["failed"] = len(groups)
             return passed_groups, needs_kline_groups, stage_diag
 
@@ -460,7 +480,14 @@ class DiscoveryRunner:
         creation_ts, _, age_missing = _parse_creation_ts(token)
         age_minutes = _compute_age_minutes(creation_ts)
 
-        slot = self._next_feature_slot()
+        slot = self._next_feature_slot("kline")
+        if slot is None:
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'kline_fallback', 'all feature slots cooldown')
+            stage_diag["failed"] = len(groups)
+            return passed_groups, stage_diag
+
         try:
             klines = await self.gmgn.fetch_kline(
                 token_mint, "1m", 60,
@@ -471,15 +498,9 @@ class DiscoveryRunner:
             stage_diag["kline_used"] = 1
         except Exception as e:
             logger.warning(f"kline fetch failed for {token_mint}: {e}")
-            for sg in groups:
-                sg_id = int(sg.get('id') or 0)
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
-                    'kline_fallback', False,
-                    _json_dumps([{"rule": "price_change_1h", "passed": False, "reason": f"kline failed: {e}", "source": "kline_failed"}]),
-                    _json_dumps({"error": str(e), "stage": "kline_fallback"}),
-                    discovery_event_id=discovery_event_ids.get(sg_id),
-                )
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'kline_fallback', f"kline API failed: {e}")
             stage_diag["failed"] = len(groups)
             return passed_groups, stage_diag
 
@@ -514,32 +535,28 @@ class DiscoveryRunner:
         if not groups:
             return passed_groups, stage_diag
 
-        slot = self._next_feature_slot()
+        slot = self._next_feature_slot("top_holder")
+        if slot is None:
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'top_holder_filter', 'all feature slots cooldown')
+            stage_diag["failed"] = len(groups)
+            return passed_groups, stage_diag
+
         try:
             holders = await self.gmgn.fetch_top_holders(token_mint, limit=20, credential_slot=slot)
         except Exception as e:
             logger.warning(f"top holders fetch failed for {token_mint}: {e}")
-            feature_vector = {"error": str(e), "stage": "top_holder_filter"}
-            for sg in groups:
-                sg_id = int(sg.get('id') or 0)
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
-                    'top_holder_filter', False,
-                    _json_dumps([{"rule": "top1_holder_addr_type0", "passed": False, "reason": f"API failed: {e}", "missing": True}]),
-                    _json_dumps(feature_vector), discovery_event_id=discovery_event_ids.get(sg_id),
-                )
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'top_holder_filter', f"holders API failed: {e}")
             stage_diag["failed"] = len(groups)
             return passed_groups, stage_diag
 
         if not holders:
-            for sg in groups:
-                sg_id = int(sg.get('id') or 0)
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
-                    'top_holder_filter', False,
-                    _json_dumps([{"rule": "top1_holder_addr_type0", "passed": False, "reason": "no holders", "missing": True}]),
-                    _json_dumps({"stage": "top_holder_filter"}), discovery_event_id=discovery_event_ids.get(sg_id),
-                )
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'top_holder_filter', 'holders API returned empty')
             stage_diag["failed"] = len(groups)
             return passed_groups, stage_diag
 
@@ -596,20 +613,21 @@ class DiscoveryRunner:
         if not groups:
             return passed_groups, stage_diag
 
-        slot = self._next_feature_slot()
+        slot = self._next_feature_slot("smart_degen")
+        if slot is None:
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'smart_degen_filter', 'all feature slots cooldown')
+            stage_diag["failed"] = len(groups)
+            return passed_groups, stage_diag
+
         try:
             smart_degen_holders = await self.gmgn.fetch_smart_degen_holders(token_mint, limit=30, credential_slot=slot)
         except Exception as e:
             logger.warning(f"smart degen fetch failed for {token_mint}: {e}")
-            for sg in groups:
-                sg_id = int(sg.get('id') or 0)
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, int(sg.get('config_version') or 1), snapshot_id,
-                    'smart_degen_filter', False,
-                    _json_dumps([{"rule": "smart_degen", "passed": False, "reason": f"API failed: {e}", "missing": True}]),
-                    _json_dumps({"error": str(e), "stage": "smart_degen_filter"}),
-                    discovery_event_id=discovery_event_ids.get(sg_id),
-                )
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                'smart_degen_filter', f"degen API failed: {e}")
             stage_diag["failed"] = len(groups)
             return passed_groups, stage_diag
 
