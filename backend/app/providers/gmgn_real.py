@@ -483,7 +483,7 @@ class GMGNProvider(MarketDataProvider):
         snapshot["raw_json"] = json.dumps(raw_bundle, ensure_ascii=False, default=str)
         return snapshot
 
-    async def fetch_kline(self, token_mint: str, interval: str, limit: int, from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> List[Dict[str, Any]]:
+    async def fetch_kline(self, token_mint: str, interval: str, limit: int, from_ts: Optional[int] = None, to_ts: Optional[int] = None, credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         if self.mode == ProviderMode.MOCK:
             self.mock_data._maybe_refresh()
             klines = [dict(k) for k in self.mock_data.klines.get(token_mint, [])]
@@ -498,7 +498,7 @@ class GMGNProvider(MarketDataProvider):
             params["from"] = int(from_ts)
         if to_ts is not None:
             params["to"] = int(to_ts)
-        data = await self._make_request(path, params, method="GET")
+        data = await self._make_request(path, params, method="GET", credential_slot=credential_slot)
         root = data.get("data", data) if isinstance(data, dict) else data
         raw_klines = self._extract_items(root, ("klines", "list", "items", "rows", "data"))
         klines: List[Dict[str, Any]] = []
@@ -509,7 +509,7 @@ class GMGNProvider(MarketDataProvider):
                 klines.append(normalized)
         return klines
 
-    async def fetch_latest_price(self, token_mint: str) -> Dict[str, Any]:
+    async def fetch_latest_price(self, token_mint: str, credential_slot: Optional[int] = None) -> Dict[str, Any]:
         if self.mode == ProviderMode.MOCK:
             self.mock_data._maybe_refresh()
             info = self.mock_data.latest.get(token_mint)
@@ -530,7 +530,7 @@ class GMGNProvider(MarketDataProvider):
 
         path = getattr(settings, "GMGN_TOKEN_PRICE_PATH", None) or getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
         params = {"chain": "sol", "address": token_mint}
-        data = await self._make_request(path, params, method="GET")
+        data = await self._make_request(path, params, method="GET", credential_slot=credential_slot)
         # Use data.data directly instead of _unwrap_data: the info response has a
         # nested "price":{…} object at the top level and _unwrap_data may return
         # the wrong sub-object (e.g. "pool") instead of the full data payload.
@@ -577,13 +577,13 @@ class GMGNProvider(MarketDataProvider):
             "source_mode": "REAL",
         }
 
-    async def fetch_top_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:
+    async def fetch_top_holders(self, token_mint: str, limit: int = 20, credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         if self.mode == ProviderMode.MOCK:
             return [{"addr_type": 0, "top1_holder_rate": 0.04, "rate": 0.04, "source_mode": "MOCK"}]
 
         path = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
         params = {"chain": "sol", "address": token_mint, "limit": int(limit)}
-        data = await self._make_request(path, params, method="GET")
+        data = await self._make_request(path, params, method="GET", credential_slot=credential_slot)
         items = self._extract_items(data, ("holders", "list", "items", "rows", "data"))
         out: List[Dict[str, Any]] = []
         for item in items:
@@ -605,7 +605,7 @@ class GMGNProvider(MarketDataProvider):
             })
         return out
 
-    async def fetch_smart_degen_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:
+    async def fetch_smart_degen_holders(self, token_mint: str, limit: int = 20, credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         if self.mode == ProviderMode.MOCK:
             return [
                 {"addr_type": 0, "amount_percentage": 0.03, "usd_value": 300.0, "source_mode": "MOCK"},
@@ -614,7 +614,7 @@ class GMGNProvider(MarketDataProvider):
 
         path = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
         params = {"chain": "sol", "address": token_mint, "limit": int(limit), "tag": "smart_degen"}
-        data = await self._make_request(path, params, method="GET")
+        data = await self._make_request(path, params, method="GET", credential_slot=credential_slot)
         items = self._extract_items(data, ("holders", "list", "items", "rows", "data"))
         out: List[Dict[str, Any]] = []
         for item in items:

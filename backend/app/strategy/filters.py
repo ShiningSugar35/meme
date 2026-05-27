@@ -330,9 +330,6 @@ def _evaluate_core_risk_rules(
     if top1 is not None:
         details.append(_mk_pass("top1_holder_rate_observed", top1, "observed only in risk filter", "observed"))
 
-    _check_bool_one(details, snapshot, "renounced_mint", ["renounced_mint", "mint_renounced", "is_mint_renounced"])
-    _check_bool_one(details, snapshot, "renounced_freeze_account", ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced"])
-
     _check_float(details, snapshot, "rug_ratio", ["rug_ratio", "max_rug_ratio", "max_rugged_ratio"],
                  lambda v: v < -0.05 + x, f"< {-0.05 + x:.6g}")
     _check_float(details, snapshot, "entrapment_ratio", ["entrapment_ratio", "max_entrapment_ratio"],
@@ -384,15 +381,12 @@ def _evaluate_core_risk_rules(
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count"],
                  lambda v: v < 50 * x, f"< {50 * x:.6g}")
 
-    top1_threshold = 0.049 + 0.01 * x
-    top1_rate = _to_float(_first_present(snapshot, ["top1_holder_rate", "top1_rate"]))
-    top1_ok = top1_rate is not None and top1_rate < top1_threshold
-    details.append(
-        _mk_pass("top1_holder", top1_rate, f"< {top1_threshold:.6g}", top1_threshold)
-        if top1_ok
-        else _mk_failed("top1_holder", top1_rate, f"< {top1_threshold:.6g}", top1_threshold,
-                        missing=(top1_rate is None))
-    )
+    # top1_holder via snapshot is observed only; the actual addr_type=0 check is
+    # done in Stage 3 via the holders API.  Do NOT fail a token here just because
+    # the snapshot field is missing or > threshold.
+
+    _check_bool_one(details, snapshot, "renounced_mint", ["renounced_mint", "mint_renounced", "is_mint_renounced"])
+    _check_bool_one(details, snapshot, "renounced_freeze_account", ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced"])
 
     if include_platform:
         platform = _norm_str(_first_present(snapshot, ["launchpad", "platform", "source_platform", "pool_platform"]))
@@ -416,7 +410,6 @@ def _evaluate_core_risk_rules(
         "renounced_mint": _to_int_bool(snapshot.get("renounced_mint")),
         "renounced_freeze_account": _to_int_bool(snapshot.get("renounced_freeze_account")),
         "platform": platform,
-        "top1_holder_threshold": top1_threshold,
     }
     return details, feature_vector
 
@@ -748,12 +741,12 @@ async def evaluate_smart_degen(
 
         min_holder = top_n[-1] if len(top_n) > 1 else top_n[0]
         min_pct = _to_float(min_holder.get("amount_percentage"))
+        min_usd = _to_float(min_holder.get("usd_value"))
         if min_pct is not None:
             min_pct_normalized = min_pct / 100.0 if min_pct > 1.0 else min_pct
         else:
             min_pct_normalized = None
         min_ok = (min_pct_normalized is not None and min_pct_normalized > 0.010) or (min_usd is not None and min_usd > 100)
-        min_usd = _to_float(min_holder.get("usd_value"))
 
         degen_hold_ok = max_ok and min_ok
         degen_hold_detail = {

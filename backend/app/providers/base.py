@@ -44,6 +44,10 @@ class MarketDataProvider(ABC):
     async def fetch_latest_price(self, token_mint: str) -> Dict[str, Any]:
         ...
 
+    async def fetch_top_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Optional provider hook for holder concentration checks."""
+        return []
+
 
 class SwapProvider(ABC):
     """Swap quoting/building provider interface.

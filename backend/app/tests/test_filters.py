@@ -75,10 +75,7 @@ def test_top10_top1_boundaries():
     res = asyncio.run(run_initial_filter(s, strategy_group, datetime.now(timezone.utc)))
     assert any(d.name == "top_10_holder_rate_range" and not d.passed for d in res.details)
 
-    s2 = make_snapshot(liquidity_usd=25000)
-    s2["top1_holder_rate"] = 0.06
-    res2 = asyncio.run(run_initial_filter(s2, strategy_group, datetime.now(timezone.utc)))
-    assert any(d.name == "top1_holder" and not d.passed for d in res2.details)
+    # top1_holder is now only checked in holder API stage (Stage 3), not in local Stage 0
 
 
 def test_pool_created_at_window_edges():

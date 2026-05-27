@@ -80,6 +80,11 @@ class RateLimiter:
                 role = "unassigned"
             self.slots[i] = CredentialSlot(slot=i, role=role)
 
+        self._slot_buckets: Dict[int, float] = {}
+        self._slot_last_refill: Dict[int, float] = {}
+        self._bucket_capacity = 60.0
+        self._bucket_refill_rate = 20.0 / 60.0  # 20 weight per minute = ~1 typical request every 3s
+
     def _endpoint_key(self, path: str) -> str:
         return path.split("?")[0].rstrip("/")
 
@@ -100,6 +105,21 @@ class RateLimiter:
                 return False
 
             weight = _endpoint_weight(path)
+
+            now = time.monotonic()
+            if slot not in self._slot_buckets:
+                self._slot_buckets[slot] = self._bucket_capacity
+                self._slot_last_refill[slot] = now
+
+            elapsed = now - self._slot_last_refill.get(slot, now)
+            self._slot_buckets[slot] = min(self._bucket_capacity, self._slot_buckets.get(slot, 0) + elapsed * self._bucket_refill_rate)
+            self._slot_last_refill[slot] = now
+
+            if self._slot_buckets[slot] < weight:
+                logger.debug(f"slot {slot} bucket empty ({self._slot_buckets[slot]:.1f} < {weight})")
+                return False
+
+            self._slot_buckets[slot] -= weight
             cred.total_calls += 1
             cred.total_weight += weight
             cred.endpoints[ep_key] = cred.endpoints.get(ep_key, 0) + 1

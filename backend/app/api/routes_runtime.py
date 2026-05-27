@@ -607,6 +607,9 @@ async def runtime_filter_stats(request: Request):
                 "unique_count": ctx.get("unique_fetched_count"),
                 "duplicate_count_estimate": ctx.get("duplicate_count_estimate"),
                 "platform_fetch": ctx.get("platform_fetch"),
+                "trench_groups": ctx.get("trench_groups"),
+                "run_started_at": ctx.get("run_started_at"),
+                "run_finished_at": ctx.get("run_finished_at"),
                 "created_at": ev.get("created_at"),
             })
 
@@ -825,11 +828,11 @@ async def _build_credential_health() -> List[Dict[str, Any]]:
 async def _build_feature_stage_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, summary: Dict[str, Any]) -> List[Dict[str, Any]]:
     from ..providers.rate_limiter import _endpoint_weight
     stages = [
-        {"stage": "risk_filter", "label": "Trenches本地风控(Stage 0)", "endpoint": "/v1/trenches", "weight": _endpoint_weight("/v1/trenches")},
-        {"stage": "top_holder_filter", "label": "Top1 Holder(Stage 1)", "endpoint": "/v1/market/token_top_holders", "weight": _endpoint_weight("/v1/market/token_top_holders")},
-        {"stage": "price_filter", "label": "Token Info价格面(Stage 2)", "endpoint": "/v1/token/info", "weight": _endpoint_weight("/v1/token/info")},
-        {"stage": "kline_fallback", "label": "Kline回退(Stage 3)", "endpoint": "/v1/market/token_kline", "weight": _endpoint_weight("/v1/market/token_kline")},
-        {"stage": "smart_degen_filter", "label": "Smart Degen(Stage 4)", "endpoint": "/v1/market/token_top_holders", "weight": _endpoint_weight("/v1/market/token_top_holders")},
+        {"stage": "risk_filter", "label": "Trenches本地(Stage 0)", "endpoint_filter": "%v1/trenches%", "weight": 3},
+        {"stage": "price_filter", "label": "Token Info价格(Stage 1)", "endpoint_filter": "%v1/token/info%", "weight": 1},
+        {"stage": "kline_fallback", "label": "Kline回退(Stage 2)", "endpoint_filter": "%v1/market/token_kline%", "weight": 2},
+        {"stage": "top_holder_filter", "label": "Top1 Holder(Stage 3)", "endpoint_filter": "%v1/market/token_top_holders%", "weight": 5},
+        {"stage": "smart_degen_filter", "label": "Smart Degen(Stage 4)", "endpoint_filter": "%v1/market/token_top_holders%", "weight": 5},
     ]
     result: List[Dict[str, Any]] = []
     for s in stages:
@@ -841,18 +844,19 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
         ok_rate_val = None
         rate_limited = 0
         if has_window:
+            ep_filter = s["endpoint_filter"]
             api_row = await _fetch_one(repo,
                 "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND created_at>=? AND created_at<=?",
-                (f"%{stage.replace('_filter','')}%", lower_bound, upper_bound))
+                (ep_filter, lower_bound, upper_bound))
             api_calls = int((api_row or {}).get("c", 0))
             if api_calls > 0:
                 ok_row = await _fetch_one(repo,
                     "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND ok=1 AND created_at>=? AND created_at<=?",
-                    (f"%{stage.replace('_filter','')}%", lower_bound, upper_bound))
+                    (ep_filter, lower_bound, upper_bound))
                 ok_rate_val = round(int((ok_row or {}).get("c", 0)) / max(api_calls, 1), 3)
             rl_row = await _fetch_one(repo,
                 "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE ? AND status_code=429 AND created_at>=? AND created_at<=?",
-                (f"%{stage.replace('_filter','')}%", lower_bound, upper_bound))
+                (ep_filter, lower_bound, upper_bound))
             rate_limited = int((rl_row or {}).get("c", 0))
         if total > 0 and failed == total:
             severity = "critical"
@@ -861,7 +865,7 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
         else:
             severity = "ok"
         result.append({
-            "stage": stage, "label": s["label"], "endpoint": s["endpoint"], "weight": s["weight"],
+            "stage": stage, "label": s["label"], "endpoint": s["endpoint_filter"].replace('%',''), "weight": s["weight"],
             "candidates_in": total, "checked_count": total, "passed_count": passed,
             "failed_count": failed, "skipped_count": 0,
             "api_calls": api_calls, "ok_rate": ok_rate_val, "rate_limited_count": rate_limited,
