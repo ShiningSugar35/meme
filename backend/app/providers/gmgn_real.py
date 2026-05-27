@@ -191,6 +191,12 @@ class GMGNProvider(MarketDataProvider):
                             if "chain" in post_body:
                                 post_params["chain"] = post_body.pop("chain")
                         resp = await client.post(url, params=post_params, json=post_body, headers=headers)
+                        logged_request["body_summary"] = {
+                            "new_creation": {
+                                k: v for k, v in post_body.get("new_creation", {}).items()
+                                if k in ("launchpad_platform", "launchpad_platform_v2", "min_created", "max_created", "limit", "filters", "quote_address_type")
+                            }
+                        } if isinstance(post_body.get("new_creation"), dict) else {"body_type": type(post_body).__name__}
                     else:
                         resp = await client.get(url, params=request_params, headers=headers)
                 latency = int((time.perf_counter() - started) * 1000)
@@ -295,8 +301,8 @@ class GMGNProvider(MarketDataProvider):
             "pool_address": cls._first_present(raw, ["pool_address", "pair_address", "pool", "pair", "address_pair"]),
             "pool_created_at": cls._first_present(raw, ["pool_created_at", "creation_time", "created_at", "open_time", "launch_time", "created_timestamp"]),
             "type": cls._first_present(raw, ["type", "trench_type", "category"]),
-            "launchpad": cls._first_present(raw, ["launchpad", "platform", "source_platform", "pool_platform"]),
-            "platform": cls._first_present(raw, ["platform", "launchpad", "source_platform", "pool_platform"]),
+            "launchpad": cls._first_present(raw, ["launchpad_platform", "launchpad", "platform", "source_platform", "pool_platform"]),
+            "platform": cls._first_present(raw, ["launchpad_platform", "platform", "launchpad", "source_platform", "pool_platform"]),
             "symbol": cls._first_present(raw, ["symbol", "base_symbol"]),
             "name": cls._first_present(raw, ["name", "base_name"]),
             "liquidity_usd": cls._to_float(cls._first_present(raw, ["liquidity_usd", "liquidity", "pool_liquidity_usd", "reserve_usd"])),
@@ -546,10 +552,6 @@ class GMGNProvider(MarketDataProvider):
             "price_1m": self._to_float(self._first_present(price_nested, ["price_1m", "price1m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_1m", "price1m"])),
             "price_5m": self._to_float(self._first_present(price_nested, ["price_5m", "price5m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_5m", "price5m"])),
             "price_1h": self._to_float(self._first_present(price_nested, ["price_1h", "price1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_1h", "price1h"])),
-            "price_change_percent1h": (
-                self._to_float(self._first_present(price_nested, ["price_change_percent1h", "price_change_1h", "change1h"]))
-                if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_change_percent1h", "price_change_1h", "change1h"]))
-            ),
             "raw_json": json.dumps(data, ensure_ascii=False, default=str),
             "source_mode": "REAL",
         }

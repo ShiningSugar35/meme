@@ -283,12 +283,22 @@ export default function Portfolio() {
               </>
             )}
 
-            {dsh.price_age_health && dsh.price_age_health.warnings?.length > 0 && (
+            {dsh.price_age_health && (
               <>
                 <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>价格年龄诊断</h3>
-                {dsh.price_age_health.warnings.map((w, idx) => (
-                  <p className="message" key={idx} style={{fontSize:12}}>{w}</p>
-                ))}
+                {dsh.price_age_health.price_screen_not_reached_reason && (
+                  <p className="message" style={{fontSize:12}}>
+                    {dsh.price_age_health.price_screen_not_reached_reason}
+                  </p>
+                )}
+                <div className="metric-row">
+                  <span>到达价格面筛选数</span>
+                  <strong>{dsh.price_age_health.price_screen_reached_count ?? 0}</strong>
+                </div>
+                <div className="metric-row">
+                  <span>风险失败未进价格面</span>
+                  <strong>{dsh.price_age_health.risk_only_failed_count ?? 0}</strong>
+                </div>
                 <div className="metric-row">
                   <span>未满60分钟记录</span>
                   <strong>{dsh.price_age_health.under_60m_count ?? 0}</strong>
@@ -297,8 +307,16 @@ export default function Portfolio() {
                   <span>年龄解析缺失</span>
                   <strong>{dsh.price_age_health.age_parse_missing_count ?? 0}</strong>
                 </div>
-              </>
-            )}
+                {Array.from(Object.entries(dsh.price_age_health.price_change_source_counts || {})).map(([k,v]) => (
+                  <div className="metric-row" key={'pcsrc_'+k}>
+                    <span>price_change源: {k}</span>
+                    <strong>{v}</strong>
+                  </div>
+                ))}
+                {dsh.price_age_health.warnings?.length > 0 && dsh.price_age_health.warnings.map((w, idx) => (
+                  <p className="message" key={idx} style={{fontSize:12}}>{w}</p>
+                ))}
+              </>)}
 
             {dsh.system_event_warnings && dsh.system_event_warnings.length > 0 && (
               <>

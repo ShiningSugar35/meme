@@ -502,9 +502,10 @@ async def run_price_filter(
     # --- price_change_1h rule ---
     # Priority when age < 60min: 1) kline since open  2) computed from price_1h
     # Priority when age >= 60min: 1) computed from price_1h
-    # (GMGN API does not provide a price_change_percent1h field — confirmed via live API test.
-    #  The token/info price nested object contains price/price_1h/swaps but no percent-change field.)
-    pct_threshold = 0.7 - 0.2 * y
+    # Unit: pct_change_1h is in percent_points (already multiplied by 100).
+    #       threshold is also in percent_points: (0.7 - 0.2*y) * 100.
+    #       For y=2.25 → threshold = 25.0 (i.e. need more than 25% gain).
+    pct_threshold = (0.7 - 0.2 * y) * 100.0
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
     price_change_age_mode: str = "unknown"
@@ -548,6 +549,7 @@ async def run_price_filter(
         "age_mode": price_change_age_mode,
         "age_minutes": age_minutes,
         "age_missing": age_missing,
+        "price_change_unit": "percent_points",
     }
     if creation_ts is not None:
         price_change_detail["creation_ts"] = creation_ts
@@ -588,6 +590,7 @@ async def run_price_filter(
         "price_change_1h_pct": pct_change_1h,
         "price_change_source": price_change_source,
         "price_change_age_mode": price_change_age_mode,
+        "price_change_unit": "percent_points",
         "degen_count": degen_count,
         "age_minutes": age_minutes,
         "creation_ts": creation_ts,

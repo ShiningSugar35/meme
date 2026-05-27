@@ -1,4 +1,5 @@
 import asyncio
+import math
 from datetime import datetime, timedelta, timezone
 from ..strategy.filters import run_initial_filter, run_price_filter, _parse_creation_ts, _compute_age_minutes
 
@@ -176,6 +177,57 @@ def test_price_filter_price_change_age_45m():
     assert pct_detail.get("age_mode") == "young_no_kline_fallback"
     # (0.0015 - 0.001) / 0.001 * 100 = 50%
     assert pct_detail.get("pct_change") == 50.0
+    # threshold = (0.7 - 0.2*2.25) * 100 = 25.0
+    assert math.isclose(pct_detail.get("threshold") or 0, 25.0, rel_tol=1e-9)
+    # unit should be percent_points
+    assert pct_detail.get("price_change_unit") == "percent_points"
+    assert pct_detail.get("passed") is True, "50% > 25% should pass"
+
+
+def test_price_change_unit_in_feature_vector():
+    """Verify price_change_unit is present in feature_vector."""
+    token = {
+        "type": "new_creation",
+        "pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat(),
+    }
+    latest = {
+        "price": 0.001,
+        "price_usd": 0.001,
+        "swaps_5m": 100,
+        "swaps_1h": 200,
+        "price_1h": 0.00099,
+    }
+    sg = {"x": 0.2, "y": 2.25}
+    res = asyncio.run(run_price_filter(token, sg, latest, []))
+    assert res.feature_vector.get("price_change_unit") == "percent_points"
+    assert res.feature_vector.get("price_change_source") == "computed_from_price_1h"
+
+
+def test_platform_field_launchpad_platform():
+    """GMGN raw item with only launchpad_platform should be recognized as platform."""
+    from ..providers.gmgn_real import GMGNProvider
+    raw = {"token_mint": "TEST111", "launchpad_platform": "Pump.fun", "type": "new_creation",
+           "liquidity_usd": 30000, "renounced_mint": 1, "renounced_freeze_account": 1,
+           "burn_status": "burn"}
+    normalized = GMGNProvider._normalize_token_data(raw)
+    assert normalized.get("platform") == "Pump.fun"
+    assert normalized.get("launchpad") == "Pump.fun"
+
+
+def test_platform_normalized_passes_risk_filter():
+    """Token normalized from launchpad_platform should pass platform whitelist check."""
+    raw = {"token_mint": "TEST222", "launchpad_platform": "Pump.fun", "type": "new_creation",
+           "top_10_holder_rate": 0.18, "top1_holder_rate": 0.04, "liquidity_usd": 30000,
+           "renounced_mint": 1, "renounced_freeze_account": 1,
+           "max_rug_ratio": -0.1, "max_entrapment_ratio": -0.1,
+           "is_wash_trading": 0, "rat_trader_amount_rate": -0.1,
+           "suspected_insider_hold_rate": 0.05, "max_bundler_rate": -0.1,
+           "fresh_wallet_rate": 0.1, "sell_tax": 0.01, "has_social": 1,
+           "burn_status": "burn", "sniper_count": 1}
+    from ..providers.gmgn_real import GMGNProvider
+    snapshot = GMGNProvider._normalize_token_data(raw)
+    res = asyncio.run(run_initial_filter(snapshot, {"x": 0.15}, datetime.now(timezone.utc)))
+    assert res.passed is True, f"Should pass platform whitelist, got: {[d.name for d in res.details if not d.passed]}"
 
 
 def test_price_filter_fallback_to_price_1h():

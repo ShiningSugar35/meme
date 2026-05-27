@@ -16,6 +16,7 @@ from ..trading.executor import TradingPipeline
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
 
 SNAPSHOT_COLUMNS = [
+    'pool_address', 'platform', 'launchpad',
     'type', 'liquidity_usd', 'sol_side_liquidity', 'volume_usd', 'market_cap',
     'price_usd', 'price_sol', 'top_10_holder_rate', 'top1_holder_rate',
     'renounced_mint', 'renounced_freeze_account', 'max_rug_ratio',

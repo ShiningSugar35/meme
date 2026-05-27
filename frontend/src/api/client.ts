@@ -154,6 +154,9 @@ export interface PriceAgeHealth {
   age_parse_missing_count: number;
   price_change_source_counts: Record<string, number>;
   swaps_source_counts: Record<string, number>;
+  price_screen_reached_count?: number;
+  risk_only_failed_count?: number;
+  price_screen_not_reached_reason?: string;
   warnings: string[];
 }
 

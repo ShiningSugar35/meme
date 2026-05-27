@@ -899,7 +899,7 @@ async def _build_field_health(repo: Repositories, lower_bound: str, upper_bound:
         -x["missing_rate"],
         -x["zero_rate"],
     ))
-    return results[:12]
+    return results
 
 
 async def _build_price_age_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> Dict[str, Any]:
@@ -908,15 +908,42 @@ async def _build_price_age_health(repo: Repositories, lower_bound: str, upper_bo
         "age_parse_missing_count": 0,
         "price_change_source_counts": {},
         "swaps_source_counts": {},
+        "price_screen_reached_count": 0,
+        "risk_only_failed_count": 0,
+        "price_screen_not_reached_reason": "",
         "warnings": [],
     }
     if not has_window:
         return result
 
-    rows = await _fetch_all(repo,
+    price_rows = await _fetch_all(repo,
         "SELECT feature_vector_json FROM token_strategy_matches WHERE stage='price_filter' AND created_at>=? AND created_at<=?",
         (lower_bound, upper_bound))
-    if not rows:
+    result["price_screen_reached_count"] = len(price_rows)
+
+    risk_fail_rows = await _fetch_all(repo,
+        """SELECT tsm.token_mint FROM token_strategy_matches tsm
+           WHERE tsm.stage='risk_filter' AND tsm.passed=0 AND tsm.created_at>=? AND tsm.created_at<=?
+             AND NOT EXISTS (SELECT 1 FROM token_strategy_matches psm
+                             WHERE psm.token_mint=tsm.token_mint AND psm.stage='price_filter'
+                               AND psm.created_at>=? AND psm.created_at<=?)
+           LIMIT 5""",
+        (lower_bound, upper_bound, lower_bound, upper_bound))
+    risk_failed_count_row = await _fetch_one(repo,
+        """SELECT COUNT(DISTINCT token_mint) AS c FROM token_strategy_matches
+           WHERE stage='risk_filter' AND passed=0 AND created_at>=? AND created_at<=?
+             AND NOT EXISTS (SELECT 1 FROM token_strategy_matches psm
+                             WHERE psm.token_mint=token_strategy_matches.token_mint AND psm.stage='price_filter'
+                               AND psm.created_at>=? AND psm.created_at<=?)""",
+        (lower_bound, upper_bound, lower_bound, upper_bound))
+    result["risk_only_failed_count"] = int((risk_failed_count_row or {}).get("c", 0))
+
+    if result["risk_only_failed_count"] > 0 and result["price_screen_reached_count"] == 0:
+        result["price_screen_not_reached_reason"] = f"全部{result['risk_only_failed_count']}个token在risk_filter阶段失败，未到达price_filter阶段。请检查风控字段数据覆盖率与阈值设定。"
+    elif result["risk_only_failed_count"] > 0:
+        result["price_screen_not_reached_reason"] = f"{result['risk_only_failed_count']}个token在risk_filter失败后未进入price_filter（已通过{result['price_screen_reached_count']}个）。"
+
+    if not price_rows:
         return result
 
     source_counts: Dict[str, int] = defaultdict(int)
@@ -924,7 +951,7 @@ async def _build_price_age_health(repo: Repositories, lower_bound: str, upper_bo
     under_60m = 0
     age_missing = 0
 
-    for row in rows:
+    for row in price_rows:
         try:
             fv = json.loads(row.get("feature_vector_json") or "{}")
         except Exception:
