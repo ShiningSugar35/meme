@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import math
 import shutil
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
@@ -19,6 +19,65 @@ router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
 LOG_EXPORT_DIR = Path("./logs")
 OPEN_POSITION_EXCLUDED_STATUSES = ("CLOSED", "LEGACY_INVALID_CONFIG", "MIGRATION_NEEDED")
+
+RULE_META: Dict[str, Dict[str, str]] = {
+    "type_new_creation": {"label": "type≠new_creation", "stage": "risk_filter", "section": "基础筛选条件"},
+    "min_liquidity_usd": {"label": "流动性不足", "stage": "risk_filter", "section": "基础筛选条件"},
+    "platform": {"label": "平台不在白名单", "stage": "risk_filter", "section": "基础筛选条件"},
+    "top_10_holder_rate_range": {"label": "top10持仓比超限", "stage": "risk_filter", "section": "风控指标"},
+    "renounced_mint": {"label": "mint未renounce", "stage": "risk_filter", "section": "基础/风控"},
+    "renounced_freeze_account": {"label": "freeze未renounce", "stage": "risk_filter", "section": "基础/风控"},
+    "rug_ratio": {"label": "rug比例超标", "stage": "risk_filter", "section": "风控指标"},
+    "entrapment_ratio": {"label": "entrapment超标", "stage": "risk_filter", "section": "风控指标"},
+    "is_wash_trading": {"label": "疑似wash trading", "stage": "risk_filter", "section": "风控指标"},
+    "rat_trader_amount_rate": {"label": "rat trader超标", "stage": "risk_filter", "section": "风控指标"},
+    "suspected_insider_hold_rate": {"label": "疑似内幕持仓", "stage": "risk_filter", "section": "风控指标"},
+    "bundler_trader_amount_rate": {"label": "bundler比例超标", "stage": "risk_filter", "section": "风控指标"},
+    "fresh_wallet_rate": {"label": "新钱包比例超标", "stage": "risk_filter", "section": "风控指标"},
+    "sell_tax": {"label": "sell_tax超标", "stage": "risk_filter", "section": "风控指标"},
+    "has_at_least_one_social": {"label": "缺少社交(仅x<0.15)", "stage": "risk_filter", "section": "基础/社交"},
+    "burn_status": {"label": "burn状态不符", "stage": "risk_filter", "section": "风控指标"},
+    "sniper_count": {"label": "sniper数量超标", "stage": "risk_filter", "section": "风控指标"},
+    "top1_holder": {"label": "TOP1持仓超标", "stage": "risk_filter", "section": "风控指标"},
+    "latest_price_present": {"label": "最新价格缺失", "stage": "price_filter", "section": "价格面及其他指标"},
+    "swaps_5m_scaled": {"label": "swaps_5m不达标", "stage": "price_filter", "section": "价格面及其他指标"},
+    "price_change_1h": {"label": "1h价格涨幅不足", "stage": "price_filter", "section": "价格面及其他指标"},
+    "smart_degen": {"label": "聪明钱指标不满足", "stage": "price_filter", "section": "价格面及其他指标"},
+    "top1_holder_rate_observed": {"label": "TOP1持有率观测", "stage": "risk_filter", "section": "observed_only"},
+}
+
+FIELD_SECTION_MAP: Dict[str, Tuple[str, str, str]] = {
+    "type": ("风控指标", "type", "trenches"),
+    "liquidity_usd": ("风控指标", "最新流动性", "trenches/token_metric_snapshots"),
+    "top_10_holder_rate": ("风控指标", "top10持仓率", "trenches/token_metric_snapshots"),
+    "top1_holder_rate": ("风控指标", "top1持仓率", "trenches/token_metric_snapshots"),
+    "renounced_mint": ("基础/风控", "mint已renounce", "trenches/token_metric_snapshots"),
+    "renounced_freeze_account": ("基础/风控", "freeze已renounce", "trenches/token_metric_snapshots"),
+    "max_rug_ratio": ("风控指标", "rug比例", "trenches/token_metric_snapshots"),
+    "max_entrapment_ratio": ("风控指标", "entrapment比例", "trenches/token_metric_snapshots"),
+    "is_wash_trading": ("风控指标", "wash trading标记", "trenches/token_metric_snapshots"),
+    "rat_trader_amount_rate": ("风控指标", "rat trader比例", "trenches/token_metric_snapshots"),
+    "suspected_insider_hold_rate": ("风控指标", "内幕持仓率", "trenches/token_metric_snapshots"),
+    "max_bundler_rate": ("风控指标", "bundler比例", "trenches/token_metric_snapshots"),
+    "fresh_wallet_rate": ("风控指标", "新钱包比例", "trenches/token_metric_snapshots"),
+    "sell_tax": ("风控指标", "卖税", "trenches/token_metric_snapshots"),
+    "has_social": ("基础/社交", "社交标记", "trenches/token_metric_snapshots"),
+    "burn_status": ("风控指标", "burn状态", "trenches/token_metric_snapshots"),
+    "sniper_count": ("风控指标", "sniper数量", "trenches/token_metric_snapshots"),
+    "launchpad": ("基础/社交", "平台", "trenches/token_metric_snapshots"),
+    "market_cap": ("价格面", "市值", "trenches/token_metric_snapshots"),
+    "price_usd": ("价格面", "价格", "trenches/token_metric_snapshots"),
+}
+
+CRITICAL_NUMERIC_FIELDS = {"liquidity_usd", "market_cap", "price_usd", "volume_usd"}
+
+def _resolve_rule_meta(rule: str) -> Dict[str, str]:
+    if rule in RULE_META:
+        meta = dict(RULE_META[rule])
+        if meta.get("section") == "observed_only":
+            meta["exclude_from_ranking"] = "true"
+        return meta
+    return {"label": rule, "stage": "unknown", "section": "未知/其他指标"}
 
 
 DEFAULT_SIM_STRATEGIES: List[Dict[str, Any]] = [
@@ -494,65 +553,488 @@ async def runtime_portfolio_table(request: Request, account_type: str = "SIM", l
 async def runtime_filter_stats(request: Request):
     repo, owned = await _get_repo(request)
     try:
-        # 近10次 discovery run 的 trenches 拉回数 & 初筛通过数
         discovery_events = await _fetch_all(
             repo,
             """
-            SELECT id, context_json FROM system_events
+            SELECT id, context_json, created_at FROM system_events
             WHERE category = 'DISCOVERY' AND message = 'Discovery run complete'
-            ORDER BY created_at DESC LIMIT 10
+            ORDER BY created_at DESC LIMIT 11
             """,
         )
+
+        if not discovery_events:
+            return {
+                "trench_history": [],
+                "filter_fails": [],
+                "data_source_health": {"summary": {}, "endpoint_health": [], "field_health": [], "price_age_health": {}, "platform_health": []},
+            }
+
+        recent_10 = list(reversed(discovery_events[:10]))
+        if len(discovery_events) >= 11:
+            lower_bound = str(discovery_events[10].get("created_at") or "")
+        elif recent_10:
+            lower_bound = str(recent_10[0].get("created_at") or "")
+        else:
+            lower_bound = ""
+        upper_bound = utc_now_iso()
+
         trench_history: List[Dict[str, Any]] = []
-        discovery_event_ids: List[int] = []
-        for ev in reversed(discovery_events):
+        for ev in recent_10:
             try:
                 ctx = json.loads(ev.get("context_json", "{}"))
             except Exception:
                 ctx = {}
             trench_history.append({
-                "count": ctx.get("count", 0),
+                "count": ctx.get("count", ctx.get("unique_fetched_count", 0)),
                 "passed": ctx.get("tracked_initial_passed", 0),
+                "raw_count": ctx.get("raw_fetched_count"),
+                "unique_count": ctx.get("unique_fetched_count"),
+                "duplicate_count_estimate": ctx.get("duplicate_count_estimate"),
+                "platform_fetch": ctx.get("platform_fetch"),
+                "created_at": ev.get("created_at"),
             })
-            discovery_event_ids.append(int(ev["id"]))
 
-        # 淘汰统计：仅统计近10次 discovery run 中风险/价格面未通过的记录
-        fail_rows_raw: List[Dict[str, Any]] = []
-        if discovery_event_ids:
-            placeholders = ",".join(["?"] * len(discovery_event_ids))
-            fail_rows_raw = await _fetch_all(
+        has_window = bool(lower_bound)
+        if has_window:
+            match_rows = await _fetch_all(
                 repo,
-                f"""
-                SELECT pass_fail_detail_json FROM token_strategy_matches
-                WHERE stage IN ('risk_filter', 'price_filter') AND passed = 0
-                  AND discovery_event_id IN ({placeholders})
+                """
+                SELECT pass_fail_detail_json, stage FROM token_strategy_matches
+                WHERE created_at >= ? AND created_at <= ?
+                  AND stage IN ('risk_filter', 'price_filter')
                 """,
-                tuple(discovery_event_ids),
+                (lower_bound, upper_bound),
             )
-        fail_counts: Dict[str, int] = {}
-        for row in fail_rows_raw:
+        else:
+            match_rows = await _fetch_all(
+                repo,
+                """
+                SELECT pass_fail_detail_json, stage FROM token_strategy_matches
+                WHERE stage IN ('risk_filter', 'price_filter')
+                ORDER BY created_at DESC LIMIT 20000
+                """,
+            )
+
+        rule_stats: Dict[str, Dict[str, Any]] = {}
+        for row in match_rows:
+            stage = str(row.get("stage") or "")
             try:
                 details = json.loads(row.get("pass_fail_detail_json", "[]"))
             except Exception:
-                continue
+                details = []
+            if not isinstance(details, list):
+                details = []
             for d in details:
-                if isinstance(d, dict) and not d.get("passed", True):
-                    name = str(d.get("name") or d.get("rule") or "unknown")
-                    fail_counts[name] = fail_counts.get(name, 0) + 1
+                if not isinstance(d, dict):
+                    continue
+                rule = str(d.get("name") or d.get("rule") or "unknown")
+                passed = bool(d.get("passed", True))
+                missing = bool(d.get("missing", False)) or bool(d.get("age_missing", False))
+                value = d.get("value")
+                threshold = d.get("threshold")
+
+                if rule not in rule_stats:
+                    meta = _resolve_rule_meta(rule)
+                    rule_stats[rule] = {
+                        "rule": rule,
+                        "label": meta.get("label", rule),
+                        "stage": meta.get("stage", "unknown"),
+                        "section": meta.get("section", "未知/其他指标"),
+                        "checked_count": 0,
+                        "failed_count": 0,
+                        "missing_count": 0,
+                        "sample_values": [],
+                        "exclude_from_ranking": meta.get("exclude_from_ranking") == "true" or meta.get("section") == "observed_only",
+                    }
+
+                rs = rule_stats[rule]
+                rs["checked_count"] += 1
+                if not passed:
+                    rs["failed_count"] += 1
+                if missing:
+                    rs["missing_count"] += 1
+                if len(rs["sample_values"]) < 5:
+                    rs["sample_values"].append(str(value or "")[:40])
+
+        for rule, rs in rule_stats.items():
+            cc = max(rs["checked_count"], 1)
+            rs["fail_rate"] = rs["failed_count"] / cc
+            rs["fail_rate_pct"] = round(rs["fail_rate"] * 100.0, 1)
+
         filter_fails = sorted(
-            [{"rule": k, "count": v} for k, v in fail_counts.items()],
-            key=lambda x: x["count"], reverse=True,
+            [rs for rule, rs in rule_stats.items() if not rs.get("exclude_from_ranking")],
+            key=lambda x: (-x["fail_rate"], -x["failed_count"], x["rule"]),
         )
+
+        data_source_health = await _build_data_source_health(repo, lower_bound, upper_bound, has_window, trench_history)
 
         return {
             "trench_history": trench_history,
             "filter_fails": filter_fails,
+            "data_source_health": data_source_health,
         }
     except Exception as e:
-        return {"trench_history": [], "filter_fails": [], "error": str(e)}
+        logger.warning("filter-stats error", error=str(e))
+        return {"trench_history": [], "filter_fails": [], "data_source_health": {}, "error": str(e)}
     finally:
         if owned:
             await repo.close()
+
+
+async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, trench_history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {"window_run_count": len(trench_history)}
+
+    raw_fetched_total = 0
+    unique_fetched_total = 0
+    duplicate_total = 0
+    for th in trench_history:
+        raw_fetched_total += int(th.get("raw_count") or th.get("count") or 0)
+        unique_fetched_total += int(th.get("unique_count") or th.get("count") or 0)
+        duplicate_total += int(th.get("duplicate_count_estimate") or 0)
+
+    summary.update({
+        "raw_fetched_count": raw_fetched_total,
+        "unique_fetched_count": unique_fetched_total,
+        "duplicate_count_estimate": duplicate_total,
+        "trench_total": raw_fetched_total,
+    })
+
+    if has_window:
+        risk_match_count_row = await _fetch_one(repo,
+            "SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage='risk_filter' AND created_at>=? AND created_at<=?",
+            (lower_bound, upper_bound))
+        risk_pass_count_row = await _fetch_one(repo,
+            "SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage='risk_filter' AND passed=1 AND created_at>=? AND created_at<=?",
+            (lower_bound, upper_bound))
+        price_match_count_row = await _fetch_one(repo,
+            "SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage='price_filter' AND created_at>=? AND created_at<=?",
+            (lower_bound, upper_bound))
+        price_pass_count_row = await _fetch_one(repo,
+            "SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage='price_filter' AND passed=1 AND created_at>=? AND created_at<=?",
+            (lower_bound, upper_bound))
+        summary["risk_match_count"] = int((risk_match_count_row or {}).get("c", 0))
+        summary["risk_pass_count"] = int((risk_pass_count_row or {}).get("c", 0))
+        summary["price_match_count"] = int((price_match_count_row or {}).get("c", 0))
+        summary["price_pass_count"] = int((price_pass_count_row or {}).get("c", 0))
+
+    endpoint_health = await _build_endpoint_health(repo, lower_bound, upper_bound, has_window)
+    field_health = await _build_field_health(repo, lower_bound, upper_bound, has_window)
+    price_age_health = await _build_price_age_health(repo, lower_bound, upper_bound, has_window)
+    platform_health = await _build_platform_health(repo, lower_bound, upper_bound, has_window, trench_history)
+
+    system_event_warnings = await _build_system_event_warnings(repo, lower_bound, upper_bound, has_window)
+
+    return {
+        "summary": summary,
+        "endpoint_health": endpoint_health,
+        "field_health": field_health,
+        "price_age_health": price_age_health,
+        "platform_health": platform_health,
+        "system_event_warnings": system_event_warnings,
+    }
+
+
+async def _build_endpoint_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> List[Dict[str, Any]]:
+    if not has_window:
+        return []
+    all_rows = await _fetch_all(repo,
+        "SELECT endpoint, method, status_code, latency_ms, ok, error_summary FROM provider_requests WHERE provider='GMGN' AND created_at>=? AND created_at<=? ORDER BY id DESC",
+        (lower_bound, upper_bound))
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in all_rows:
+        ep = str(row.get("endpoint") or "")
+        if ep not in grouped:
+            grouped[ep] = {"endpoint": ep, "method": str(row.get("method", "GET")), "calls": 0, "ok_calls": 0, "total_latency": 0,
+                           "latest_status_code": None, "latest_error": None, "status_codes": []}
+        grp = grouped[ep]
+        grp["calls"] += 1
+        grp["total_latency"] += int(row.get("latency_ms") or 0)
+        if int(row.get("ok") or 0):
+            grp["ok_calls"] += 1
+        sc = row.get("status_code")
+        if sc is not None:
+            grp["status_codes"].append(int(sc))
+            if not grp["latest_status_code"]:
+                grp["latest_status_code"] = int(sc)
+            grp["latest_status_code"] = int(sc)
+        err = row.get("error_summary")
+        if err:
+            grp["latest_error"] = str(err)[:200]
+
+    result: List[Dict[str, Any]] = []
+    for ep, grp in grouped.items():
+        calls = max(grp["calls"], 1)
+        ok_rate = grp["ok_calls"] / calls
+        if ok_rate < 0.5:
+            severity = "critical"
+        elif ok_rate < 0.9:
+            severity = "warn"
+        else:
+            severity = "ok"
+        result.append({
+            "endpoint": ep,
+            "method": grp["method"],
+            "calls": grp["calls"],
+            "ok_calls": grp["ok_calls"],
+            "ok_rate": round(ok_rate, 3),
+            "latest_status_code": grp["latest_status_code"],
+            "avg_latency_ms": round(grp["total_latency"] / calls, 1),
+            "latest_error": grp["latest_error"],
+            "severity": severity,
+        })
+    return sorted(result, key=lambda x: (0 if x["severity"] == "critical" else 1 if x["severity"] == "warn" else 2, -x["ok_rate"]))
+
+
+async def _build_field_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> List[Dict[str, Any]]:
+    FIELDS = [
+        ("type", "type"), ("liquidity_usd", "流动性"), ("top_10_holder_rate", "top10持仓率"),
+        ("top1_holder_rate", "top1持仓率"), ("renounced_mint", "mint renounce"),
+        ("renounced_freeze_account", "freeze renounce"), ("max_rug_ratio", "rug比例"),
+        ("max_entrapment_ratio", "entrapment比例"), ("is_wash_trading", "wash trading"),
+        ("rat_trader_amount_rate", "rat trader"), ("suspected_insider_hold_rate", "内幕持仓率"),
+        ("max_bundler_rate", "bundler比例"), ("fresh_wallet_rate", "新钱包比例"),
+        ("sell_tax", "卖税"), ("has_social", "社交"), ("burn_status", "burn状态"),
+        ("sniper_count", "sniper数量"), ("launchpad", "平台"), ("market_cap", "市值"),
+        ("price_usd", "价格"),
+    ]
+
+    token_count = 0
+    if has_window:
+        cnt_row = await _fetch_one(repo,
+            "SELECT COUNT(*) AS c FROM tokens WHERE first_seen_at >= ? AND first_seen_at <= ?",
+            (lower_bound, upper_bound))
+        token_count = int((cnt_row or {}).get("c", 0))
+    else:
+        cnt_row = await _fetch_one(repo, "SELECT COUNT(*) AS c FROM tokens")
+        token_count = int((cnt_row or {}).get("c", 0))
+
+    if token_count == 0:
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for col, label in FIELDS:
+        if has_window:
+            nonnull_row = await _fetch_one(repo,
+                f"SELECT COUNT(*) AS c FROM token_metric_snapshots WHERE {col} IS NOT NULL AND {col} != '' AND observed_at >= ? AND observed_at <= ?",
+                (lower_bound, upper_bound))
+            all_row = await _fetch_one(repo,
+                "SELECT COUNT(*) AS c FROM token_metric_snapshots WHERE observed_at >= ? AND observed_at <= ?",
+                (lower_bound, upper_bound))
+        else:
+            nonnull_row = await _fetch_one(repo,
+                f"SELECT COUNT(*) AS c FROM token_metric_snapshots WHERE {col} IS NOT NULL AND {col} != ''")
+            all_row = await _fetch_one(repo,
+                "SELECT COUNT(*) AS c FROM token_metric_snapshots")
+
+        checked = int((all_row or {}).get("c", 0))
+        nonnull = int((nonnull_row or {}).get("c", 0))
+        if checked == 0:
+            continue
+        missing = checked - nonnull
+        missing_rate = missing / checked
+
+        is_numeric = col in CRITICAL_NUMERIC_FIELDS or any(t in col.lower() for t in ("rate", "ratio", "tax", "count", "cap"))
+        zero_count = 0
+        if is_numeric and nonnull > 0:
+            zero_clause = f"AND ({col} = 0 OR {col} = 0.0 OR CAST({col} AS REAL) = 0)"
+            if has_window:
+                zero_row = await _fetch_one(repo,
+                    f"SELECT COUNT(*) AS c FROM token_metric_snapshots WHERE observed_at >= ? AND observed_at <= ? {zero_clause}",
+                    (lower_bound, upper_bound))
+            else:
+                zero_row = await _fetch_one(repo,
+                    f"SELECT COUNT(*) AS c FROM token_metric_snapshots WHERE {zero_clause}")
+            zero_count = int((zero_row or {}).get("c", 0))
+        zero_rate = zero_count / max(nonnull, 1)
+
+        sample_vals: List[str] = []
+        if has_window:
+            sample_rows = await _fetch_all(repo,
+                f"SELECT {col}, token_mint FROM token_metric_snapshots WHERE {col} IS NOT NULL AND {col} != '' AND observed_at >= ? AND observed_at <= ? LIMIT 5",
+                (lower_bound, upper_bound))
+        else:
+            sample_rows = await _fetch_all(repo,
+                f"SELECT {col}, token_mint FROM token_metric_snapshots WHERE {col} IS NOT NULL AND {col} != '' LIMIT 5")
+        for sr in sample_rows:
+            v = sr.get(col)
+            sample_vals.append(str(v)[:40])
+        sample_tokens: List[str] = []
+        for sr in sample_rows:
+            t = sr.get("token_mint")
+            if t:
+                sample_tokens.append(str(t)[:12])
+
+        note = ""
+        if missing_rate >= 0.9:
+            severity = "critical"
+            note = "字段基本缺失，可能GMGN字段名未对齐或未返回"
+        elif missing_rate >= 0.2 or (is_numeric and zero_rate >= 0.8):
+            severity = "warn"
+            if missing_rate >= 0.2:
+                note = f"字段缺失率较高 ({missing_rate:.0%})"
+            elif zero_rate >= 0.8:
+                note = f"数值字段为0比例极高 ({zero_rate:.0%})"
+        else:
+            severity = "ok"
+
+        results.append({
+            "section": "风控指标",
+            "field": col,
+            "label": label,
+            "source": "trenches/token_metric_snapshots",
+            "checked_count": checked,
+            "nonnull_count": nonnull,
+            "missing_count": missing,
+            "zero_count": zero_count,
+            "missing_rate": round(missing_rate, 3),
+            "zero_rate": round(zero_rate, 3),
+            "sample_values": sample_vals,
+            "sample_tokens": sample_tokens,
+            "severity": severity,
+            "note": note,
+        })
+
+    results.sort(key=lambda x: (
+        0 if x["severity"] == "critical" else 1 if x["severity"] == "warn" else 2,
+        -x["missing_rate"],
+        -x["zero_rate"],
+    ))
+    return results[:12]
+
+
+async def _build_price_age_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "under_60m_count": 0,
+        "age_parse_missing_count": 0,
+        "price_change_source_counts": {},
+        "swaps_source_counts": {},
+        "warnings": [],
+    }
+    if not has_window:
+        return result
+
+    rows = await _fetch_all(repo,
+        "SELECT feature_vector_json FROM token_strategy_matches WHERE stage='price_filter' AND created_at>=? AND created_at<=?",
+        (lower_bound, upper_bound))
+    if not rows:
+        return result
+
+    source_counts: Dict[str, int] = defaultdict(int)
+    swaps_src_counts: Dict[str, int] = defaultdict(int)
+    under_60m = 0
+    age_missing = 0
+
+    for row in rows:
+        try:
+            fv = json.loads(row.get("feature_vector_json") or "{}")
+        except Exception:
+            fv = {}
+        if not isinstance(fv, dict):
+            continue
+        age = fv.get("age_minutes")
+        if age is not None and isinstance(age, (int, float)) and age < 60:
+            under_60m += 1
+        if fv.get("age_missing"):
+            age_missing += 1
+        src = str(fv.get("price_change_source") or fv.get("price_change_1h_pct_source") or "missing")
+        source_counts[src] = source_counts.get(src, 0) + 1
+        sw_src = str(fv.get("swaps_source") or "missing")
+        swaps_src_counts[sw_src] = swaps_src_counts.get(sw_src, 0) + 1
+
+    result["under_60m_count"] = under_60m
+    result["age_parse_missing_count"] = age_missing
+    result["price_change_source_counts"] = dict(source_counts)
+    result["swaps_source_counts"] = dict(swaps_src_counts)
+
+    warnings: List[str] = []
+    if age_missing > 0:
+        warnings.append(f"{age_missing}条记录无法解析创建时间(age_missing=true)")
+    sm = source_counts.get("missing", 0)
+    if sm > 0:
+        warnings.append(f"{sm}条price_change记录缺失source")
+    sw_m = swaps_src_counts.get("missing", 0)
+    if sw_m > 0:
+        warnings.append(f"{sw_m}条swaps记录缺失source")
+    result["warnings"] = warnings
+    return result
+
+
+async def _build_platform_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, trench_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    platform_items: List[Dict[str, Any]] = []
+    for th in trench_history:
+        pf_meta = th.get("platform_fetch") or {}
+        if pf_meta.get("mode") == "platform_sharded":
+            items = pf_meta.get("items", [])
+            for item in items:
+                if isinstance(item, dict):
+                    ok = bool(item.get("ok", False))
+                    raw_count = item.get("raw_count", 0)
+                    fallback = bool(item.get("fallback_used", False))
+                    if not ok:
+                        severity = "critical"
+                    elif raw_count == 0:
+                        severity = "warn"
+                    elif fallback:
+                        severity = "warn"
+                    else:
+                        severity = "ok"
+                    platform_items.append({
+                        "platform": item.get("platform", ""),
+                        "primary_slot": item.get("primary_slot"),
+                        "used_slot": item.get("used_slot"),
+                        "used_role": item.get("used_role", "primary"),
+                        "ok": ok,
+                        "raw_count": raw_count,
+                        "unique_count": item.get("unique_count", 0),
+                        "duplicate_count": item.get("duplicate_count", 0),
+                        "fallback_used": fallback,
+                        "error": item.get("error"),
+                        "severity": severity,
+                        "latency_ms": item.get("latency_ms"),
+                    })
+            break
+    if not platform_items and has_window:
+        rows = await _fetch_all(repo,
+            "SELECT request_summary_json, ok, status_code FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE '%trenches%' AND created_at>=? AND created_at<=?",
+            (lower_bound, upper_bound))
+        for row in rows:
+            try:
+                req = json.loads(row.get("request_summary_json") or "{}")
+            except Exception:
+                req = {}
+            if isinstance(req, dict) and "platforms" in req:
+                platforms_in = req.get("platforms", [])
+                if isinstance(platforms_in, list) and len(platforms_in) == 1:
+                    platform_items.append({
+                        "platform": str(platforms_in[0]),
+                        "ok": bool(row.get("ok")),
+                        "raw_count": -1,
+                        "severity": "ok" if bool(row.get("ok")) else "critical",
+                    })
+
+    summary = {"platform_sharding_enabled": len(platform_items) > 0}
+    # Attach to meta
+    return platform_items
+
+
+async def _build_system_event_warnings(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> List[Dict[str, Any]]:
+    if not has_window:
+        return []
+    rows = await _fetch_all(repo,
+        """SELECT message, context_json, created_at FROM system_events
+           WHERE level IN ('ERROR', 'WARNING') AND category = 'DISCOVERY' AND created_at >= ? AND created_at <= ?
+           ORDER BY created_at DESC LIMIT 20""",
+        (lower_bound, upper_bound))
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        msg = str(row.get("message", "") or "")
+        if any(kw in msg for kw in ("fetch_trenches failed", "price screen fetch failed", "risk filter exception", "price filter exception", "fetch failed")):
+            try:
+                ctx = json.loads(row.get("context_json", "{}"))
+            except Exception:
+                ctx = {}
+            results.append({"message": msg, "context": ctx, "created_at": row.get("created_at")})
+    return results[:10]
 
 
 def _spec_by_key() -> Dict[str, Dict[str, Any]]:

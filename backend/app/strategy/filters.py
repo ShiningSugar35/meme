@@ -7,9 +7,10 @@ Price screen — y-scaling swap/price rules and smart degen check.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -48,6 +49,99 @@ def _to_int_bool(v: Any) -> Optional[int]:
 
 def _norm_str(v: Any) -> str:
     return str(v or "").strip()
+
+
+def _parse_creation_ts(token: Dict[str, Any]) -> Tuple[Optional[float], str, bool]:
+    """Robust creation time parser. Returns (timestamp_seconds, source_desc, age_missing)."""
+    pool_created_at = token.get("pool_created_at")
+    if isinstance(pool_created_at, (int, float)) and float(pool_created_at) > 0:
+        val = float(pool_created_at)
+        if val > 1e12:
+            return val / 1000.0, "pool_created_at_ms", False
+        if val > 1e9:
+            return val, "pool_created_at_s", False
+    if isinstance(pool_created_at, str) and pool_created_at.strip():
+        try:
+            dt = datetime.fromisoformat(pool_created_at.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp(), "pool_created_at_iso", False
+        except Exception:
+            try:
+                val = float(pool_created_at)
+                if val > 1e12:
+                    return val / 1000.0, "pool_created_at_str_ms", False
+                if val > 1e9:
+                    return val, "pool_created_at_str_s", False
+            except Exception:
+                pass
+
+    raw_creation = _first_present(token, ["creation_timestamp", "created_timestamp", "created_at", "open_time", "launch_time"])
+    if raw_creation is not None:
+        try:
+            val = float(raw_creation)
+            if val > 1e12:
+                return val / 1000.0, "creation_timestamp_ms", False
+            if val > 1e9:
+                return val, "creation_timestamp_s", False
+        except Exception:
+            pass
+        if isinstance(raw_creation, str) and raw_creation.strip():
+            try:
+                dt = datetime.fromisoformat(raw_creation.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp(), "creation_timestamp_iso", False
+            except Exception:
+                pass
+
+    return None, "missing", True
+
+
+def _compute_age_minutes(creation_ts: Optional[float]) -> Optional[float]:
+    if creation_ts is None:
+        return None
+    now_ts = datetime.now(timezone.utc).timestamp()
+    return (now_ts - creation_ts) / 60.0
+
+
+def _parse_price_change_percent1h(latest_price: Dict[str, Any]) -> Tuple[Optional[float], str]:
+    """Extract price_change_percent1h from latest_price data.
+    
+    GMGN may return this as a percentage value (e.g. 20 means 20%) or as a 
+    fractional ratio (e.g. 0.2 means 20%). We use a conservative heuristic:
+    if abs(value) > 10, assume it's already a percentage; otherwise treat as ratio.
+    Only values clearly outside [-10, 10] are treated as raw percentage.
+    """
+    for name in ("price_change_percent1h", "price_change_1h", "change1h",
+                 "price_change_1h_pct", "priceChange1h", "change_1h"):
+        val = _to_float(_first_present(latest_price, [name]))
+        if val is not None:
+            break
+    else:
+        # Check nested price/pool objects
+        for nest_key in ("price", "pool"):
+            nested = latest_price.get(nest_key)
+            if isinstance(nested, dict):
+                for name in ("price_change_percent1h", "price_change_1h", "change1h"):
+                    val = _to_float(nested.get(name))
+                    if val is not None:
+                        break
+                if val is not None:
+                    break
+            if val is not None:
+                break
+
+    if val is None:
+        return None, "missing"
+
+    # Heuristic: if |val| > 10, it's likely already a percentage (e.g. GMGN returns 20 for 20%)
+    # If |val| <= 10, treat as fractional and multiply by 100.
+    # This is deliberately conservative — we favor using it as-is when ambiguous.
+    if abs(val) > 10.0:
+        return val, "gmgn_price_change_percent1h"
+    else:
+        return val * 100.0, "gmgn_price_change_percent1h_fractional"
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +478,7 @@ async def run_price_filter(
     strategy_group: Dict[str, Any],
     latest_price: Dict[str, Any],
     smart_degen_holders: List[Dict[str, Any]],
+    klines: Optional[List[Dict[str, Any]]] = None,
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x", 0.2))
@@ -391,48 +486,109 @@ async def run_price_filter(
 
     current_price = _current_price(latest_price, token)
     if current_price is None or current_price <= 0:
-        details.append({"rule": "latest_price_present", "passed": False, "reason": "missing latest price"})
+        details.append({"rule": "latest_price_present", "passed": False, "reason": "missing latest price",
+                        "source": "missing", "current_price": current_price})
         return PriceFilterResult(False, details, {})
 
-    swaps_5m = _to_float(latest_price.get("swaps_5m"))
-    swaps_1h = _to_float(latest_price.get("swaps_1h"))
-    price_1h = _to_float(latest_price.get("price_1h"))
-    price_5m = _to_float(latest_price.get("price_5m"))
-    price_1m = _to_float(latest_price.get("price_1m"))
+    # --- swaps extraction ---
+    swaps_5m = _to_float(_first_present(latest_price, ["swaps_5m", "swaps5m"]))
+    swaps_1h = _to_float(_first_present(latest_price, ["swaps_1h", "swaps1h"]))
+    # Also check nested price/pool objects
+    if swaps_5m is None or swaps_1h is None:
+        for nest_key in ("price", "pool"):
+            nested = latest_price.get(nest_key)
+            if isinstance(nested, dict):
+                if swaps_5m is None:
+                    swaps_5m = _to_float(_first_present(nested, ["swaps_5m", "swaps5m"]))
+                if swaps_1h is None:
+                    swaps_1h = _to_float(_first_present(nested, ["swaps_1h", "swaps1h"]))
+    # fallback to token snapshot
+    swaps_source = "latest_price"
+    if swaps_5m is None or swaps_1h is None:
+        swaps_5m_token = _to_float(_first_present(token, ["swaps_5m", "swaps5m"]))
+        swaps_1h_token = _to_float(_first_present(token, ["swaps_1h", "swaps1h"]))
+        swaps_5m = swaps_5m if swaps_5m is not None else swaps_5m_token
+        swaps_1h = swaps_1h if swaps_1h is not None else swaps_1h_token
+        if swaps_5m_token is not None or swaps_1h_token is not None:
+            swaps_source = "token_snapshot"
 
-    creation_ts = _to_float(token.get("creation_timestamp"))
-    now_ts = datetime.utcnow().timestamp()
-    age_minutes = (now_ts - creation_ts / 1000.0) if (creation_ts and creation_ts > 1e9) else None
+    # --- creation time & age ---
+    creation_ts, creation_source, age_missing = _parse_creation_ts(token)
+    age_minutes = _compute_age_minutes(creation_ts)
+    if age_minutes is None and not age_missing:
+        age_missing = True
+
+    # --- swaps_5m_scaled rule ---
     if swaps_1h and swaps_1h > 0:
         if age_minutes is not None and age_minutes < 60:
-            divisor = max(1, age_minutes / 5.0)
+            divisor = min(12.0, max(1.0, age_minutes / 5.0))
         else:
             divisor = 12.0
         swaps_threshold = max(0, (4.0 - y) * (swaps_1h / divisor))
         cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
     else:
-        cond_swaps = False
+        divisor = 12.0
         swaps_threshold = None
+        cond_swaps = False
     details.append({
         "rule": "swaps_5m_scaled", "passed": cond_swaps,
         "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
         "threshold": swaps_threshold, "y": y, "age_minutes": age_minutes,
+        "divisor": divisor, "source": swaps_source,
+        "age_missing": age_missing,
     })
 
-    if price_1h and price_1h > 0:
-        pct_change_1h = ((current_price - price_1h) / price_1h) * 100.0
-        pct_threshold = 0.7 - 0.2 * y
+    # --- price_change_1h rule ---
+    # Priority: 1) GMGN price_change_percent1h 2) kline since open (age<60min only) 3) current vs price_1h computed
+    pct_threshold = 0.7 - 0.2 * y
+    pct_change_1h: Optional[float] = None
+    price_change_source: str = "missing"
+    cond_pct: bool = False
+    price_change_detail: Dict[str, Any] = {}
+
+    # 1) Try GMGN's own price_change_percent1h
+    pct_from_gmgn, pct_source = _parse_price_change_percent1h(latest_price)
+    if pct_from_gmgn is not None:
+        pct_change_1h = pct_from_gmgn
+        price_change_source = pct_source
         cond_pct = pct_change_1h > pct_threshold
-    else:
-        pct_change_1h = None
-        pct_threshold = None
-        cond_pct = False
-    details.append({
-        "rule": "price_change_1h", "passed": cond_pct,
-        "current": current_price, "price_1h": price_1h,
-        "pct_change": pct_change_1h, "threshold": pct_threshold, "y": y,
-    })
+    elif age_minutes is not None and age_minutes < 60 and klines:
+        # 2) Fallback: kline since open
+        sorted_klines = sort_klines(klines)
+        if sorted_klines:
+            open_price = _kline_open(sorted_klines[0])
+            if open_price is not None and open_price > 0:
+                pct_change_1h = ((current_price - open_price) / open_price) * 100.0
+                price_change_source = "kline_since_open"
+                cond_pct = pct_change_1h > pct_threshold
+    if pct_change_1h is None:
+        # 3) Fallback: compute from price_1h
+        price_1h = _to_float(_first_present(latest_price, ["price_1h", "price1h"]))
+        if price_1h is None:
+            for nest_key in ("price", "pool"):
+                nested = latest_price.get(nest_key)
+                if isinstance(nested, dict):
+                    price_1h = _to_float(_first_present(nested, ["price_1h", "price1h"]))
+                    if price_1h is not None:
+                        break
+        if price_1h and price_1h > 0:
+            pct_change_1h = ((current_price - price_1h) / price_1h) * 100.0
+            price_change_source = "computed_from_price_1h"
+            cond_pct = pct_change_1h > pct_threshold
 
+    price_change_detail = {
+        "rule": "price_change_1h", "passed": cond_pct,
+        "current": current_price,
+        "pct_change": pct_change_1h, "threshold": pct_threshold, "y": y,
+        "source": price_change_source,
+        "age_minutes": age_minutes,
+        "age_missing": age_missing,
+    }
+    if creation_ts is not None:
+        price_change_detail["creation_ts"] = creation_ts
+    details.append(price_change_detail)
+
+    # --- smart_degen rule ---
     min_degen_count = 4.0 - 10.0 * x
     degen_count = len(smart_degen_holders)
     cond_degen = degen_count >= max(1, int(min_degen_count))
@@ -465,7 +621,13 @@ async def run_price_filter(
         "x": x, "y": y, "current_price": current_price,
         "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
         "price_change_1h_pct": pct_change_1h,
+        "price_change_source": price_change_source,
         "degen_count": degen_count,
         "age_minutes": age_minutes,
+        "creation_ts": creation_ts,
+        "swaps_divisor": divisor,
+        "swaps_source": swaps_source,
+        "age_missing": age_missing,
+        "price_change_1h_pct_source": price_change_source,
     }
     return PriceFilterResult(passed, details, feature_vector)

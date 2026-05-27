@@ -1,14 +1,16 @@
+import asyncio
 import json
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
 from ..providers.base import MarketDataProvider, SwapProvider, ExecutionProvider, RpcProvider
 from ..services.event_bus import event_bus
-from ..strategy.filters import run_risk_filter, run_price_filter
+from ..strategy.filters import run_risk_filter, run_price_filter, sort_klines
 from ..trading.executor import TradingPipeline
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
@@ -65,6 +67,14 @@ def _csv_list(value: Any) -> List[str]:
 
 
 class DiscoveryRunner:
+    TRENCH_PLATFORMS = [
+        "Pump.fun", "Moonshot", "moonshot_app", "letsbonk", "memoo",
+        "token_mill", "jup_studio", "bags", "believe", "heaven"
+    ]
+
+    FIXED_MIN_CREATED = 1800
+    FIXED_MAX_CREATED = 14400
+
     def __init__(
         self,
         repo: Repositories,
@@ -80,6 +90,7 @@ class DiscoveryRunner:
         self.processed_count = 0
         self.last_elapsed_ms = 0
         self.pipeline = TradingPipeline(repo, gmgn, jupiter, jito, rpc)
+        self._credential_count = self._count_credentials()
 
     async def _load_enabled_strategy_groups(self) -> List[dict]:
         try:
@@ -104,13 +115,24 @@ class DiscoveryRunner:
         self.strategy_groups = groups
         return groups
 
-    FIXED_MIN_CREATED = 300
+    def _count_credentials(self) -> int:
+        try:
+            if hasattr(self.gmgn, 'credentials'):
+                return len(self.gmgn.credentials or [])
+            if hasattr(self.gmgn, 'api_keys'):
+                return len(self.gmgn.api_keys or [])
+            if hasattr(self.gmgn, 'client_ids'):
+                return len(self.gmgn.client_ids or [])
+        except Exception:
+            pass
+        return 0
 
-    def _build_trench_params(self) -> Dict[str, Any]:
+    def _build_trench_params(self, platform: Optional[str] = None) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             'chain': 'sol',
             'type': 'new_creation',
             'min_created': self.FIXED_MIN_CREATED,
+            'max_created': self.FIXED_MAX_CREATED,
         }
 
         types = _csv_list(getattr(settings, 'GMGN_TRENCHES_TYPES', ''))
@@ -119,11 +141,152 @@ class DiscoveryRunner:
             if len(types) > 1:
                 params['types'] = types
 
-        platforms = _csv_list(getattr(settings, 'GMGN_TRENCHES_PLATFORMS', ''))
-        if platforms:
-            params['platforms'] = platforms
+        if platform:
+            params['platforms'] = [platform]
+        else:
+            platforms = _csv_list(getattr(settings, 'GMGN_TRENCHES_PLATFORMS', ''))
+            if platforms:
+                params['platforms'] = platforms
 
         return params
+
+    def _can_use_platform_sharding(self) -> bool:
+        return self._credential_count >= 10
+
+    async def _fetch_trenches_by_platforms(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        mode = settings.get_provider_mode()
+        if mode == ProviderMode.MOCK:
+            params = self._build_trench_params()
+            trenches = await self.gmgn.fetch_trenches(params)
+            diag: Dict[str, Any] = {
+                "mode": "mock_single_request",
+                "raw_fetched_count": len(trenches),
+                "unique_fetched_count": len(trenches),
+                "duplicate_count_estimate": 0,
+                "platform_fetch": {"mode": "mock", "platform_count": 0},
+            }
+            return trenches, diag
+
+        if not self._can_use_platform_sharding():
+            logger.warning(f"Credentials={self._credential_count} insufficient for platform sharding; falling back to single request")
+            await self.repo.append_system_event(
+                'WARNING', 'DISCOVERY',
+                f'platform sharding disabled: only {self._credential_count} credentials (need >= 10)',
+                json.dumps({"credential_count": self._credential_count}),
+                account_type='SIM',
+            )
+            params = self._build_trench_params()
+            trenches = await self.gmgn.fetch_trenches(params)
+            diag = {
+                "mode": "fallback_single_request",
+                "raw_fetched_count": len(trenches),
+                "unique_fetched_count": len(trenches),
+                "duplicate_count_estimate": 0,
+                "platform_fetch": {"mode": "fallback", "platform_count": 0},
+            }
+            return trenches, diag
+
+        primary_slots = list(range(10))
+        PRIMARY_COUNT = 10
+        primary_slots = list(range(PRIMARY_COUNT))
+        reserve_slots = list(range(PRIMARY_COUNT, min(self._credential_count, 12)))
+
+        async def _fetch_one_platform(idx: int, platform_name: str) -> Dict[str, Any]:
+            t0 = time.perf_counter()
+            result: Dict[str, Any] = {
+                "platform": platform_name,
+                "primary_slot": idx,
+                "used_slot": idx,
+                "used_role": "primary",
+                "ok": False,
+                "raw_count": 0,
+                "unique_count": 0,
+                "duplicate_count": 0,
+                "fallback_used": False,
+                "error": None,
+                "latency_ms": 0,
+                "items": [],
+            }
+
+            params = self._build_trench_params(platform=platform_name)
+            provider = self.gmgn
+
+            try:
+                items = await provider.fetch_trenches(params, credential_slot=idx)
+                result["ok"] = True
+                result["raw_count"] = len(items)
+                result["items"] = items
+            except Exception as e:
+                logger.warning(f"primary fetch failed for {platform_name} (slot={idx}): {e}")
+                for reserve_slot in reserve_slots:
+                    try:
+                        items = await provider.fetch_trenches(params, credential_slot=reserve_slot)
+                        result["ok"] = True
+                        result["raw_count"] = len(items)
+                        result["items"] = items
+                        result["used_slot"] = reserve_slot
+                        result["used_role"] = "reserve"
+                        result["fallback_used"] = True
+                        result["fallback_from_slot"] = idx
+                        logger.info(f"reserve credential {reserve_slot} succeeded for {platform_name}")
+                        break
+                    except Exception as re:
+                        logger.warning(f"reserve credential {reserve_slot} also failed for {platform_name}: {re}")
+
+            result["error"] = str(e) if not result["ok"] else None
+            result["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+            return result
+
+        tasks = [_fetch_one_platform(i, p) for i, p in enumerate(self.TRENCH_PLATFORMS)]
+        platform_results = []
+        for i in range(0, len(tasks), 10):
+            batch = tasks[i:i+10]
+            batch_results = await asyncio.gather(*batch, return_exceptions=True)
+            for r in batch_results:
+                if isinstance(r, Exception):
+                    platform_results.append({"ok": False, "error": str(r), "raw_count": 0, "items": []})
+                elif isinstance(r, dict):
+                    platform_results.append(r)
+                else:
+                    platform_results.append({"ok": False, "error": f"unexpected: {r}", "raw_count": 0, "items": []})
+
+        all_items: List[Dict[str, Any]] = []
+        dedup_key: Dict[Tuple[str, str], int] = {}
+        for pr in platform_results:
+            items = pr.get("items", [])
+            pr.pop("items", None)
+            raw_before = len(items)
+            unique_items: List[Dict[str, Any]] = []
+            for item in items:
+                pool_addr = str(item.get("pool_address") or "")
+                token_mint = str(item.get("token_mint") or "")
+                key = (token_mint, pool_addr)
+                if key not in dedup_key:
+                    dedup_key[key] = 0
+                    unique_items.append(item)
+                dedup_key[key] += 1
+            pr["unique_count"] = len(unique_items)
+            pr["duplicate_count"] = raw_before - len(unique_items)
+            all_items.extend(unique_items)
+
+        raw_fetched_count = sum(p.get("raw_count", 0) for p in platform_results)
+        unique_fetched_count = len(all_items)
+        duplicate_count_estimate = raw_fetched_count - unique_fetched_count
+
+        diag = {
+            "mode": "platform_sharded",
+            "raw_fetched_count": raw_fetched_count,
+            "unique_fetched_count": unique_fetched_count,
+            "duplicate_count_estimate": duplicate_count_estimate,
+            "platform_fetch": {
+                "mode": "platform_sharded",
+                "platform_count": len(self.TRENCH_PLATFORMS),
+                "primary_credential_count": PRIMARY_COUNT,
+                "reserve_credential_count": len(reserve_slots),
+                "items": platform_results,
+            },
+        }
+        return all_items, diag
 
     @staticmethod
     def _group_by_timing(strategy_groups: List[dict]) -> List[Tuple[str, List[dict]]]:
@@ -202,13 +365,26 @@ class DiscoveryRunner:
             smart_degen_holders = []
             logger.warning(f"smart degen holders fetch failed for {token_mint}: {e}")
 
+        from ..strategy.filters import _parse_creation_ts, _compute_age_minutes
+        creation_ts, _creation_source, age_missing = _parse_creation_ts(token)
+        age_minutes = _compute_age_minutes(creation_ts)
+        klines: Optional[List[Dict[str, Any]]] = None
+        if age_minutes is not None and age_minutes < 60 and creation_ts is not None:
+            try:
+                klines = await self.gmgn.fetch_kline(
+                    token_mint, "1m", 60,
+                    from_ts=int(creation_ts), to_ts=int(datetime.now(timezone.utc).timestamp()),
+                )
+            except Exception as e:
+                logger.warning(f"kline fetch failed for {token_mint}: {e}")
+
         price_passed: List[dict] = []
         for sg in risk_passed_groups:
             sg_id = int(sg.get('id') or 0)
             config_version = int(sg.get('config_version') or 1)
             discovery_id = discovery_event_ids.get(sg_id)
             try:
-                res = await run_price_filter(token, sg, latest, smart_degen_holders)
+                res = await run_price_filter(token, sg, latest, smart_degen_holders, klines=klines)
                 await self.repo.insert_strategy_match(
                     token_mint, sg_id, config_version, snapshot_id,
                     'price_filter', res.passed,
@@ -229,6 +405,9 @@ class DiscoveryRunner:
         tracked_count = 0
         dedup_skipped = 0
         total_fetched = 0
+        raw_fetched_count = 0
+        duplicate_count_estimate = 0
+        platform_fetch_meta: Dict[str, Any] = {}
         mode = settings.get_provider_mode()
 
         strategy_groups = await self._load_enabled_strategy_groups()
@@ -242,14 +421,17 @@ class DiscoveryRunner:
             return
 
         for timing_key, groups_for_t in self._group_by_timing(strategy_groups):
-            params = self._build_trench_params()
             try:
-                trenches = await self.gmgn.fetch_trenches(params)
+                trenches, trench_diag = await self._fetch_trenches_by_platforms()
+                raw_fetched_count = trench_diag.get("raw_fetched_count", 0)
+                total_fetched = trench_diag.get("unique_fetched_count", len(trenches))
+                duplicate_count_estimate = trench_diag.get("duplicate_count_estimate", 0)
+                platform_fetch_meta = trench_diag.get("platform_fetch", {})
             except Exception as e:
                 logger.error(f"fetch_trenches failed: {e}")
                 await self.repo.append_system_event(
                     'ERROR', 'DISCOVERY', 'GMGN fetch_trenches failed',
-                    _json_dumps({'params': params, 'error': str(e)}),
+                    _json_dumps({'error': str(e)}),
                     account_type='SIM',
                 )
                 await event_bus.publish('system', {
@@ -257,8 +439,6 @@ class DiscoveryRunner:
                     'message': 'fetch_trenches failed'
                 })
                 continue
-
-            total_fetched += len(trenches)
 
             for token in trenches:
                 token_mint = token.get('token_mint')
@@ -284,7 +464,6 @@ class DiscoveryRunner:
                     )
                     continue
 
-                # --- risk filter per strategy ---
                 risk_passed: List[dict] = []
                 discovery_event_ids: Dict[int, int] = {}
 
@@ -352,7 +531,6 @@ class DiscoveryRunner:
                             account_type='SIM',
                         )
 
-                # --- price screen + entry for tokens that passed risk ---
                 if risk_passed:
                     try:
                         passed_strategies = await self._run_price_screen(
@@ -372,16 +550,23 @@ class DiscoveryRunner:
         self.processed_count = total_fetched
         self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
 
+        context = {
+            'count': total_fetched,
+            'raw_fetched_count': raw_fetched_count,
+            'unique_fetched_count': total_fetched,
+            'duplicate_count_estimate': duplicate_count_estimate,
+            'discovered': discovered_count,
+            'tracked_initial_passed': tracked_count,
+            'dedup_skipped': dedup_skipped,
+            'enabled_strategy_groups': len(strategy_groups),
+            'elapsed_ms': self.last_elapsed_ms,
+        }
+        if platform_fetch_meta:
+            context['platform_fetch'] = platform_fetch_meta
+
         await self.repo.append_system_event(
             'INFO', 'DISCOVERY', 'Discovery run complete',
-            _json_dumps({
-                'count': total_fetched,
-                'discovered': discovered_count,
-                'tracked_initial_passed': tracked_count,
-                'dedup_skipped': dedup_skipped,
-                'enabled_strategy_groups': len(strategy_groups),
-                'elapsed_ms': self.last_elapsed_ms,
-            }),
+            _json_dumps(context),
             account_type='SIM',
         )
         await event_bus.publish('system', {

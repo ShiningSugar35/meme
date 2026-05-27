@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 class MarketDataProvider(ABC):
@@ -20,7 +20,7 @@ class MarketDataProvider(ABC):
         ...
 
     @abstractmethod
-    async def fetch_kline(self, token_mint: str, interval: str, limit: int) -> List[Dict[str, Any]]:
+    async def fetch_kline(self, token_mint: str, interval: str, limit: int, from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> List[Dict[str, Any]]:
         ...
 
     async def fetch_top_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:

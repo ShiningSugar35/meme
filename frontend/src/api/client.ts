@@ -99,16 +99,92 @@ export interface PortfolioRow {
 export interface TrenchHistoryItem {
   count: number;
   passed: number;
+  raw_count?: number;
+  unique_count?: number;
+  duplicate_count_estimate?: number;
+  platform_fetch?: Record<string, unknown>;
+  created_at?: string;
 }
 
 export interface RuleFailItem {
   rule: string;
-  count: number;
+  count?: number;
+  label?: string;
+  stage?: string;
+  section?: string;
+  checked_count?: number;
+  failed_count?: number;
+  fail_rate?: number;
+  fail_rate_pct?: number;
+  missing_count?: number;
+  sample_values?: string[];
+}
+
+export interface EndpointHealthItem {
+  endpoint: string;
+  method: string;
+  calls: number;
+  ok_calls: number;
+  ok_rate: number;
+  latest_status_code?: number;
+  avg_latency_ms?: number;
+  latest_error?: string | null;
+  severity: 'ok' | 'warn' | 'critical';
+}
+
+export interface FieldHealthItem {
+  section: string;
+  field: string;
+  label: string;
+  source: string;
+  checked_count: number;
+  nonnull_count: number;
+  missing_count: number;
+  zero_count: number;
+  missing_rate: number;
+  zero_rate: number;
+  sample_values: string[];
+  sample_tokens: string[];
+  severity: 'ok' | 'warn' | 'critical';
+  note: string;
+}
+
+export interface PriceAgeHealth {
+  under_60m_count: number;
+  age_parse_missing_count: number;
+  price_change_source_counts: Record<string, number>;
+  swaps_source_counts: Record<string, number>;
+  warnings: string[];
+}
+
+export interface PlatformHealthItem {
+  platform: string;
+  primary_slot?: number;
+  used_slot?: number;
+  used_role?: string;
+  ok: boolean;
+  raw_count: number;
+  unique_count?: number;
+  duplicate_count?: number;
+  fallback_used?: boolean;
+  error?: string | null;
+  severity: 'ok' | 'warn' | 'critical';
+  latency_ms?: number;
+}
+
+export interface DataSourceHealth {
+  summary: Record<string, unknown>;
+  endpoint_health: EndpointHealthItem[];
+  field_health: FieldHealthItem[];
+  price_age_health: PriceAgeHealth;
+  platform_health: PlatformHealthItem[];
+  system_event_warnings?: Record<string, unknown>[];
 }
 
 export interface FilterStats {
   trench_history: TrenchHistoryItem[];
   filter_fails: RuleFailItem[];
+  data_source_health?: DataSourceHealth;
   error?: string;
 }
 

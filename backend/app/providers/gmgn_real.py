@@ -115,6 +115,12 @@ class GMGNProvider(MarketDataProvider):
         self._key_cursor += 1
         return item
 
+    def _credential_by_slot(self, slot: int) -> Optional[Dict[str, Any]]:
+        creds = self.credentials or [{"api_key": k, "client_id": ""} for k in self.api_keys] or [{"api_key": "", "client_id": c} for c in self.client_ids]
+        if not creds or slot < 0 or slot >= len(creds):
+            return None
+        return creds[slot]
+
     @staticmethod
     def _compact_response_summary(data: Any) -> Dict[str, Any]:
         if isinstance(data, dict):
@@ -132,25 +138,31 @@ class GMGNProvider(MarketDataProvider):
             return {"list_count": len(data)}
         return {"type": type(data).__name__}
 
-    async def _make_request(self, path: str, params: Optional[Dict[str, Any]] = None, *, method: str = "GET", json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def _make_request(self, path: str, params: Optional[Dict[str, Any]] = None, *, method: str = "GET", json_body: Optional[Dict[str, Any]] = None, credential_slot: Optional[int] = None) -> Dict[str, Any]:
         if not HAS_HTTPX:
             raise ImportError("httpx required for real API calls")
         method = (method or "GET").upper()
         cleaned = {k: v for k, v in dict(params or {}).items() if v is not None and v != ""}
         url = self._build_url(path)
-        creds_available = len(self.credentials or []) or len(self.api_keys or []) or len(self.client_ids or [])
-        attempts = max(1, creds_available or 1)
+        creds = self.credentials or [{"api_key": k, "client_id": ""} for k in self.api_keys] or [{"api_key": "", "client_id": c} for c in self.client_ids]
+        creds_available = len(creds or [])
+        if credential_slot is not None:
+            cred = self._credential_by_slot(credential_slot)
+            if not cred:
+                raise GMGNAPIError(f"Invalid credential_slot {credential_slot} (available: 0-{creds_available-1})", path=path, method=method, retryable=False)
+            attempts_to_make = [(credential_slot, cred)]
+        else:
+            attempts_to_make = [(i % max(creds_available, 1), creds[i % max(creds_available, 1)] if creds_available else {}) for i in range(max(1, creds_available))]
+
         last_exc: Optional[BaseException] = None
         last_status: Optional[int] = None
 
-        for _attempt in range(attempts):
-            cred = self._next_credential()
+        for slot, cred in attempts_to_make:
             if not cred:
                 continue
             api_key = cred.get("api_key") or ""
             started = time.perf_counter()
 
-            # auth: X-APIKEY header + timestamp + random client_id per request (matches gmgn-cli)
             auth_query = {"timestamp": str(int(time.time())), "client_id": str(uuid.uuid4())}
             headers = {"X-APIKEY": api_key, "Content-Type": "application/json"}
             request_params = {**cleaned, **auth_query}
@@ -184,6 +196,8 @@ class GMGNProvider(MarketDataProvider):
                     await self._log_request(path, False, request_params, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
                     err = GMGNAPIError(f"GMGN HTTP {resp.status_code}: {str(data)[:500]}", status_code=resp.status_code, path=path, method=method, retryable=retryable)
                     last_exc = err
+                    if credential_slot is not None:
+                        raise err
                     if retryable:
                         continue
                     raise err
@@ -196,6 +210,8 @@ class GMGNProvider(MarketDataProvider):
                 latency = int((time.perf_counter() - started) * 1000)
                 last_exc = exc
                 await self._log_request(path, False, cleaned, {}, None, latency, "REQUEST_ERROR", str(exc) or repr(exc), method)
+                if credential_slot is not None:
+                    raise GMGNAPIError(f"GMGN request failed (slot={credential_slot}): {exc}", path=path, method=method, retryable=True)
                 continue
 
         if isinstance(last_exc, GMGNAPIError):
@@ -207,7 +223,7 @@ class GMGNProvider(MarketDataProvider):
         if not detail or detail.strip() == '':
             detail = type(last_exc).__name__ if last_exc else 'unknown'
         raise GMGNAPIError(
-            f"GMGN request failed after {attempts} attempt(s) "
+            f"GMGN request failed after {creds_available} attempt(s) "
             f"(creds={creds_available}, last_status={last_status}): {detail}",
             path=path, method=method, retryable=True,
         )
@@ -344,7 +360,7 @@ class GMGNProvider(MarketDataProvider):
                         items.append(item)
         return items
 
-    async def fetch_trenches(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    async def fetch_trenches(self, params: Dict[str, Any], credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         path = settings.GMGN_TRENCHES_PATH
         if self.mode == ProviderMode.MOCK:
             self.mock_data._maybe_refresh()
@@ -375,7 +391,7 @@ class GMGNProvider(MarketDataProvider):
         if max_created is not None:
             body["new_creation"]["max_created"] = f"{int(max_created)}s"
 
-        data = await self._make_request(path, {"chain": chain}, method="POST", json_body=body)
+        data = await self._make_request(path, {"chain": chain}, method="POST", json_body=body, credential_slot=credential_slot)
         items = self._extract_v2_trench_items(data)
         out: List[Dict[str, Any]] = []
         for item in items:
@@ -430,7 +446,7 @@ class GMGNProvider(MarketDataProvider):
         snapshot["raw_json"] = json.dumps(raw_bundle, ensure_ascii=False, default=str)
         return snapshot
 
-    async def fetch_kline(self, token_mint: str, interval: str, limit: int) -> List[Dict[str, Any]]:
+    async def fetch_kline(self, token_mint: str, interval: str, limit: int, from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> List[Dict[str, Any]]:
         if self.mode == ProviderMode.MOCK:
             self.mock_data._maybe_refresh()
             klines = [dict(k) for k in self.mock_data.klines.get(token_mint, [])]
@@ -440,7 +456,11 @@ class GMGNProvider(MarketDataProvider):
             return klines
 
         path = settings.get_gmgn_kline_path() if hasattr(settings, "get_gmgn_kline_path") else (getattr(settings, "GMGN_KLINE_PATH", None) or "/v1/market/token_kline")
-        params = {"chain": "sol", "address": token_mint, "resolution": interval, "limit": int(limit)}
+        params: Dict[str, Any] = {"chain": "sol", "address": token_mint, "resolution": interval, "limit": int(limit)}
+        if from_ts is not None:
+            params["from"] = int(from_ts)
+        if to_ts is not None:
+            params["to"] = int(to_ts)
         data = await self._make_request(path, params, method="GET")
         root = data.get("data", data) if isinstance(data, dict) else data
         raw_klines = self._extract_items(root, ("klines", "list", "items", "rows", "data"))
@@ -511,11 +531,15 @@ class GMGNProvider(MarketDataProvider):
             "liquidity_usd": liquidity_usd,
             "sol_side_liquidity": sol_side_liquidity,
             "market_cap": market_cap,
-            "swaps_5m": self._to_float(self._first_present(price_nested, ["swaps_5m", "swaps5m"])) if isinstance(price_nested, dict) else None,
-            "swaps_1h": self._to_float(self._first_present(price_nested, ["swaps_1h", "swaps1h"])) if isinstance(price_nested, dict) else None,
-            "price_1m": self._to_float(self._first_present(price_nested, ["price_1m", "price1m"])) if isinstance(price_nested, dict) else None,
-            "price_5m": self._to_float(self._first_present(price_nested, ["price_5m", "price5m"])) if isinstance(price_nested, dict) else None,
-            "price_1h": self._to_float(self._first_present(price_nested, ["price_1h", "price1h"])) if isinstance(price_nested, dict) else None,
+            "swaps_5m": self._to_float(self._first_present(price_nested, ["swaps_5m", "swaps5m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["swaps_5m", "swaps5m"])),
+            "swaps_1h": self._to_float(self._first_present(price_nested, ["swaps_1h", "swaps1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["swaps_1h", "swaps1h"])),
+            "price_1m": self._to_float(self._first_present(price_nested, ["price_1m", "price1m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_1m", "price1m"])),
+            "price_5m": self._to_float(self._first_present(price_nested, ["price_5m", "price5m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_5m", "price5m"])),
+            "price_1h": self._to_float(self._first_present(price_nested, ["price_1h", "price1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_1h", "price1h"])),
+            "price_change_percent1h": (
+                self._to_float(self._first_present(price_nested, ["price_change_percent1h", "price_change_1h", "change1h"]))
+                if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_change_percent1h", "price_change_1h", "change1h"]))
+            ),
             "raw_json": json.dumps(data, ensure_ascii=False, default=str),
             "source_mode": "REAL",
         }
