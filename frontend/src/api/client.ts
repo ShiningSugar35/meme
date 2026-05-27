@@ -123,6 +123,7 @@ export interface RuleFailItem {
 export interface EndpointHealthItem {
   endpoint: string;
   method: string;
+  credential_slot?: string;
   calls: number;
   ok_calls: number;
   ok_rate: number;
@@ -175,11 +176,28 @@ export interface PlatformHealthItem {
   latency_ms?: number;
 }
 
+export interface PriceFaceHealth {
+  latest_price_ok_rate: number | null;
+  holder_endpoint_ok_rate: number | null;
+  pass_fail_stats: Record<string, { total: number; passed: number; failed: number; missing: number; fail_rate: number; missing_rate: number; reasons: string[] }>;
+  feature_vector_field_missing: Record<string, number>;
+  warnings: string[];
+}
+
+export interface CredentialSummaryItem {
+  slot: string;
+  total_calls: number;
+  failed_calls: number;
+  ok_rate: number;
+}
+
 export interface DataSourceHealth {
   summary: Record<string, unknown>;
   endpoint_health: EndpointHealthItem[];
+  credential_summary?: CredentialSummaryItem[];
   field_health: FieldHealthItem[];
   price_age_health: PriceAgeHealth;
+  price_face_health?: PriceFaceHealth;
   platform_health: PlatformHealthItem[];
   system_event_warnings?: Record<string, unknown>[];
 }

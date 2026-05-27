@@ -202,132 +202,75 @@ export default function Portfolio() {
             <h2>数据源健康诊断</h2>
             {dsh.summary && Object.keys(dsh.summary).length > 0 && (
               <>
-                <div className="metric-row">
-                  <span>窗口轮次</span>
-                  <strong>{String(dsh.summary.window_run_count || 0)}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>危险筛选数</span>
-                  <strong>{String(dsh.summary.risk_match_count ?? '-')}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>危险通过</span>
-                  <strong>{String(dsh.summary.risk_pass_count ?? '-')}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>价格筛选数</span>
-                  <strong>{String(dsh.summary.price_match_count ?? '-')}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>价格通过</span>
-                  <strong>{String(dsh.summary.price_pass_count ?? '-')}</strong>
-                </div>
-              </>
-            )}
-
+                <div className="metric-row"><span>窗口轮次</span><strong>{String(dsh.summary.window_run_count || 0)}</strong></div>
+                <div className="metric-row"><span>危险筛选数</span><strong>{String(dsh.summary.risk_match_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>危险通过</span><strong>{String(dsh.summary.risk_pass_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>价格筛选数</span><strong>{String(dsh.summary.price_match_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>价格通过</span><strong>{String(dsh.summary.price_pass_count ?? '-')}</strong></div>
+                {(dsh.summary.primary_failed_count as number) > 0 && (
+                  <div className="metric-row"><span>Primary API 失败数</span><strong style={{color:'#f85149'}}>{String(dsh.summary.primary_failed_count)}</strong></div>
+                )}
+                {Array.isArray(dsh.summary.failed_slots) && (dsh.summary.failed_slots as string[]).length > 0 && (
+                  <div className="metric-row"><span>失败 slots</span><strong style={{color:'#f85149'}}>{(dsh.summary.failed_slots as string[]).join(', ')}</strong></div>
+                )}
+              </>)}
             {dsh.endpoint_health && dsh.endpoint_health.length > 0 && (
               <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>API 端点健康</h3>
-                {dsh.endpoint_health.map((ep) => (
-                  <div className="metric-row" key={ep.endpoint}>
-                    <span>
-                      {severityDot(ep.severity)} {ep.endpoint}
-                      <br/><small className="hint">{ep.method} · 共{ep.calls}次 · {rateFmt(ep.ok_rate)}成功 · {ep.avg_latency_ms}ms</small>
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>API 端点（按 slot）</h3>
+                {dsh.endpoint_health.slice(0, 8).map((ep) => (
+                  <div className="metric-row" key={ep.endpoint + (ep.credential_slot || '')}>
+                    <span>{severityDot(ep.severity)} {ep.endpoint}
+                      {ep.credential_slot && <span style={{fontSize:11,color:'#58a6ff'}}> [slot {ep.credential_slot}]</span>}
+                      <br/><small className="hint">{ep.method} · {ep.calls}次 · {rateFmt(ep.ok_rate)} · {ep.avg_latency_ms}ms</small>
                     </span>
-                    <strong>{ep.ok_rate != null ? rateFmt(ep.ok_rate) : '-'}</strong>
+                    <strong>{rateFmt(ep.ok_rate)}</strong>
                   </div>
-                ))}
-              </>
-            )}
-
+                ))}</>)}
+            {dsh.credential_summary && dsh.credential_summary.length > 0 && (
+              <>
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>Credential 统计</h3>
+                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>Slot</th><th>总次数</th><th>失败</th><th>成功率</th></tr></thead><tbody>
+                {dsh.credential_summary.map((cs, i) => (
+                  <tr key={i}><td>{cs.slot}</td><td>{cs.total_calls}</td><td style={{color: cs.failed_calls > 0 ? '#f85149' : '#8892ae'}}>{cs.failed_calls}</td><td>{rateFmt(cs.ok_rate)}</td></tr>
+                ))}</tbody></table></>)}
             {dsh.platform_health && dsh.platform_health.length > 0 && (
               <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>Platform 分片拉取</h3>
-                <table style={{fontSize:12,marginTop:4}}>
-                  <thead>
-                    <tr>
-                      <th>Platform</th><th>状态</th><th>原始</th><th>去重</th><th>备注</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dsh.platform_health.map((ph, idx) => (
-                      <tr key={idx}>
-                        <td>{ph.platform}</td>
-                        <td>{severityDot(ph.severity)} {ph.ok ? 'OK' : 'FAIL'}{ph.fallback_used ? ' (备用API)' : ''}</td>
-                        <td>{ph.raw_count >= 0 ? ph.raw_count : '-'}</td>
-                        <td>{ph.unique_count != null ? ph.unique_count : '-'}</td>
-                        <td style={{fontSize:11,color:'#8892ae'}}>{ph.error ? String(ph.error).substring(0, 60) : (ph.raw_count === 0 && ph.ok ? '返回0条' : '')}{ph.fallback_used ? ` 备用slot ${ph.used_slot}` : ''}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </>
-            )}
-
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>Platform 分片（最新轮）</h3>
+                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>Platform</th><th>状态</th><th>原始</th><th>备注</th></tr></thead><tbody>
+                {dsh.platform_health.map((ph, idx) => (
+                  <tr key={idx}><td>{ph.platform}</td>
+                    <td>{severityDot(ph.severity)} {ph.ok ? (ph.fallback_used ? '备用接管' : 'OK') : 'FAIL'}</td>
+                    <td>{ph.raw_count >= 0 ? ph.raw_count : '-'}</td>
+                    <td style={{fontSize:11,color:'#8892ae'}}>{ph.error ? String(ph.error).substring(0,50) : (ph.raw_count===0&&ph.ok ? '返回0条' : '')}</td>
+                  </tr>))}</tbody></table></>)}
             {dsh.field_health && dsh.field_health.length > 0 && (
               <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>字段异常（全部 critical + warn）</h3>
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>字段异常（critical + warn）</h3>
                 {dsh.field_health.filter((fh) => fh.severity !== 'ok').map((fh, idx) => (
-                  <div className="metric-row" key={idx}>
-                    <span>
-                      {severityDot(fh.severity)} {fh.label} ({fh.field})
-                      <br/><small className="hint">
-                        缺失 {rateFmt(fh.missing_rate)}
-                        {fh.zero_count > 0 ? ` · 零值 ${rateFmt(fh.zero_rate)}` : ''}
-                        {fh.note ? ` · ${fh.note.substring(0, 50)}` : ''}
-                      </small>
-                    </span>
-                    <strong>{rateFmt(fh.missing_rate)}</strong>
-                  </div>
-                ))}
-              </>
-            )}
-
+                  <div className="metric-row" key={idx}><span>{severityDot(fh.severity)} {fh.label} ({fh.field})
+                    <br/><small className="hint">缺失 {rateFmt(fh.missing_rate)}{fh.note ? ` · ${fh.note.substring(0,50)}` : ''}</small>
+                  </span><strong>{rateFmt(fh.missing_rate)}</strong></div>))} </>)}
             {dsh.price_age_health && (
               <>
                 <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>价格年龄诊断</h3>
-                {dsh.price_age_health.price_screen_not_reached_reason && (
-                  <p className="message" style={{fontSize:12}}>
-                    {dsh.price_age_health.price_screen_not_reached_reason}
-                  </p>
-                )}
-                <div className="metric-row">
-                  <span>到达价格面筛选数</span>
-                  <strong>{dsh.price_age_health.price_screen_reached_count ?? 0}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>风险失败未进价格面</span>
-                  <strong>{dsh.price_age_health.risk_only_failed_count ?? 0}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>未满60分钟记录</span>
-                  <strong>{dsh.price_age_health.under_60m_count ?? 0}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>年龄解析缺失</span>
-                  <strong>{dsh.price_age_health.age_parse_missing_count ?? 0}</strong>
-                </div>
-                {Array.from(Object.entries(dsh.price_age_health.price_change_source_counts || {})).map(([k,v]) => (
-                  <div className="metric-row" key={'pcsrc_'+k}>
-                    <span>price_change源: {k}</span>
-                    <strong>{v}</strong>
-                  </div>
-                ))}
-                {dsh.price_age_health.warnings?.length > 0 && dsh.price_age_health.warnings.map((w, idx) => (
-                  <p className="message" key={idx} style={{fontSize:12}}>{w}</p>
-                ))}
-              </>)}
-
+                {dsh.price_age_health.price_screen_not_reached_reason && <p className="message" style={{fontSize:12}}>{dsh.price_age_health.price_screen_not_reached_reason}</p>}
+                <div className="metric-row"><span>到达价格面</span><strong>{dsh.price_age_health.price_screen_reached_count ?? 0}</strong></div>
+                <div className="metric-row"><span>风险失败未进</span><strong>{dsh.price_age_health.risk_only_failed_count ?? 0}</strong></div>
+                <div className="metric-row"><span>未满60分钟</span><strong>{dsh.price_age_health.under_60m_count ?? 0}</strong></div>
+                {dsh.price_age_health.warnings?.map((w, idx) => <p className="message" key={idx} style={{fontSize:12}}>{w}</p>)}</>)}
+            {dsh.price_face_health && (
+              <>
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>价格面API诊断</h3>
+                <div className="metric-row"><span>latest_price token/info ok</span><strong>{dsh.price_face_health.latest_price_ok_rate != null ? rateFmt(dsh.price_face_health.latest_price_ok_rate) : '-'}</strong></div>
+                <div className="metric-row"><span>holder endpoint ok</span><strong>{dsh.price_face_health.holder_endpoint_ok_rate != null ? rateFmt(dsh.price_face_health.holder_endpoint_ok_rate) : '-'}</strong></div>
+                {Object.entries(dsh.price_face_health.pass_fail_stats || {}).map(([rule, stats]) => (
+                  <div className="metric-row" key={rule}><span>{rule}<br/><small className="hint">{stats.total}条 · 失败{stats.failed} · 缺失{stats.missing}</small></span>
+                    <strong>{rateFmt(stats.fail_rate)}</strong></div>))}
+                {dsh.price_face_health.warnings?.map((w, idx) => <p className="message" key={idx} style={{fontSize:12}}>{w}</p>)}</>)}
             {dsh.system_event_warnings && dsh.system_event_warnings.length > 0 && (
               <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#f85149'}}>系统错误摘要</h3>
-                {dsh.system_event_warnings.slice(0, 3).map((w, idx) => (
-                  <p className="message" key={idx} style={{fontSize:12}}>
-                    {String((w as Record<string,unknown>).message || '').substring(0, 200)}
-                  </p>
-                ))}
-              </>
-            )}
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#f85149'}}>系统错误</h3>
+                {dsh.system_event_warnings.slice(0, 3).map((w, idx) => <p className="message" key={idx} style={{fontSize:12}}>{String((w as Record<string,unknown>).message || '').substring(0,200)}</p>)}</>)}
           </div>
         )}
       </div>

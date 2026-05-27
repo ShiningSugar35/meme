@@ -717,52 +717,75 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
         summary["price_match_count"] = int((price_match_count_row or {}).get("c", 0))
         summary["price_pass_count"] = int((price_pass_count_row or {}).get("c", 0))
 
-    endpoint_health = await _build_endpoint_health(repo, lower_bound, upper_bound, has_window)
+    endpoint_health, credential_summary = await _build_endpoint_health(repo, lower_bound, upper_bound, has_window)
     field_health = await _build_field_health(repo, lower_bound, upper_bound, has_window)
     price_age_health = await _build_price_age_health(repo, lower_bound, upper_bound, has_window)
+    price_face_health = await _build_price_face_health(repo, lower_bound, upper_bound, has_window)
     platform_health = await _build_platform_health(repo, lower_bound, upper_bound, has_window, trench_history)
 
     system_event_warnings = await _build_system_event_warnings(repo, lower_bound, upper_bound, has_window)
 
+    primary_failed = sum(1 for p in platform_health if not p.get("ok") and p.get("used_role") == "primary")
+    reserve_used = sum(1 for p in platform_health if p.get("fallback_used"))
+    failed_slots = sorted(set(str(p.get("primary_slot", "")) for p in platform_health if not p.get("ok")))
+    reserve_slots = sorted(set(str(p.get("used_slot", "")) for p in platform_health if p.get("fallback_used")))
+
+    summary["primary_failed_count"] = primary_failed
+    summary["reserve_used_count"] = reserve_used
+    summary["failed_slots"] = failed_slots
+    summary["reserve_slots_used"] = reserve_slots
+
     return {
         "summary": summary,
         "endpoint_health": endpoint_health,
+        "credential_summary": credential_summary,
         "field_health": field_health,
         "price_age_health": price_age_health,
+        "price_face_health": price_face_health,
         "platform_health": platform_health,
         "system_event_warnings": system_event_warnings,
     }
 
 
-async def _build_endpoint_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> List[Dict[str, Any]]:
+async def _build_endpoint_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Returns (endpoint_health_by_slot, credential_summary_stats)."""
     if not has_window:
-        return []
+        return [], []
     all_rows = await _fetch_all(repo,
-        "SELECT endpoint, method, status_code, latency_ms, ok, error_summary FROM provider_requests WHERE provider='GMGN' AND created_at>=? AND created_at<=? ORDER BY id DESC",
+        "SELECT endpoint, method, status_code, latency_ms, ok, error_summary, request_summary_json FROM provider_requests WHERE provider='GMGN' AND created_at>=? AND created_at<=? ORDER BY id DESC",
         (lower_bound, upper_bound))
     grouped: Dict[str, Dict[str, Any]] = {}
     for row in all_rows:
         ep = str(row.get("endpoint") or "")
-        if ep not in grouped:
-            grouped[ep] = {"endpoint": ep, "method": str(row.get("method", "GET")), "calls": 0, "ok_calls": 0, "total_latency": 0,
-                           "latest_status_code": None, "latest_error": None, "status_codes": []}
-        grp = grouped[ep]
+        method = str(row.get("method", "GET"))
+        cred_slot = "unknown"
+        try:
+            rs = json.loads(row.get("request_summary_json") or "{}")
+            if isinstance(rs, dict):
+                cred_slot = str(rs.get("credential_slot", "unknown"))
+                role = rs.get("credential_role", "round_robin")
+        except Exception:
+            pass
+        key = f"{ep}|{method}|slot={cred_slot}"
+        if key not in grouped:
+            grouped[key] = {"endpoint": ep, "method": method, "credential_slot": cred_slot,
+                            "calls": 0, "ok_calls": 0, "total_latency": 0,
+                            "latest_status_code": None, "latest_error": None}
+        grp = grouped[key]
         grp["calls"] += 1
         grp["total_latency"] += int(row.get("latency_ms") or 0)
         if int(row.get("ok") or 0):
             grp["ok_calls"] += 1
         sc = row.get("status_code")
-        if sc is not None:
-            grp["status_codes"].append(int(sc))
-            if not grp["latest_status_code"]:
-                grp["latest_status_code"] = int(sc)
+        if sc is not None and grp["latest_status_code"] is None:
             grp["latest_status_code"] = int(sc)
         err = row.get("error_summary")
-        if err:
+        if err and not grp["latest_error"]:
             grp["latest_error"] = str(err)[:200]
 
     result: List[Dict[str, Any]] = []
-    for ep, grp in grouped.items():
+    cred_stats: Dict[str, Dict[str, Any]] = {}
+    for key, grp in grouped.items():
         calls = max(grp["calls"], 1)
         ok_rate = grp["ok_calls"] / calls
         if ok_rate < 0.5:
@@ -772,8 +795,9 @@ async def _build_endpoint_health(repo: Repositories, lower_bound: str, upper_bou
         else:
             severity = "ok"
         result.append({
-            "endpoint": ep,
+            "endpoint": grp["endpoint"],
             "method": grp["method"],
+            "credential_slot": grp["credential_slot"],
             "calls": grp["calls"],
             "ok_calls": grp["ok_calls"],
             "ok_rate": round(ok_rate, 3),
@@ -782,7 +806,24 @@ async def _build_endpoint_health(repo: Repositories, lower_bound: str, upper_bou
             "latest_error": grp["latest_error"],
             "severity": severity,
         })
-    return sorted(result, key=lambda x: (0 if x["severity"] == "critical" else 1 if x["severity"] == "warn" else 2, -x["ok_rate"]))
+        slot = grp["credential_slot"]
+        if slot not in cred_stats:
+            cred_stats[slot] = {"slot": slot, "total_calls": 0, "failed_calls": 0, "ok_calls": 0}
+        cs = cred_stats[slot]
+        cs["total_calls"] += grp["calls"]
+        cs["failed_calls"] += (grp["calls"] - grp["ok_calls"])
+        cs["ok_calls"] += grp["ok_calls"]
+
+    summary = []
+    failed_slots = []
+    for slot, cs in sorted(cred_stats.items()):
+        ok_rate = cs["ok_calls"] / max(cs["total_calls"], 1)
+        summary.append({"slot": slot, "total_calls": cs["total_calls"], "failed_calls": cs["failed_calls"],
+                        "ok_rate": round(ok_rate, 3)})
+        if ok_rate < 0.9:
+            failed_slots.append(slot)
+
+    return sorted(result, key=lambda x: (0 if x["severity"] == "critical" else 1 if x["severity"] == "warn" else 2, -x["ok_rate"])), summary
 
 
 async def _build_field_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> List[Dict[str, Any]]:
@@ -986,9 +1027,98 @@ async def _build_price_age_health(repo: Repositories, lower_bound: str, upper_bo
     return result
 
 
+async def _build_price_face_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> Dict[str, Any]:
+    """Diagnose price-filter-specific field coverage from pass_fail_detail_json and feature_vector_json."""
+    result: Dict[str, Any] = {
+        "latest_price_ok_rate": None,
+        "holder_endpoint_ok_rate": None,
+        "pass_fail_stats": {},
+        "feature_vector_field_missing": {},
+        "warnings": [],
+    }
+    if not has_window:
+        return result
+
+    price_rows = await _fetch_all(repo,
+        "SELECT pass_fail_detail_json, feature_vector_json FROM token_strategy_matches WHERE stage='price_filter' AND created_at>=? AND created_at<=?",
+        (lower_bound, upper_bound))
+    if not price_rows:
+        return result
+
+    total = len(price_rows)
+    rule_stats: Dict[str, Dict[str, int]] = {}
+    field_missing: Dict[str, int] = defaultdict(int)
+
+    for row in price_rows:
+        try:
+            details = json.loads(row.get("pass_fail_detail_json") or "[]")
+        except Exception:
+            details = []
+        try:
+            fv = json.loads(row.get("feature_vector_json") or "{}")
+        except Exception:
+            fv = {}
+
+        if isinstance(details, list):
+            for d in details:
+                if not isinstance(d, dict):
+                    continue
+                rule = str(d.get("rule") or "unknown")
+                if rule not in rule_stats:
+                    rule_stats[rule] = {"total": 0, "passed": 0, "failed": 0, "missing": 0, "reasons": []}
+                rs = rule_stats[rule]
+                rs["total"] += 1
+                if d.get("passed"):
+                    rs["passed"] += 1
+                else:
+                    rs["failed"] += 1
+                    reason = str(d.get("reason") or d.get("source") or "")[:60]
+                    if reason and reason not in rs["reasons"]:
+                        rs["reasons"].append(reason)
+                    if d.get("missing") or d.get("age_missing"):
+                        rs["missing"] += 1
+
+        if isinstance(fv, dict):
+            for key in ("swaps_5m", "swaps_1h", "price_change_1h_pct", "current_price"):
+                if fv.get(key) is None or fv.get(key) == "":
+                    field_missing[key] += 1
+
+    for rule, rs in rule_stats.items():
+        rs["fail_rate"] = round(rs["failed"] / max(rs["total"], 1), 3)
+        rs["missing_rate"] = round(rs["missing"] / max(rs["total"], 1), 3)
+
+    for key, missing in field_missing.items():
+        field_missing[key] = round(missing / total, 3)
+
+    latest_price_rows = await _fetch_all(repo,
+        "SELECT ok FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE '%token/info%' AND created_at>=? AND created_at<=?",
+        (lower_bound, upper_bound))
+    if latest_price_rows:
+        ok_count = sum(1 for r in latest_price_rows if int(r.get("ok") or 0))
+        result["latest_price_ok_rate"] = round(ok_count / len(latest_price_rows), 3)
+
+    holder_rows = await _fetch_all(repo,
+        "SELECT ok FROM provider_requests WHERE provider='GMGN' AND endpoint LIKE '%holders%' AND created_at>=? AND created_at<=?",
+        (lower_bound, upper_bound))
+    if holder_rows:
+        ok_count = sum(1 for r in holder_rows if int(r.get("ok") or 0))
+        result["holder_endpoint_ok_rate"] = round(ok_count / len(holder_rows), 3)
+
+    result["pass_fail_stats"] = dict(rule_stats)
+    result["feature_vector_field_missing"] = dict(field_missing)
+
+    if result["latest_price_ok_rate"] is not None and result["latest_price_ok_rate"] < 0.9:
+        result["warnings"].append(f"latest price token/info endpoint ok_rate={result['latest_price_ok_rate']}")
+    if result["holder_endpoint_ok_rate"] is not None and result["holder_endpoint_ok_rate"] < 0.9:
+        result["warnings"].append(f"holder endpoint ok_rate={result['holder_endpoint_ok_rate']}")
+
+    return result
+
+
 async def _build_platform_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, trench_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     platform_items: List[Dict[str, Any]] = []
-    for th in trench_history:
+    # trench_history is oldest→newest; iterate reversed so we pick the latest round
+    for th in reversed(trench_history):
         pf_meta = th.get("platform_fetch") or {}
         if pf_meta.get("mode") == "platform_sharded":
             items = pf_meta.get("items", [])
