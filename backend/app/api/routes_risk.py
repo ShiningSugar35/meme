@@ -10,8 +10,8 @@ async def kill_switch_status(request: Request):
     try:
         closed = await repo.list_recent_closed_live_positions(10)
         if len(closed) >= 10:
-            total_cost = sum(c.get('total_cost_sol', 0) or 0 for c in closed)
-            total_return = sum(c.get('total_return_sol', 0) or 0 for c in closed)
+            total_cost = sum(c.get('total_cost_usd', 0) or 0 for c in closed)
+            total_return = sum(c.get('total_return_usd', 0) or 0 for c in closed)
             rolling_roi = (total_return / total_cost - 1) if total_cost > 0 else 0
         else:
             rolling_roi = 0

@@ -276,8 +276,6 @@ async def _migrate_positions(db: aiosqlite.Connection):
         "next_check_at": "TEXT",
         "last_checked_at": "TEXT",
         "pnl_pct": "REAL",
-        "remaining_value_sol": "REAL",
-        "last_fill_price_sol": "REAL",
         "last_risk_check_at": "TEXT",
         "next_risk_check_at": "TEXT",
         "risk_check_interval_seconds": "INTEGER",
@@ -430,7 +428,6 @@ async def _migrate_tick_snapshots(db: aiosqlite.Connection):
 
 async def _migrate_strategy_groups(db: aiosqlite.Connection):
     await _rename_column(db, "strategy_groups", "t_seconds", "min_created")
-    await _add_column_if_missing(db, "strategy_groups", "max_created", "INTEGER NOT NULL DEFAULT 300")
     await _rename_column(db, "discovery_events", "t_seconds", "min_created")
     # Drop columns that were used by the now-removed second_filter runner.
     await _drop_column_if_exists(db, "discovery_events", "next_second_check_at")

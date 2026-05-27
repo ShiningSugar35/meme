@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, RuntimeStatus, StrategyGroup, TradingParamSpec } from '../api/client';
 
-const emptyStrategy = { name: '', x: 10, y: 20, min_created: 180, max_created: 300, enabled: true, is_live: false };
+const emptyStrategy = { name: '', x: 10, y: 20, enabled: true, is_live: false };
 
 function asBool(value: number | boolean | undefined) {
   return value === true || value === 1;
@@ -69,11 +69,9 @@ export default function ControlCenter() {
     try {
       const payload = {
         ...form,
-        name: form.name || `x=${form.x}, y=${form.y}, min=${form.min_created}s`,
+        name: form.name || `x=${form.x}, y=${form.y}`,
         x: Number(form.x),
         y: Number(form.y),
-        min_created: Number(form.min_created),
-        max_created: Number(form.max_created),
       };
       if (editingId) await api.updateStrategy(editingId, payload);
       else await api.createStrategy(payload);
@@ -93,8 +91,6 @@ export default function ControlCenter() {
       name: s.name,
       x: Number(s.x),
       y: Number(s.y),
-      min_created: Number(s.min_created),
-      max_created: Number(s.max_created),
       enabled: asBool(s.enabled),
       is_live: asBool(s.is_live),
     });
@@ -170,8 +166,6 @@ export default function ControlCenter() {
           <label>策略名<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="留空自动生成" /></label>
           <label>X<input type="number" value={form.x} onChange={(e) => setForm({ ...form, x: Number(e.target.value) })} /></label>
           <label>Y<input type="number" value={form.y} onChange={(e) => setForm({ ...form, y: Number(e.target.value) })} /></label>
-          <label>min_created(秒)<input type="number" value={form.min_created} onChange={(e) => setForm({ ...form, min_created: Number(e.target.value) })} /></label>
-          <label>max_created(秒)<input type="number" value={form.max_created} onChange={(e) => setForm({ ...form, max_created: Number(e.target.value) })} /></label>
           <label>交易属性
             <select value={form.is_live ? 'LIVE' : 'SIM'} onChange={(e) => setForm({ ...form, is_live: e.target.value === 'LIVE' })}>
               <option value="SIM">模拟盘</option>
@@ -191,7 +185,7 @@ export default function ControlCenter() {
         <table>
           <thead>
             <tr>
-              <th>ID</th><th>名称</th><th>交易属性</th><th>启用</th><th>X</th><th>Y</th><th>min</th><th>max</th><th>版本</th><th>操作</th>
+              <th>ID</th><th>名称</th><th>交易属性</th><th>启用</th><th>X</th><th>Y</th><th>版本</th><th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -201,7 +195,7 @@ export default function ControlCenter() {
                 <td>{s.name}</td>
                 <td><span className={asBool(s.is_live) ? 'tag live' : 'tag sim'}>{asBool(s.is_live) ? '实盘' : '模拟盘'}</span></td>
                 <td>{asBool(s.enabled) ? '是' : '否'}</td>
-                <td>{s.x}</td><td>{s.y}</td><td>{s.min_created}</td><td>{s.max_created}</td><td>{s.config_version ?? '-'}</td>
+                <td>{s.x}</td><td>{s.y}</td><td>{s.config_version ?? '-'}</td>
                 <td><button onClick={() => editStrategy(s)}>编辑</button> <button className="danger" onClick={() => deleteStrategy(s)}>删除</button></td>
               </tr>
             ))}

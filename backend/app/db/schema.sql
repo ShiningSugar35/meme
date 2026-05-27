@@ -80,8 +80,6 @@ CREATE TABLE IF NOT EXISTS strategy_groups (
 
   x REAL NOT NULL,
   y REAL NOT NULL,
-  min_created INTEGER NOT NULL,
-  max_created INTEGER NOT NULL DEFAULT 300,
 
   buy_slippage_cap_bps INTEGER NOT NULL DEFAULT 1500,
   sell_slippage_cap_bps INTEGER NOT NULL DEFAULT 2000,
@@ -229,15 +227,10 @@ CREATE TABLE IF NOT EXISTS positions (
 
   status TEXT NOT NULL,
   entry_price_usd REAL,
-  entry_price_sol REAL,
   entry_token_amount REAL,
   remaining_token_amount REAL,
   remaining_value_usd REAL,
-  remaining_value_sol REAL,
 
-  total_cost_sol REAL DEFAULT 0,
-  total_return_sol REAL DEFAULT 0,
-  realized_pnl_sol REAL DEFAULT 0,
   realized_pnl_pct REAL,
   pnl_pct REAL,
 
@@ -255,7 +248,6 @@ CREATE TABLE IF NOT EXISTS positions (
   opened_at TEXT NOT NULL,
   last_fill_at TEXT,
   last_fill_price_usd REAL,
-  last_fill_price_sol REAL,
   closed_at TEXT,
 
   open_trade_event_id INTEGER,
@@ -321,7 +313,6 @@ CREATE TABLE IF NOT EXISTS discovery_events (
 
   first_seen_at TEXT NOT NULL,
   pool_created_at TEXT,
-  min_created INTEGER,
 
   status TEXT NOT NULL DEFAULT 'DISCOVERED',
 

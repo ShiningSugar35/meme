@@ -1,15 +1,9 @@
 """Risk + price filter rules for GMGN trench candidates.
 
-The discovery timing parameters ``min_created`` and ``max_created`` are used
-by the provider query to ask GMGN for pools whose age is in [min_created,
-max_created] seconds.  After the risk screen, kline data is fetched so the
-price screen can run in the same cycle.
+Risk screen — minimum liquidity depends on x:
+    min_liquidity_usd = 40000 - 100000 * x
 
-Risk screen — minimum liquidity is a function of min_created:
-
-    min_liquidity_usd = 5000 + 4 * min_created
-
-Price screen — y-scaling rules on 1m/5m candles and current price.
+Price screen — y-scaling swap/price rules and smart degen check.
 """
 from __future__ import annotations
 
@@ -174,14 +168,6 @@ def _strategy_x(strategy_group: Dict[str, Any]) -> float:
     return float(strategy_group.get("x", 0.2))
 
 
-def _strategy_min_created(strategy_group: Dict[str, Any]) -> int:
-    raw = _first_present(strategy_group, ["min_created", "t_seconds", "t", "age_seconds"], 180)
-    try:
-        return int(float(raw))
-    except (TypeError, ValueError):
-        return 180
-
-
 PLATFORMS = {
     "Pump.fun", "PumpFun", "pump", "pump_fun", "pumpfun",
     "Moonshot", "moonshot", "moonshot_app",
@@ -258,7 +244,6 @@ def _evaluate_core_risk_rules(
     include_platform: bool = True,
 ) -> tuple[List[FilterDetail], Dict[str, Any]]:
     x = _strategy_x(strategy_group)
-    min_created = _strategy_min_created(strategy_group)
     details: List[FilterDetail] = []
 
     if include_type:
@@ -271,7 +256,7 @@ def _evaluate_core_risk_rules(
     else:
         typ = _norm_str(_first_present(snapshot, ["type", "trench_type", "category"]))
 
-    min_liquidity_usd = 5000 + 4 * min_created
+    min_liquidity_usd = 40000 - 100000 * x
     liquidity = _check_float(
         details, snapshot, "min_liquidity_usd",
         ["liquidity_usd", "liquidity", "pool_liquidity_usd"],
@@ -334,20 +319,6 @@ def _evaluate_core_risk_rules(
             else _mk_failed("has_at_least_one_social", val, "required when x < 0.15", 1, missing=(val is None))
         )
 
-    creator_status = _norm_str(_first_present(snapshot, ["creator_token_status", "creator_status"])).lower()
-    dev_hold = _to_float(_first_present(snapshot, ["dev_team_hold_rate", "dev_hold_rate", "creator_hold_rate"]))
-    dev_threshold = 0.03 + 0.1 * x
-    creator_ok = creator_status in CREATOR_CLOSE_VALUES or (dev_hold is not None and dev_hold < dev_threshold)
-    creator_value = creator_status or dev_hold
-    details.append(
-        _mk_pass("creator_token_status_or_dev_team_hold_rate", creator_value,
-                 f"creator_close OR dev_hold < {dev_threshold:.6g}", ("creator_close", dev_threshold))
-        if creator_ok
-        else _mk_failed("creator_token_status_or_dev_team_hold_rate", creator_value,
-                        f"creator_close OR dev_hold < {dev_threshold:.6g}", ("creator_close", dev_threshold),
-                        missing=(creator_value in (None, "")))
-    )
-
     burn_status = _norm_str(_first_present(snapshot, ["burn_status", "lp_burn_status", "burnt_status"])).lower()
     details.append(
         _mk_pass("burn_status", burn_status, "burn", "burn")
@@ -357,6 +328,16 @@ def _evaluate_core_risk_rules(
 
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count"],
                  lambda v: v < 50 * x, f"< {50 * x:.6g}")
+
+    top1_threshold = 0.049 + 0.01 * x
+    top1_rate = _to_float(_first_present(snapshot, ["top1_holder_rate", "top1_rate"]))
+    top1_ok = top1_rate is not None and top1_rate < top1_threshold
+    details.append(
+        _mk_pass("top1_holder", top1_rate, f"< {top1_threshold:.6g}", top1_threshold)
+        if top1_ok
+        else _mk_failed("top1_holder", top1_rate, f"< {top1_threshold:.6g}", top1_threshold,
+                        missing=(top1_rate is None))
+    )
 
     if include_platform:
         platform = _norm_str(_first_present(snapshot, ["launchpad", "platform", "source_platform", "pool_platform"]))
@@ -370,7 +351,6 @@ def _evaluate_core_risk_rules(
 
     feature_vector = {
         "x": x,
-        "min_created": min_created,
         "min_liquidity_usd_threshold": min_liquidity_usd,
         "top_10_holder_rate_low": low,
         "top_10_holder_rate_high": high,
@@ -381,13 +361,13 @@ def _evaluate_core_risk_rules(
         "renounced_mint": _to_int_bool(snapshot.get("renounced_mint")),
         "renounced_freeze_account": _to_int_bool(snapshot.get("renounced_freeze_account")),
         "platform": platform,
+        "top1_holder_threshold": top1_threshold,
     }
     return details, feature_vector
 
 
 async def run_risk_filter(snapshot: Dict[str, Any], strategy_group: Dict[str, Any], now: datetime | None = None) -> FilterResult:
     details, feature_vector = _evaluate_core_risk_rules(snapshot, strategy_group, include_type=True, include_platform=True)
-    feature_vector.update({"min_created": _strategy_min_created(strategy_group)})
     return FilterResult(all(d.passed for d in details), details, feature_vector)
 
 
@@ -403,107 +383,89 @@ async def run_price_filter(
     token: Dict[str, Any],
     strategy_group: Dict[str, Any],
     latest_price: Dict[str, Any],
-    klines: List[Dict[str, Any]],
-    buy_sell_1m: Dict[str, float],
+    smart_degen_holders: List[Dict[str, Any]],
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
+    x = float(strategy_group.get("x", 0.2))
     y = float(strategy_group.get("y", 2.25))
 
     current_price = _current_price(latest_price, token)
-    if current_price is None:
+    if current_price is None or current_price <= 0:
         details.append({"rule": "latest_price_present", "passed": False, "reason": "missing latest price"})
         return PriceFilterResult(False, details, {})
 
-    high_5m, low_5m, kline_count = _extract_5m_range(klines, current_price)
-    if high_5m is None or low_5m is None:
-        details.append({
-            "rule": "kline_price_range_present", "passed": False,
-            "actual": {"kline_count": len(klines)},
-            "reason": "need at least one usable kline price or current price",
-        })
-        return PriceFilterResult(False, details, {"current_price": current_price})
+    swaps_5m = _to_float(latest_price.get("swaps_5m"))
+    swaps_1h = _to_float(latest_price.get("swaps_1h"))
+    price_1h = _to_float(latest_price.get("price_1h"))
+    price_5m = _to_float(latest_price.get("price_5m"))
+    price_1m = _to_float(latest_price.get("price_1m"))
 
-    if high_5m <= low_5m:
-        details.append({
-            "rule": "high_gt_low", "passed": False,
-            "actual": {"high_5m": high_5m, "low_5m": low_5m},
-            "reason": "cannot compute price range fraction when high <= low",
-        })
-        return PriceFilterResult(False, details, {
-            "current_price": current_price, "high_5m": high_5m,
-            "low_5m": low_5m, "kline_count_used": kline_count,
-        })
-
-    latest_1m: Dict[str, Any] = klines[-1] if klines else {}
-    open_1m = _kline_open(latest_1m)
-    close_1m = _kline_close(latest_1m)
-    high_1m = _kline_high(latest_1m)
-    low_1m = _kline_low(latest_1m)
-    volume_1m = _kline_volume_usd(latest_1m) or 0.0
-
-    # rule 1: volume_1m > liquidity_usd * (0.07 - 0.02 * y)
-    liquidity_usd = _to_float(_first_present(token, ["liquidity_usd", "liquidity"]))
-    threshold_1 = (liquidity_usd or 0.0) * (0.07 - 0.02 * y)
-    cond1 = volume_1m > threshold_1
-    details.append({
-        "rule": "volume_1m", "passed": cond1,
-        "volume_1m": volume_1m, "liquidity_usd": liquidity_usd,
-        "threshold": threshold_1, "y": y,
-    })
-
-    # rule 2: (close_1m - low_1m) / (high_1m - low_1m) > (0.80 - 0.1 * y)
-    if high_1m and low_1m and close_1m and high_1m > low_1m:
-        candle_ratio = (close_1m - low_1m) / (high_1m - low_1m)
-        threshold_3 = 0.80 - 0.1 * y
-        cond3 = candle_ratio > threshold_3
+    creation_ts = _to_float(token.get("creation_timestamp"))
+    now_ts = datetime.utcnow().timestamp()
+    age_minutes = (now_ts - creation_ts / 1000.0) if (creation_ts and creation_ts > 1e9) else None
+    if swaps_1h and swaps_1h > 0:
+        if age_minutes is not None and age_minutes < 60:
+            divisor = max(1, age_minutes / 5.0)
+        else:
+            divisor = 12.0
+        swaps_threshold = max(0, (4.0 - y) * (swaps_1h / divisor))
+        cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
     else:
-        candle_ratio = None
-        threshold_3 = None
-        cond3 = False
+        cond_swaps = False
+        swaps_threshold = None
     details.append({
-        "rule": "candle_position", "passed": cond3,
-        "candle_ratio": candle_ratio, "threshold": threshold_3,
-        "open_1m": open_1m, "close_1m": close_1m,
-        "high_1m": high_1m, "low_1m": low_1m, "y": y,
+        "rule": "swaps_5m_scaled", "passed": cond_swaps,
+        "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
+        "threshold": swaps_threshold, "y": y, "age_minutes": age_minutes,
     })
 
-    # rule 3: current_price > high_5m / (y - 0.5)
-    high_over_y = high_5m / (y - 0.5)
-    cond4 = current_price > high_over_y
+    if price_1h and price_1h > 0:
+        pct_change_1h = ((current_price - price_1h) / price_1h) * 100.0
+        pct_threshold = 0.7 - 0.2 * y
+        cond_pct = pct_change_1h > pct_threshold
+    else:
+        pct_change_1h = None
+        pct_threshold = None
+        cond_pct = False
     details.append({
-        "rule": "price_gt_high_over_y", "passed": cond4,
-        "current": current_price, "high_5m": high_5m,
-        "threshold_value": high_over_y, "y": y,
+        "rule": "price_change_1h", "passed": cond_pct,
+        "current": current_price, "price_1h": price_1h,
+        "pct_change": pct_change_1h, "threshold": pct_threshold, "y": y,
     })
 
-    # rule 4: current_price < low_5m * y
-    low_times_y = low_5m * y
-    cond5 = current_price < low_times_y
+    min_degen_count = 4.0 - 10.0 * x
+    degen_count = len(smart_degen_holders)
+    cond_degen = degen_count >= max(1, int(min_degen_count))
+    degen_hold_ok = False
+    degen_hold_detail: Dict[str, Any] = {}
+    if smart_degen_holders:
+        holders_by_pct = sorted(smart_degen_holders, key=lambda h: _to_float(h.get("amount_percentage")) or 0.0, reverse=True)
+        max_holder = holders_by_pct[0]
+        max_pct = _to_float(max_holder.get("amount_percentage"))
+        max_usd = _to_float(max_holder.get("usd_value"))
+        max_ok = (max_pct is not None and max_pct > 1.5) or (max_usd is not None and max_usd > 200)
+        min_holder = holders_by_pct[-1]
+        min_pct = _to_float(min_holder.get("amount_percentage"))
+        min_usd = _to_float(min_holder.get("usd_value"))
+        min_ok = (min_pct is not None and min_pct > 1.0) or (min_usd is not None and min_usd > 100)
+        degen_hold_ok = max_ok and min_ok
+        degen_hold_detail = {
+            "max_holder_pct": max_pct, "max_holder_usd": max_usd, "max_ok": max_ok,
+            "min_holder_pct": min_pct, "min_holder_usd": min_usd, "min_ok": min_ok,
+        }
+    cond_degen_full = cond_degen and degen_hold_ok
     details.append({
-        "rule": "price_lt_low_times_y", "passed": cond5,
-        "current": current_price, "low_5m": low_5m,
-        "threshold_value": low_times_y, "y": y,
-    })
-
-    # rule 5: 0.8-0.2*y < frac < 0.4+0.2*y
-    frac = (current_price - low_5m) / (high_5m - low_5m)
-    low_frac = 0.8 - 0.2 * y
-    high_frac = 0.4 + 0.2 * y
-    cond6 = low_frac < frac < high_frac
-    details.append({
-        "rule": "fraction_range", "passed": cond6,
-        "frac": frac, "range": [low_frac, high_frac],
-        "current": current_price, "high_5m": high_5m,
-        "low_5m": low_5m, "y": y,
+        "rule": "smart_degen", "passed": cond_degen_full,
+        "degen_count": degen_count, "min_degen_count": max(1, int(min_degen_count)),
+        "holdings": degen_hold_detail, "x": x,
     })
 
     passed = all(d.get("passed") for d in details)
     feature_vector = {
-        "y": y, "current_price": current_price,
-        "high_5m": high_5m, "low_5m": low_5m, "frac": frac,
-        "volume_1m": volume_1m, "liquidity_usd": liquidity_usd,
-        "open_1m": open_1m, "close_1m": close_1m,
-        "high_1m": high_1m, "low_1m": low_1m,
-        "kline_count_used": kline_count,
+        "x": x, "y": y, "current_price": current_price,
+        "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
+        "price_change_1h_pct": pct_change_1h,
+        "degen_count": degen_count,
+        "age_minutes": age_minutes,
     }
     return PriceFilterResult(passed, details, feature_vector)

@@ -197,8 +197,6 @@ class Repositories:
         name: str,
         x: float,
         y: float,
-        min_created: int,
-        max_created: int = 300,
         is_live: bool = False,
         priority: int = 100,
         raw_config_json: str = "{}",
@@ -207,7 +205,7 @@ class Repositories:
 
         async def _do():
             cur = await self.db.execute(
-                "INSERT INTO strategy_groups(name, enabled, is_live, priority, config_version, x, y, min_created, max_created, raw_config_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO strategy_groups(name, enabled, is_live, priority, config_version, x, y, raw_config_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     name,
                     1,
@@ -216,8 +214,6 @@ class Repositories:
                     1,
                     x,
                     y,
-                    min_created,
-                    max_created,
                     raw_config_json,
                     created_at,
                     created_at,
@@ -263,7 +259,7 @@ class Repositories:
 
         allowed = {
             "name", "enabled", "is_live", "priority", "config_version",
-            "x", "y", "min_created", "max_created",
+            "x", "y",
             "buy_slippage_cap_bps", "sell_slippage_cap_bps",
             "emergency_slippage_cap_bps", "price_impact_hard_cap_pct",
             "raw_config_json",
@@ -346,8 +342,6 @@ class Repositories:
                 "模拟盘1",
                 0.20,
                 2.25,
-                180,
-                max_created=300,
                 is_live=False,
                 priority=10,
                 raw_config_json="{}",
@@ -666,7 +660,6 @@ class Repositories:
         token_mint: str,
         pool_address: Optional[str] = None,
         pool_created_at: Optional[str] = None,
-        min_created: Optional[int] = None,
         snapshot_id: Optional[int] = None,
         strategy_id: Optional[int] = None,
         strategy_config_version: Optional[int] = None,
@@ -691,12 +684,12 @@ class Repositories:
                 """
                 INSERT INTO discovery_events(
                   token_mint, pool_address, strategy_id, strategy_config_version,
-                  first_seen_at, pool_created_at, min_created, status,
+                  first_seen_at, pool_created_at, status,
                   source_snapshot_id, initial_snapshot_id,
                   feature_vector_json,
                   created_at, updated_at
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     token_mint,
@@ -705,14 +698,13 @@ class Repositories:
                     strategy_config_version,
                     now,
                     pool_created_at,
-                    min_created,
                     status,
                     snapshot_id,
                     snapshot_id,
                     feature_vector_json,
                     now,
                     now,
-                ),
+                )
             )
             return cur.lastrowid
 
@@ -738,7 +730,6 @@ class Repositories:
         token_mint: str,
         pool_address: Optional[str] = None,
         pool_created_at: Optional[str] = None,
-        min_created: Optional[int] = None,
         source_snapshot_id: Optional[int] = None,
         strategy_id: Optional[int] = None,
         strategy_config_version: Optional[int] = None,
@@ -752,11 +743,11 @@ class Repositories:
                 """
                 INSERT INTO discovery_events(
                   token_mint, pool_address, strategy_id, strategy_config_version,
-                  first_seen_at, pool_created_at, min_created, status,
+                  first_seen_at, pool_created_at, status,
                   source_snapshot_id, initial_snapshot_id,
                   created_at, updated_at
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     token_mint,
@@ -765,13 +756,12 @@ class Repositories:
                     strategy_config_version,
                     now,
                     pool_created_at,
-                    min_created,
                     status,
                     source_snapshot_id,
                     source_snapshot_id,
                     now,
                     now,
-                ),
+                )
             )
             return cur.lastrowid
 
@@ -812,7 +802,6 @@ class Repositories:
             "last_error",
             "fail_reason_json",
             "feature_vector_json",
-            "min_created",
         }
 
         updates: Dict[str, Any] = {"status": status, "updated_at": utc_now_iso()}
@@ -940,35 +929,25 @@ class Repositories:
         locked_strategy_config_json: str,
         status: str,
         entry_price_usd: Optional[float],
-        entry_price_sol: Optional[float],
         entry_token_amount: float,
         remaining_token_amount: float,
         remaining_value_usd: Optional[float],
         opened_at: Optional[str] = None,
         live_strategy_id: Optional[int] = None,
         strategy_config_version: int = 1,
-        total_cost_sol: float = 0.0,
         open_trade_event_id: Optional[int] = None,
         last_fill_at: Optional[str] = None,
         last_fill_price_usd: Optional[float] = None,
-        last_fill_price_sol: Optional[float] = None,
         discovery_event_id: Optional[int] = None,
         account_type: Optional[str] = None,
         legacy_config_status: Optional[str] = None,
         pool_address: Optional[str] = None,
-        remaining_value_sol: Optional[float] = None,
         next_risk_check_at: Optional[str] = None,
         risk_check_interval_seconds: Optional[int] = None,
     ) -> int:
         now = utc_now_iso()
         opened_at = opened_at or now
         acct = account_type or ("LIVE" if is_live else "SIM")
-
-        if remaining_value_sol is None and entry_price_sol is not None:
-            remaining_value_sol = remaining_token_amount * entry_price_sol
-
-        if last_fill_price_sol is None:
-            last_fill_price_sol = entry_price_sol
 
         if last_fill_at is None:
             last_fill_at = opened_at
@@ -980,17 +959,17 @@ class Repositories:
                   token_mint, pool_address, discovery_event_id,
                   is_live, account_type, live_strategy_id, strategy_config_version,
                   locked_strategy_config_json, legacy_config_status, status,
-                  entry_price_usd, entry_price_sol,
+                  entry_price_usd,
                   entry_token_amount, remaining_token_amount,
-                  remaining_value_usd, remaining_value_sol,
-                  total_cost_sol, opened_at,
-                  last_fill_at, last_fill_price_usd, last_fill_price_sol,
+                  remaining_value_usd,
+                  opened_at,
+                  last_fill_at, last_fill_price_usd,
                   open_trade_event_id,
                   next_risk_check_at, risk_check_interval_seconds,
                   executed_exit_rules_json,
                   updated_at
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     token_mint,
@@ -1004,16 +983,12 @@ class Repositories:
                     legacy_config_status,
                     status,
                     entry_price_usd,
-                    entry_price_sol,
                     entry_token_amount,
                     remaining_token_amount,
                     remaining_value_usd,
-                    remaining_value_sol,
-                    total_cost_sol,
                     opened_at,
                     last_fill_at,
                     last_fill_price_usd,
-                    last_fill_price_sol,
                     open_trade_event_id,
                     next_risk_check_at,
                     risk_check_interval_seconds,
@@ -1099,15 +1074,14 @@ class Repositories:
             """
             SELECT
               id, token_mint, status, account_type,
-              entry_price_usd, entry_price_sol,
+              entry_price_usd,
               entry_token_amount, remaining_token_amount,
-              remaining_value_usd, remaining_value_sol,
-              realized_pnl_sol, realized_pnl_pct, pnl_pct,
-              total_cost_sol, total_return_sol,
+              remaining_value_usd,
+              realized_pnl_pct, pnl_pct,
               opened_at, closed_at, close_reason,
               last_exit_reason,
               updated_at, is_live,
-              last_fill_at, last_fill_price_usd, last_fill_price_sol,
+              last_fill_at, last_fill_price_usd,
               last_risk_check_at, next_risk_check_at, risk_check_interval_seconds,
               executed_exit_rules_json
             FROM positions
@@ -1133,18 +1107,6 @@ class Repositories:
             row = await cur.fetchone()
         sim_open = row[0] if row else 0
 
-        async with self.db.execute(
-            "SELECT COALESCE(SUM(realized_pnl_sol), 0) as total_pnl FROM positions WHERE account_type = 'LIVE' AND status = 'CLOSED'"
-        ) as cur:
-            row = await cur.fetchone()
-        live_pnl = row[0] if row else 0
-
-        async with self.db.execute(
-            "SELECT COALESCE(SUM(realized_pnl_sol), 0) as total_pnl FROM positions WHERE account_type = 'SIM' AND status = 'CLOSED'"
-        ) as cur:
-            row = await cur.fetchone()
-        sim_pnl = row[0] if row else 0
-
         one_hour_ago = iso_before_seconds(3600)
 
         async with self.db.execute(
@@ -1164,8 +1126,8 @@ class Repositories:
         return {
             "live_open_count": live_open,
             "sim_open_count": sim_open,
-            "live_pnl_sol": live_pnl,
-            "sim_pnl_sol": sim_pnl,
+            "live_pnl_sol": 0,
+            "sim_pnl_sol": 0,
             "recent_discoveries": events,
             "recent_errors": errors,
         }
@@ -1175,7 +1137,6 @@ class Repositories:
         position_id: int,
         remaining_token_amount: float,
         remaining_value_usd: Optional[float] = None,
-        remaining_value_sol: Optional[float] = None,
         last_fill_at: Optional[str] = None,
         last_fill_price_usd: Optional[float] = None,
         last_fill_price_sol: Optional[float] = None,
@@ -1191,8 +1152,6 @@ class Repositories:
 
         if remaining_value_usd is not None:
             updates["remaining_value_usd"] = remaining_value_usd
-        if remaining_value_sol is not None:
-            updates["remaining_value_sol"] = remaining_value_sol
         if last_fill_at is not None:
             updates["last_fill_at"] = last_fill_at
         if last_fill_price_usd is not None:
@@ -1227,7 +1186,6 @@ class Repositories:
     async def update_position_risk_schedule(
         self,
         position_id: int,
-        remaining_value_sol: Optional[float],
         remaining_value_usd: Optional[float] = None,
         interval_seconds: int = 0,
         last_risk_check_at: Optional[str] = None,
@@ -1241,8 +1199,7 @@ class Repositories:
             await self.db.execute(
                 """
                 UPDATE positions
-                SET remaining_value_sol = COALESCE(?, remaining_value_sol),
-                    remaining_value_usd = COALESCE(?, remaining_value_usd),
+                SET remaining_value_usd = COALESCE(?, remaining_value_usd),
                     last_risk_check_at = ?,
                     next_risk_check_at = ?,
                     risk_check_interval_seconds = ?,
@@ -1250,7 +1207,6 @@ class Repositories:
                 WHERE id = ?
                 """,
                 (
-                    remaining_value_sol,
                     remaining_value_usd,
                     last_at,
                     next_at,
@@ -1271,8 +1227,6 @@ class Repositories:
         position_id: int,
         closed_at: Optional[str] = None,
         close_reason: Optional[str] = None,
-        total_return_sol: Optional[float] = None,
-        realized_pnl_sol: Optional[float] = None,
         realized_pnl_pct: Optional[float] = None,
         pnl_pct: Optional[float] = None,
     ):
@@ -1286,10 +1240,6 @@ class Repositories:
             "updated_at": closed_at,
         }
 
-        if total_return_sol is not None:
-            updates["total_return_sol"] = total_return_sol
-        if realized_pnl_sol is not None:
-            updates["realized_pnl_sol"] = realized_pnl_sol
         if realized_pnl_pct is not None:
             updates["realized_pnl_pct"] = realized_pnl_pct
         if pnl_pct is not None:

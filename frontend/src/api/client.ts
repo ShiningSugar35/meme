@@ -41,8 +41,6 @@ export interface PositionSummary {
   total_pnl_usd?: number;
   live_pnl_usd?: number;
   sim_pnl_usd?: number;
-  live_pnl_sol?: number;
-  sim_pnl_sol?: number;
   [key: string]: unknown;
 }
 
@@ -55,8 +53,6 @@ export interface StrategyGroup {
   config_version?: number;
   x: number;
   y: number;
-  min_created: number;
-  max_created: number;
   raw_config_json?: string;
   created_at?: string;
   updated_at?: string;
@@ -69,8 +65,6 @@ export interface StrategyPayload {
   is_live: boolean;
   x: number;
   y: number;
-  min_created: number;
-  max_created?: number;
 }
 
 export interface TradingParamSpec {
@@ -96,7 +90,6 @@ export interface PortfolioRow {
   status: string;
   remaining?: number;
   remaining_value_usd?: number;
-  remaining_value_sol?: number;
   pnl_pct?: number;
   ratio?: number | string;
   updated_at?: string;

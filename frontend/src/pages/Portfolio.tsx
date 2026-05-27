@@ -29,16 +29,13 @@ function ruleLabel(name: string): string {
     fresh_wallet_rate: '新钱包比例超标',
     sell_tax: 'sell_tax超标',
     has_at_least_one_social: '缺少社交(仅x<0.15)',
-    creator_token_status_or_dev_team_hold_rate: 'creator未关仓/dev持币',
     burn_status: 'burn状态不符',
     sniper_count: 'sniper数量超标',
     platform: '平台不在白名单',
-    volume_1m: 'volume_1m不达标',
-    candle_position: '1m candle位置偏低',
-    price_gt_high_over_y: '价格未突破high5/(y-0.5)',
-    price_lt_low_times_y: '价格未跌破low5*y',
-    fraction_range: '价格分位不在区间',
     top1_holder: 'TOP1持仓超标',
+    swaps_5m_scaled: 'swaps_5m不达标',
+    price_change_1h: '1h价格涨幅不足',
+    smart_degen: '聪明钱指标不满足',
   };
   return map[name] || name;
 }

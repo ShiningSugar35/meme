@@ -511,6 +511,11 @@ class GMGNProvider(MarketDataProvider):
             "liquidity_usd": liquidity_usd,
             "sol_side_liquidity": sol_side_liquidity,
             "market_cap": market_cap,
+            "swaps_5m": self._to_float(self._first_present(price_nested, ["swaps_5m", "swaps5m"])) if isinstance(price_nested, dict) else None,
+            "swaps_1h": self._to_float(self._first_present(price_nested, ["swaps_1h", "swaps1h"])) if isinstance(price_nested, dict) else None,
+            "price_1m": self._to_float(self._first_present(price_nested, ["price_1m", "price1m"])) if isinstance(price_nested, dict) else None,
+            "price_5m": self._to_float(self._first_present(price_nested, ["price_5m", "price5m"])) if isinstance(price_nested, dict) else None,
+            "price_1h": self._to_float(self._first_present(price_nested, ["price_1h", "price1h"])) if isinstance(price_nested, dict) else None,
             "raw_json": json.dumps(data, ensure_ascii=False, default=str),
             "source_mode": "REAL",
         }
@@ -538,6 +543,45 @@ class GMGNProvider(MarketDataProvider):
                 "addr_type": addr_type,
                 "top1_holder_rate": rate,
                 "rate": rate,
+                "source_mode": "REAL",
+                "raw_json": json.dumps(item, ensure_ascii=False, default=str),
+            })
+        return out
+
+    async def fetch_smart_degen_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:
+        if self.mode == ProviderMode.MOCK:
+            return [
+                {"addr_type": 0, "amount_percentage": 0.03, "usd_value": 300.0, "source_mode": "MOCK"},
+                {"addr_type": 0, "amount_percentage": 0.02, "usd_value": 200.0, "source_mode": "MOCK"},
+            ]
+
+        path = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
+        params = {"chain": "sol", "address": token_mint, "limit": int(limit), "tag": "smart_degen"}
+        data = await self._make_request(path, params, method="GET")
+        items = self._extract_items(data, ("holders", "list", "items", "rows", "data"))
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            addr_type = self._first_present(item, ["addr_type", "address_type", "type"], 0)
+            try:
+                addr_type = int(addr_type)
+            except Exception:
+                addr_type = 0
+            if addr_type != 0:
+                continue
+            amount_percentage = self._to_float(self._first_present(item, ["amount_percentage", "rate", "hold_rate"]))
+            usd_value = self._to_float(self._first_present(item, ["usd_value", "usd_val"]))
+            buy_volume_cur = self._to_float(self._first_present(item, ["buy_volume_cur", "buy_volume"]))
+            sell_volume_cur = self._to_float(self._first_present(item, ["sell_volume_cur", "sell_volume"]))
+            out.append({
+                "address": item.get("address") or item.get("wallet"),
+                "addr_type": addr_type,
+                "amount_percentage": amount_percentage,
+                "usd_value": usd_value,
+                "buy_volume_cur": buy_volume_cur,
+                "sell_volume_cur": sell_volume_cur,
+                "tags": item.get("tags") or [],
                 "source_mode": "REAL",
                 "raw_json": json.dumps(item, ensure_ascii=False, default=str),
             })

@@ -10,8 +10,8 @@ class KillSwitchRunner:
         closed = await self.repo.list_recent_closed_live_positions(10)
         if len(closed) < 10:
             return
-        total_cost = sum([c.get('total_cost_sol', 0) or 0 for c in closed])
-        total_return = sum([c.get('total_return_sol', 0) or 0 for c in closed])
+        total_cost = sum([c.get('total_cost_usd', 0) or 0 for c in closed])
+        total_return = sum([c.get('total_return_usd', 0) or 0 for c in closed])
         if total_cost == 0:
             await self.repo.append_system_event('WARN', 'KILL_SWITCH', 'insufficient total_cost',
                 str({'total_cost': total_cost}), account_type='SIM')

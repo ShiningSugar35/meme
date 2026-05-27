@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 import json
 
 from ..db.repositories import Repositories
@@ -61,32 +61,6 @@ def risk_scan_interval_seconds(remaining_value_usd: float) -> int:
     return int(settings.get_risk_scan_interval_seconds(float(remaining_value_usd or 0.0)))
 
 
-def _extract_price_sol(latest: Dict[str, Any], position: Optional[Dict[str, Any]] = None) -> Optional[float]:
-    latest = latest or {}
-    position = position or {}
-
-    for key in ("price_sol", "latest_price_sol", "current_price_sol"):
-        value = _to_float(latest.get(key))
-        if value and value > 0:
-            return value
-
-    # Compatibility fallback for old MOCK providers that returned SOL price as "price".
-    # Real providers should populate price_sol explicitly to avoid USD/SOL mixing.
-    provider_mode = str(getattr(settings, "PROVIDER_MODE", "") or "").upper()
-    if "MOCK" in provider_mode:
-        value = _to_float(latest.get("price"))
-        if value and value > 0:
-            return value
-
-    # Last-resort fallback for legacy SIM positions only.
-    if _account_type(position) == "SIM":
-        value = _to_float(position.get("entry_price_sol"))
-        if value and value > 0:
-            return value
-
-    return None
-
-
 def _extract_price_usd(latest: Dict[str, Any]) -> Optional[float]:
     latest = latest or {}
     for key in ("price_usd", "latest_price_usd"):
@@ -100,25 +74,6 @@ def _extract_price_usd(latest: Dict[str, Any]) -> Optional[float]:
         return value
 
     return None
-
-
-def _remaining_value_sol(position: Dict[str, Any], current_price_sol: Optional[float]) -> float:
-    remaining_value_sol = _to_float(position.get("remaining_value_sol"))
-    if remaining_value_sol is not None and remaining_value_sol >= 0:
-        # Use DB value only as a fallback. If fresh price exists, recompute below.
-        fallback = remaining_value_sol
-    else:
-        fallback = 0.0
-
-    remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
-    if current_price_sol and current_price_sol > 0:
-        return max(remaining_token * current_price_sol, 0.0)
-
-    entry_price_sol = _to_float(position.get("entry_price_sol"))
-    if entry_price_sol and entry_price_sol > 0:
-        return max(remaining_token * entry_price_sol, 0.0)
-
-    return fallback
 
 
 def _remaining_value_usd(position: Dict[str, Any], current_price_usd: Optional[float]) -> float:
@@ -170,6 +125,7 @@ class PositionRiskRunner:
         self.trading_pipeline = trading_pipeline
         self._legacy_warned: set[int] = set()
         self._last_top1_check: Dict[int, datetime] = {}
+        self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -207,10 +163,18 @@ class PositionRiskRunner:
             return
 
         latest = await self._fetch_latest_price(token, account_type)
-        price_sol = _extract_price_sol(latest, position)
         price_usd = _extract_price_usd(latest)
-        remaining_value_sol = _remaining_value_sol(position, price_sol)
         remaining_value_usd = _remaining_value_usd(position, price_usd)
+
+        if price_usd is None or price_usd <= 0:
+            await self.repo.append_system_event(
+                "WARN",
+                "RISK",
+                "Risk runner skipped position because USD price is unavailable",
+                _safe_json_dumps({"position_id": pos_id, "token": token, "latest": latest}),
+                account_type=account_type,
+            )
+            return
 
         interval = risk_scan_interval_seconds(remaining_value_usd)
         next_check_at = now + timedelta(seconds=interval)
@@ -218,22 +182,11 @@ class PositionRiskRunner:
         if hasattr(self.repo, "update_position_risk_schedule"):
             await self.repo.update_position_risk_schedule(
                 position_id=pos_id,
-                remaining_value_sol=remaining_value_sol,
                 remaining_value_usd=remaining_value_usd,
                 interval_seconds=interval,
                 last_risk_check_at=_iso(now),
                 next_risk_check_at=_iso(next_check_at),
             )
-
-        if price_sol is None or price_sol <= 0:
-            await self.repo.append_system_event(
-                "WARN",
-                "RISK",
-                "Risk runner skipped position because SOL price is unavailable",
-                _safe_json_dumps({"position_id": pos_id, "token": token, "latest": latest}),
-                account_type=account_type,
-            )
-            return
 
         latest_snapshot = await self._fetch_latest_snapshot(token, account_type)
         token_info = await self.repo.get_token(token)
@@ -242,28 +195,25 @@ class PositionRiskRunner:
 
         ticks = await self.repo.get_recent_ticks(token, 60)
         prices_60 = [
-            _to_float(t.get("price_sol"))
+            _to_float(t.get("price_usd"))
             for t in ticks
-            if _to_float(t.get("price_sol")) is not None and _to_float(t.get("price_sol")) > 0
+            if _to_float(t.get("price_usd")) is not None and _to_float(t.get("price_usd")) > 0
         ]
-        if price_sol:
-            prices_60.append(price_sol)
+        if price_usd:
+            prices_60.append(price_usd)
 
         rolling = {
-            "low": min(prices_60) if prices_60 else price_sol,
-            "high": max(prices_60) if prices_60 else price_sol,
+            "low": min(prices_60) if prices_60 else price_usd,
+            "high": max(prices_60) if prices_60 else price_usd,
         }
 
         position_for_decision = dict(position)
-        position_for_decision["remaining_value_sol"] = remaining_value_sol
         position_for_decision["remaining_value_usd"] = remaining_value_usd
         if token_info and token_info.get("latest_type"):
             position_for_decision["latest_token_type"] = token_info["latest_type"]
 
         tick = {
-            "price_sol": price_sol,
             "price_usd": price_usd,
-            "remaining_value_sol": remaining_value_sol,
             "remaining_value_usd": remaining_value_usd,
         }
 
@@ -276,7 +226,6 @@ class PositionRiskRunner:
                 reason_code="RISK_RECHECK_FAILED",
                 emergency=True,
                 latest=latest,
-                current_price_sol=price_sol,
                 current_price_usd=price_usd,
             )
             return
@@ -290,7 +239,19 @@ class PositionRiskRunner:
                 reason_code="TOP1_HOLDER_RISK",
                 emergency=True,
                 latest=latest,
-                current_price_sol=price_sol,
+                current_price_usd=price_usd,
+            )
+            return
+
+        # Smart money sell monitoring (feature-flagged, polling)
+        smart_dump = await self._check_smart_money_sell(position_for_decision, now)
+        if smart_dump:
+            await self._request_exit(
+                position=position_for_decision,
+                exit_pct=0.5,
+                reason_code="SMART_MONEY_SELL",
+                emergency=False,
+                latest=latest,
                 current_price_usd=price_usd,
             )
             return
@@ -301,7 +262,6 @@ class PositionRiskRunner:
             rolling,
             latest_snapshot,
             now=now,
-            dust_force_exit_sol=float(getattr(settings, "DUST_FORCE_EXIT_SOL", 0.15)),
         )
 
         if not decision.should_exit:
@@ -315,7 +275,6 @@ class PositionRiskRunner:
             reason_code=reason_code,
             emergency=decision.emergency,
             latest=latest,
-            current_price_sol=price_sol,
             current_price_usd=price_usd,
         )
 
@@ -557,6 +516,62 @@ class PositionRiskRunner:
 
         return False
 
+    async def _check_smart_money_sell(self, position: Dict[str, Any], now: datetime) -> bool:
+        if not getattr(settings, "SMART_MONEY_SELL_MONITOR_ENABLED", False):
+            return False
+        pos_id = int(position["id"])
+        remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
+        interval = settings.get_risk_scan_interval_seconds(remaining_value_usd)
+        if interval <= 0:
+            return False
+
+        last_check = self._last_smart_degen_sell.get(pos_id, {})
+        last_time_val = last_check.get("_ts")
+        if last_time_val is not None and now.timestamp() < last_time_val + interval:
+            return False
+
+        token = position["token_mint"]
+        account_type = _account_type(position)
+
+        try:
+            holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20)
+        except Exception:
+            return False
+
+        if not holders:
+            return False
+
+        sell_trigger = float(getattr(settings, "SMART_MONEY_SELL_THRESHOLD_USD", 50.0))
+        triggered = False
+        for h in holders:
+            addr = h.get("address") or ""
+            if not addr:
+                continue
+            sell_cur = _to_float(h.get("sell_volume_cur")) or 0.0
+            prev = last_check.get(addr, 0.0)
+            delta = sell_cur - prev
+            if delta > sell_trigger:
+                triggered = True
+                await self.repo.append_system_event(
+                    "INFO", "RISK",
+                    f"Smart money sell detected: wallet {addr} sold +${delta:.0f}",
+                    _safe_json_dumps({
+                        "position_id": pos_id, "token": token,
+                        "wallet": addr, "sell_delta_usd": delta,
+                        "threshold": sell_trigger,
+                    }),
+                    account_type=account_type,
+                )
+                break
+
+        snapshot: Dict[str, Any] = {"_ts": now.timestamp()}
+        for h in holders:
+            addr = h.get("address") or ""
+            snapshot[addr] = _to_float(h.get("sell_volume_cur")) or 0.0
+        self._last_smart_degen_sell[pos_id] = snapshot
+
+        return triggered
+
     def _primary_reason(self, decision) -> str:
         if not decision.reasons:
             return "EXIT"
@@ -574,7 +589,6 @@ class PositionRiskRunner:
         reason_code: str,
         emergency: bool,
         latest: Dict[str, Any],
-        current_price_sol: float,
         current_price_usd: Optional[float],
     ):
         pos_id = int(position["id"])
@@ -582,9 +596,9 @@ class PositionRiskRunner:
         account_type = _account_type(position)
         is_live = bool(position.get("is_live"))
 
-        remaining_value_sol = _remaining_value_sol(position, current_price_sol)
-        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_SOL", 0.15))
-        if remaining_value_sol < dust_threshold:
+        remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
+        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 0.50))
+        if remaining_value_usd < dust_threshold:
             exit_pct = 1.0
             reason_code = "DUST_FORCE_EXIT"
 
@@ -618,7 +632,6 @@ class PositionRiskRunner:
                 event_type="SELL",
                 status="FAILED",
                 requested_pct=exit_pct,
-                price_sol=current_price_sol,
                 price_usd=current_price_usd,
                 error_code="TRADING_PIPELINE_MISSING",
                 error_message="LIVE exit was requested, but no TradingPipeline.execute_sell was available.",
@@ -637,7 +650,6 @@ class PositionRiskRunner:
             position=position,
             exit_pct=exit_pct,
             reason_code=reason_code,
-            current_price_sol=current_price_sol,
             current_price_usd=current_price_usd,
         )
 
@@ -688,7 +700,6 @@ class PositionRiskRunner:
         position: Dict[str, Any],
         exit_pct: float,
         reason_code: str,
-        current_price_sol: float,
         current_price_usd: Optional[float],
     ):
         pos_id = int(position["id"])
@@ -700,15 +711,14 @@ class PositionRiskRunner:
         sell_token_amount = max(remaining_token * min(max(exit_pct, 0.0), 1.0), 0.0)
         new_remaining = max(remaining_token - sell_token_amount, 0.0)
 
-        executed_sol_amount = sell_token_amount * current_price_sol if current_price_sol else 0.0
         executed_usd_amount = sell_token_amount * current_price_usd if current_price_usd else None
 
-        existing_return = _to_float(position.get("total_return_sol"), 0.0) or 0.0
-        total_return_sol = existing_return + executed_sol_amount
+        existing_return = _to_float(position.get("total_return_usd"), 0.0) or 0.0
+        total_return_usd = existing_return + (executed_usd_amount or 0.0)
 
-        total_cost_sol = _to_float(position.get("total_cost_sol"), 0.0) or 0.0
-        realized_pnl_sol = total_return_sol - total_cost_sol if total_cost_sol else None
-        realized_pnl_pct = (realized_pnl_sol / total_cost_sol) if total_cost_sol and realized_pnl_sol is not None else None
+        total_cost_usd = _to_float(position.get("total_cost_usd"), 0.0) or 0.0
+        realized_pnl_usd = total_return_usd - total_cost_usd if total_cost_usd else None
+        realized_pnl_pct = (realized_pnl_usd / total_cost_usd) if total_cost_usd and realized_pnl_usd is not None else None
 
         await self.repo.append_trade_event(
             f"SELL_SIM:{pos_id}:{reason_code}",
@@ -723,8 +733,7 @@ class PositionRiskRunner:
             requested_pct=exit_pct,
             requested_token_amount=sell_token_amount,
             executed_token_amount=sell_token_amount,
-            executed_sol_amount=executed_sol_amount,
-            price_sol=current_price_sol,
+            executed_usd_amount=executed_usd_amount,
             price_usd=current_price_usd,
             provider="POSITION_RISK_SIM",
         )
@@ -733,8 +742,8 @@ class PositionRiskRunner:
             await self.repo.close_position(
                 pos_id,
                 close_reason=reason_code,
-                total_return_sol=total_return_sol,
-                realized_pnl_sol=realized_pnl_sol,
+                total_return_usd=total_return_usd,
+                realized_pnl_usd=realized_pnl_usd,
                 realized_pnl_pct=realized_pnl_pct,
                 pnl_pct=realized_pnl_pct,
             )
@@ -751,12 +760,10 @@ class PositionRiskRunner:
                 pos_id,
                 remaining_token_amount=new_remaining,
                 remaining_value_usd=executed_usd_amount,
-                remaining_value_sol=new_remaining * current_price_sol if current_price_sol else None,
                 last_fill_at=_iso(now),
                 last_fill_price_usd=current_price_usd,
-                last_fill_price_sol=current_price_sol,
-                total_return_sol=total_return_sol,
-                realized_pnl_sol=realized_pnl_sol,
+                total_return_usd=total_return_usd,
+                realized_pnl_usd=realized_pnl_usd,
                 realized_pnl_pct=realized_pnl_pct,
                 pnl_pct=realized_pnl_pct,
             )

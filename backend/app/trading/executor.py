@@ -159,10 +159,7 @@ class TradingPipeline:
             v = self._to_float(data.get(key))
             if v is not None and v > 0:
                 return v
-        # Compatibility fallback for mocks/legacy providers. In live code this
-        # should be price_sol from the provider.
-        v = self._to_float(data.get("price"))
-        return v if v is not None and v > 0 else 0.0
+        return 0.0
 
     def _get_sol_side_liquidity(self, data: Dict[str, Any]) -> float:
         for key in ("sol_side_liquidity", "latest_sol_side_liquidity", "sol_liquidity", "solLiquidity"):
@@ -251,13 +248,11 @@ class TradingPipeline:
         strategy: Dict[str, Any],
         *,
         token_decimals: int,
-        entry_size_sol: float,
         discovery_event_id: Optional[int],
         entry_size_usd: Optional[float] = None,
     ) -> str:
         locked = dict(strategy)
         locked["token_decimals"] = token_decimals
-        locked["entry_size_sol"] = entry_size_sol
         if entry_size_usd is not None:
             locked["entry_size_usd"] = entry_size_usd
         locked["discovery_event_id"] = discovery_event_id
@@ -493,7 +488,6 @@ class TradingPipeline:
             self._locked_strategy_for_position(
                 strategy,
                 token_decimals=token_decimals,
-                entry_size_sol=size_sol,
                 discovery_event_id=discovery_event_id,
                 entry_size_usd=size_usd,
             ),
@@ -506,7 +500,6 @@ class TradingPipeline:
             opened_at,
             live_strategy_id=None,
             strategy_config_version=strategy.get("config_version", 1),
-            total_cost_sol=size_sol,
             open_trade_event_id=te.get("id"),
             last_fill_at=opened_at,
             last_fill_price_usd=price_usd,
@@ -519,7 +512,7 @@ class TradingPipeline:
             token_mint,
             strategy.get("id", 0),
             False,
-            self._safe_json({"entry_price_sol": price_sol, "entry_price_usd": price_usd, "size_sol": size_sol, "size_usd": size_usd, "jupiter_impact": jupiter_price_impact}),
+            self._safe_json({"entry_price_usd": price_usd, "size_usd": size_usd, "jupiter_impact": jupiter_price_impact}),
             self._safe_json(strategy),
             position_id=pos_id,
             discovery_event_id=discovery_event_id,
@@ -710,7 +703,6 @@ class TradingPipeline:
             self._locked_strategy_for_position(
                 strategy,
                 token_decimals=token_decimals,
-                entry_size_sol=size_sol,
                 discovery_event_id=discovery_event_id,
                 entry_size_usd=size_usd,
             ),
@@ -723,7 +715,6 @@ class TradingPipeline:
             opened_at,
             live_strategy_id=sid,
             strategy_config_version=strategy.get("config_version", 1),
-            total_cost_sol=size_sol,
             open_trade_event_id=te_confirmed.get("id"),
             last_fill_at=opened_at,
             last_fill_price_usd=price_usd,
@@ -736,7 +727,7 @@ class TradingPipeline:
             token_mint,
             sid,
             True,
-            self._safe_json({"entry_price_sol": price_sol, "entry_price_usd": price_usd, "size_sol": size_sol, "size_usd": size_usd}),
+            self._safe_json({"entry_price_usd": price_usd, "size_usd": size_usd}),
             self._safe_json(strategy),
             position_id=pos_id,
             discovery_event_id=discovery_event_id,
@@ -819,9 +810,8 @@ class TradingPipeline:
         current_price_sol = self._get_price_sol(latest) or self._to_float(position.get("entry_price_sol"), 0.0) or 0.0
         sol_side_liquidity = self._get_sol_side_liquidity(latest)
 
-        remaining_value_sol = remaining_token * current_price_sol if current_price_sol > 0 else 0.0
-        # Dust means the next withdrawal should remove everything.
-        if remaining_value_sol > 0 and remaining_value_sol < getattr(settings, "DUST_FORCE_EXIT_SOL", 0.125):
+        remaining_value_usd = remaining_token * current_price_usd if current_price_usd > 0 else 0.0
+        if remaining_value_usd > 0 and remaining_value_usd < getattr(settings, "DUST_FORCE_EXIT_USD", 12.5):
             pct = 1.0
             exit_reason = "DUST_FORCE_EXIT"
 
@@ -940,7 +930,6 @@ class TradingPipeline:
                 pos_id,
                 closed_at=now_iso,
                 close_reason=exit_reason,
-                total_return_sol=out_sol,
             )
         else:
             new_remaining = max(0.0, remaining_token - sell_amount_human)

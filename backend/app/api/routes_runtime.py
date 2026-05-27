@@ -22,7 +22,7 @@ OPEN_POSITION_EXCLUDED_STATUSES = ("CLOSED", "LEGACY_INVALID_CONFIG", "MIGRATION
 
 
 DEFAULT_SIM_STRATEGIES: List[Dict[str, Any]] = [
-    {"name": "模拟盘1", "x": 0.20, "y": 2.25, "min_created": 180, "max_created": 300, "is_live": False, "priority": 10},
+    {"name": "模拟盘1", "x": 0.20, "y": 2.25, "is_live": False, "priority": 10},
 ]
 
 TRADING_PARAM_SPECS: List[Dict[str, Any]] = [
@@ -108,8 +108,6 @@ async def ensure_runtime_defaults(repo: Any) -> None:
                 row
                 for row in existing
                 if not _as_bool(row.get("is_live"))
-                and int(row.get("min_created") or 0) == int(spec["min_created"])
-                and int(row.get("max_created") or 0) == int(spec["max_created"])
                 and _close_number(row.get("x"), spec["x"])
                 and _close_number(row.get("y"), spec["y"])
             ),
@@ -122,8 +120,6 @@ async def ensure_runtime_defaults(repo: Any) -> None:
                 name=spec["name"],
                 x=float(spec["x"]),
                 y=float(spec["y"]),
-                min_created=int(spec["min_created"]),
-                max_created=int(spec["max_created"]),
                 is_live=False,
                 priority=int(spec["priority"]),
                 raw_config_json="{}",
@@ -143,16 +139,12 @@ async def ensure_runtime_defaults(repo: Any) -> None:
             updates["x"] = float(spec["x"])
         if not _close_number(target.get("y"), spec["y"]):
             updates["y"] = float(spec["y"])
-        if int(target.get("min_created") or 0) != int(spec["min_created"]):
-            updates["min_created"] = int(spec["min_created"])
-        if int(target.get("max_created") or 0) != int(spec["max_created"]):
-            updates["max_created"] = int(spec["max_created"])
         if int(target.get("priority") or 0) != int(spec["priority"]):
             updates["priority"] = int(spec["priority"])
 
         if updates and hasattr(repo, "update_strategy_group"):
             await repo.update_strategy_group(int(target["id"]), updates)
-            if any(key in updates for key in {"x", "y", "min_created", "max_created"}) and hasattr(repo, "increment_config_version"):
+            if any(key in updates for key in {"x", "y"}) and hasattr(repo, "increment_config_version"):
                 await repo.increment_config_version(int(target["id"]))
 
 
@@ -395,8 +387,6 @@ async def create_strategy(request: Request, payload: Dict[str, Any] = Body(...))
             name=str(payload.get("name") or "策略组"),
             x=float(payload.get("x", 0.2)),
             y=float(payload.get("y", 2.25)),
-            min_created=int(payload.get("min_created", payload.get("t", 150))),
-            max_created=int(payload.get("max_created", 300)),
             is_live=bool(payload.get("is_live", False)),
             priority=int(payload.get("priority", 100)),
             raw_config_json=raw_config_json,
@@ -414,7 +404,7 @@ async def create_strategy(request: Request, payload: Dict[str, Any] = Body(...))
 @router.patch("/strategies/{strategy_id}")
 async def upsert_strategy(strategy_id: int, request: Request, payload: Dict[str, Any] = Body(...)):
     allowed = {
-        "name", "enabled", "is_live", "priority", "config_version", "x", "y", "min_created", "max_created",
+        "name", "enabled", "is_live", "priority", "config_version", "x", "y",
         "buy_slippage_cap_bps", "sell_slippage_cap_bps", "emergency_slippage_cap_bps",
         "price_impact_hard_cap_pct", "raw_config_json",
     }
@@ -430,7 +420,7 @@ async def upsert_strategy(strategy_id: int, request: Request, payload: Dict[str,
     try:
         if updates:
             await repo.update_strategy_group(strategy_id, updates)
-            if any(k in updates for k in {"x", "y", "min_created", "max_created", "raw_config_json"}):
+            if any(k in updates for k in {"x", "y", "raw_config_json"}):
                 await repo.increment_config_version(strategy_id)
         strategy = await repo.get_strategy_group(strategy_id) if hasattr(repo, "get_strategy_group") else None
         return {"ok": True, "strategy": strategy}
@@ -910,8 +900,7 @@ async def _trade_stats(repo: Repositories) -> Dict[str, Any]:
             repo,
             """
             SELECT account_type, status, COUNT(*) AS count,
-                   AVG(realized_pnl_pct) AS avg_realized_pnl_pct,
-                   SUM(realized_pnl_sol) AS sum_realized_pnl_sol
+                   AVG(realized_pnl_pct) AS avg_realized_pnl_pct
             FROM positions
             GROUP BY account_type, status
             """,

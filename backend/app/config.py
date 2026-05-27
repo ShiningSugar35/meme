@@ -171,31 +171,26 @@ class Settings(BaseSettings):
 
     # Risk Feature Scan Tiers, USD based.
     RISK_FEATURE_SCAN_TIER_1_USD: float = Field(150.0)
-    RISK_FEATURE_SCAN_TIER_1_SECONDS: int = Field(2)
+    RISK_FEATURE_SCAN_TIER_1_SECONDS: int = Field(4)
     RISK_FEATURE_SCAN_TIER_2_USD: float = Field(100.0)
-    RISK_FEATURE_SCAN_TIER_2_SECONDS: int = Field(3)
+    RISK_FEATURE_SCAN_TIER_2_SECONDS: int = Field(8)
     RISK_FEATURE_SCAN_TIER_3_USD: float = Field(50.0)
-    RISK_FEATURE_SCAN_TIER_3_SECONDS: int = Field(6)
+    RISK_FEATURE_SCAN_TIER_3_SECONDS: int = Field(16)
     RISK_FEATURE_SCAN_TIER_4_USD: float = Field(25.0)
-    RISK_FEATURE_SCAN_TIER_4_SECONDS: int = Field(12)
-    RISK_FEATURE_SCAN_TIER_5_SECONDS: int = Field(24)
+    RISK_FEATURE_SCAN_TIER_4_SECONDS: int = Field(32)
+    RISK_FEATURE_SCAN_TIER_5_SECONDS: int = Field(64)
 
     TOP1_HOLDER_SCAN_TIER_1_USD: float = Field(150.0)
-    TOP1_HOLDER_SCAN_TIER_1_SECONDS: int = Field(10)
+    TOP1_HOLDER_SCAN_TIER_1_SECONDS: int = Field(20)
     TOP1_HOLDER_SCAN_TIER_2_USD: float = Field(100.0)
-    TOP1_HOLDER_SCAN_TIER_2_SECONDS: int = Field(15)
+    TOP1_HOLDER_SCAN_TIER_2_SECONDS: int = Field(30)
     TOP1_HOLDER_SCAN_TIER_3_USD: float = Field(50.0)
-    TOP1_HOLDER_SCAN_TIER_3_SECONDS: int = Field(30)
+    TOP1_HOLDER_SCAN_TIER_3_SECONDS: int = Field(60)
     TOP1_HOLDER_SCAN_TIER_4_USD: float = Field(25.0)
-    TOP1_HOLDER_SCAN_TIER_4_SECONDS: int = Field(60)
+    TOP1_HOLDER_SCAN_TIER_4_SECONDS: int = Field(120)
     TOP1_HOLDER_SCAN_TIER_5_SECONDS: int = Field(0)
 
     DUST_FORCE_EXIT_USD: float = Field(12.5)
-    DUST_FORCE_EXIT_SOL: float = Field(0.15)
-    RISK_FEATURE_SCAN_TIER_1_SOL: float = Field(1.5)
-    RISK_FEATURE_SCAN_TIER_2_SOL: float = Field(1.0)
-    RISK_FEATURE_SCAN_TIER_3_SOL: float = Field(0.5)
-    RISK_FEATURE_SCAN_TIER_4_SOL: float = Field(0.25)
 
     WALLET_PUBLIC_KEY: Optional[str] = None
     WALLET_PRIVATE_KEY_BASE58: Optional[SecretStr] = None
@@ -375,8 +370,7 @@ class Settings(BaseSettings):
                 return max(int(seconds), 0)
         return max(int(fallback_seconds), 0)
 
-    def get_risk_scan_interval_seconds(self, remaining_value_usd: Optional[float] = None, remaining_value_sol: Optional[float] = None) -> int:
-        _ = remaining_value_sol
+    def get_risk_scan_interval_seconds(self, remaining_value_usd: Optional[float] = None) -> int:
         return self._tiered_interval(
             remaining_value_usd,
             [
@@ -388,8 +382,7 @@ class Settings(BaseSettings):
             self.RISK_FEATURE_SCAN_TIER_5_SECONDS,
         )
 
-    def get_top1_holder_scan_interval_seconds(self, remaining_value_usd: Optional[float] = None, remaining_value_sol: Optional[float] = None) -> Optional[int]:
-        _ = remaining_value_sol
+    def get_top1_holder_scan_interval_seconds(self, remaining_value_usd: Optional[float] = None) -> Optional[int]:
         seconds = self._tiered_interval(
             remaining_value_usd,
             [
