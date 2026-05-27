@@ -274,8 +274,8 @@ class DiscoveryRunner:
                 if rl.is_slot_cooldown(try_slot):
                     continue
                 items, gres = await self._try_fetch_group(group_name, platforms, try_slot, try_role)
-                if gres["ok"] and items:
-                    final_items = items
+                if gres["ok"]:
+                    final_items = items or []
                     final_gres = gres
                     break
                 else:

@@ -43,7 +43,7 @@ RULE_META: Dict[str, Dict[str, str]] = {
     "latest_price_present": {"label": "最新价格缺失", "stage": "price_filter", "section": "价格面及其他指标"},
     "swaps_5m_scaled": {"label": "swaps_5m不达标", "stage": "price_filter", "section": "价格面及其他指标"},
     "price_change_1h": {"label": "1h价格涨幅不足", "stage": "price_filter", "section": "价格面及其他指标"},
-    "smart_degen": {"label": "聪明钱指标不满足", "stage": "price_filter", "section": "价格面及其他指标"},
+    "smart_degen": {"label": "聪明钱指标不满足", "stage": "smart_degen_filter", "section": "价格面及其他指标"},
     "top1_holder_rate_observed": {"label": "TOP1持有率观测", "stage": "risk_filter", "section": "observed_only"},
 }
 
@@ -799,14 +799,20 @@ async def _build_credential_health() -> List[Dict[str, Any]]:
         rl = get_rate_limiter()
         result = []
         for slot, cred in rl.slots.items():
-            calls = max(cred.total_calls, 1)
-            ok_rate = cred.ok_calls / calls
-            if ok_rate < 0.5:
-                severity = "critical"
-            elif ok_rate < 0.9 or cred.is_cooldown():
-                severity = "warn"
+            severity: str
+            ok_rate: Optional[float]
+            if cred.total_calls == 0:
+                severity = "idle"
+                ok_rate = None
             else:
-                severity = "ok"
+                calls = max(cred.total_calls, 1)
+                ok_rate = cred.ok_calls / calls
+                if ok_rate < 0.5:
+                    severity = "critical"
+                elif ok_rate < 0.9 or cred.is_cooldown():
+                    severity = "warn"
+                else:
+                    severity = "ok"
             result.append({
                 "slot": slot,
                 "role": cred.role,
@@ -818,7 +824,7 @@ async def _build_credential_health() -> List[Dict[str, Any]]:
                 "local_rate_limited_count": cred.rate_limited_count,
                 "cooldown_until": cred.cooldown_until if cred.is_cooldown() else None,
                 "cooldown_remaining_s": round(cred.cooldown_remaining(), 1),
-                "ok_rate": round(ok_rate, 3),
+                "ok_rate": round(ok_rate, 3) if ok_rate is not None else None,
                 "endpoints": dict(cred.endpoints),
                 "severity": severity,
             })

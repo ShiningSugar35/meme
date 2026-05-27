@@ -1,7 +1,7 @@
 import asyncio
 import math
 from datetime import datetime, timedelta, timezone
-from ..strategy.filters import run_initial_filter, run_price_filter, _parse_creation_ts, _compute_age_minutes
+from ..strategy.filters import run_initial_filter, run_price_filter, _parse_creation_ts, _compute_age_minutes, evaluate_price_activity_rules, evaluate_smart_degen
 
 
 def make_snapshot(**kwargs):
@@ -282,3 +282,68 @@ def test_price_filter_swaps_from_token_fallback():
     assert swaps_detail.get("swaps_5m") == 100
     assert swaps_detail.get("swaps_1h") == 500
     assert swaps_detail.get("source") == "token_snapshot"
+
+
+# --- New tests for evaluate_price_activity_rules (Stage 1/2) ---
+
+def test_stage_price_activity_rules_basic():
+    token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
+    latest = {"price": 0.002, "price_usd": 0.002, "swaps_5m": 100, "swaps_1h": 500, "price_1h": 0.0015}
+    sg = {"x": 0.2, "y": 2.25}
+    res = asyncio.run(evaluate_price_activity_rules(token, sg, latest))
+    assert isinstance(res.passed, bool)
+    pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
+    assert pct_detail is not None
+    assert pct_detail.get("price_change_unit") == "percent_points"
+
+
+def test_stage_price_activity_with_kline_fallback():
+    token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()}
+    klines = [{"open_time": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
+               "open": 0.001, "high": 0.002, "low": 0.001, "close": 0.002}]
+    latest = {"price": 0.002, "price_usd": 0.002, "swaps_5m": 100, "swaps_1h": 500}
+    sg = {"x": 0.2, "y": 2.25}
+    res = asyncio.run(evaluate_price_activity_rules(token, sg, latest, klines=klines))
+    pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
+    assert pct_detail is not None
+    assert pct_detail.get("source") == "kline_since_open"
+    assert pct_detail.get("age_mode") == "young_kline_priority"
+    # open=0.001, current=0.002 => (0.002-0.001)/0.001*100 = 100%
+    assert pct_detail.get("pct_change") == 100.0
+
+
+# --- New tests for evaluate_smart_degen (Stage 4) ---
+
+def test_stage_smart_degen_ceil_count():
+    sg = {"x": 0.2}
+    holders = [
+        {"amount_percentage": 0.03, "usd_value": 500},
+        {"amount_percentage": 0.02, "usd_value": 300},
+    ]
+    # ceil(4 - 10*0.2) = ceil(2) = 2
+    res = asyncio.run(evaluate_smart_degen(sg, holders))
+    detail = res.details[0]
+    assert detail["rule"] == "smart_degen"
+    assert detail["required_count"] == 2
+    assert detail["degen_count"] == 2
+    # max_pct=0.03 > 0.015, max_usd=500 > 200; min_pct=0.02 > 0.010
+    assert detail["passed"] is True
+
+
+def test_stage_smart_degen_normalizes_large_percents():
+    sg = {"x": 0.2}
+    holders = [{"amount_percentage": 1.6, "usd_value": 300}]
+    # ceil(4 - 2) = 2, but only 1 holder < 2 -> fails count check
+    res = asyncio.run(evaluate_smart_degen(sg, holders))
+    detail = res.details[0]
+    assert detail["passed"] is False
+    assert detail["degen_count"] == 1
+    assert detail["required_count"] == 2
+
+
+def test_stage_smart_degen_insufficient_holders():
+    sg = {"x": 0.15}
+    holders = [{"amount_percentage": 0.05, "usd_value": 1000}]
+    # ceil(4-1.5) = ceil(2.5) = 3, only 1 holder -> fail
+    res = asyncio.run(evaluate_smart_degen(sg, holders))
+    assert res.passed is False

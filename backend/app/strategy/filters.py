@@ -549,30 +549,35 @@ async def run_price_filter(
     details.append(price_change_detail)
 
     # --- smart_degen rule ---
-    min_degen_count = 4.0 - 10.0 * x
+    required_count = max(1, math.ceil(4.0 - 10.0 * x))
     degen_count = len(smart_degen_holders)
-    cond_degen = degen_count >= max(1, int(min_degen_count))
+    cond_degen = degen_count >= required_count
     degen_hold_ok = False
     degen_hold_detail: Dict[str, Any] = {}
-    if smart_degen_holders:
+    if smart_degen_holders and cond_degen:
         holders_by_pct = sorted(smart_degen_holders, key=lambda h: _to_float(h.get("amount_percentage")) or 0.0, reverse=True)
-        max_holder = holders_by_pct[0]
+        top_n = holders_by_pct[:required_count]
+        max_holder = top_n[0]
         max_pct = _to_float(max_holder.get("amount_percentage"))
         max_usd = _to_float(max_holder.get("usd_value"))
-        max_ok = (max_pct is not None and max_pct > 1.5) or (max_usd is not None and max_usd > 200)
-        min_holder = holders_by_pct[-1]
+        max_pct_norm = max_pct / 100.0 if max_pct is not None and max_pct > 1.0 else max_pct
+        max_ok = (max_pct_norm is not None and max_pct_norm > 0.015) or (max_usd is not None and max_usd > 200)
+        min_holder = top_n[-1] if len(top_n) > 1 else top_n[0]
         min_pct = _to_float(min_holder.get("amount_percentage"))
         min_usd = _to_float(min_holder.get("usd_value"))
-        min_ok = (min_pct is not None and min_pct > 1.0) or (min_usd is not None and min_usd > 100)
+        min_pct_norm = min_pct / 100.0 if min_pct is not None and min_pct > 1.0 else min_pct
+        min_ok = (min_pct_norm is not None and min_pct_norm > 0.010) or (min_usd is not None and min_usd > 100)
         degen_hold_ok = max_ok and min_ok
         degen_hold_detail = {
-            "max_holder_pct": max_pct, "max_holder_usd": max_usd, "max_ok": max_ok,
-            "min_holder_pct": min_pct, "min_holder_usd": min_usd, "min_ok": min_ok,
+            "required_count": required_count, "actual_count": len(top_n),
+            "max_holder_pct": max_pct, "max_holder_pct_norm": max_pct_norm, "max_holder_usd": max_usd, "max_ok": max_ok,
+            "min_holder_pct": min_pct, "min_holder_pct_norm": min_pct_norm, "min_holder_usd": min_usd, "min_ok": min_ok,
+            "threshold_max_pct": 0.015, "threshold_min_pct": 0.010,
         }
     cond_degen_full = cond_degen and degen_hold_ok
     details.append({
         "rule": "smart_degen", "passed": cond_degen_full,
-        "degen_count": degen_count, "min_degen_count": max(1, int(min_degen_count)),
+        "degen_count": degen_count, "required_count": required_count,
         "holdings": degen_hold_detail, "x": x,
     })
 

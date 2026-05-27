@@ -82,48 +82,53 @@ class RateLimiter:
 
         self._slot_buckets: Dict[int, float] = {}
         self._slot_last_refill: Dict[int, float] = {}
-        self._bucket_capacity = 60.0
-        self._bucket_refill_rate = 20.0 / 60.0  # 20 weight per minute = ~1 typical request every 3s
+        self._bucket_capacity = float(getattr(settings, 'GMGN_RATE_LIMIT_BUCKET_CAPACITY', None) or 20)
+        self._bucket_refill_wpm = float(getattr(settings, 'GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_MINUTE', None) or 20)
+        self._bucket_refill_rate = self._bucket_refill_wpm / 60.0
+        self._bucket_wait_max_s = float(getattr(settings, 'GMGN_RATE_LIMIT_BUCKET_WAIT_MAX_SECONDS', None) or 5.0)
 
     def _endpoint_key(self, path: str) -> str:
         return path.split("?")[0].rstrip("/")
 
     async def acquire(self, slot: int, path: str) -> bool:
-        async with self._lock:
-            cred = self.slots.get(slot)
-            if cred is None:
-                return True
+        weight = _endpoint_weight(path)
+        deadline = time.monotonic() + self._bucket_wait_max_s
 
-            if cred.is_cooldown():
-                remaining = cred.cooldown_remaining()
-                logger.debug(f"slot {slot} in cooldown ({remaining:.0f}s remaining)")
-                return False
+        while True:
+            async with self._lock:
+                cred = self.slots.get(slot)
+                if cred is None:
+                    return True
 
-            ep_key = self._endpoint_key(path)
-            if ep_key in self._endpoint_cooldowns and self._endpoint_cooldowns[ep_key].is_cooldown():
-                logger.debug(f"endpoint {ep_key} in cooldown")
-                return False
+                if cred.is_cooldown():
+                    return False
 
-            weight = _endpoint_weight(path)
+                ep_key = self._endpoint_key(path)
+                if ep_key in self._endpoint_cooldowns and self._endpoint_cooldowns[ep_key].is_cooldown():
+                    return False
 
-            now = time.monotonic()
-            if slot not in self._slot_buckets:
-                self._slot_buckets[slot] = self._bucket_capacity
+                now = time.monotonic()
+                if slot not in self._slot_buckets:
+                    self._slot_buckets[slot] = self._bucket_capacity
+                    self._slot_last_refill[slot] = now
+
+                elapsed = now - self._slot_last_refill.get(slot, now)
+                self._slot_buckets[slot] = min(self._bucket_capacity, self._slot_buckets.get(slot, 0) + elapsed * self._bucket_refill_rate)
                 self._slot_last_refill[slot] = now
 
-            elapsed = now - self._slot_last_refill.get(slot, now)
-            self._slot_buckets[slot] = min(self._bucket_capacity, self._slot_buckets.get(slot, 0) + elapsed * self._bucket_refill_rate)
-            self._slot_last_refill[slot] = now
+                if self._slot_buckets[slot] >= weight:
+                    self._slot_buckets[slot] -= weight
+                    cred.total_calls += 1
+                    cred.total_weight += weight
+                    cred.endpoints[ep_key] = cred.endpoints.get(ep_key, 0) + 1
+                    return True
 
-            if self._slot_buckets[slot] < weight:
-                logger.debug(f"slot {slot} bucket empty ({self._slot_buckets[slot]:.1f} < {weight})")
+                remaining = (weight - self._slot_buckets[slot]) / self._bucket_refill_rate
+                remaining = min(remaining, self._bucket_wait_max_s)
+
+            if time.monotonic() + remaining > deadline:
                 return False
-
-            self._slot_buckets[slot] -= weight
-            cred.total_calls += 1
-            cred.total_weight += weight
-            cred.endpoints[ep_key] = cred.endpoints.get(ep_key, 0) + 1
-            return True
+            await asyncio.sleep(min(remaining, 1.0))
 
     async def report_success(self, slot: int):
         async with self._lock:
