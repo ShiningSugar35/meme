@@ -105,45 +105,6 @@ def _compute_age_minutes(creation_ts: Optional[float]) -> Optional[float]:
     return (now_ts - creation_ts) / 60.0
 
 
-def _parse_price_change_percent1h(latest_price: Dict[str, Any]) -> Tuple[Optional[float], str]:
-    """Extract price_change_percent1h from latest_price data.
-    
-    GMGN may return this as a percentage value (e.g. 20 means 20%) or as a 
-    fractional ratio (e.g. 0.2 means 20%). We use a conservative heuristic:
-    if abs(value) > 10, assume it's already a percentage; otherwise treat as ratio.
-    Only values clearly outside [-10, 10] are treated as raw percentage.
-    """
-    for name in ("price_change_percent1h", "price_change_1h", "change1h",
-                 "price_change_1h_pct", "priceChange1h", "change_1h"):
-        val = _to_float(_first_present(latest_price, [name]))
-        if val is not None:
-            break
-    else:
-        # Check nested price/pool objects
-        for nest_key in ("price", "pool"):
-            nested = latest_price.get(nest_key)
-            if isinstance(nested, dict):
-                for name in ("price_change_percent1h", "price_change_1h", "change1h"):
-                    val = _to_float(nested.get(name))
-                    if val is not None:
-                        break
-                if val is not None:
-                    break
-            if val is not None:
-                break
-
-    if val is None:
-        return None, "missing"
-
-    # Heuristic: if |val| > 10, it's likely already a percentage (e.g. GMGN returns 20 for 20%)
-    # If |val| <= 10, treat as fractional and multiply by 100.
-    # This is deliberately conservative — we favor using it as-is when ambiguous.
-    if abs(val) > 10.0:
-        return val, "gmgn_price_change_percent1h"
-    else:
-        return val * 100.0, "gmgn_price_change_percent1h_fractional"
-
-
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
@@ -539,30 +500,33 @@ async def run_price_filter(
     })
 
     # --- price_change_1h rule ---
-    # Priority: 1) GMGN price_change_percent1h 2) kline since open (age<60min only) 3) current vs price_1h computed
+    # Priority when age < 60min: 1) kline since open  2) computed from price_1h
+    # Priority when age >= 60min: 1) computed from price_1h
+    # (GMGN API does not provide a price_change_percent1h field — confirmed via live API test.
+    #  The token/info price nested object contains price/price_1h/swaps but no percent-change field.)
     pct_threshold = 0.7 - 0.2 * y
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
+    price_change_age_mode: str = "unknown"
     cond_pct: bool = False
     price_change_detail: Dict[str, Any] = {}
 
-    # 1) Try GMGN's own price_change_percent1h
-    pct_from_gmgn, pct_source = _parse_price_change_percent1h(latest_price)
-    if pct_from_gmgn is not None:
-        pct_change_1h = pct_from_gmgn
-        price_change_source = pct_source
-        cond_pct = pct_change_1h > pct_threshold
-    elif age_minutes is not None and age_minutes < 60 and klines:
-        # 2) Fallback: kline since open
-        sorted_klines = sort_klines(klines)
-        if sorted_klines:
-            open_price = _kline_open(sorted_klines[0])
-            if open_price is not None and open_price > 0:
-                pct_change_1h = ((current_price - open_price) / open_price) * 100.0
-                price_change_source = "kline_since_open"
-                cond_pct = pct_change_1h > pct_threshold
+    if age_minutes is not None and age_minutes < 60:
+        if klines:
+            sorted_klines = sort_klines(klines)
+            if sorted_klines:
+                open_price = _kline_open(sorted_klines[0])
+                if open_price is not None and open_price > 0:
+                    pct_change_1h = ((current_price - open_price) / open_price) * 100.0
+                    price_change_source = "kline_since_open"
+                    price_change_age_mode = "young_kline_priority"
+                    cond_pct = pct_change_1h > pct_threshold
+        if pct_change_1h is None:
+            price_change_age_mode = "young_no_kline_fallback"
+    else:
+        price_change_age_mode = "mature_computed"
+
     if pct_change_1h is None:
-        # 3) Fallback: compute from price_1h
         price_1h = _to_float(_first_present(latest_price, ["price_1h", "price1h"]))
         if price_1h is None:
             for nest_key in ("price", "pool"):
@@ -581,6 +545,7 @@ async def run_price_filter(
         "current": current_price,
         "pct_change": pct_change_1h, "threshold": pct_threshold, "y": y,
         "source": price_change_source,
+        "age_mode": price_change_age_mode,
         "age_minutes": age_minutes,
         "age_missing": age_missing,
     }
@@ -622,12 +587,12 @@ async def run_price_filter(
         "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
         "price_change_1h_pct": pct_change_1h,
         "price_change_source": price_change_source,
+        "price_change_age_mode": price_change_age_mode,
         "degen_count": degen_count,
         "age_minutes": age_minutes,
         "creation_ts": creation_ts,
         "swaps_divisor": divisor,
         "swaps_source": swaps_source,
         "age_missing": age_missing,
-        "price_change_1h_pct_source": price_change_source,
     }
     return PriceFilterResult(passed, details, feature_vector)

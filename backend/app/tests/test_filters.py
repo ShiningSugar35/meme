@@ -154,25 +154,28 @@ def test_parse_creation_ts_pool_created_at_iso():
     assert missing is False
 
 
-def test_price_filter_uses_price_change_percent1h():
+def test_price_filter_price_change_age_45m():
+    """Token age 45min -> should use kline if available, else computed_from_price_1h."""
     token = {
         "type": "new_creation",
         "pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(),
     }
     latest = {
-        "price": 0.001,
-        "price_usd": 0.001,
+        "price": 0.0015,
+        "price_usd": 0.0015,
         "swaps_5m": 100,
         "swaps_1h": 200,
-        "price_change_percent1h": 25.0,
+        "price_1h": 0.001,
     }
     sg = {"x": 0.2, "y": 2.25}
     res = asyncio.run(run_price_filter(token, sg, latest, []))
     pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
     assert pct_detail is not None
-    assert pct_detail.get("source") == "gmgn_price_change_percent1h"
-    # threshold = 0.7 - 0.2*2.25 = 0.25, so 25% > 0.25% should pass
-    assert pct_detail.get("passed") is True, f"price_change 25% > threshold 0.25% should pass"
+    # Without klines, age<60 falls back to computed_from_price_1h
+    assert pct_detail.get("source") == "computed_from_price_1h"
+    assert pct_detail.get("age_mode") == "young_no_kline_fallback"
+    # (0.0015 - 0.001) / 0.001 * 100 = 50%
+    assert pct_detail.get("pct_change") == 50.0
 
 
 def test_price_filter_fallback_to_price_1h():

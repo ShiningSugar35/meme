@@ -80,6 +80,8 @@ class GMGNProvider(MarketDataProvider):
         for k in ("api_key", "x-api-key", "x-route-key", "client_id", "private_key"):
             if k in req:
                 req[k] = mask(req[k])
+        if "credential_slot" in req:
+            req["credential_slot"] = int(req["credential_slot"])
         try:
             await self.repo.append_provider_request(
                 "GMGN",
@@ -166,6 +168,14 @@ class GMGNProvider(MarketDataProvider):
             auth_query = {"timestamp": str(int(time.time())), "client_id": str(uuid.uuid4())}
             headers = {"X-APIKEY": api_key, "Content-Type": "application/json"}
             request_params = {**cleaned, **auth_query}
+            logged_request = dict(request_params)
+            logged_request["credential_slot"] = slot
+            if credential_slot is not None:
+                logged_request["credential_role"] = "explicit"
+            else:
+                logged_request["credential_role"] = "round_robin"
+            if "api_key" in logged_request:
+                logged_request["api_key"] = "***"
 
             try:
                 timeout = float(getattr(settings, "GMGN_TIMEOUT_SECONDS", 8.0) or 8.0)
@@ -193,7 +203,7 @@ class GMGNProvider(MarketDataProvider):
                 last_status = resp.status_code
                 if resp.status_code >= 400:
                     retryable = self._retryable_status(resp.status_code)
-                    await self._log_request(path, False, request_params, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
+                    await self._log_request(path, False, logged_request, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
                     err = GMGNAPIError(f"GMGN HTTP {resp.status_code}: {str(data)[:500]}", status_code=resp.status_code, path=path, method=method, retryable=retryable)
                     last_exc = err
                     if credential_slot is not None:
@@ -202,14 +212,14 @@ class GMGNProvider(MarketDataProvider):
                         continue
                     raise err
 
-                await self._log_request(path, True, request_params, self._compact_response_summary(data), resp.status_code, latency, method=method)
+                await self._log_request(path, True, logged_request, self._compact_response_summary(data), resp.status_code, latency, method=method)
                 return data if isinstance(data, dict) else {"data": data}
             except GMGNAPIError:
                 raise
             except Exception as exc:
                 latency = int((time.perf_counter() - started) * 1000)
                 last_exc = exc
-                await self._log_request(path, False, cleaned, {}, None, latency, "REQUEST_ERROR", str(exc) or repr(exc), method)
+                await self._log_request(path, False, logged_request, {}, None, latency, "REQUEST_ERROR", str(exc) or repr(exc), method)
                 if credential_slot is not None:
                     raise GMGNAPIError(f"GMGN request failed (slot={credential_slot}): {exc}", path=path, method=method, retryable=True)
                 continue

@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     GMGN_CLIENT_ID_11: Optional[str] = None
     GMGN_CLIENT_ID_12: Optional[str] = None
 
-    GMGN_TRENCHES_PATH: str = Field("/api/v1/trenches")
+    GMGN_TRENCHES_PATH: str = Field("/v1/trenches")
     GMGN_TRENCHES_METHOD: str = Field("POST")
     GMGN_TRENCHES_TYPES: str = Field("new_creation")
     GMGN_TRENCHES_PLATFORMS: str = Field("")

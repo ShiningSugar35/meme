@@ -252,6 +252,7 @@ async def _migrate_token_metric_snapshots(db: aiosqlite.Connection):
     await _add_column_if_missing(db, "token_metric_snapshots", "pool_address", "TEXT")
     await _add_column_if_missing(db, "token_metric_snapshots", "platform", "TEXT")
     await _add_column_if_missing(db, "token_metric_snapshots", "launchpad", "TEXT")
+    await _add_column_if_missing(db, "token_metric_snapshots", "burn_status", "TEXT")
     await _add_index_if_missing(
         db,
         "idx_token_metric_snapshots_token_time",

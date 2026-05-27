@@ -22,7 +22,8 @@ SNAPSHOT_COLUMNS = [
     'max_insider_ratio', 'max_entrapment_ratio', 'is_wash_trading',
     'rat_trader_amount_rate', 'suspected_insider_hold_rate', 'max_bundler_rate',
     'fresh_wallet_rate', 'sell_tax', 'has_social', 'creator_token_status',
-    'dev_team_hold_rate', 'dev_token_burn_ratio', 'sniper_count', 'source_mode',
+    'dev_team_hold_rate', 'dev_token_burn_ratio', 'sniper_count', 'burn_status',
+    'source_mode',
 ]
 
 
@@ -193,6 +194,7 @@ class DiscoveryRunner:
 
         async def _fetch_one_platform(idx: int, platform_name: str) -> Dict[str, Any]:
             t0 = time.perf_counter()
+            last_error: Optional[Exception] = None
             result: Dict[str, Any] = {
                 "platform": platform_name,
                 "primary_slot": idx,
@@ -217,6 +219,7 @@ class DiscoveryRunner:
                 result["raw_count"] = len(items)
                 result["items"] = items
             except Exception as e:
+                last_error = e
                 logger.warning(f"primary fetch failed for {platform_name} (slot={idx}): {e}")
                 for reserve_slot in reserve_slots:
                     try:
@@ -229,11 +232,13 @@ class DiscoveryRunner:
                         result["fallback_used"] = True
                         result["fallback_from_slot"] = idx
                         logger.info(f"reserve credential {reserve_slot} succeeded for {platform_name}")
+                        last_error = None
                         break
                     except Exception as re:
+                        last_error = re
                         logger.warning(f"reserve credential {reserve_slot} also failed for {platform_name}: {re}")
 
-            result["error"] = str(e) if not result["ok"] else None
+            result["error"] = str(last_error) if last_error is not None else None
             result["latency_ms"] = int((time.perf_counter() - t0) * 1000)
             return result
 
@@ -356,6 +361,20 @@ class DiscoveryRunner:
                 _json_dumps({'token': token_mint, 'error': price_error or 'latest price missing', 'stage': 'latest_price'}),
                 account_type='SIM',
             )
+            for sg in risk_passed_groups:
+                sg_id = int(sg.get('id') or 0)
+                config_version = int(sg.get('config_version') or 1)
+                discovery_id = discovery_event_ids.get(sg_id)
+                try:
+                    await self.repo.insert_strategy_match(
+                        token_mint, sg_id, config_version, snapshot_id,
+                        'price_filter', False,
+                        _json_dumps([{"rule": "latest_price_present", "passed": False, "reason": str(price_error or "latest price missing")}]),
+                        _json_dumps({"error": price_error or "latest price missing"}),
+                        discovery_event_id=discovery_id,
+                    )
+                except Exception:
+                    pass
             return []
 
         try:

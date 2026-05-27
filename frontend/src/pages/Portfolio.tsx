@@ -266,8 +266,8 @@ export default function Portfolio() {
 
             {dsh.field_health && dsh.field_health.length > 0 && (
               <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>字段异常 Top</h3>
-                {dsh.field_health.slice(0, 6).map((fh, idx) => (
+                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>字段异常（全部 critical + warn）</h3>
+                {dsh.field_health.filter((fh) => fh.severity !== 'ok').map((fh, idx) => (
                   <div className="metric-row" key={idx}>
                     <span>
                       {severityDot(fh.severity)} {fh.label} ({fh.field})
