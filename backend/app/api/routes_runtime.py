@@ -129,8 +129,9 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
         return {str(i): v for i, v in enumerate(row)}
 
 
-def _as_bool(value: Any) -> bool:
-    return value is True or value == 1 or str(value).lower() in {"1", "true", "yes", "on"}
+def _safe_float(payload: Dict[str, Any], key: str, default: float) -> float:
+    val = payload.get(key)
+    return float(val) if val is not None else float(default)
 
 
 def _close_number(a: Any, b: Any, *, tol: float = 1e-9) -> bool:
@@ -447,8 +448,8 @@ async def create_strategy(request: Request, payload: Dict[str, Any] = Body(...))
             raw_config_json = _json_dumps(raw_config_json or {})
         strategy_id = await repo.create_strategy_group(
             name=str(payload.get("name") or "策略组"),
-            x=float(payload.get("x", settings.STRATEGY_DEFAULT_X)),
-            y=float(payload.get("y", settings.STRATEGY_DEFAULT_Y)),
+            x=_safe_float(payload, "x", settings.STRATEGY_DEFAULT_X),
+            y=_safe_float(payload, "y", settings.STRATEGY_DEFAULT_Y),
             is_live=bool(payload.get("is_live", False)),
             priority=int(payload.get("priority", 100)),
             raw_config_json=raw_config_json,
