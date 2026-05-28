@@ -45,6 +45,7 @@ RULE_META: Dict[str, Dict[str, str]] = {
     "price_change_1h": {"label": "1h价格涨幅不足", "stage": "price_filter", "section": "价格面及其他指标"},
     "smart_degen": {"label": "聪明钱指标不满足", "stage": "smart_degen_filter", "section": "价格面及其他指标"},
     "top1_holder_rate_observed": {"label": "TOP1持有率观测", "stage": "risk_filter", "section": "observed_only"},
+    "data_unavailable": {"label": "数据不可用", "stage": "api_error", "section": "data_unavailable"},
 }
 
 FIELD_SECTION_MAP: Dict[str, Tuple[str, str, str]] = {

@@ -222,7 +222,7 @@ def _mk_failed(name: str, value: Any, reason: str, threshold: Any, missing: bool
 
 
 def _strategy_x(strategy_group: Dict[str, Any]) -> float:
-    return float(strategy_group.get("x", settings.STRATEGY_DEFAULT_X))
+    return float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
 
 
 PLATFORMS = {
@@ -437,8 +437,8 @@ async def run_price_filter(
     klines: Optional[List[Dict[str, Any]]] = None,
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
-    x = float(strategy_group.get("x", 0.2))
-    y = float(strategy_group.get("y", settings.STRATEGY_DEFAULT_Y))
+    x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
+    y = float(strategy_group.get("y") if strategy_group.get("y") is not None else settings.STRATEGY_DEFAULT_Y)
 
     current_price = _current_price(latest_price, token)
     if current_price is None or current_price <= 0:
@@ -611,8 +611,8 @@ async def evaluate_price_activity_rules(
     klines: Optional[List[Dict[str, Any]]] = None,
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
-    x = float(strategy_group.get("x", 0.2))
-    y = float(strategy_group.get("y", settings.STRATEGY_DEFAULT_Y))
+    x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
+    y = float(strategy_group.get("y") if strategy_group.get("y") is not None else settings.STRATEGY_DEFAULT_Y)
     divisor = 12.0
 
     current_price = _current_price(latest_price, token)
@@ -725,7 +725,7 @@ async def evaluate_smart_degen(
     smart_degen_holders: List[Dict[str, Any]],
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
-    x = float(strategy_group.get("x", 0.2))
+    x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
 
     required_count = max(1, math.ceil(3.0 - 10.0 * x))
     degen_count = len(smart_degen_holders)

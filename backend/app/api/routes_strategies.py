@@ -2,6 +2,8 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
+from ..config import settings
+
 router = APIRouter(prefix="/api/config", tags=["config"])
 
 
@@ -32,8 +34,10 @@ async def list_strategies(request: Request):
 @router.post("/strategies")
 async def create_strategy(body: StrategyCreate, request: Request):
     repo = request.app.state.repo
+    x_val = body.x if body.x is not None else settings.STRATEGY_DEFAULT_X
+    y_val = body.y if body.y is not None else settings.STRATEGY_DEFAULT_Y
     sid = await repo.create_strategy_group(
-        name=body.name, x=body.x, y=body.y,
+        name=body.name, x=x_val, y=y_val,
         is_live=body.is_live, priority=body.priority, raw_config_json=body.raw_config_json
     )
     return {"id": sid, "status": "created"}

@@ -438,7 +438,7 @@ class GMGNProvider(MarketDataProvider):
                 "filters": ["offchain", "onchain"],
                 "launchpad_platform_v2": True,
                 "quote_address_type": [4, 5, 3, 1, 13, 0],
-                "limit": 80,
+                "limit": int(getattr(settings, "GMGN_TRENCHES_LIMIT", 200) or 200),
                 "renounced_mint": 1,
                 "renounced_freeze_account": 1,
             }

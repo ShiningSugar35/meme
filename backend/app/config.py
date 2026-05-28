@@ -140,6 +140,9 @@ class Settings(BaseSettings):
     STRATEGY_DEFAULT_X: float = Field(0.20)
     STRATEGY_DEFAULT_Y: float = Field(2.0)
 
+    # GMGN tuning
+    GMGN_TRENCHES_LIMIT: int = Field(200)
+
     def get_discovery_primary_slot(self) -> int:
         return self.GMGN_DISCOVERY_PRIMARY_SLOT
 
