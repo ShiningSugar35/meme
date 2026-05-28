@@ -447,7 +447,7 @@ async def create_strategy(request: Request, payload: Dict[str, Any] = Body(...))
         strategy_id = await repo.create_strategy_group(
             name=str(payload.get("name") or "策略组"),
             x=float(payload.get("x", 0.2)),
-            y=float(payload.get("y", 2.25)),
+            y=float(payload.get("y", 2.0)),
             is_live=bool(payload.get("is_live", False)),
             priority=int(payload.get("priority", 100)),
             raw_config_json=raw_config_json,
@@ -575,7 +575,7 @@ async def runtime_filter_stats(request: Request):
             except Exception:
                 run_started = ev_ts
         if not run_finished:
-            run_finished = utc_now_iso()
+            run_finished = latest_ev.get("created_at") or utc_now_iso()
 
         latest_unique = ctx.get("unique_fetched_count") or ctx.get("count") or 0
         latest_raw = ctx.get("raw_fetched_count") or latest_unique
@@ -633,13 +633,15 @@ async def runtime_filter_stats(request: Request):
                     if len(rs.get("sample_values", [])) < 5:
                         rs["sample_values"].append(str(d.get("value", ""))[:40])
             for rule, rs in rule_stats.items():
-                failed_count = len(rs.pop("failed_pools", set()))
-                checked_pools = len(rs.pop("checked_pools", set()))
+                failed_pools = rs.pop("failed_pools", set())
+                checked_pools_set = rs.pop("checked_pools", set())
+                failed_count = len(failed_pools)
+                actual_checked = len(checked_pools_set)
                 rs["failed_count"] = failed_count
-                rs["checked_count"] = latest_unique
-                rs["actual_checked_count"] = checked_pools
-                rs["denominator_count"] = latest_unique
-                rs["fail_rate"] = failed_count / max(latest_unique, 1)
+                rs["checked_count"] = actual_checked
+                rs["actual_checked_count"] = actual_checked
+                rs["denominator_count"] = actual_checked
+                rs["fail_rate"] = failed_count / max(actual_checked, 1)
                 rs["fail_rate_pct"] = round(rs["fail_rate"] * 100.0, 1)
             filter_fails = sorted(
                 [rs for rule, rs in rule_stats.items() if not rs.get("exclude_from_ranking")],
@@ -687,8 +689,7 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
     summary["risk_filter_pass_count"] = await _count_stage_unique_pools(repo, "risk_filter", passed=True)
     summary["price_filter_count"] = await _count_stage_unique_pools(repo, "price_filter", passed=None)
     summary["price_filter_pass_count"] = await _count_stage_unique_pools(repo, "price_filter", passed=True)
-    summary["raw_fetched_count"] = all_time_trench
-    summary["unique_fetched_count"] = all_time_trench
+    summary["all_time_unique_pool_count"] = all_time_trench
 
     if has_window:
         rl_429 = await _fetch_one(repo,
@@ -703,7 +704,7 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
 
     discovery_fetch_health = await _build_discovery_fetch_health(trench_history)
     credential_health = await _build_credential_health()
-    feature_stage_health = await _build_feature_stage_health(repo, lower_bound, upper_bound, has_window, summary)
+    feature_stage_health = await _build_feature_stage_health(repo, lower_bound, upper_bound, has_window, summary, all_time_trench)
 
     system_event_warnings = await _build_system_event_warnings(repo, lower_bound, upper_bound, has_window)
 
@@ -793,7 +794,7 @@ async def _build_credential_health() -> List[Dict[str, Any]]:
         return []
 
 
-async def _build_feature_stage_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+async def _build_feature_stage_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, summary: Dict[str, Any], all_time_trench: int) -> List[Dict[str, Any]]:
     from ..providers.rate_limiter import _endpoint_weight
     stages = [
         {"stage": "risk_filter", "label": "Trenches本地(Stage 0)", "endpoint_filter": "%v1/trenches%", "weight": 3},
@@ -805,11 +806,14 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
     result: List[Dict[str, Any]] = []
     for s in stages:
         stage = s["stage"]
-        all_stage_pools = await _count_stage_unique_pools(repo, stage, passed=None)
-        all_stage_passed = await _count_stage_unique_pools(repo, stage, passed=True)
-        total = all_stage_pools
-        passed = all_stage_passed
-        failed = total - passed
+        if stage == "risk_filter":
+            total = all_time_trench
+            passed = await _count_stage_unique_pools(repo, stage, passed=True)
+            failed = total - passed
+        else:
+            total = await _count_stage_unique_pools(repo, stage, passed=None)
+            passed = await _count_stage_unique_pools(repo, stage, passed=True)
+            failed = total - passed
         api_calls = 0
         ok_rate_val = None
         rate_limited = 0

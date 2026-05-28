@@ -341,7 +341,7 @@ class Repositories:
             await self.create_strategy_group(
                 "模拟盘1",
                 0.20,
-                2.25,
+                2.0,
                 is_live=False,
                 priority=10,
                 raw_config_json="{}",

@@ -5,7 +5,7 @@ Set-Location -LiteralPath $projectRoot
 # --- Clean up SQLite WAL files from previous run ---
 $dataDir = Join-Path $projectRoot "data"
 if (Test-Path -LiteralPath $dataDir) {
-    $walFiles = @("trading_bot.sqlite3-shm", "trading_bot.sqlite3-wal", "trading_bot.sqlite3")
+    $walFiles = @("trading_bot.sqlite3-shm", "trading_bot.sqlite3-wal")
     foreach ($f in $walFiles) {
         $full = Join-Path $dataDir $f
         if (Test-Path -LiteralPath $full) {

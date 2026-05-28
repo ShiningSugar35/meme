@@ -436,7 +436,7 @@ async def run_price_filter(
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x", 0.2))
-    y = float(strategy_group.get("y", 2.25))
+    y = float(strategy_group.get("y", 2.0))
 
     current_price = _current_price(latest_price, token)
     if current_price is None or current_price <= 0:
@@ -496,8 +496,7 @@ async def run_price_filter(
     # Priority when age < 60min: 1) kline since open  2) computed from price_1h
     # Priority when age >= 60min: 1) computed from price_1h
     # Unit: pct_change_1h is in percent_points (already multiplied by 100).
-    #       threshold is also in percent_points: (0.7 - 0.2*y) * 100.
-    #       For y=2.25 → threshold = 25.0 (i.e. need more than 25% gain).
+    #       threshold = 10.0 * y.  For y=2.0, threshold = 20.0 (i.e. need >20% gain).
     pct_threshold = 10.0 * y
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
@@ -611,7 +610,7 @@ async def evaluate_price_activity_rules(
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x", 0.2))
-    y = float(strategy_group.get("y", 2.25))
+    y = float(strategy_group.get("y", 2.0))
     divisor = 12.0
 
     current_price = _current_price(latest_price, token)

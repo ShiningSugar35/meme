@@ -182,7 +182,7 @@ export default function Portfolio() {
         {fstats && (
           <div className="card">
             <h2>淘汰指标排行</h2>
-            <p className="hint">最近一次 trench 拉回池子中，各指标不满足比例（分母为上一次拉回池子数）</p>
+            <p className="hint">最近一次 run 中各指标不满足比例；每个指标分母为实际进入该项筛选的去重池子数</p>
             {(!fstats.filter_fails || fstats.filter_fails.length === 0) && (
               <p className="empty">暂无淘汰数据</p>
             )}
@@ -268,25 +268,6 @@ export default function Portfolio() {
           </div>
         )}
       </div>
-
-      {fstats && !dsh && (
-        <div className="card">
-          <h2>淘汰指标排行</h2>
-          <p className="hint">风控+价格面筛选各指标不满足比例（按实际检查次数计算）</p>
-          {(!fstats.filter_fails || fstats.filter_fails.length === 0) && (
-            <p className="empty">暂无淘汰数据</p>
-          )}
-          {fstats.filter_fails?.map((item) => (
-            <div className="metric-row" key={item.rule}>
-              <span title={item.stage ? `[${item.stage}] ${item.section || ''}` : undefined}>
-                {item.label || ruleLabel(item.rule)}
-                <br/><small className="hint">检查{item.checked_count ?? '?'}次 · 失败{item.failed_count ?? '?'}次</small>
-              </span>
-              <strong>{item.fail_rate_pct != null ? `${item.fail_rate_pct}%` : (item.count != null ? `${item.count}` : '-')}</strong>
-            </div>
-          ))}
-        </div>
-      )}
     </section>
   );
 }
