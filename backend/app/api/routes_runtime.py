@@ -82,7 +82,7 @@ def _resolve_rule_meta(rule: str) -> Dict[str, str]:
 
 
 DEFAULT_SIM_STRATEGIES: List[Dict[str, Any]] = [
-    {"name": "模拟盘1", "x": 0.20, "y": 2.25, "is_live": False, "priority": 10},
+    {"name": "模拟盘1", "x": 0.20, "y": 2.0, "is_live": False, "priority": 10},
 ]
 
 TRADING_PARAM_SPECS: List[Dict[str, Any]] = [
@@ -555,146 +555,103 @@ async def runtime_portfolio_table(request: Request, account_type: str = "SIM", l
 async def runtime_filter_stats(request: Request):
     repo, owned = await _get_repo(request)
     try:
-        discovery_events = await _fetch_all(
-            repo,
-            """
-            SELECT id, context_json, created_at FROM system_events
-            WHERE category = 'DISCOVERY' AND message = 'Discovery run complete'
-            ORDER BY created_at DESC LIMIT 11
-            """,
-        )
+        latest_ev = await _fetch_one(repo,
+            "SELECT id, context_json, created_at FROM system_events WHERE category='DISCOVERY' AND message='Discovery run complete' ORDER BY created_at DESC LIMIT 1")
+        if not latest_ev:
+            return {"trench_history": [], "filter_fails": [], "data_source_health": {"summary": {}, "endpoint_health": [], "field_health": [], "price_age_health": {}}}
 
-        if not discovery_events:
-            return {
-                "trench_history": [],
-                "filter_fails": [],
-                "data_source_health": {"summary": {}, "endpoint_health": [], "field_health": [], "price_age_health": {}, "platform_health": []},
-            }
-
-        recent_10 = list(reversed(discovery_events[:10]))
-        if len(discovery_events) >= 11:
-            ctx11 = json.loads(str(discovery_events[10].get("context_json") or "{}")) if isinstance(discovery_events[10].get("context_json"), str) else (discovery_events[10].get("context_json") or {})
-            if not isinstance(ctx11, dict):
-                ctx11 = {}
-            lower_bound = str(ctx11.get("run_started_at") or discovery_events[10].get("created_at") or "")
-        elif recent_10:
-            ctx0 = json.loads(str(recent_10[0].get("context_json") or "{}")) if isinstance(recent_10[0].get("context_json"), str) else (recent_10[0].get("context_json") or {})
-            if not isinstance(ctx0, dict):
-                ctx0 = {}
-            fb = ctx0.get("run_started_at") or recent_10[0].get("created_at") or ""
-            if fb:
+        ctx = json.loads(latest_ev.get("context_json", "{}")) if isinstance(latest_ev.get("context_json"), str) else (latest_ev.get("context_json") or {})
+        if not isinstance(ctx, dict):
+            ctx = {}
+        run_started = ctx.get("run_started_at") or ""
+        run_finished = ctx.get("run_finished_at") or ""
+        if not run_started:
+            ev_ts = latest_ev.get("created_at") or ""
+            try:
                 from datetime import timedelta
+                dt = datetime.fromisoformat(str(ev_ts).replace("Z", "+00:00"))
+                dt = dt - timedelta(seconds=max(getattr(settings, 'POLL_INTERVAL_SECONDS', 60), 120))
+                run_started = dt.isoformat()
+            except Exception:
+                run_started = ev_ts
+        if not run_finished:
+            run_finished = utc_now_iso()
+
+        latest_unique = ctx.get("unique_fetched_count") or ctx.get("count") or 0
+        latest_raw = ctx.get("raw_fetched_count") or latest_unique
+        latest_dup = ctx.get("duplicate_count_estimate") or 0
+
+        latest_risk_pass = 0
+        if run_started:
+            row = await _fetch_one(repo,
+                """SELECT COUNT(DISTINCT tsm.token_mint || '|' || COALESCE(NULLIF(de.pool_address,''), NULLIF(snap.pool_address,''), '')) AS c
+                   FROM token_strategy_matches tsm
+                   LEFT JOIN token_metric_snapshots snap ON snap.id = tsm.snapshot_id
+                   LEFT JOIN discovery_events de ON de.id = tsm.discovery_event_id
+                   WHERE tsm.stage='risk_filter' AND tsm.passed=1 AND tsm.created_at >= ? AND tsm.created_at <= ?""",
+                (run_started, run_finished))
+            latest_risk_pass = int((row or {}).get("c", 0))
+
+        trench_history = [{
+            "count": latest_unique, "raw_count": latest_raw, "unique_count": latest_unique,
+            "duplicate_count_estimate": latest_dup, "passed": latest_risk_pass,
+            "trench_groups": ctx.get("trench_groups"), "created_at": latest_ev.get("created_at"),
+            "run_started_at": run_started, "run_finished_at": run_finished,
+        }]
+
+        filter_fails: List[Dict[str, Any]] = []
+        if run_started and latest_unique > 0:
+            match_rows = await _fetch_all(repo,
+                "SELECT pass_fail_detail_json, stage, tsm.token_mint, COALESCE(NULLIF(de.pool_address,''), NULLIF(snap.pool_address,''), '') AS pool_addr FROM token_strategy_matches tsm LEFT JOIN token_metric_snapshots snap ON snap.id = tsm.snapshot_id LEFT JOIN discovery_events de ON de.id = tsm.discovery_event_id WHERE tsm.stage IN ('risk_filter','price_filter','kline_fallback','top_holder_filter','smart_degen_filter') AND tsm.created_at >= ? AND tsm.created_at <= ?",
+                (run_started, run_finished))
+            rule_stats: Dict[str, Dict[str, Any]] = {}
+            for row in match_rows:
+                pool_key = f"{row.get('token_mint') or ''}|{row.get('pool_addr') or ''}"
                 try:
-                    dt = datetime.fromisoformat(str(fb).replace("Z", "+00:00"))
-                    dt = dt - timedelta(seconds=max(getattr(settings, 'POLL_INTERVAL_SECONDS', 60), 120))
-                    lower_bound = dt.isoformat()
+                    details = json.loads(row.get("pass_fail_detail_json", "[]"))
                 except Exception:
-                    lower_bound = fb
-            else:
-                lower_bound = ""
-        else:
-            lower_bound = ""
-        upper_bound = utc_now_iso()
+                    details = []
+                if not isinstance(details, list):
+                    details = []
+                for d in details:
+                    if not isinstance(d, dict):
+                        continue
+                    rule = str(d.get("name") or d.get("rule") or "unknown")
+                    passed = bool(d.get("passed", True))
+                    missing = bool(d.get("missing", False)) or bool(d.get("age_missing", False))
+                    if rule not in rule_stats:
+                        meta = _resolve_rule_meta(rule)
+                        rule_stats[rule] = {"rule": rule, "label": meta.get("label", rule), "stage": meta.get("stage", "unknown"),
+                                             "section": meta.get("section", ""), "exclude_from_ranking": meta.get("exclude_from_ranking") == "true",
+                                             "failed_pools": set(), "checked_pools": set(), "sample_values": []}
+                    rs = rule_stats[rule]
+                    rs["checked_pools"].add(pool_key)
+                    if not passed:
+                        rs["failed_pools"].add(pool_key)
+                    if missing:
+                        rs["missing_count"] = rs.get("missing_count", 0) + 1
+                    if len(rs.get("sample_values", [])) < 5:
+                        rs["sample_values"].append(str(d.get("value", ""))[:40])
+            for rule, rs in rule_stats.items():
+                failed_count = len(rs.pop("failed_pools", set()))
+                checked_pools = len(rs.pop("checked_pools", set()))
+                rs["failed_count"] = failed_count
+                rs["checked_count"] = latest_unique
+                rs["actual_checked_count"] = checked_pools
+                rs["denominator_count"] = latest_unique
+                rs["fail_rate"] = failed_count / max(latest_unique, 1)
+                rs["fail_rate_pct"] = round(rs["fail_rate"] * 100.0, 1)
+            filter_fails = sorted(
+                [rs for rule, rs in rule_stats.items() if not rs.get("exclude_from_ranking")],
+                key=lambda x: (-x["fail_rate"], -x["failed_count"], x["rule"]),
+            )
 
-        trench_history: List[Dict[str, Any]] = []
-        for ev in recent_10:
-            try:
-                ctx = json.loads(ev.get("context_json", "{}"))
-            except Exception:
-                ctx = {}
-            trench_history.append({
-                "count": ctx.get("count", ctx.get("unique_fetched_count", 0)),
-                "passed": ctx.get("tracked_initial_passed", 0),
-                "raw_count": ctx.get("raw_fetched_count"),
-                "unique_count": ctx.get("unique_fetched_count"),
-                "duplicate_count_estimate": ctx.get("duplicate_count_estimate"),
-                "platform_fetch": ctx.get("platform_fetch"),
-                "trench_groups": ctx.get("trench_groups"),
-                "run_started_at": ctx.get("run_started_at"),
-                "run_finished_at": ctx.get("run_finished_at"),
-                "created_at": ev.get("created_at"),
-            })
-
+        lower_bound = run_started
+        upper_bound = run_finished or utc_now_iso()
         has_window = bool(lower_bound)
-        ALL_STAGES = ['risk_filter', 'top_holder_filter', 'price_filter', 'kline_fallback', 'smart_degen_filter']
-        if has_window:
-            match_rows = await _fetch_all(
-                repo,
-                f"""
-                SELECT pass_fail_detail_json, stage FROM token_strategy_matches
-                WHERE created_at >= ? AND created_at <= ?
-                  AND stage IN ({','.join(['?']*len(ALL_STAGES))})
-                """,
-                (lower_bound, upper_bound, *ALL_STAGES),
-            )
-        else:
-            match_rows = await _fetch_all(
-                repo,
-                """
-                SELECT pass_fail_detail_json, stage FROM token_strategy_matches
-                WHERE stage IN ('risk_filter', 'price_filter')
-                ORDER BY created_at DESC LIMIT 20000
-                """,
-            )
-
-        rule_stats: Dict[str, Dict[str, Any]] = {}
-        for row in match_rows:
-            stage = str(row.get("stage") or "")
-            try:
-                details = json.loads(row.get("pass_fail_detail_json", "[]"))
-            except Exception:
-                details = []
-            if not isinstance(details, list):
-                details = []
-            for d in details:
-                if not isinstance(d, dict):
-                    continue
-                rule = str(d.get("name") or d.get("rule") or "unknown")
-                passed = bool(d.get("passed", True))
-                missing = bool(d.get("missing", False)) or bool(d.get("age_missing", False))
-                value = d.get("value")
-                threshold = d.get("threshold")
-
-                if rule not in rule_stats:
-                    meta = _resolve_rule_meta(rule)
-                    rule_stats[rule] = {
-                        "rule": rule,
-                        "label": meta.get("label", rule),
-                        "stage": meta.get("stage", "unknown"),
-                        "section": meta.get("section", "未知/其他指标"),
-                        "checked_count": 0,
-                        "failed_count": 0,
-                        "missing_count": 0,
-                        "sample_values": [],
-                        "exclude_from_ranking": meta.get("exclude_from_ranking") == "true" or meta.get("section") == "observed_only",
-                    }
-
-                rs = rule_stats[rule]
-                rs["checked_count"] += 1
-                if not passed:
-                    rs["failed_count"] += 1
-                if missing:
-                    rs["missing_count"] += 1
-                if len(rs["sample_values"]) < 5:
-                    rs["sample_values"].append(str(value or "")[:40])
-
-        for rule, rs in rule_stats.items():
-            cc = max(rs["checked_count"], 1)
-            rs["fail_rate"] = rs["failed_count"] / cc
-            rs["fail_rate_pct"] = round(rs["fail_rate"] * 100.0, 1)
-
-        filter_fails = sorted(
-            [rs for rule, rs in rule_stats.items() if not rs.get("exclude_from_ranking")],
-            key=lambda x: (-x["fail_rate"], -x["failed_count"], x["rule"]),
-        )
-
         data_source_health = await _build_data_source_health(repo, lower_bound, upper_bound, has_window, trench_history)
 
-        return {
-            "trench_history": trench_history,
-            "filter_fails": filter_fails,
-            "data_source_health": data_source_health,
-        }
+        return {"trench_history": trench_history, "filter_fails": filter_fails, "data_source_health": data_source_health}
     except Exception as e:
         logger.warning("filter-stats error", error=str(e))
         return {"trench_history": [], "filter_fails": [], "data_source_health": {}, "error": str(e)}
@@ -703,35 +660,37 @@ async def runtime_filter_stats(request: Request):
             await repo.close()
 
 
+async def _count_all_time_unique_trench_pools(repo: Repositories) -> int:
+    row = await _fetch_one(repo,
+        "SELECT COUNT(DISTINCT token_mint || '|' || COALESCE(NULLIF(pool_address,''), '')) AS c FROM token_metric_snapshots")
+    return int((row or {}).get("c", 0))
+
+
+async def _count_stage_unique_pools(repo: Repositories, stage: str, passed: Optional[bool] = None) -> int:
+    extra = ""
+    if passed is True:
+        extra = " AND tsm.passed=1"
+    elif passed is False:
+        extra = " AND tsm.passed=0"
+    row = await _fetch_one(repo,
+        f"SELECT COUNT(DISTINCT tsm.token_mint || '|' || COALESCE(NULLIF(de.pool_address,''), NULLIF(snap.pool_address,''), '')) AS c FROM token_strategy_matches tsm LEFT JOIN token_metric_snapshots snap ON snap.id=tsm.snapshot_id LEFT JOIN discovery_events de ON de.id=tsm.discovery_event_id WHERE tsm.stage=?{extra}",
+        (stage,))
+    return int((row or {}).get("c", 0))
+
+
 async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool, trench_history: List[Dict[str, Any]]) -> Dict[str, Any]:
-    summary: Dict[str, Any] = {"window_run_count": len(trench_history), "discovery_mode": "two_group_discovery"}
+    summary: Dict[str, Any] = {"window_run_count": len(trench_history), "discovery_mode": "two_group_discovery", "stats_mode": "all_time_unique"}
 
-    raw_fetched_total = 0
-    unique_fetched_total = 0
-    duplicate_total = 0
-    for th in trench_history:
-        raw_fetched_total += int(th.get("raw_count") or th.get("count") or 0)
-        unique_fetched_total += int(th.get("unique_count") or th.get("count") or 0)
-        duplicate_total += int(th.get("duplicate_count_estimate") or 0)
-
-    summary.update({
-        "raw_fetched_count": raw_fetched_total,
-        "unique_fetched_count": unique_fetched_total,
-        "duplicate_count_estimate": duplicate_total,
-        "trench_total": raw_fetched_total,
-    })
+    all_time_trench = await _count_all_time_unique_trench_pools(repo)
+    summary["trench_total"] = all_time_trench
+    summary["risk_filter_count"] = all_time_trench
+    summary["risk_filter_pass_count"] = await _count_stage_unique_pools(repo, "risk_filter", passed=True)
+    summary["price_filter_count"] = await _count_stage_unique_pools(repo, "price_filter", passed=None)
+    summary["price_filter_pass_count"] = await _count_stage_unique_pools(repo, "price_filter", passed=True)
+    summary["raw_fetched_count"] = all_time_trench
+    summary["unique_fetched_count"] = all_time_trench
 
     if has_window:
-        for stage in ['risk_filter', 'top_holder_filter', 'price_filter', 'kline_fallback', 'smart_degen_filter']:
-            match_row = await _fetch_one(repo,
-                f"SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage=? AND created_at>=? AND created_at<=?",
-                (stage, lower_bound, upper_bound))
-            pass_row = await _fetch_one(repo,
-                f"SELECT COUNT(*) AS c FROM token_strategy_matches WHERE stage=? AND passed=1 AND created_at>=? AND created_at<=?",
-                (stage, lower_bound, upper_bound))
-            summary[f"{stage}_count"] = int((match_row or {}).get("c", 0))
-            summary[f"{stage}_pass_count"] = int((pass_row or {}).get("c", 0))
-
         rl_429 = await _fetch_one(repo,
             "SELECT COUNT(*) AS c FROM provider_requests WHERE provider='GMGN' AND status_code=429 AND created_at>=? AND created_at<=?",
             (lower_bound, upper_bound))
@@ -846,8 +805,10 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
     result: List[Dict[str, Any]] = []
     for s in stages:
         stage = s["stage"]
-        total = summary.get(f"{stage}_count", 0)
-        passed = summary.get(f"{stage}_pass_count", 0)
+        all_stage_pools = await _count_stage_unique_pools(repo, stage, passed=None)
+        all_stage_passed = await _count_stage_unique_pools(repo, stage, passed=True)
+        total = all_stage_pools
+        passed = all_stage_passed
         failed = total - passed
         api_calls = 0
         ok_rate_val = None

@@ -113,6 +113,8 @@ export interface RuleFailItem {
   stage?: string;
   section?: string;
   checked_count?: number;
+  actual_checked_count?: number;
+  denominator_count?: number;
   failed_count?: number;
   fail_rate?: number;
   fail_rate_pct?: number;
@@ -248,7 +250,7 @@ export interface DataSourceHealth {
   discovery_fetch_health?: DiscoveryFetchHealthItem[];
   feature_stage_health?: FeatureStageHealthItem[];
   field_health: FieldHealthItem[];
-  price_age_health: PriceAgeHealth;
+  price_age_health?: PriceAgeHealth;
   price_face_health?: PriceFaceHealth;
   platform_health?: PlatformHealthItem[];
   system_event_warnings?: Record<string, unknown>[];

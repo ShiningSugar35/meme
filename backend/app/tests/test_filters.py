@@ -59,8 +59,8 @@ def test_has_social_required_for_small_x():
 
 def test_x_thresholds_and_boundaries():
     x = 0.2
-    s = make_snapshot()
-    thresh_liq = 40000 - 100000 * x
+    s = make_snapshot(liquidity_usd=25000)
+    thresh_liq = 6500 - 5000 * x
     s["liquidity_usd"] = thresh_liq - 1
     strategy_group = {"x": x, "min_created": 120}
     res = asyncio.run(run_initial_filter(s, strategy_group, datetime.now(timezone.utc)))
@@ -123,7 +123,7 @@ def test_price_filter_swaps_divisor_age_30m():
     swaps_detail = next((d for d in res.details if d.get("rule") == "swaps_5m_scaled"), None)
     assert swaps_detail is not None
     assert math.isclose(swaps_detail.get("divisor"), 6.0, rel_tol=0.01), f"Expected divisor~6, got {swaps_detail.get('divisor')}"
-    assert swaps_detail.get("passed") is False, "swaps_5m=30 < threshold=35 should fail"
+    assert swaps_detail.get("passed") is True, "swaps_5m=30 > threshold=20 should pass (new rule)"
 
 
 def test_parse_creation_ts_seconds():
@@ -174,8 +174,8 @@ def test_price_filter_price_change_age_45m():
     assert pct_detail.get("age_mode") == "young_no_kline_fallback"
     # (0.0015 - 0.001) / 0.001 * 100 = 50%
     assert pct_detail.get("pct_change") == 50.0
-    # threshold = (0.7 - 0.2*2.25) * 100 = 25.0
-    assert math.isclose(pct_detail.get("threshold") or 0, 25.0, rel_tol=1e-9)
+    # threshold = 10 * y = 10 * 2.25 = 22.5
+    assert math.isclose(pct_detail.get("threshold") or 0, 22.5, rel_tol=1e-9)
     # unit should be percent_points
     assert pct_detail.get("price_change_unit") == "percent_points"
     assert pct_detail.get("passed") is True, "50% > 25% should pass"
@@ -320,30 +320,30 @@ def test_stage_smart_degen_ceil_count():
         {"amount_percentage": 0.03, "usd_value": 500},
         {"amount_percentage": 0.02, "usd_value": 300},
     ]
-    # ceil(4 - 10*0.2) = ceil(2) = 2
+    # ceil(3 - 10*0.2) = ceil(1) = 1
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     detail = res.details[0]
     assert detail["rule"] == "smart_degen"
-    assert detail["required_count"] == 2
+    assert detail["required_count"] == 1
     assert detail["degen_count"] == 2
     # max_pct=0.03 > 0.015, max_usd=500 > 200; min_pct=0.02 > 0.010
     assert detail["passed"] is True
 
 
 def test_stage_smart_degen_normalizes_large_percents():
-    sg = {"x": 0.2}
+    sg = {"x": 0.05}
     holders = [{"amount_percentage": 1.6, "usd_value": 300}]
-    # ceil(4 - 2) = 2, but only 1 holder < 2 -> fails count check
+    # ceil(3 - 0.5) = ceil(2.5) = 3, only 1 holder < 3 -> fails count check
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     detail = res.details[0]
     assert detail["passed"] is False
     assert detail["degen_count"] == 1
-    assert detail["required_count"] == 2
+    assert detail["required_count"] == 3
 
 
 def test_stage_smart_degen_insufficient_holders():
     sg = {"x": 0.15}
     holders = [{"amount_percentage": 0.05, "usd_value": 1000}]
-    # ceil(4-1.5) = ceil(2.5) = 3, only 1 holder -> fail
+    # ceil(3-1.5) = ceil(1.5) = 2, only 1 holder -> fail
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     assert res.passed is False

@@ -2,6 +2,19 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location -LiteralPath $projectRoot
 
+# --- Clean up SQLite WAL files from previous run ---
+$dataDir = Join-Path $projectRoot "data"
+if (Test-Path -LiteralPath $dataDir) {
+    $walFiles = @("trading_bot.sqlite3-shm", "trading_bot.sqlite3-wal", "trading_bot.sqlite3")
+    foreach ($f in $walFiles) {
+        $full = Join-Path $dataDir $f
+        if (Test-Path -LiteralPath $full) {
+            Write-Host "       Removing previous $f..." -ForegroundColor Yellow
+            Remove-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Write-Host "=== Meme Project Launcher ===" -ForegroundColor Cyan
 
 # --- Python venv ---

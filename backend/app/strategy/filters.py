@@ -478,7 +478,7 @@ async def run_price_filter(
             divisor = min(12.0, max(1.0, age_minutes / 5.0))
         else:
             divisor = 12.0
-        swaps_threshold = max(0, (4.0 - y) * (swaps_1h / divisor))
+        swaps_threshold = max(0, swaps_1h / divisor)
         cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
     else:
         divisor = 12.0
@@ -498,7 +498,7 @@ async def run_price_filter(
     # Unit: pct_change_1h is in percent_points (already multiplied by 100).
     #       threshold is also in percent_points: (0.7 - 0.2*y) * 100.
     #       For y=2.25 → threshold = 25.0 (i.e. need more than 25% gain).
-    pct_threshold = (0.7 - 0.2 * y) * 100.0
+    pct_threshold = 10.0 * y
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
     price_change_age_mode: str = "unknown"
@@ -549,7 +549,7 @@ async def run_price_filter(
     details.append(price_change_detail)
 
     # --- smart_degen rule ---
-    required_count = max(1, math.ceil(4.0 - 10.0 * x))
+    required_count = max(1, math.ceil(3.0 - 10.0 * x))
     degen_count = len(smart_degen_holders)
     cond_degen = degen_count >= required_count
     degen_hold_ok = False
@@ -648,7 +648,7 @@ async def evaluate_price_activity_rules(
             divisor = min(12.0, max(1.0, age_minutes / 5.0))
         else:
             divisor = 12.0
-        swaps_threshold = max(0, (4.0 - y) * (swaps_1h / divisor))
+        swaps_threshold = max(0, swaps_1h / divisor)
         cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
     else:
         swaps_threshold = None
@@ -660,7 +660,7 @@ async def evaluate_price_activity_rules(
         "divisor": divisor, "source": swaps_source, "age_missing": age_missing,
     })
 
-    pct_threshold = (0.7 - 0.2 * y) * 100.0
+    pct_threshold = 10.0 * y
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
     price_change_age_mode: str = "unknown"
@@ -726,7 +726,7 @@ async def evaluate_smart_degen(
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x", 0.2))
 
-    required_count = max(1, math.ceil(4.0 - 10.0 * x))
+    required_count = max(1, math.ceil(3.0 - 10.0 * x))
     degen_count = len(smart_degen_holders)
     cond_degen = degen_count >= required_count
 

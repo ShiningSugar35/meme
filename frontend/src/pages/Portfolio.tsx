@@ -99,11 +99,12 @@ export default function Portfolio() {
     }
   };
 
-  const trenchTotal = fstats?.trench_history?.reduce((s, i) => s + i.count, 0) ?? 0;
-  const rawTotal = fstats?.trench_history?.reduce((s, i) => s + (i.raw_count || i.count || 0), 0) ?? 0;
-  const uniqueTotal = fstats?.trench_history?.reduce((s, i) => s + (i.unique_count || i.count || 0), 0) ?? 0;
-  const dupTotal = fstats?.trench_history?.reduce((s, i) => s + (i.duplicate_count_estimate || 0), 0) ?? 0;
-  const passTotal = fstats?.trench_history?.reduce((s, i) => s + i.passed, 0) ?? 0;
+  const latestTrench = fstats?.trench_history?.[(fstats?.trench_history?.length ?? 0) - 1];
+  const rawLast = latestTrench?.raw_count ?? latestTrench?.count ?? 0;
+  const uniqueLast = latestTrench?.unique_count ?? latestTrench?.count ?? 0;
+  const dupLast = latestTrench?.duplicate_count_estimate ?? 0;
+  const passLast = latestTrench?.passed ?? 0;
+  const passTotal = passLast;
   const dsh = fstats?.data_source_health;
 
   return (
@@ -118,20 +119,20 @@ export default function Portfolio() {
           <button className={tab === 'SIM' ? 'primary' : ''} onClick={() => switchTab('SIM')}>SIM 模拟盘策略</button>
         </div>
         <p className="hint">当前系统状态：{status?.user_mode ?? '加载中'}</p>
-        {rawTotal > 0 && rawTotal !== trenchTotal && (
+        {rawLast > 0 && (
           <div className="metric-row">
-            <span>近{fstats?.trench_history?.length ?? 0}次 trench 原始拉回</span>
-            <strong>{rawTotal}</strong>
+            <span>上一次 trench 原始拉回</span>
+            <strong>{rawLast}</strong>
           </div>
         )}
         <div className="metric-row">
-          <span>近{fstats?.trench_history?.length ?? 0}次 trench 拉回池子总数</span>
-          <strong>{rawTotal > 0 && rawTotal !== trenchTotal ? uniqueTotal : trenchTotal}</strong>
+          <span>上一次 trench 拉回池子数</span>
+          <strong>{uniqueLast}</strong>
         </div>
-        {dupTotal > 0 && (
+        {dupLast > 0 && (
           <div className="metric-row">
-            <span>估算重复</span>
-            <strong>{dupTotal}</strong>
+            <span>上一次估算重复</span>
+            <strong>{dupLast}</strong>
           </div>
         )}
         <div className="metric-row">
@@ -181,7 +182,7 @@ export default function Portfolio() {
         {fstats && (
           <div className="card">
             <h2>淘汰指标排行</h2>
-            <p className="hint">风控+价格面筛选各指标不满足比例（按实际检查次数计算）</p>
+            <p className="hint">最近一次 trench 拉回池子中，各指标不满足比例（分母为上一次拉回池子数）</p>
             {(!fstats.filter_fails || fstats.filter_fails.length === 0) && (
               <p className="empty">暂无淘汰数据</p>
             )}
@@ -189,7 +190,7 @@ export default function Portfolio() {
               <div className="metric-row" key={item.rule}>
                 <span title={item.stage ? `[${item.stage}] ${item.section || ''}` : undefined}>
                   {item.label || ruleLabel(item.rule)}
-                  <br/><small className="hint">检查{item.checked_count ?? '?'}次 · 失败{item.failed_count ?? '?'}次</small>
+                  <br/><small className="hint">分母{item.denominator_count ?? item.checked_count ?? '?'} · 失败{item.failed_count ?? '?'}次</small>
                 </span>
                 <strong>{item.fail_rate_pct != null ? `${item.fail_rate_pct}%` : (item.count != null ? `${item.count}` : '-')}</strong>
               </div>
@@ -203,12 +204,13 @@ export default function Portfolio() {
             {/* Summary */}
             {dsh.summary && Object.keys(dsh.summary).length > 0 && (
               <>
-                <div className="metric-row"><span>模式</span><strong>{String(dsh.summary.discovery_mode || 'two_group_discovery')}</strong></div>
-                <div className="metric-row"><span>窗口轮次</span><strong>{String(dsh.summary.window_run_count || 0)}</strong></div>
-                <div className="metric-row"><span>风险筛选</span><strong>{String(dsh.summary.risk_filter_count ?? '-')} / 通过 {String(dsh.summary.risk_filter_pass_count ?? '-')}</strong></div>
-                <div className="metric-row"><span>价格筛选</span><strong>{String(dsh.summary.price_filter_count ?? '-')} / 通过 {String(dsh.summary.price_filter_pass_count ?? '-')}</strong></div>
+                <p className="hint">统计口径：全历史池子去重</p>
+                <div className="metric-row"><span>风险筛选候选</span><strong>{String(dsh.summary.risk_filter_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>风险筛选通过</span><strong>{String(dsh.summary.risk_filter_pass_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>价格筛选候选</span><strong>{String(dsh.summary.price_filter_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>价格筛选通过</span><strong>{String(dsh.summary.price_filter_pass_count ?? '-')}</strong></div>
                 {dsh.summary.total_429_count as number > 0 && (
-                  <div className="metric-row"><span>429 总次数</span><strong style={{color:'#f85149'}}>{String(dsh.summary.total_429_count)}</strong></div>
+                  <div className="metric-row"><span>最近窗口429次数</span><strong style={{color:'#f85149'}}>{String(dsh.summary.total_429_count)}</strong></div>
                 )}
               </>)}
 
@@ -257,15 +259,6 @@ export default function Portfolio() {
                 <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>字段异常</h3>
                 {dsh.field_health.filter(fh => fh.severity !== 'ok').slice(0, 6).map((fh, idx) => (
                   <div className="metric-row" key={idx}><span>{severityDot(fh.severity)} {fh.label}<br/><small className="hint">缺失{rateFmt(fh.missing_rate)}</small></span><strong>{rateFmt(fh.missing_rate)}</strong></div>))}</>)}
-
-            {/* Price age */}
-            {dsh.price_age_health && (
-              <>
-                <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>价格年龄</h3>
-                {dsh.price_age_health.price_screen_not_reached_reason && <p className="message" style={{fontSize:12}}>{dsh.price_age_health.price_screen_not_reached_reason}</p>}
-                <div className="metric-row"><span>到达价格面</span><strong>{dsh.price_age_health.price_screen_reached_count ?? 0}</strong></div>
-                <div className="metric-row"><span>未满60分钟</span><strong>{dsh.price_age_health.under_60m_count ?? 0}</strong></div>
-              </>)}
 
             {/* System events */}
             {dsh.system_event_warnings && dsh.system_event_warnings.length > 0 && (
