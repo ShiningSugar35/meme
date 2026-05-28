@@ -478,7 +478,7 @@ class PositionRiskRunner:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        x_val = float(cfg.get("x", 0.2))
+        x_val = float(cfg.get("x") if cfg.get("x") is not None else settings.STRATEGY_DEFAULT_X)
         threshold = 0.048 + 0.01 * x_val
 
         try:
