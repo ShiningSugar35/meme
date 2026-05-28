@@ -8,8 +8,8 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 class StrategyCreate(BaseModel):
     name: str
     is_live: bool = False
-    x: float = 0.15
-    y: float = 2.25
+    x: Optional[float] = None
+    y: Optional[float] = None
     priority: int = 100
     raw_config_json: str = "{}"
 

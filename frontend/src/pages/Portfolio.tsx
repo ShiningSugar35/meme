@@ -182,7 +182,7 @@ export default function Portfolio() {
         {fstats && (
           <div className="card">
             <h2>淘汰指标排行</h2>
-            <p className="hint">最近一次 run 中各指标不满足比例；每个指标分母为实际进入该项筛选的去重池子数</p>
+            <p className="hint">最近一次 run 中各指标不满足比例；分母为实际进入该项筛选的策略-池子检查次数</p>
             {(!fstats.filter_fails || fstats.filter_fails.length === 0) && (
               <p className="empty">暂无淘汰数据</p>
             )}
@@ -190,7 +190,7 @@ export default function Portfolio() {
               <div className="metric-row" key={item.rule}>
                 <span title={item.stage ? `[${item.stage}] ${item.section || ''}` : undefined}>
                   {item.label || ruleLabel(item.rule)}
-                  <br/><small className="hint">分母{item.denominator_count ?? item.checked_count ?? '?'} · 失败{item.failed_count ?? '?'}次</small>
+                  <br/><small className="hint">检查{item.checked_count ?? '?'}次 · 失败{item.failed_count ?? '?'}次</small>
                 </span>
                 <strong>{item.fail_rate_pct != null ? `${item.fail_rate_pct}%` : (item.count != null ? `${item.count}` : '-')}</strong>
               </div>

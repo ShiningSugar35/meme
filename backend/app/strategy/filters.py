@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from ..config import settings
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -220,7 +222,7 @@ def _mk_failed(name: str, value: Any, reason: str, threshold: Any, missing: bool
 
 
 def _strategy_x(strategy_group: Dict[str, Any]) -> float:
-    return float(strategy_group.get("x", 0.2))
+    return float(strategy_group.get("x", settings.STRATEGY_DEFAULT_X))
 
 
 PLATFORMS = {
@@ -436,7 +438,7 @@ async def run_price_filter(
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x", 0.2))
-    y = float(strategy_group.get("y", 2.0))
+    y = float(strategy_group.get("y", settings.STRATEGY_DEFAULT_Y))
 
     current_price = _current_price(latest_price, token)
     if current_price is None or current_price <= 0:
@@ -610,7 +612,7 @@ async def evaluate_price_activity_rules(
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x", 0.2))
-    y = float(strategy_group.get("y", 2.0))
+    y = float(strategy_group.get("y", settings.STRATEGY_DEFAULT_Y))
     divisor = 12.0
 
     current_price = _current_price(latest_price, token)

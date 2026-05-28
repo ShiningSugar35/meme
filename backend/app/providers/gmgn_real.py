@@ -439,6 +439,8 @@ class GMGNProvider(MarketDataProvider):
                 "launchpad_platform_v2": True,
                 "quote_address_type": [4, 5, 3, 1, 13, 0],
                 "limit": 80,
+                "renounced_mint": 1,
+                "renounced_freeze_account": 1,
             }
         }
         if platforms:

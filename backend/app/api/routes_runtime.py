@@ -21,12 +21,12 @@ LOG_EXPORT_DIR = Path("./logs")
 OPEN_POSITION_EXCLUDED_STATUSES = ("CLOSED", "LEGACY_INVALID_CONFIG", "MIGRATION_NEEDED")
 
 RULE_META: Dict[str, Dict[str, str]] = {
-    "type_new_creation": {"label": "type≠new_creation", "stage": "risk_filter", "section": "基础筛选条件"},
-    "min_liquidity_usd": {"label": "流动性不足", "stage": "risk_filter", "section": "基础筛选条件"},
-    "platform": {"label": "平台不在白名单", "stage": "risk_filter", "section": "基础筛选条件"},
+    "type_new_creation": {"label": "type≠new_creation", "stage": "risk_filter", "section": "prefilter"},
+    "min_liquidity_usd": {"label": "流动性不足", "stage": "risk_filter", "section": "风控指标"},
+    "platform": {"label": "平台不在白名单", "stage": "risk_filter", "section": "prefilter"},
     "top_10_holder_rate_range": {"label": "top10持仓比超限", "stage": "risk_filter", "section": "风控指标"},
-    "renounced_mint": {"label": "mint未renounce", "stage": "risk_filter", "section": "基础/风控"},
-    "renounced_freeze_account": {"label": "freeze未renounce", "stage": "risk_filter", "section": "基础/风控"},
+    "renounced_mint": {"label": "mint未renounce", "stage": "risk_filter", "section": "prefilter"},
+    "renounced_freeze_account": {"label": "freeze未renounce", "stage": "risk_filter", "section": "prefilter"},
     "rug_ratio": {"label": "rug比例超标", "stage": "risk_filter", "section": "风控指标"},
     "entrapment_ratio": {"label": "entrapment超标", "stage": "risk_filter", "section": "风控指标"},
     "is_wash_trading": {"label": "疑似wash trading", "stage": "risk_filter", "section": "风控指标"},
@@ -75,14 +75,14 @@ CRITICAL_NUMERIC_FIELDS = {"liquidity_usd", "market_cap", "price_usd", "volume_u
 def _resolve_rule_meta(rule: str) -> Dict[str, str]:
     if rule in RULE_META:
         meta = dict(RULE_META[rule])
-        if meta.get("section") in ("observed_only", "data_unavailable"):
+        if meta.get("section") in ("observed_only", "data_unavailable", "prefilter"):
             meta["exclude_from_ranking"] = "true"
         return meta
     return {"label": rule, "stage": "unknown", "section": "未知/其他指标"}
 
 
 DEFAULT_SIM_STRATEGIES: List[Dict[str, Any]] = [
-    {"name": "模拟盘1", "x": 0.20, "y": 2.0, "is_live": False, "priority": 10},
+    {"name": "模拟盘1", "x": settings.STRATEGY_DEFAULT_X, "y": settings.STRATEGY_DEFAULT_Y, "is_live": False, "priority": 10},
 ]
 
 TRADING_PARAM_SPECS: List[Dict[str, Any]] = [
@@ -446,8 +446,8 @@ async def create_strategy(request: Request, payload: Dict[str, Any] = Body(...))
             raw_config_json = _json_dumps(raw_config_json or {})
         strategy_id = await repo.create_strategy_group(
             name=str(payload.get("name") or "策略组"),
-            x=float(payload.get("x", 0.2)),
-            y=float(payload.get("y", 2.0)),
+            x=float(payload.get("x", settings.STRATEGY_DEFAULT_X)),
+            y=float(payload.get("y", settings.STRATEGY_DEFAULT_Y)),
             is_live=bool(payload.get("is_live", False)),
             priority=int(payload.get("priority", 100)),
             raw_config_json=raw_config_json,
@@ -606,7 +606,6 @@ async def runtime_filter_stats(request: Request):
                 (run_started, run_finished))
             rule_stats: Dict[str, Dict[str, Any]] = {}
             for row in match_rows:
-                pool_key = f"{row.get('token_mint') or ''}|{row.get('pool_addr') or ''}"
                 try:
                     details = json.loads(row.get("pass_fail_detail_json", "[]"))
                 except Exception:
@@ -623,25 +622,20 @@ async def runtime_filter_stats(request: Request):
                         meta = _resolve_rule_meta(rule)
                         rule_stats[rule] = {"rule": rule, "label": meta.get("label", rule), "stage": meta.get("stage", "unknown"),
                                              "section": meta.get("section", ""), "exclude_from_ranking": meta.get("exclude_from_ranking") == "true",
-                                             "failed_pools": set(), "checked_pools": set(), "sample_values": []}
+                                             "checked_count": 0, "failed_count": 0, "sample_values": []}
                     rs = rule_stats[rule]
-                    rs["checked_pools"].add(pool_key)
+                    rs["checked_count"] += 1
                     if not passed:
-                        rs["failed_pools"].add(pool_key)
+                        rs["failed_count"] += 1
                     if missing:
                         rs["missing_count"] = rs.get("missing_count", 0) + 1
                     if len(rs.get("sample_values", [])) < 5:
                         rs["sample_values"].append(str(d.get("value", ""))[:40])
             for rule, rs in rule_stats.items():
-                failed_pools = rs.pop("failed_pools", set())
-                checked_pools_set = rs.pop("checked_pools", set())
-                failed_count = len(failed_pools)
-                actual_checked = len(checked_pools_set)
-                rs["failed_count"] = failed_count
-                rs["checked_count"] = actual_checked
-                rs["actual_checked_count"] = actual_checked
-                rs["denominator_count"] = actual_checked
-                rs["fail_rate"] = failed_count / max(actual_checked, 1)
+                cc = max(rs["checked_count"], 1)
+                rs["actual_checked_count"] = rs["checked_count"]
+                rs["denominator_count"] = rs["checked_count"]
+                rs["fail_rate"] = rs["failed_count"] / cc
                 rs["fail_rate_pct"] = round(rs["fail_rate"] * 100.0, 1)
             filter_fails = sorted(
                 [rs for rule, rs in rule_stats.items() if not rs.get("exclude_from_ranking")],

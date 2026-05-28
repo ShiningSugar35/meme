@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     GMGN_MAX_CREATED_SECONDS: int = Field(2100)
     GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
 
+    STRATEGY_DEFAULT_X: float = Field(0.20)
+    STRATEGY_DEFAULT_Y: float = Field(2.0)
+
     def get_discovery_primary_slot(self) -> int:
         return self.GMGN_DISCOVERY_PRIMARY_SLOT
 

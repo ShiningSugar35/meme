@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 
 from .database import init_db
+from ..config import settings
 from ..logging_config import logger
 
 
@@ -340,8 +341,8 @@ class Repositories:
         if row and row[0] == 0:
             await self.create_strategy_group(
                 "模拟盘1",
-                0.20,
-                2.0,
+                settings.STRATEGY_DEFAULT_X,
+                settings.STRATEGY_DEFAULT_Y,
                 is_live=False,
                 priority=10,
                 raw_config_json="{}",
