@@ -7,12 +7,19 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
     ...options,
   });
   const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
   if (!response.ok) {
-    const message = data?.error || data?.detail || response.statusText;
+    let message = text;
+    try {
+      const data = JSON.parse(text);
+      message = data?.error || data?.detail || response.statusText || `HTTP ${response.status}`;
+    } catch {}
     throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
   }
-  return data as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as unknown as T;
+  }
 }
 
 export type RuntimeMode = 'IDLE' | 'SIM_TEST' | 'FORMAL_SIM_LIVE';

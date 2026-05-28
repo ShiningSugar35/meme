@@ -131,7 +131,24 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
 
 def _safe_float(payload: Dict[str, Any], key: str, default: float) -> float:
     val = payload.get(key)
-    return float(val) if val is not None else float(default)
+    if val is None or val == "":
+        return float(default)
+    return float(val)
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "on", "enabled"):
+        return True
+    if s in ("0", "false", "no", "off", "disabled"):
+        return False
+    return default
 
 
 def _close_number(a: Any, b: Any, *, tol: float = 1e-9) -> bool:
