@@ -15,7 +15,7 @@ from ..strategy.filters import (
     run_entry_local_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
     _parse_creation_ts, _compute_age_minutes, sort_klines,
 )
-from ..strategy.thresholds import compute_thresholds, StrategyThresholds
+from ..strategy.thresholds import compute_thresholds, StrategyThresholds, build_trench_filters_for_x, strip_internal_debug_fields
 from ..trading.executor import TradingPipeline
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
@@ -291,14 +291,32 @@ class DiscoveryRunner:
                     dedup[key] += 1
                 continue
 
-            # Merge custom_params (x filters) with platform-specific params
-            params_base = dict(custom_params) if custom_params else {}
-            params_base['platforms'] = platforms
-            params = self._build_trench_params(platforms=platforms)
+            # Build base params, then merge trench_filters from custom_params
+            base_params = self._build_trench_params(platforms=platforms)
             if custom_params:
-                if 'trench_filters' in custom_params:
-                    params['trench_filters'] = custom_params['trench_filters']
-                    params['_x'] = custom_params.get('_x')
+                trench_filters = custom_params.get("trench_filters", {})
+                if trench_filters:
+                    base_params.update(trench_filters)
+                debug_x = custom_params.get("_x")
+                if debug_x is not None:
+                    base_params["_debug_x"] = debug_x
+                debug_ids = custom_params.get("_strategy_group_ids")
+                if debug_ids is not None:
+                    base_params["_debug_strategy_group_ids"] = debug_ids
+
+            # Strip internal debug fields before sending to GMGN
+            send_params = strip_internal_debug_fields(base_params)
+
+            # Log the full params (including debug) before stripping
+            logger.info(
+                "trenches fetch params",
+                x=custom_params.get("_x") if custom_params else None,
+                platforms=platforms,
+                trench_filters=custom_params.get("trench_filters") if custom_params else None,
+                credential_slot_primary=PRIMARY_SLOT,
+                credential_slot_reserve=RESERVE_SLOT,
+                raw_params_sent=send_params,
+            )
 
             # Try primary first, then reserve immediately on failure
             final_items: Optional[List] = None
@@ -307,7 +325,7 @@ class DiscoveryRunner:
             for try_slot, try_role in [(PRIMARY_SLOT, "primary"), (RESERVE_SLOT, "reserve")]:
                 if rl.is_slot_cooldown(try_slot):
                     continue
-                items, gres = await self._try_fetch_group(group_name, platforms, try_slot, try_role, custom_params=params)
+                items, gres = await self._try_fetch_group(group_name, platforms, try_slot, try_role, custom_params=send_params)
                 if gres["ok"]:
                     final_items = items or []
                     final_gres = gres
@@ -330,6 +348,17 @@ class DiscoveryRunner:
                         dedup[key] = 0
                         all_items.append(item)
                     dedup[key] += 1
+
+            # Log result summary
+            logger.info(
+                "trenches fetch result",
+                group=group_name,
+                x=custom_params.get("_x") if custom_params else None,
+                raw_count=final_gres.get("raw_count", 0) if final_gres else 0,
+                unique_count=final_gres.get("unique_count", 0) if final_gres else 0,
+                slot=try_slot if final_gres and final_gres.get("ok") else None,
+                credential_slot=final_gres.get("slot") if final_gres else None,
+            )
 
             # Wait between groups
             try:
@@ -722,36 +751,48 @@ class DiscoveryRunner:
             self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
             return
 
-        # For simplicity when multiple x values exist, use the "most permissive"
-        # (lowest common_risk) x to avoid missing tokens that could match any group.
-        # Each token is then evaluated against all strategy groups via local filters.
-        # This avoids N x 2 API calls per discovery run.
-        # TODO: For full unique-x pushdown, iterate over unique_xs and call
-        # _fetch_trenches_two_group per x with trench_filters, then route tokens
-        # to matching x strategy groups.
-        most_permissive_x = min(unique_xs) if len(unique_xs) > 1 else unique_xs[0]
+        groups_by_x: Dict[float, List[dict]] = {}
+        for sg in strategy_groups:
+            x = float(sg.get("x") if sg.get("x") is not None else settings.STRATEGY_DEFAULT_X)
+            x = round(x, 6)
+            groups_by_x.setdefault(x, []).append(sg)
+
         logger.info(
-            "discovery trenches pushdown",
+            "discovery multi-x trenches pushdown",
             unique_xs=unique_xs,
-            most_permissive_x=most_permissive_x,
+            groups_by_x={str(k): len(v) for k, v in groups_by_x.items()},
             count=len(unique_xs),
             strategy_groups=len(strategy_groups),
         )
 
         for timing_key, groups_for_t in self._group_by_timing(strategy_groups):
-            # Fetch trenches with most permissive x filters (or no x at all for backward compat)
-            if len(unique_xs) > 1:
-                params = self._build_trench_params(x=most_permissive_x)
-                trenches, trench_diag = await self._fetch_trenches_two_group(custom_params=params)
-            else:
-                # Single x: use exact trench filters for that x
-                params = self._build_trench_params(x=unique_xs[0])
-                trenches, trench_diag = await self._fetch_trenches_two_group(custom_params=params)
-            total_fetched = trench_diag.get("unique_fetched_count", 0)
-            trench_diag["unique_xs"] = unique_xs
-            trench_diag["most_permissive_x"] = most_permissive_x
+            all_trenches: List[Dict[str, Any]] = []
+            per_x_diags: Dict[str, Any] = {}
 
-            for token in trenches:
+            for x, groups_for_x in groups_by_x.items():
+                trench_filters = build_trench_filters_for_x(x)
+                custom_params = {
+                    "trench_filters": dict(trench_filters),
+                    "_x": x,
+                    "_strategy_group_ids": [g["id"] for g in groups_for_x],
+                }
+                x_trenches, x_diag = await self._fetch_trenches_two_group(custom_params=custom_params)
+                x_diag["x"] = x
+                x_diag["strategy_group_ids"] = [g["id"] for g in groups_for_x]
+                per_x_diags[str(x)] = x_diag
+
+                for token in x_trenches:
+                    all_trenches.append(token)
+
+            trench_diag = {
+                "unique_xs": unique_xs,
+                "per_x": per_x_diags,
+                "unique_fetched_count": len(all_trenches),
+                "groups": [],
+            }
+            total_fetched = len(all_trenches)
+
+            for token in all_trenches:
                 token_mint = token.get('token_mint')
                 if not token_mint:
                     continue

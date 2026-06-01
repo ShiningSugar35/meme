@@ -366,12 +366,9 @@ async def evaluate_price_activity_rules(
         age_missing = True
 
     # swaps rule: swaps_1h > 12, then swaps_5m > multiplier * (swaps_1h / 12)
+    divisor = 12.0
     cond_swaps_overall = False
     if swaps_1h and swaps_1h > 12:
-        if age_minutes is not None and age_minutes < 60:
-            divisor = min(12.0, max(1.0, age_minutes / 5.0))
-        else:
-            divisor = 12.0
         swaps_threshold = max(0, t.swaps_5m_multiplier * swaps_1h / divisor)
         cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
         cond_swaps_overall = cond_swaps
@@ -387,17 +384,16 @@ async def evaluate_price_activity_rules(
 
     # volume_5m / swaps_5m rule
     volume_5m = _to_float(_first_present(latest_price, ["volume_5m", "volume5m", "buy_volume_5m", "sell_volume_5m"]))
-    volume_per_swap_cond = True
+    volume_per_swap_cond = False
+    vps = None
     if volume_5m is not None and swaps_5m is not None and swaps_5m > 0:
         vps = volume_5m / swaps_5m
         volume_per_swap_cond = vps > t.volume_per_swap_5m_min
-    else:
-        volume_per_swap_cond = False
-        vps = None
     details.append({
         "rule": "volume_per_swap_5m", "passed": volume_per_swap_cond,
         "volume_5m": volume_5m, "swaps_5m": swaps_5m, "vps": vps,
         "threshold": t.volume_per_swap_5m_min,
+        "data_unavailable": volume_5m is None or swaps_5m is None,
     })
 
     # price_change_1h rule
@@ -434,6 +430,8 @@ async def evaluate_price_activity_rules(
             pct_change_1h = ((current_price - price_1h) / price_1h) * 100.0
             price_change_source = "computed_from_price_1h"
             cond_pct = pct_change_1h > pct_threshold
+        else:
+            price_change_source = "missing"
 
     details.append({
         "rule": "price_change_1h", "passed": cond_pct,
@@ -479,7 +477,7 @@ async def evaluate_smart_degen(
     t = compute_thresholds(x)
 
     # min_smart_degen_count = max(0, 2 - 10*x). Strictly greater: required > that value.
-    raw_required = t.min_smart_degen_count
+    raw_required = t.min_smart_degen_count_raw
     required_count = int(math.floor(raw_required)) + 1
     degen_count = len(smart_degen_holders)
     cond_degen = degen_count >= required_count
@@ -550,8 +548,10 @@ async def run_holding_risk_filter(
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
     _check_float(details, snapshot, "entrapment_ratio", ["entrapment_ratio", "max_entrapment_ratio"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
+    _check_float(details, snapshot, "insider_ratio", ["max_insider_ratio", "insider_ratio"],
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
     _check_float(details, snapshot, "suspected_insider_hold_rate",
-                 ["suspected_insider_hold_rate", "insider_hold_rate", "max_insider_ratio"],
+                 ["suspected_insider_hold_rate", "insider_hold_rate"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
     _check_float(details, snapshot, "bundler_trader_amount_rate",
                  ["bundler_trader_amount_rate", "bundler_rate", "max_bundler_rate"],
@@ -566,7 +566,7 @@ async def run_holding_risk_filter(
                  ["creator_balance_rate", "dev_team_hold_rate", "creator_hold_rate"],
                  lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}")
     _check_float(details, snapshot, "holder_count", ["holder_count", "holders", "total_holders"],
-                 lambda v: v > t.min_holder_count, f"> {t.min_holder_count:.6g}", required=False)
+                 lambda v: v > t.min_holder_count_raw, f"> {t.min_holder_count_raw:.6g}", required=True)
     _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected"])
     _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")

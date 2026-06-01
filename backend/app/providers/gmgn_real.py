@@ -156,7 +156,13 @@ class GMGNProvider(MarketDataProvider):
                 raise GMGNAPIError(f"Invalid credential_slot {credential_slot} (available: 0-{creds_available-1})", path=path, method=method, retryable=False)
             attempts_to_make = [(credential_slot, cred)]
         else:
-            attempts_to_make = [(i % max(creds_available, 1), creds[i % max(creds_available, 1)] if creds_available else {}) for i in range(max(1, creds_available))]
+            # Round-robin: start from _key_cursor instead of always slot 0
+            start = self._key_cursor % max(creds_available, 1)
+            attempts_to_make = [
+                ((start + i) % max(creds_available, 1), creds[(start + i) % max(creds_available, 1)] if creds_available else {})
+                for i in range(max(1, creds_available))
+            ]
+            self._key_cursor += 1
 
         last_exc: Optional[BaseException] = None
         last_status: Optional[int] = None

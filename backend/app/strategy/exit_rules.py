@@ -95,10 +95,12 @@ def _append_reason(
 def _current_price_usd(tick: Dict[str, Any], position: Dict[str, Any]) -> Optional[float]:
     return _to_float(
         tick.get("price_usd")
+        or tick.get("price_sol")
         or tick.get("latest_price_usd")
         or tick.get("current_price_usd")
         or position.get("last_fill_price_usd")
         or position.get("entry_price_usd")
+        or position.get("entry_price_sol")
         or tick.get("price")
     )
 
@@ -134,7 +136,7 @@ async def decide_exit(
     reasons: List[ExitReason] = []
     executed = _executed_exit_rules(position)
 
-    entry_price = _to_float(position.get("entry_price_usd"))
+    entry_price = _to_float(position.get("entry_price_usd") or position.get("entry_price_sol"))
     current_price = _current_price_usd(tick, position)
     current_price_usd = _current_price_usd(tick, position)
 

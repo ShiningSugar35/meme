@@ -11,6 +11,7 @@ from ..strategy.filters import run_holding_risk_filter
 from ..services.event_bus import event_bus
 from ..config import settings
 from ..logging_config import logger
+from ..strategy.exit_rules import _executed_exit_rules
 
 
 def _utc_now() -> datetime:
@@ -545,6 +546,13 @@ class PositionRiskRunner:
     async def _check_top3_smart_degen_reduction(self, position: Dict[str, Any], now: datetime) -> bool:
         """Check if any of the original TOP3 smart degen holders reduced holdings by >25%.
 
+        Per-wallet one-shot: once a wallet triggers an exit, it is recorded in
+        executed_exit_rules_json as TOP3_SMART_DEGEN_DUMP:<address> and will not
+        trigger a second time.
+
+        Comparison priority: token amount > amount_percentage.  Do NOT use usd_value
+        alone because price change affects it.
+
         Returns True if risk is triggered (50% exit needed), False otherwise.
         """
         locked = position.get("locked_strategy_config_json")
@@ -563,6 +571,13 @@ class PositionRiskRunner:
         pos_id = int(position["id"])
         account_type = _account_type(position)
 
+        # Check per-wallet one-shot rules
+        executed = _executed_exit_rules(position)
+        already_triggered_wallets: set[str] = set()
+        for rule in executed:
+            if rule.startswith("TOP3_SMART_DEGEN_DUMP:"):
+                already_triggered_wallets.add(rule.split(":", 1)[1])
+
         try:
             holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20)
         except Exception:
@@ -571,38 +586,64 @@ class PositionRiskRunner:
         if not holders:
             return False
 
-        # Build current map of address -> amount_percentage
-        current_map: Dict[str, float] = {}
+        # Build current map of address -> (token_amount, amount_percentage)
+        current_map: Dict[str, Dict[str, float]] = {}
         for h in holders:
             addr = h.get("address", "")
             if addr:
-                current_map[addr] = float(h.get("amount_percentage") or 0)
+                current_map[addr] = {
+                    "token_amount": float(h.get("token_amount") or 0),
+                    "amount_percentage": float(h.get("amount_percentage") or 0),
+                }
 
-        triggered = False
+        triggered_addr: Optional[str] = None
         for snap in top3_snapshot:
             addr = snap.get("address", "")
-            if not addr or addr not in current_map:
+            if not addr or addr not in current_map or addr in already_triggered_wallets:
                 continue
-            initial_pct = float(snap.get("amount_percentage") or 0)
-            current_pct = current_map[addr]
-            if initial_pct <= 0:
-                continue
-            reduction = (initial_pct - current_pct) / initial_pct
-            if reduction > 0.25:
-                triggered = True
-                await self.repo.append_system_event(
-                    "WARN", "RISK",
-                    f"TOP3 smart degen dump detected: {addr} reduced {reduction*100:.0f}%",
-                    _safe_json_dumps({
-                        "position_id": pos_id, "token": token,
-                        "address": addr, "initial_pct": initial_pct,
-                        "current_pct": current_pct, "reduction_pct": reduction,
-                    }),
-                    account_type=account_type,
-                )
-                break
 
-        return triggered
+            curr = current_map[addr]
+            initial_token = float(snap.get("token_amount") or 0)
+            initial_pct = float(snap.get("amount_percentage") or 0)
+
+            # Prefer token_amount comparison
+            if initial_token > 0:
+                current_token = curr["token_amount"]
+                if current_token <= 0:
+                    # Wallet fully exited
+                    triggered_addr = addr
+                    break
+                reduction = (initial_token - current_token) / initial_token
+                if reduction > 0.25:
+                    triggered_addr = addr
+                    break
+            elif initial_pct > 0:
+                current_pct = curr["amount_percentage"]
+                if current_pct <= 0:
+                    triggered_addr = addr
+                    break
+                reduction = (initial_pct - current_pct) / initial_pct
+                if reduction > 0.25:
+                    triggered_addr = addr
+                    break
+
+        if triggered_addr is not None:
+            await self.repo.append_system_event(
+                "WARN", "RISK",
+                f"TOP3 smart degen dump detected: {triggered_addr}",
+                _safe_json_dumps({
+                    "position_id": pos_id, "token": token,
+                    "address": triggered_addr,
+                }),
+                account_type=account_type,
+            )
+            # Record per-wallet one-shot rule
+            wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_addr}"
+            if hasattr(self.repo, "mark_exit_rule_executed"):
+                await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
+            return True
+
+        return False
 
     def _primary_reason(self, decision) -> str:
         if not decision.reasons:
@@ -650,6 +691,20 @@ class PositionRiskRunner:
             if ok:
                 if hasattr(self.repo, "mark_exit_rule_executed"):
                     await self.repo.mark_exit_rule_executed(pos_id, reason_code)
+                if exit_pct < 1.0:
+                    if hasattr(self.repo, "update_position_remaining"):
+                        now_iso = _iso(_utc_now())
+                        remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
+                        sell_amt = remaining_token * exit_pct
+                        new_remaining = max(0.0, remaining_token - sell_amt)
+                        new_value = new_remaining * (current_price_usd or 0.0)
+                        await self.repo.update_position_remaining(
+                            pos_id,
+                            new_remaining,
+                            new_value,
+                            last_fill_at=now_iso,
+                            last_fill_price_usd=current_price_usd,
+                        )
                 return
 
         if is_live:
@@ -695,37 +750,30 @@ class PositionRiskRunner:
     ) -> bool:
         fn = self.trading_pipeline.execute_sell
 
-        call_variants = [
-            lambda: fn(position=position, exit_pct=exit_pct, exit_reason=reason_code, emergency=emergency, latest_price=latest),
-            lambda: fn(position=position, exit_pct=exit_pct, reason=reason_code, emergency=emergency),
-            lambda: fn(position, exit_pct, reason_code, emergency),
-            lambda: fn(position["id"], exit_pct, reason_code),
-        ]
-
-        last_error = None
-        for call in call_variants:
+        try:
+            result = await fn(position=position, exit_pct=exit_pct, exit_reason=reason_code)
+        except TypeError as e:
+            # Fallback for older signatures
             try:
-                result = await call()
-                if result is None:
-                    return True
-                if isinstance(result, dict):
-                    status = str(result.get("status") or result.get("result") or "").upper()
-                    if result.get("ok") is True or result.get("success") is True:
-                        return True
-                    if status in {"CONFIRMED", "FILLED", "SUCCESS", "OK"}:
-                        return True
-                    if status in {"FAILED", "ERROR", "REJECTED"}:
-                        return False
-                return bool(result)
-            except TypeError as e:
-                last_error = e
-                continue
-            except Exception as e:
-                last_error = e
-                break
+                result = await fn(position, exit_pct, reason_code)
+            except Exception as e2:
+                logger.warning("execute_sell call failed", error=str(e2), position_id=position.get("id"))
+                return False
+        except Exception as e:
+            logger.warning("execute_sell call failed", error=str(e), position_id=position.get("id"))
+            return False
 
-        logger.warning("execute_sell call failed", error=str(last_error), position_id=position.get("id"))
-        return False
+        if result is None:
+            return True
+        if isinstance(result, dict):
+            status = str(result.get("status") or result.get("result") or "").upper()
+            if result.get("ok") is True or result.get("success") is True:
+                return True
+            if status in {"CONFIRMED", "FILLED", "SUCCESS", "OK"}:
+                return True
+            if status in {"FAILED", "ERROR", "REJECTED"}:
+                return False
+        return bool(result)
 
     async def _paper_exit(
         self,

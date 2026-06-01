@@ -689,8 +689,8 @@ class TradingPipeline:
         )
 
         wallet_pubkey = settings.WALLET_PUBLIC_KEY or "MOCK_WALLET"
-        instructions = await self.jupiter.build_swap_instructions(quote, wallet_pubkey)
-        bundle = await self.jito.send_bundle(instructions)
+        instructions = await self.jupiter.build_swap_instructions(quote, wallet_pubkey, extra={})
+        bundle = await self.jito.send(instructions)
 
         te_confirmed = await self.repo.append_trade_event(
             idem + ":CONFIRMED",
@@ -916,8 +916,8 @@ class TradingPipeline:
         )
 
         wallet_pubkey = settings.WALLET_PUBLIC_KEY or "MOCK_WALLET"
-        instructions = await self.jupiter.build_swap_instructions(quote, wallet_pubkey)
-        bundle = await self.jito.send_bundle(instructions)
+        instructions = await self.jupiter.build_swap_instructions(quote, wallet_pubkey, extra={})
+        bundle = await self.jito.send(instructions)
 
         idem_confirmed = f"SELL:{pos_id}:{exit_reason}:{bucket}:CONFIRMED"
         te_confirmed = await self.repo.append_trade_event(

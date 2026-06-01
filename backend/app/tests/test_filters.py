@@ -48,7 +48,7 @@ def make_snapshot(**kwargs):
 def test_thresholds_x_02():
     t = compute_thresholds(0.2)
     assert math.isclose(t.common_risk, 0.15, rel_tol=1e-9)
-    assert math.isclose(t.min_liquidity_usd, 5250.0, rel_tol=1e-9)
+    assert math.isclose(t.min_liquidity, 5250.0, rel_tol=1e-9)
     assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
     assert math.isclose(t.min_holder_count, 29.0, rel_tol=1e-9)
     assert math.isclose(t.min_marketcap, 2900.0, rel_tol=1e-9)

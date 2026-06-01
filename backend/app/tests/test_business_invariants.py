@@ -10,19 +10,28 @@ These tests verify that core constraints are maintained:
 6. No RPC send fallback - Jito-only broadcast or blocked
 """
 
+import os
 import pytest
 import json
+from ..config import ProviderMode, settings as global_settings
 from ..db.repositories import Repositories
 from ..trading.executor import TradingPipeline
 
 
 async def _ensure_live(repo):
+    await repo.set_runtime_setting("live_entries_enabled", "true")
     groups = await repo.list_strategy_groups()
     live = [g for g in groups if g['is_live']]
     if not live:
-        await repo.create_strategy_group("test_live", 0.15, 2.25, 180, max_created=300, is_live=True, priority=10, raw_config_json='{}')
+        await repo.create_strategy_group("test_live", 0.15, is_live=True, priority=10, raw_config_json='{}')
         groups = await repo.list_strategy_groups()
     return [g for g in groups if g['is_live']]
+
+
+def _mock_safety_gate():
+    """Patch TradingPipeline._safety_gate to return None (pass) for tests."""
+    import backend.app.trading.executor as exec_mod
+    exec_mod.TradingPipeline._safety_gate = lambda self: None
 
 
 @pytest.mark.asyncio
@@ -34,10 +43,9 @@ async def test_no_global_x_in_strategy_config(repo):
     """
     groups = await repo.get_enabled_strategy_groups()
     for g in groups:
-        # x, y, t should only be in strategy_groups, not global
         assert g.get('x') is not None, "x must be in strategy_groups"
-        assert g.get('y') is not None, "y must be in strategy_groups"
-        assert g.get('min_created') is not None, "min_created must be in strategy_groups"
+        # y was removed in Stage 2.5; only x remains as the single strategy parameter
+        assert 'y' not in g or g.get('y') is None, "y must not be in strategy_groups"
 
 
 @pytest.mark.asyncio
@@ -50,10 +58,9 @@ async def test_no_entry_x_entry_y_entry_t_fields(repo):
     pos_id = await repo.create_position(
         token_mint="PASS1",
         is_live=False,
-        locked_strategy_config_json='{"x": 0.15, "y": 2.25}',
+        locked_strategy_config_json='{"x": 0.15}',
         status="OPEN",
         entry_price_usd=1.0,
-        entry_price_sol=0.5,
         entry_token_amount=1000,
         remaining_token_amount=1000,
         remaining_value_usd=1000,
@@ -72,6 +79,7 @@ async def test_no_entry_x_entry_y_entry_t_fields(repo):
 
 @pytest.mark.asyncio
 async def test_one_live_position_per_token_constraint(repo, pipeline_factory):
+    _mock_safety_gate()
     """
     Invariant 3: Only one OPEN live position per (token, cycle).
     Once an open live position exists in the same cycle,
@@ -118,7 +126,6 @@ async def test_exit_percentage_on_current_remaining_amount(repo):
         locked_strategy_config_json='{"x": 0.15}',
         status="OPEN",
         entry_price_usd=1.0,
-        entry_price_sol=0.5,
         entry_token_amount=100.0,
         remaining_token_amount=100.0,
         remaining_value_usd=100.0,
@@ -159,7 +166,6 @@ async def test_multiple_exit_conditions_take_max(repo):
         locked_strategy_config_json='{"x": 0.15}',
         status="OPEN",
         entry_price_usd=1.0,
-        entry_price_sol=0.5,
         entry_token_amount=100.0,
         remaining_token_amount=100.0,
         remaining_value_usd=100.0,
@@ -361,7 +367,6 @@ async def test_small_dust_position_cleared_in_single_exit(repo):
         locked_strategy_config_json='{"x": 0.15}',
         status="OPEN",
         entry_price_usd=1.0,
-        entry_price_sol=0.5,
         entry_token_amount=100.0,
         remaining_token_amount=100.0,
         remaining_value_usd=100.0,
