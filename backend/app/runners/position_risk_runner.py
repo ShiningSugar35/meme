@@ -5,7 +5,6 @@ from typing import Any, Dict, Optional
 import json
 
 from ..db.repositories import Repositories
-from ..strategy.exit_rules import decide_exit
 from ..strategy.thresholds import compute_thresholds
 from ..strategy.filters import run_holding_risk_filter
 from ..services.event_bus import event_bus
@@ -122,7 +121,6 @@ class PositionRiskRunner:
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
         self._legacy_warned: set[int] = set()
-        self._last_top1_check: Dict[int, datetime] = {}
         self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
@@ -228,6 +226,33 @@ class PositionRiskRunner:
             )
             return
 
+        # Completed type check: if token is completed, full exit immediately.
+        # This is checked both in PositionRiskRunner (as safety net) and
+        # ActivePositionPriceRunner (primary price runner).
+        token_type = latest_snapshot.get("type") or latest_snapshot.get("token_type")
+        if token_type == "completed" and token_type != position.get("latest_token_type"):
+            await self._request_exit(
+                position=position_for_decision,
+                exit_pct=1.0,
+                reason_code="COMPLETED",
+                emergency=True,
+                latest=latest,
+                current_price_usd=price_usd,
+            )
+            return
+
+        # Dust force exit check (keep in PositionRiskRunner since it's not price-based)
+        if remaining_value_usd is not None and remaining_value_usd < float(getattr(settings, "DUST_FORCE_EXIT_USD", 12.5)):
+            await self._request_exit(
+                position=position_for_decision,
+                exit_pct=1.0,
+                reason_code="DUST_FORCE_EXIT",
+                emergency=True,
+                latest=latest,
+                current_price_usd=price_usd,
+            )
+            return
+
         # Top1 holder continuous monitoring: check addr_type=0 share against threshold
         top1_failed = await self._check_top1_holder(position_for_decision, now)
         if top1_failed:
@@ -268,27 +293,10 @@ class PositionRiskRunner:
             )
             return
 
-        decision = await decide_exit(
-            position_for_decision,
-            tick,
-            rolling,
-            latest_snapshot,
-            now=now,
-        )
-
-        if not decision.should_exit:
-            return
-
-        # Prefer the highest-severity reason for idempotency and DB close reason.
-        reason_code = self._primary_reason(decision)
-        await self._request_exit(
-            position=position_for_decision,
-            exit_pct=decision.exit_pct,
-            reason_code=reason_code,
-            emergency=decision.emergency,
-            latest=latest,
-            current_price_usd=price_usd,
-        )
+        # NOTE: Price-based exit rules (HARD_TP, HARD_SL, DYN_SL, TIME_STOPLOSS)
+        # are handled exclusively by ActivePositionPriceRunner to avoid duplicate triggers.
+        # PositionRiskRunner covers only holding risk, TOP1 holder, smart money sell,
+        # TOP3 smart degen dump, completed, and dust force exit.
 
     async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
         try:
@@ -421,22 +429,12 @@ class PositionRiskRunner:
         return False
 
     async def _check_top1_holder(self, position: Dict[str, Any], now: datetime) -> bool:
-        """Check top1 holder (addr_type=0) share against threshold per tiered schedule.
+        """Check top1 holder (addr_type=0) share against threshold.
 
+        Called inline during the risk scan cycle (no independent TOP1_HOLDER_SCAN_TIER).
         Returns True if risk is triggered (full exit needed), False otherwise.
         """
         pos_id = int(position["id"])
-        remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
-        interval = settings.get_top1_holder_scan_interval_seconds(remaining_value_usd)
-        if interval is None or interval <= 0:
-            return False
-
-        last_check = self._last_top1_check.get(pos_id)
-        if last_check is not None and now < last_check + timedelta(seconds=interval):
-            return False
-
-        self._last_top1_check[pos_id] = now
-
         token = position["token_mint"]
         account_type = _account_type(position)
 
@@ -455,7 +453,6 @@ class PositionRiskRunner:
         try:
             holders = await self.gmgn.fetch_top_holders(token, limit=20)
         except Exception as e:
-            # Best-effort: if holder fetch fails, do not force exit
             await self.repo.append_system_event(
                 "WARN",
                 "RISK",
@@ -583,24 +580,27 @@ class PositionRiskRunner:
         except Exception:
             return False
 
-        if not holders:
-            return False
-
-        # Build current map of address -> (token_amount, amount_percentage)
+        # Build current map — may be empty if all holders disappeared
         current_map: Dict[str, Dict[str, float]] = {}
-        for h in holders:
-            addr = h.get("address", "")
-            if addr:
-                current_map[addr] = {
-                    "token_amount": float(h.get("token_amount") or 0),
-                    "amount_percentage": float(h.get("amount_percentage") or 0),
-                }
+        if holders:
+            for h in holders:
+                addr = h.get("address", "")
+                if addr:
+                    current_map[addr] = {
+                        "token_amount": float(h.get("token_amount") or 0),
+                        "amount_percentage": float(h.get("amount_percentage") or 0),
+                    }
 
         triggered_addr: Optional[str] = None
         for snap in top3_snapshot:
             addr = snap.get("address", "")
-            if not addr or addr not in current_map or addr in already_triggered_wallets:
+            if not addr or addr in already_triggered_wallets:
                 continue
+
+            # Wallet disappeared from holders — treat as 100% reduction
+            if addr not in current_map:
+                triggered_addr = addr
+                break
 
             curr = current_map[addr]
             initial_token = float(snap.get("token_amount") or 0)
@@ -610,7 +610,6 @@ class PositionRiskRunner:
             if initial_token > 0:
                 current_token = curr["token_amount"]
                 if current_token <= 0:
-                    # Wallet fully exited
                     triggered_addr = addr
                     break
                 reduction = (initial_token - current_token) / initial_token
@@ -644,16 +643,6 @@ class PositionRiskRunner:
             return True
 
         return False
-
-    def _primary_reason(self, decision) -> str:
-        if not decision.reasons:
-            return "EXIT"
-
-        full_reasons = [r for r in decision.reasons if r.desired_exit_pct >= 1.0]
-        if full_reasons:
-            return full_reasons[0].name
-
-        return decision.reasons[0].name
 
     async def _request_exit(
         self,
@@ -790,15 +779,7 @@ class PositionRiskRunner:
         remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
         sell_token_amount = max(remaining_token * min(max(exit_pct, 0.0), 1.0), 0.0)
         new_remaining = max(remaining_token - sell_token_amount, 0.0)
-
-        executed_usd_amount = sell_token_amount * current_price_usd if current_price_usd else None
-
-        existing_return = _to_float(position.get("total_return_usd"), 0.0) or 0.0
-        total_return_usd = existing_return + (executed_usd_amount or 0.0)
-
-        total_cost_usd = _to_float(position.get("total_cost_usd"), 0.0) or 0.0
-        realized_pnl_usd = total_return_usd - total_cost_usd if total_cost_usd else None
-        realized_pnl_pct = (realized_pnl_usd / total_cost_usd) if total_cost_usd and realized_pnl_usd is not None else None
+        new_value = new_remaining * (current_price_usd or 0.0)
 
         await self.repo.append_trade_event(
             f"SELL_SIM:{pos_id}:{reason_code}",
@@ -813,7 +794,6 @@ class PositionRiskRunner:
             requested_pct=exit_pct,
             requested_token_amount=sell_token_amount,
             executed_token_amount=sell_token_amount,
-            executed_usd_amount=executed_usd_amount,
             price_usd=current_price_usd,
             provider="POSITION_RISK_SIM",
         )
@@ -822,10 +802,6 @@ class PositionRiskRunner:
             await self.repo.close_position(
                 pos_id,
                 close_reason=reason_code,
-                total_return_usd=total_return_usd,
-                realized_pnl_usd=realized_pnl_usd,
-                realized_pnl_pct=realized_pnl_pct,
-                pnl_pct=realized_pnl_pct,
             )
             await event_bus.publish(
                 "system",
@@ -839,13 +815,9 @@ class PositionRiskRunner:
             await self.repo.update_position_remaining(
                 pos_id,
                 remaining_token_amount=new_remaining,
-                remaining_value_usd=executed_usd_amount,
+                remaining_value_usd=new_value,
                 last_fill_at=_iso(now),
                 last_fill_price_usd=current_price_usd,
-                total_return_usd=total_return_usd,
-                realized_pnl_usd=realized_pnl_usd,
-                realized_pnl_pct=realized_pnl_pct,
-                pnl_pct=realized_pnl_pct,
             )
             await event_bus.publish(
                 "system",

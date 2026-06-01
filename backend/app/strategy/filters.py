@@ -343,21 +343,21 @@ async def evaluate_price_activity_rules(
                         "source": "missing", "current_price": current_price})
         return PriceFilterResult(False, details, {})
 
-    # swaps_5m / swaps_1h
-    swaps_5m = _to_float(_first_present(latest_price, ["swaps_5m", "swaps5m"]))
-    swaps_1h = _to_float(_first_present(latest_price, ["swaps_1h", "swaps1h"]))
+    # swaps_5m / swaps_1h — support multiple GMGN field name conventions
+    swaps_5m = _to_float(_first_present(latest_price, ["swaps_5m", "swaps5m", "swap_5m", "trades_5m", "trade_5m"]))
+    swaps_1h = _to_float(_first_present(latest_price, ["swaps_1h", "swaps1h", "swap_1h", "trades_1h", "trade_1h"]))
     if swaps_5m is None or swaps_1h is None:
-        for nest_key in ("price", "pool"):
+        for nest_key in ("price", "pool", "token", "info"):
             nested = latest_price.get(nest_key)
             if isinstance(nested, dict):
                 if swaps_5m is None:
-                    swaps_5m = _to_float(_first_present(nested, ["swaps_5m", "swaps5m"]))
+                    swaps_5m = _to_float(_first_present(nested, ["swaps_5m", "swaps5m", "swap_5m", "trades_5m"]))
                 if swaps_1h is None:
-                    swaps_1h = _to_float(_first_present(nested, ["swaps_1h", "swaps1h"]))
+                    swaps_1h = _to_float(_first_present(nested, ["swaps_1h", "swaps1h", "swap_1h", "trades_1h"]))
     swaps_source = "latest_price"
     if swaps_5m is None or swaps_1h is None:
-        swaps_5m = swaps_5m or _to_float(_first_present(token, ["swaps_5m", "swaps5m"]))
-        swaps_1h = swaps_1h or _to_float(_first_present(token, ["swaps_1h", "swaps1h"]))
+        swaps_5m = swaps_5m or _to_float(_first_present(token, ["swaps_5m", "swaps5m", "swap_5m", "trades_5m"]))
+        swaps_1h = swaps_1h or _to_float(_first_present(token, ["swaps_1h", "swaps1h", "swap_1h", "trades_1h"]))
         swaps_source = "token_snapshot"
 
     creation_ts, _, age_missing = _parse_creation_ts(token)
@@ -383,7 +383,14 @@ async def evaluate_price_activity_rules(
     })
 
     # volume_5m / swaps_5m rule
-    volume_5m = _to_float(_first_present(latest_price, ["volume_5m", "volume5m", "buy_volume_5m", "sell_volume_5m"]))
+    volume_5m = _to_float(_first_present(latest_price, ["volume_5m", "volume5m", "volume_5m_usd", "buy_volume_5m", "sell_volume_5m"]))
+    if volume_5m is None:
+        for nest_key in ("price", "pool", "token", "info"):
+            nested = latest_price.get(nest_key)
+            if isinstance(nested, dict):
+                volume_5m = _to_float(_first_present(nested, ["volume_5m", "volume5m", "volume_5m_usd"]))
+                if volume_5m is not None:
+                    break
     volume_per_swap_cond = False
     vps = None
     if volume_5m is not None and swaps_5m is not None and swaps_5m > 0:
@@ -396,14 +403,34 @@ async def evaluate_price_activity_rules(
         "data_unavailable": volume_5m is None or swaps_5m is None,
     })
 
-    # price_change_1h rule
+    # price_change_1h rule — prefer direct API field, then compute from price_1h or klines
     pct_threshold = t.price_change_1h_min_pct
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
     price_change_age_mode: str = "unknown"
     cond_pct: bool = False
 
-    if age_minutes is not None and age_minutes < 60 and klines:
+    # First try direct price_change_percent1h from GMGN
+    pct_change_1h = _to_float(_first_present(latest_price, [
+        "price_change_percent1h", "price_change_1h", "change_1h", "price_change_percent_1h",
+        "price_change_1h_pct",
+    ]))
+    if pct_change_1h is not None:
+        for nest_key in ("price", "pool", "token", "info"):
+            nested = latest_price.get(nest_key)
+            if isinstance(nested, dict):
+                pct_change_1h = _to_float(_first_present(nested, [
+                    "price_change_percent1h", "price_change_1h", "change_1h", "price_change_percent_1h",
+                ]))
+                if pct_change_1h is not None:
+                    break
+    if pct_change_1h is not None:
+        price_change_source = "direct_price_change_percent1h"
+        price_change_age_mode = "direct_api"
+        cond_pct = pct_change_1h > pct_threshold
+
+    # Fallback: kline computation for young tokens
+    if pct_change_1h is None and age_minutes is not None and age_minutes < 60 and klines:
         sorted_klines = sort_klines(klines)
         if sorted_klines:
             open_price = _kline_open(sorted_klines[0])
@@ -414,13 +441,14 @@ async def evaluate_price_activity_rules(
                 cond_pct = pct_change_1h > pct_threshold
         if pct_change_1h is None:
             price_change_age_mode = "young_no_kline_fallback"
-    else:
-        price_change_age_mode = "mature_computed"
 
+    # Fallback: compute from price_1h
     if pct_change_1h is None:
+        if price_change_age_mode == "unknown":
+            price_change_age_mode = "mature_computed"
         price_1h = _to_float(_first_present(latest_price, ["price_1h", "price1h"]))
         if price_1h is None:
-            for nest_key in ("price", "pool"):
+            for nest_key in ("price", "pool", "token", "info"):
                 nested = latest_price.get(nest_key)
                 if isinstance(nested, dict):
                     price_1h = _to_float(_first_present(nested, ["price_1h", "price1h"]))
@@ -478,47 +506,55 @@ async def evaluate_smart_degen(
 
     # min_smart_degen_count = max(0, 2 - 10*x). Strictly greater: required > that value.
     raw_required = t.min_smart_degen_count_raw
-    required_count = int(math.floor(raw_required)) + 1
+    required_count_for_count_rule = max(0, int(math.floor(raw_required)) + 1)
+    required_count_for_holding_eval = max(1, required_count_for_count_rule)
     degen_count = len(smart_degen_holders)
-    cond_degen = degen_count >= required_count
+    cond_degen = degen_count >= required_count_for_count_rule
 
     degen_hold_ok = False
     degen_hold_detail: Dict[str, Any] = {}
-    if smart_degen_holders and cond_degen:
+    if smart_degen_holders and cond_degen and degen_count >= 1:
         holders_sorted = sorted(smart_degen_holders, key=lambda h: _to_float(h.get("amount_percentage")) or 0.0, reverse=True)
-        top_n = holders_sorted[:required_count]
-        max_holder = top_n[0]
-        max_pct = _to_float(max_holder.get("amount_percentage"))
-        max_usd = _to_float(max_holder.get("usd_value"))
-        max_pct_norm, max_norm_src = _normalize_pct(max_pct)
-        max_ok = (max_pct_norm is not None and max_pct_norm > t.smart_degen_max_pct) or (max_usd is not None and max_usd > t.smart_degen_max_usd)
+        top_n = holders_sorted[:required_count_for_holding_eval]
+        if top_n:
+            max_holder = top_n[0]
+            max_pct = _to_float(max_holder.get("amount_percentage"))
+            max_usd = _to_float(max_holder.get("usd_value"))
+            max_pct_norm, max_norm_src = _normalize_pct(max_pct)
+            max_ok = (max_pct_norm is not None and max_pct_norm > t.smart_degen_max_pct) or (max_usd is not None and max_usd > t.smart_degen_max_usd)
 
-        min_holder = top_n[-1] if len(top_n) > 1 else top_n[0]
-        min_pct = _to_float(min_holder.get("amount_percentage"))
-        min_usd = _to_float(min_holder.get("usd_value"))
-        min_pct_norm, min_norm_src = _normalize_pct(min_pct)
-        min_ok = (min_pct_norm is not None and min_pct_norm > t.smart_degen_min_pct) or (min_usd is not None and min_usd > t.smart_degen_min_usd)
+            min_holder = top_n[-1] if len(top_n) > 1 else top_n[0]
+            min_pct = _to_float(min_holder.get("amount_percentage"))
+            min_usd = _to_float(min_holder.get("usd_value"))
+            min_pct_norm, min_norm_src = _normalize_pct(min_pct)
+            min_ok = (min_pct_norm is not None and min_pct_norm > t.smart_degen_min_pct) or (min_usd is not None and min_usd > t.smart_degen_min_usd)
 
-        degen_hold_ok = max_ok and min_ok
-        degen_hold_detail = {
-            "required_count": required_count, "raw_required": raw_required, "actual_count": len(top_n),
-            "max_holder_pct_raw": max_pct, "max_holder_pct_norm": max_pct_norm, "max_holder_pct_norm_src": max_norm_src,
-            "max_holder_usd": max_usd, "max_ok": max_ok,
-            "min_holder_pct_raw": min_pct, "min_holder_pct_norm": min_pct_norm, "min_holder_pct_norm_src": min_norm_src,
-            "min_holder_usd": min_usd, "min_ok": min_ok,
-            "threshold_max_pct": t.smart_degen_max_pct, "threshold_min_pct": t.smart_degen_min_pct,
-            "threshold_max_usd": t.smart_degen_max_usd, "threshold_min_usd": t.smart_degen_min_usd,
-        }
+            degen_hold_ok = max_ok and min_ok
+            degen_hold_detail = {
+                "required_count": required_count_for_holding_eval, "raw_required": raw_required,
+                "required_count_for_count": required_count_for_count_rule,
+                "actual_count": len(top_n),
+                "max_holder_pct_raw": max_pct, "max_holder_pct_norm": max_pct_norm, "max_holder_pct_norm_src": max_norm_src,
+                "max_holder_usd": max_usd, "max_ok": max_ok,
+                "min_holder_pct_raw": min_pct, "min_holder_pct_norm": min_pct_norm, "min_holder_pct_norm_src": min_norm_src,
+                "min_holder_usd": min_usd, "min_ok": min_ok,
+                "threshold_max_pct": t.smart_degen_max_pct, "threshold_min_pct": t.smart_degen_min_pct,
+                "threshold_max_usd": t.smart_degen_max_usd, "threshold_min_usd": t.smart_degen_min_usd,
+            }
+    elif not smart_degen_holders:
+        degen_hold_detail = {"reason": "no smart degen holders available"}
 
     cond_degen_full = cond_degen and degen_hold_ok
     details.append({
         "rule": "smart_degen", "passed": cond_degen_full,
-        "degen_count": degen_count, "required_count": required_count,
+        "degen_count": degen_count, "required_count": required_count_for_count_rule,
+        "held_eval_required_count": required_count_for_holding_eval,
         "holdings": degen_hold_detail, "x": x,
     })
 
     passed = all(d.get("passed") for d in details)
-    fv = {"x": x, "degen_count": degen_count, "required_count": required_count, "degen_hold_ok": degen_hold_ok}
+    fv = {"x": x, "degen_count": degen_count, "required_count": required_count_for_count_rule,
+          "degen_hold_ok": degen_hold_ok}
     return PriceFilterResult(passed, details, fv)
 
 # --- Legacy aliases ---
@@ -544,33 +580,35 @@ async def run_holding_risk_filter(
     t = compute_thresholds(x)
     details: List[FilterDetail] = []
 
-    _check_float(details, snapshot, "rug_ratio", ["rug_ratio", "max_rug_ratio", "max_rugged_ratio"],
+    _check_float(details, snapshot, "rug_ratio", ["rug_ratio", "max_rug_ratio", "max_rugged_ratio", "rug"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
-    _check_float(details, snapshot, "entrapment_ratio", ["entrapment_ratio", "max_entrapment_ratio"],
+    _check_float(details, snapshot, "entrapment_ratio", ["entrapment_ratio", "max_entrapment_ratio", "entrapment"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
-    _check_float(details, snapshot, "insider_ratio", ["max_insider_ratio", "insider_ratio"],
+    _check_float(details, snapshot, "insider_ratio", ["max_insider_ratio", "insider_ratio", "insider_rate"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
     _check_float(details, snapshot, "suspected_insider_hold_rate",
-                 ["suspected_insider_hold_rate", "insider_hold_rate"],
+                 ["suspected_insider_hold_rate", "insider_hold_rate", "insider_rate"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
     _check_float(details, snapshot, "bundler_trader_amount_rate",
-                 ["bundler_trader_amount_rate", "bundler_rate", "max_bundler_rate"],
+                 ["bundler_trader_amount_rate", "bundler_rate", "max_bundler_rate", "bundler"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
     _check_float(details, snapshot, "top_10_holder_rate_range",
-                 ["top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate"],
+                 ["top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate",
+                  "top_holder_rate", "top10_holder_pct", "top10HolderRate", "top_10_holder_percent",
+                  "top10HolderPercent"],
                  lambda v: t.min_top_holder_rate < v < t.max_top_holder_rate,
                  f"({t.min_top_holder_rate:.6g}, {t.max_top_holder_rate:.6g})")
-    _check_float(details, snapshot, "fresh_wallet_rate", ["fresh_wallet_rate", "fresh_wallets_rate"],
+    _check_float(details, snapshot, "fresh_wallet_rate", ["fresh_wallet_rate", "fresh_wallets_rate", "fresh_wallet"],
                  lambda v: v < t.max_fresh_wallet_rate, f"< {t.max_fresh_wallet_rate:.6g}")
     _check_float(details, snapshot, "creator_balance_rate",
-                 ["creator_balance_rate", "dev_team_hold_rate", "creator_hold_rate"],
+                 ["creator_balance_rate", "dev_team_hold_rate", "creator_hold_rate", "dev_hold_rate"],
                  lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}")
-    _check_float(details, snapshot, "holder_count", ["holder_count", "holders", "total_holders"],
+    _check_float(details, snapshot, "holder_count", ["holder_count", "holders", "total_holders", "holder"],
                  lambda v: v > t.min_holder_count_raw, f"> {t.min_holder_count_raw:.6g}", required=True)
-    _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected"])
-    _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate"],
+    _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"])
+    _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate", "rat_trader"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
-    _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count"],
+    _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count", "sniper_cnt"],
                  lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}")
     return FilterResult(all(d.passed for d in details), details, {"x": x})
 

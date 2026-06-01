@@ -333,11 +333,12 @@ class TradingPipeline:
         passed_strategies: List[Dict[str, Any]],
         snapshot_id: Optional[int] = None,
         discovery_event_id: Optional[int] = None,
+        discovery_event_ids_by_strategy: Optional[Dict[int, int]] = None,
     ):
         if not passed_strategies:
             return {"status": "NO_PASSED_STRATEGY", "token_mint": token_mint}
 
-        if discovery_event_id is None:
+        if discovery_event_id is None and not discovery_event_ids_by_strategy:
             discovery_event_id, _ = await self.repo.create_discovery_event_idempotent(
                 token_mint=token_mint,
                 snapshot_id=snapshot_id,
@@ -359,8 +360,12 @@ class TradingPipeline:
         # Sim positions are paper tracking only. Keep one SIM position per passed
         # strategy/cycle so the bandit data is not lost.
         for strategy in sim_strategies:
+            sg_id = int(strategy.get('id') or 0)
+            de_id = discovery_event_id
+            if discovery_event_ids_by_strategy:
+                de_id = discovery_event_ids_by_strategy.get(sg_id, discovery_event_id)
             pos = await self._create_sim_position(
-                token_mint, strategy, snapshot_id, discovery_event_id,
+                token_mint, strategy, snapshot_id, de_id,
                 top3_smart_degen_snapshot=top3_snapshot,
             )
             if pos:
@@ -515,23 +520,23 @@ class TradingPipeline:
             price_impact_pct=(jupiter_price_impact * 100.0) if jupiter_price_impact else None,
         )
 
+        locked_json = self._locked_strategy_for_position(
+            strategy,
+            token_decimals=token_decimals,
+            discovery_event_id=discovery_event_id,
+            entry_size_usd=size_usd,
+            top3_smart_degen_snapshot=top3_smart_degen_snapshot,
+        )
         pos_id = await self.repo.create_position(
-            token_mint,
-            False,
-            self._locked_strategy_for_position(
-                strategy,
-                token_decimals=token_decimals,
-                discovery_event_id=discovery_event_id,
-                entry_size_usd=size_usd,
-                top3_smart_degen_snapshot=top3_smart_degen_snapshot,
-            ),
-            "POSITION_OPEN",
-            price_usd,
-            price_sol,
-            token_amount,
-            token_amount,
-            remaining_value_usd,
-            opened_at,
+            token_mint=token_mint,
+            is_live=False,
+            locked_strategy_config_json=locked_json,
+            status="POSITION_OPEN",
+            entry_price_usd=price_usd,
+            entry_token_amount=token_amount,
+            remaining_token_amount=token_amount,
+            remaining_value_usd=remaining_value_usd,
+            opened_at=opened_at,
             live_strategy_id=None,
             strategy_config_version=strategy.get("config_version", 1),
             open_trade_event_id=te.get("id"),
@@ -732,23 +737,23 @@ class TradingPipeline:
             return {"ok": False, "error": bundle.get("error_code") or "BUNDLE_FAILED", "trade_event_id": te_confirmed.get("id")}
 
         opened_at = datetime.now(timezone.utc).isoformat()
+        locked_json = self._locked_strategy_for_position(
+            strategy,
+            token_decimals=token_decimals,
+            discovery_event_id=discovery_event_id,
+            entry_size_usd=size_usd,
+            top3_smart_degen_snapshot=top3_smart_degen_snapshot,
+        )
         pos_id = await self.repo.create_position(
-            token_mint,
-            True,
-            self._locked_strategy_for_position(
-                strategy,
-                token_decimals=token_decimals,
-                discovery_event_id=discovery_event_id,
-                entry_size_usd=size_usd,
-                top3_smart_degen_snapshot=top3_smart_degen_snapshot,
-            ),
-            "POSITION_OPEN",
-            price_usd,
-            price_sol,
-            token_amount,
-            token_amount,
-            remaining_value_usd,
-            opened_at,
+            token_mint=token_mint,
+            is_live=True,
+            locked_strategy_config_json=locked_json,
+            status="POSITION_OPEN",
+            entry_price_usd=price_usd,
+            entry_token_amount=token_amount,
+            remaining_token_amount=token_amount,
+            remaining_value_usd=remaining_value_usd,
+            opened_at=opened_at,
             live_strategy_id=sid,
             strategy_config_version=strategy.get("config_version", 1),
             open_trade_event_id=te_confirmed.get("id"),

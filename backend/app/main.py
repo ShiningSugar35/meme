@@ -17,6 +17,7 @@ from .runners.discovery_runner import DiscoveryRunner
 from .runners.price_monitor_runner import PriceMonitorRunner
 from .runners.position_risk_runner import PositionRiskRunner
 from .runners.kill_switch_runner import KillSwitchRunner
+from .runners.active_position_price_runner import ActivePositionPriceRunner
 from .trading.executor import TradingPipeline
 from .api.routes_mock import router as mock_router
 from .api.routes_strategies import router as strategies_router
@@ -85,12 +86,14 @@ async def lifespan(app: FastAPI):
     price = PriceMonitorRunner(repo, aggregator) if aggregator else None
     risk = PositionRiskRunner(repo, providers.gmgn if providers else None, trading_pipeline=trading_pipeline)
     kill = KillSwitchRunner(repo)
+    active_price_runner = ActivePositionPriceRunner(repo, providers.gmgn if providers else None, trading_pipeline=trading_pipeline)
 
     worker_mgr.register_worker('discovery', discovery.run_once, int(settings.POLL_INTERVAL_SECONDS))
     if price:
         worker_mgr.register_worker('price_monitor', price.run_once, int(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS))
     worker_mgr.register_worker('position_risk', risk.run_once, 1)
     worker_mgr.register_worker('kill_switch', kill.run_once, 30)
+    worker_mgr.register_worker('active_position_price', active_price_runner.run_once, int(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS))
 
     try:
         await repo.set_runtime_setting('user_mode', 'IDLE', 'system')

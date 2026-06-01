@@ -766,7 +766,6 @@ class DiscoveryRunner:
         )
 
         for timing_key, groups_for_t in self._group_by_timing(strategy_groups):
-            all_trenches: List[Dict[str, Any]] = []
             per_x_diags: Dict[str, Any] = {}
 
             for x, groups_for_x in groups_by_x.items():
@@ -781,90 +780,110 @@ class DiscoveryRunner:
                 x_diag["strategy_group_ids"] = [g["id"] for g in groups_for_x]
                 per_x_diags[str(x)] = x_diag
 
+                logger.info(
+                    "discovery per-x trenches result",
+                    x=x, strategy_group_ids=[g["id"] for g in groups_for_x],
+                    fetched=len(x_trenches),
+                    trench_filters_payload=trench_filters,
+                )
+
                 for token in x_trenches:
-                    all_trenches.append(token)
+                    token_mint = token.get('token_mint')
+                    if not token_mint:
+                        continue
+
+                    source_mode = token.get('source_mode', 'MOCK')
+                    if mode != ProviderMode.MOCK and source_mode == 'MOCK' and token_mint in MOCK_MINTS:
+                        continue
+
+                    try:
+                        token_mint, pool_address, pool_created_at, snapshot_id = await self._store_snapshot_and_token(token, now)
+                    except Exception as e:
+                        logger.error(f"store discovery snapshot failed token={token_mint}: {e}")
+                        continue
+
+                    # Stage 0: local risk filter — uses ONLY groups_for_x (this x's groups)
+                    risk_passed, discovery_event_ids, dc, tc = await self._run_stage0_risk_filter(
+                        token, groups_for_x, now, snapshot_id, token_mint, pool_address,
+                    )
+                    discovered_count += dc
+                    tracked_count += tc
+                    stage_diags.setdefault("stage0_risk", {"candidates": 0, "passed": 0})
+                    stage_diags["stage0_risk"]["candidates"] += 1
+                    stage_diags["stage0_risk"]["passed"] += len(risk_passed)
+
+                    if not risk_passed:
+                        continue
+
+                    # Stage 1: token info / price (w=1)
+                    price_passed, needs_kline, price_diag = await self._run_stage1_price_info(
+                        token_mint, token, risk_passed, snapshot_id, discovery_event_ids,
+                    )
+                    stage_diags.setdefault("stage1_price", {"checked": 0, "passed": 0, "failed": 0, "needs_kline": 0})
+                    stage_diags["stage1_price"]["checked"] += price_diag["checked"]
+                    stage_diags["stage1_price"]["passed"] += price_diag["passed"]
+                    stage_diags["stage1_price"]["failed"] += price_diag["failed"]
+                    stage_diags["stage1_price"]["needs_kline"] += price_diag.get("needs_kline", 0)
+
+                    # Stage 2: kline fallback (w=2) for young tokens that Stage 1 couldn't evaluate
+                    kline_passed, kline_diag = await self._run_stage2_kline_fallback(
+                        token_mint, token, needs_kline, snapshot_id, discovery_event_ids,
+                    )
+                    stage_diags.setdefault("stage2_kline", {"checked": 0, "kline_used": 0, "passed": 0, "failed": 0})
+                    stage_diags["stage2_kline"]["checked"] += kline_diag["checked"]
+                    stage_diags["stage2_kline"]["passed"] += kline_diag["passed"]
+                    stage_diags["stage2_kline"]["failed"] += kline_diag["failed"]
+                    stage_diags["stage2_kline"]["kline_used"] += kline_diag.get("kline_used", 0)
+
+                    kline_passed_all = price_passed + kline_passed
+
+                    if not kline_passed_all:
+                        continue
+
+                    # Stage 3: top1 holder via API (w=5)
+                    holder_passed, holder_diag = await self._run_stage3_top_holder(
+                        token_mint, token, kline_passed_all, snapshot_id, discovery_event_ids,
+                    )
+                    stage_diags.setdefault("stage3_holder", {"checked": 0, "passed": 0, "failed": 0})
+                    stage_diags["stage3_holder"]["checked"] += holder_diag["checked"]
+                    stage_diags["stage3_holder"]["passed"] += holder_diag["passed"]
+                    stage_diags["stage3_holder"]["failed"] += holder_diag["failed"]
+
+                    if not holder_passed:
+                        continue
+
+                    # Stage 4: smart degen (w=5)
+                    final_passed, degen_diag = await self._run_stage4_smart_degen(
+                        token_mint, token, holder_passed, snapshot_id, discovery_event_ids,
+                    )
+                    stage_diags.setdefault("stage4_degen", {"checked": 0, "passed": 0, "failed": 0})
+                    stage_diags["stage4_degen"]["checked"] += degen_diag["checked"]
+                    stage_diags["stage4_degen"]["passed"] += degen_diag["passed"]
+                    stage_diags["stage4_degen"]["failed"] += degen_diag["failed"]
+
+                    if final_passed:
+                        try:
+                            await self.pipeline.handle_token_second_filter_result(
+                                token_mint, final_passed,
+                                snapshot_id=snapshot_id,
+                                discovery_event_id=discovery_event_ids.get(int(final_passed[0].get('id') or 0)),
+                                discovery_event_ids_by_strategy=discovery_event_ids,
+                            )
+                        except Exception as e:
+                            logger.error(f"pipeline entry failed for {token_mint}: {e}")
+
+            all_unique = sum(
+                d.get("unique_fetched_count", d.get("raw_fetched_count", 0))
+                for d in per_x_diags.values()
+            )
+            total_fetched += all_unique
 
             trench_diag = {
                 "unique_xs": unique_xs,
                 "per_x": per_x_diags,
-                "unique_fetched_count": len(all_trenches),
+                "unique_fetched_count": all_unique,
                 "groups": [],
             }
-            total_fetched = len(all_trenches)
-
-            for token in all_trenches:
-                token_mint = token.get('token_mint')
-                if not token_mint:
-                    continue
-
-                source_mode = token.get('source_mode', 'MOCK')
-                if mode != ProviderMode.MOCK and source_mode == 'MOCK' and token_mint in MOCK_MINTS:
-                    continue
-
-                try:
-                    token_mint, pool_address, pool_created_at, snapshot_id = await self._store_snapshot_and_token(token, now)
-                except Exception as e:
-                    logger.error(f"store discovery snapshot failed token={token_mint}: {e}")
-                    continue
-
-                # Stage 0: local risk filter (zero extra API)
-                risk_passed, discovery_event_ids, dc, tc = await self._run_stage0_risk_filter(
-                    token, groups_for_t, now, snapshot_id, token_mint, pool_address,
-                )
-                discovered_count += dc
-                tracked_count += tc
-                stage_diags.setdefault("stage0_risk", {"candidates": len(trenches), "passed": 0})
-                stage_diags["stage0_risk"]["passed"] += len(risk_passed)
-
-                # Stage 1: token info / price (w=1)
-                price_passed, needs_kline, price_diag = await self._run_stage1_price_info(
-                    token_mint, token, risk_passed, snapshot_id, discovery_event_ids,
-                )
-                stage_diags.setdefault("stage1_price", {"checked": 0, "passed": 0, "failed": 0, "needs_kline": 0})
-                stage_diags["stage1_price"]["checked"] += price_diag["checked"]
-                stage_diags["stage1_price"]["passed"] += price_diag["passed"]
-                stage_diags["stage1_price"]["failed"] += price_diag["failed"]
-                stage_diags["stage1_price"]["needs_kline"] += price_diag.get("needs_kline", 0)
-
-                # Stage 2: kline fallback (w=2) for young tokens that Stage 1 couldn't evaluate
-                kline_passed, kline_diag = await self._run_stage2_kline_fallback(
-                    token_mint, token, needs_kline, snapshot_id, discovery_event_ids,
-                )
-                stage_diags.setdefault("stage2_kline", {"checked": 0, "kline_used": 0, "passed": 0, "failed": 0})
-                stage_diags["stage2_kline"]["checked"] += kline_diag["checked"]
-                stage_diags["stage2_kline"]["passed"] += kline_diag["passed"]
-                stage_diags["stage2_kline"]["failed"] += kline_diag["failed"]
-                stage_diags["stage2_kline"]["kline_used"] += kline_diag.get("kline_used", 0)
-
-                kline_passed_all = price_passed + kline_passed
-
-                # Stage 3: top1 holder via API (w=5)
-                holder_passed, holder_diag = await self._run_stage3_top_holder(
-                    token_mint, token, kline_passed_all, snapshot_id, discovery_event_ids,
-                )
-                stage_diags.setdefault("stage3_holder", {"checked": 0, "passed": 0, "failed": 0})
-                stage_diags["stage3_holder"]["checked"] += holder_diag["checked"]
-                stage_diags["stage3_holder"]["passed"] += holder_diag["passed"]
-                stage_diags["stage3_holder"]["failed"] += holder_diag["failed"]
-
-                # Stage 4: smart degen (w=5)
-                final_passed, degen_diag = await self._run_stage4_smart_degen(
-                    token_mint, token, holder_passed, snapshot_id, discovery_event_ids,
-                )
-                stage_diags.setdefault("stage4_degen", {"checked": 0, "passed": 0, "failed": 0})
-                stage_diags["stage4_degen"]["checked"] += degen_diag["checked"]
-                stage_diags["stage4_degen"]["passed"] += degen_diag["passed"]
-                stage_diags["stage4_degen"]["failed"] += degen_diag["failed"]
-
-                if final_passed:
-                    try:
-                        await self.pipeline.handle_token_second_filter_result(
-                            token_mint, final_passed,
-                            snapshot_id=snapshot_id,
-                            discovery_event_id=discovery_event_ids.get(int(final_passed[0].get('id') or 0)),
-                        )
-                    except Exception as e:
-                        logger.error(f"pipeline entry failed for {token_mint}: {e}")
 
         self.processed_count = total_fetched
         self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
@@ -872,9 +891,12 @@ class DiscoveryRunner:
         run_finished_at = datetime.now(timezone.utc).isoformat()
         context = {
             'count': total_fetched,
-            'raw_fetched_count': trench_diag.get("raw_fetched_count", 0),
+            'raw_fetched_count': sum(
+                sum(g.get("raw_count", 0) for g in (d.get("groups") or []))
+                for d in per_x_diags.values()
+            ) if per_x_diags else 0,
             'unique_fetched_count': total_fetched,
-            'duplicate_count_estimate': trench_diag.get("duplicate_count_estimate", 0),
+            'duplicate_count_estimate': 0,
             'discovered': discovered_count,
             'tracked_initial_passed': tracked_count,
             'dedup_skipped': dedup_skipped,
@@ -882,8 +904,8 @@ class DiscoveryRunner:
             'elapsed_ms': self.last_elapsed_ms,
             'run_started_at': run_started_at,
             'run_finished_at': run_finished_at,
-            'fetch_mode': 'two_group_discovery',
-            'trench_groups': trench_diag.get("groups", []),
+            'fetch_mode': 'per_x_two_group_discovery',
+            'trench_groups': [],
             'stage_diagnostics': stage_diags,
         }
 

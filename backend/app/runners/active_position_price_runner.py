@@ -194,8 +194,17 @@ class ActivePositionPriceRunner:
                 if growth < 0.05:
                     reasons.append(("TIME_STOPLOSS", 0.5))
 
-        # Completed type
+        # Completed type — also try fetching latest token snapshot for up-to-date type
         token_type = position.get("latest_token_type") or position.get("type")
+        if token_type != "completed":
+            try:
+                snap = await self.gmgn.fetch_token_snapshot(token)
+                if snap:
+                    snap_type = snap.get("type") or snap.get("token_type")
+                    if snap_type:
+                        token_type = snap_type
+            except Exception:
+                pass
         if token_type == "completed":
             reasons.append(("COMPLETED", 1.0))
 
