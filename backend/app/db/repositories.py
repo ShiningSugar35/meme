@@ -1593,3 +1593,39 @@ class Repositories:
         ) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    # position_smart_money_baselines
+
+    async def insert_smart_money_baseline(
+        self, position_id: int, token_mint: str, wallet_address: str, rank: int,
+        amount_pct: Optional[float], usd_value: Optional[float],
+    ):
+        now = utc_now_iso()
+
+        async def _do():
+            await self.db.execute(
+                "INSERT INTO position_smart_money_baselines(position_id, token_mint, wallet_address, rank_at_entry, baseline_amount_percentage, baseline_usd_value, baseline_observed_at) VALUES(?,?,?,?,?,?,?)",
+                (position_id, token_mint, wallet_address, rank, amount_pct, usd_value, now),
+            )
+        await self._write_txn(_do())
+
+    async def get_position_smart_money_baselines(self, position_id: int) -> List[Dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT * FROM position_smart_money_baselines WHERE position_id = ? AND triggered = 0 ORDER BY rank_at_entry ASC",
+            (position_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def update_smart_money_baseline_latest(
+        self, baseline_id: int, latest_amount_pct: Optional[float], latest_usd: Optional[float],
+        reduction_rate: Optional[float], triggered: bool = False,
+    ):
+        now = utc_now_iso()
+
+        async def _do():
+            await self.db.execute(
+                "UPDATE position_smart_money_baselines SET latest_amount_percentage=?, latest_usd_value=?, latest_reduction_rate=?, triggered=?, latest_observed_at=? WHERE id=?",
+                (latest_amount_pct, latest_usd, reduction_rate, 1 if triggered else 0, now, baseline_id),
+            )
+        await self._write_txn(_do())

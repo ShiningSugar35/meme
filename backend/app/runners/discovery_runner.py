@@ -685,13 +685,13 @@ class DiscoveryRunner:
     async def _run_stage4_smart_degen(
         self, token_mint: str, token: Dict[str, Any], groups: List[dict],
         snapshot_id: int, discovery_event_ids: Dict[int, int],
-    ) -> Tuple[List[dict], Dict[str, Any]]:
-        """Stage 4: Smart degen holders (w=5)."""
+    ) -> Tuple[List[dict], Dict[str, Any], Optional[List[Dict[str, Any]]]]:
+        """Stage 4: Smart degen holders (w=5). Returns (passed, diag, smart_degen_holders)."""
         stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "passed": 0, "failed": 0}
         passed_groups: List[dict] = []
 
         if not groups:
-            return passed_groups, stage_diag
+            return passed_groups, stage_diag, None
 
         slot = self._next_feature_slot("smart_degen")
         if slot is None:
@@ -699,7 +699,7 @@ class DiscoveryRunner:
                 token_mint, groups, snapshot_id, discovery_event_ids,
                 'smart_degen_filter', 'all feature slots cooldown')
             stage_diag["failed"] = len(groups)
-            return passed_groups, stage_diag
+            return passed_groups, stage_diag, None
 
         try:
             smart_degen_holders = await self.gmgn.fetch_smart_degen_holders(token_mint, limit=30, credential_slot=slot)
@@ -709,7 +709,7 @@ class DiscoveryRunner:
                 token_mint, groups, snapshot_id, discovery_event_ids,
                 'smart_degen_filter', f"degen API failed: {e}")
             stage_diag["failed"] = len(groups)
-            return passed_groups, stage_diag
+            return passed_groups, stage_diag, None
 
         for sg in groups:
             sg_id = int(sg.get('id') or 0)
@@ -729,9 +729,39 @@ class DiscoveryRunner:
             else:
                 stage_diag["failed"] += 1
 
-        return passed_groups, stage_diag
+        return passed_groups, stage_diag, smart_degen_holders if passed_groups else None
 
-    async def run_once(self):
+    async def _save_top3_smart_money_baselines(self, token_mint: str, degen_holders: List[Dict[str, Any]]):
+        """Save TOP3 smart money baselines for the most recent SIM/LIVE positions."""
+        if not degen_holders:
+            return
+        try:
+            pos_rows = await self.repo.list_positions_by_token(token_mint, limit=5)
+            if not pos_rows:
+                return
+            pos = pos_rows[0]
+            pos_id = int(pos.get("id", 0))
+            if not pos_id:
+                return
+            holders_sorted = sorted(degen_holders, reverse=True,
+                key=lambda h: (float(h.get("amount_percentage", 0) or 0) / 100.0 if (h.get("amount_percentage") and float(str(h.get("amount_percentage", 0))) > 1.0) else float(h.get("amount_percentage", 0) or 0)))
+            top3 = holders_sorted[:3]
+            for i, holder in enumerate(top3):
+                wallet = str(holder.get("address") or holder.get("wallet") or "")
+                if not wallet:
+                    continue
+                amt_pct = float(holder.get("amount_percentage", 0) or 0)
+                if amt_pct > 1.0:
+                    amt_pct = amt_pct / 100.0
+                usd_val = float(holder.get("usd_value", 0) or 0)
+                try:
+                    await self.repo.insert_smart_money_baseline(
+                        pos_id, token_mint, wallet, i + 1, amt_pct, usd_val,
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"save_top3_smart_money_baselines failed for {token_mint}: {e}")
         async with self._run_lock:
             await self._run_once_locked()
 
@@ -870,7 +900,7 @@ class DiscoveryRunner:
                         continue
 
                     # Stage 4: smart degen (w=5)
-                    final_passed, degen_diag = await self._run_stage4_smart_degen(
+                    final_passed, degen_diag, degen_holders = await self._run_stage4_smart_degen(
                         token_mint, token, holder_passed, snapshot_id, discovery_event_ids,
                     )
                     stage_diags.setdefault("stage4_degen", {"checked": 0, "passed": 0, "failed": 0})
@@ -886,6 +916,8 @@ class DiscoveryRunner:
                                 discovery_event_id=discovery_event_ids.get(int(final_passed[0].get('id') or 0)),
                                 discovery_event_ids_by_strategy=discovery_event_ids,
                             )
+                            if degen_holders:
+                                await self._save_top3_smart_money_baselines(token_mint, degen_holders)
                         except Exception as e:
                             logger.error(f"pipeline entry failed for {token_mint}: {e}")
 

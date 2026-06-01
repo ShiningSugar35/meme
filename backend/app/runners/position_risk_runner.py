@@ -566,6 +566,19 @@ class PositionRiskRunner:
 
         top3_snapshot = cfg.get("top3_smart_degen_snapshot")
         if not top3_snapshot or not isinstance(top3_snapshot, list):
+            # Fall back to position_smart_money_baselines table
+            try:
+                baselines = await self.repo.get_position_smart_money_baselines(pos_id)
+                if baselines:
+                    top3_snapshot = [
+                        {"address": b.get("wallet_address", ""),
+                         "token_amount": float(b.get("baseline_amount_percentage", 0) or 0),
+                         "amount_percentage": float(b.get("baseline_amount_percentage", 0) or 0)}
+                        for b in baselines if b.get("wallet_address")
+                    ]
+            except Exception:
+                pass
+        if not top3_snapshot or not isinstance(top3_snapshot, list):
             return False
 
         token = position["token_mint"]

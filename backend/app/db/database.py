@@ -107,6 +107,7 @@ async def _run_migrations(db: aiosqlite.Connection):
         await _migrate_kline_snapshots(db)
         await _migrate_tick_snapshots(db)
         await _migrate_strategy_groups(db)
+        await _migrate_smart_money_baselines(db)
 
         await db.commit()
 
@@ -438,6 +439,28 @@ async def _migrate_strategy_groups(db: aiosqlite.Connection):
     await _drop_column_if_exists(db, "strategy_groups", "y")
     await _drop_column_if_exists(db, "strategy_groups", "min_created")
     await _drop_column_if_exists(db, "discovery_events", "min_created")
+
+
+async def _migrate_smart_money_baselines(db: aiosqlite.Connection):
+    await _ensure_table_exists(db, "position_smart_money_baselines", """
+        CREATE TABLE IF NOT EXISTS position_smart_money_baselines (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER NOT NULL,
+          token_mint TEXT NOT NULL,
+          wallet_address TEXT NOT NULL,
+          rank_at_entry INTEGER NOT NULL,
+          baseline_amount_percentage REAL,
+          baseline_usd_value REAL,
+          latest_amount_percentage REAL,
+          latest_usd_value REAL,
+          latest_reduction_rate REAL,
+          triggered INTEGER NOT NULL DEFAULT 0,
+          baseline_observed_at TEXT NOT NULL,
+          latest_observed_at TEXT,
+          raw_json TEXT
+        )
+    """)
+    await _add_index_if_missing(db, "idx_position_smart_money", "position_smart_money_baselines", "position_id, wallet_address")
 
 
 def get_db_sync():
