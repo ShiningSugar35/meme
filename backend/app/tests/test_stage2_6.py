@@ -35,6 +35,11 @@ from ..trading.executor import TradingPipeline
 class TestTrenchesPushdown:
     """Verify that trenches filter constants reach the GMGN POST body."""
 
+    def test_discovery_runner_has_callable_run_once(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = DiscoveryRunner(repo=repo, gmgn=gmgn, strategy_groups=[])
+        assert callable(runner.run_once)
+
     def test_build_trench_filters_x02_constants(self):
         """x=0.2 produces expected GMGN-sendable constants."""
         payload = build_trench_filters_for_x(0.2)
@@ -110,6 +115,114 @@ class TestTrenchesPushdown:
                     continue
                 assert k in p, f"params missing {k}: {p.keys()}"
 
+    @pytest.mark.asyncio
+    async def test_fetch_trenches_two_group_strips_internal_request_fields(self, repo, monkeypatch):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = DiscoveryRunner(repo=repo, gmgn=gmgn, strategy_groups=[])
+        monkeypatch.setattr(type(settings), "get_provider_mode", lambda self: ProviderMode.ONLINE_READONLY)
+        monkeypatch.setattr(settings, "GMGN_DISCOVERY_GROUP_DELAY_SECONDS", 0.0)
+
+        captured_params = []
+
+        async def spy_try_fetch(group_name, platforms, request_slot, role, custom_params=None):
+            captured_params.append(dict(custom_params or {}))
+            return [], {
+                "group_name": group_name,
+                "platforms": platforms,
+                "slot": request_slot,
+                "role": role,
+                "ok": True,
+                "raw_count": 0,
+                "unique_count": 0,
+                "duplicate_count": 0,
+                "status_code": None,
+                "error": None,
+                "latency_ms": 0,
+            }
+
+        runner._try_fetch_group = spy_try_fetch
+        await runner._fetch_trenches_two_group(custom_params={
+            "trench_filters": build_trench_filters_for_x(0.2),
+            "_x": 0.2,
+            "_computed_from_x": 0.2,
+            "_debug_x": 0.2,
+            "_strategy_group_ids": [1],
+        })
+
+        assert captured_params
+        for params in captured_params:
+            assert "trench_filters" not in params
+            assert not any(key.startswith("_") for key in params), params
+
+    @pytest.mark.asyncio
+    async def test_run_once_uses_default_x_for_trenches_filters(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        strategy_group = {"id": 1, "config_version": 1, "is_live": False}
+        runner = DiscoveryRunner(repo=repo, gmgn=gmgn, strategy_groups=[strategy_group])
+        runner._load_enabled_strategy_groups = AsyncMock(return_value=[strategy_group])
+        captured_custom_params = []
+
+        async def fake_fetch(custom_params=None):
+            captured_custom_params.append(dict(custom_params or {}))
+            return [], {"groups": [], "unique_fetched_count": 0, "raw_fetched_count": 0}
+
+        runner._fetch_trenches_two_group = fake_fetch
+        await runner.run_once()
+
+        assert captured_custom_params
+        params = captured_custom_params[0]
+        assert math.isclose(params["_x"], settings.STRATEGY_DEFAULT_X, rel_tol=1e-9)
+        filters = params["trench_filters"]
+        assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
+        assert math.isclose(filters["min_liquidity"], 5250.0, rel_tol=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_save_top3_baselines_does_not_run_discovery_loop(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = DiscoveryRunner(repo=repo, gmgn=gmgn, strategy_groups=[])
+        runner._run_once_locked = AsyncMock()
+        position_id = await repo.create_position(
+            token_mint="BASELINE_SAVE_TEST", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="POSITION_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+        )
+
+        await runner._save_top3_smart_money_baselines(position_id, "BASELINE_SAVE_TEST", [
+            {"address": "wallet1", "amount_percentage": 2.0, "usd_value": 200.0},
+        ])
+
+        runner._run_once_locked.assert_not_called()
+        baselines = await repo.get_position_smart_money_baselines(position_id)
+        assert len(baselines) == 1
+        assert math.isclose(baselines[0]["baseline_amount_percentage"], 0.02, rel_tol=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_save_top3_baselines_does_not_lookup_position_by_token(self):
+        class BaselineRepo:
+            def __init__(self):
+                self.inserted = []
+
+            async def delete_smart_money_baselines_for_position(self, position_id):
+                self.deleted_position_id = position_id
+
+            async def insert_smart_money_baseline(self, *args):
+                self.inserted.append(args)
+
+            async def list_positions_by_token(self, *args, **kwargs):
+                raise AssertionError("must not lookup positions by token")
+
+        fake_repo = BaselineRepo()
+        runner = DiscoveryRunner(repo=fake_repo, gmgn=None, strategy_groups=[])
+
+        await runner._save_top3_smart_money_baselines(123, "NO_LOOKUP_TEST", [
+            {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0},
+        ])
+
+        assert fake_repo.deleted_position_id == 123
+        assert fake_repo.inserted[0][0] == 123
+
 
 # ============================================================================
 # Issue 2: Default x=0.2
@@ -129,6 +242,79 @@ class TestDefaultX:
         assert len(xs) == 2
         assert math.isclose(xs[0], 0.2, rel_tol=1e-9)
         assert math.isclose(xs[1], 0.5, rel_tol=1e-9)
+
+
+class TestTop3BaselineFallback:
+    @pytest.mark.asyncio
+    async def test_baseline_table_fallback_no_unboundlocalerror(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = PositionRiskRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TOP3_FALLBACK_TEST", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="POSITION_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+        )
+        await repo.insert_smart_money_baseline(
+            pos_id, "TOP3_FALLBACK_TEST", "wallet1", 1, 0.02, 200.0,
+        )
+        pos = await repo.get_position(pos_id)
+        gmgn.fetch_smart_degen_holders = AsyncMock(return_value=[
+            {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0},
+        ])
+
+        result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_fallback_amount_percentage_reduction_triggers(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = PositionRiskRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TOP3_PERCENT_TEST", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="POSITION_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+        )
+        await repo.insert_smart_money_baseline(
+            pos_id, "TOP3_PERCENT_TEST", "wallet1", 1, 0.02, 200.0,
+        )
+        pos = await repo.get_position(pos_id)
+        gmgn.fetch_smart_degen_holders = AsyncMock(return_value=[
+            {"address": "wallet1", "amount_percentage": 0.014, "usd_value": 140.0},
+        ])
+
+        result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_current_percentage_normalizes_percent_units(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = PositionRiskRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TOP3_PERCENT_UNITS_TEST", is_live=False,
+            locked_strategy_config_json=json.dumps({
+                "x": 0.2,
+                "top3_smart_degen_snapshot": [
+                    {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0},
+                ],
+            }),
+            status="POSITION_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+        )
+        pos = await repo.get_position(pos_id)
+        gmgn.fetch_smart_degen_holders = AsyncMock(return_value=[
+            {"address": "wallet1", "amount_percentage": 1.4, "usd_value": 140.0},
+        ])
+
+        result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
+
+        assert result is True
 
 
 # ============================================================================

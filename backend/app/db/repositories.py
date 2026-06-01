@@ -1596,6 +1596,14 @@ class Repositories:
 
     # position_smart_money_baselines
 
+    async def delete_smart_money_baselines_for_position(self, position_id: int):
+        async def _do():
+            await self.db.execute(
+                "DELETE FROM position_smart_money_baselines WHERE position_id = ?",
+                (position_id,),
+            )
+        await self._write_txn(_do())
+
     async def insert_smart_money_baseline(
         self, position_id: int, token_mint: str, wallet_address: str, rank: int,
         amount_pct: Optional[float], usd_value: Optional[float],

@@ -103,6 +103,10 @@ def _safe_json_dumps(value: Any) -> str:
         return str(value)
 
 
+def _normalize_amount_percentage(value: Any) -> Optional[float]:
+    return normalize_rate_fraction(_to_float(value))
+
+
 class PositionRiskRunner:
     """
     Risk and exit runner.
@@ -564,26 +568,32 @@ class PositionRiskRunner:
         except (json.JSONDecodeError, TypeError):
             return False
 
-        top3_snapshot = cfg.get("top3_smart_degen_snapshot")
-        if not top3_snapshot or not isinstance(top3_snapshot, list):
-            # Fall back to position_smart_money_baselines table
-            try:
-                baselines = await self.repo.get_position_smart_money_baselines(pos_id)
-                if baselines:
-                    top3_snapshot = [
-                        {"address": b.get("wallet_address", ""),
-                         "token_amount": float(b.get("baseline_amount_percentage", 0) or 0),
-                         "amount_percentage": float(b.get("baseline_amount_percentage", 0) or 0)}
-                        for b in baselines if b.get("wallet_address")
-                    ]
-            except Exception:
-                pass
-        if not top3_snapshot or not isinstance(top3_snapshot, list):
-            return False
-
         token = position["token_mint"]
         pos_id = int(position["id"])
         account_type = _account_type(position)
+
+        top3_snapshot = cfg.get("top3_smart_degen_snapshot")
+        if not top3_snapshot or not isinstance(top3_snapshot, list):
+            # Fall back to position_smart_money_baselines table
+            baselines = []
+            try:
+                baselines = await self.repo.get_position_smart_money_baselines(pos_id)
+            except Exception as e:
+                logger.warning(
+                    "top3 smart degen baseline fallback failed",
+                    position_id=pos_id,
+                    token=token,
+                    error=str(e),
+                )
+            if baselines:
+                top3_snapshot = [
+                    {"address": b.get("wallet_address", ""),
+                     "amount_percentage": _normalize_amount_percentage(b.get("baseline_amount_percentage")),
+                     "usd_value": _to_float(b.get("baseline_usd_value"), 0.0)}
+                    for b in baselines if b.get("wallet_address")
+                ]
+        if not top3_snapshot or not isinstance(top3_snapshot, list):
+            return False
 
         # Check per-wallet one-shot rules
         executed = _executed_exit_rules(position)
@@ -606,7 +616,7 @@ class PositionRiskRunner:
                 if addr:
                     current_map[addr] = {
                         "token_amount": float(h.get("token_amount") or 0),
-                        "amount_percentage": float(h.get("amount_percentage") or 0),
+                        "amount_percentage": _normalize_amount_percentage(h.get("amount_percentage")) or 0.0,
                     }
 
         triggered_addr: Optional[str] = None
@@ -622,7 +632,7 @@ class PositionRiskRunner:
 
             curr = current_map[addr]
             initial_token = float(snap.get("token_amount") or 0)
-            initial_pct = float(snap.get("amount_percentage") or 0)
+            initial_pct = _normalize_amount_percentage(snap.get("amount_percentage")) or 0.0
 
             # Prefer token_amount comparison
             if initial_token > 0:

@@ -9,6 +9,7 @@ from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
 from ..providers.base import MarketDataProvider, SwapProvider, ExecutionProvider, RpcProvider
+from ..providers.credential_router import get_credential_router
 from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from ..strategy.filters import (
@@ -51,6 +52,23 @@ _feature_slot_cursor_global = 0
 
 
 def acquire_feature_slot(stage: str = "") -> Optional[int]:
+    stage_lower = (stage or "").lower()
+    if "kline" in stage_lower:
+        endpoint = getattr(settings, "GMGN_KLINE_PATH", "/v1/market/token_kline")
+        task_type = "kline"
+    elif "holder" in stage_lower or "degen" in stage_lower or "smart_money" in stage_lower:
+        endpoint = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
+        task_type = "holders"
+    else:
+        endpoint = getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
+        task_type = "token_info"
+    try:
+        slot = get_credential_router().choose_slot(endpoint=endpoint, task_type=task_type)
+        if slot is not None:
+            return slot
+    except Exception as e:
+        logger.warning(f"credential router feature slot selection failed stage={stage}: {e}")
+
     global _feature_slot_cursor_global
     rl = get_rate_limiter()
     if not FEATURE_SLOTS:
@@ -133,6 +151,10 @@ class DiscoveryRunner:
         return sorted(xs)
 
     def _next_feature_slot(self, stage: str = "") -> Optional[int]:
+        slot = acquire_feature_slot(stage)
+        if slot is not None:
+            return slot
+
         rl = get_rate_limiter()
         if not FEATURE_SLOTS:
             return None
@@ -325,6 +347,16 @@ class DiscoveryRunner:
             send_params = strip_internal_debug_fields(base_params)
 
             # Log the full params (including debug) before stripping
+            router_slot = None
+            try:
+                router_slot = get_credential_router().choose_slot(
+                    endpoint=getattr(settings, "GMGN_TRENCHES_PATH", "/v1/trenches"),
+                    task_type="discovery",
+                    preferred=PRIMARY_SLOT,
+                )
+            except Exception as e:
+                logger.warning(f"credential router discovery slot selection failed: {e}")
+
             logger.info(
                 "trenches fetch params",
                 x=custom_params.get("_x") if custom_params else None,
@@ -332,6 +364,7 @@ class DiscoveryRunner:
                 trench_filters=custom_params.get("trench_filters") if custom_params else None,
                 credential_slot_primary=PRIMARY_SLOT,
                 credential_slot_reserve=RESERVE_SLOT,
+                credential_slot_router=router_slot,
                 raw_params_sent=send_params,
             )
 
@@ -339,7 +372,19 @@ class DiscoveryRunner:
             final_items: Optional[List] = None
             final_gres: Optional[Dict] = None
 
-            for try_slot, try_role in [(PRIMARY_SLOT, "primary"), (RESERVE_SLOT, "reserve")]:
+            slot_attempts: List[Tuple[Optional[int], str]] = []
+            for candidate_slot, candidate_role in [
+                (router_slot, "router"),
+                (PRIMARY_SLOT, "primary"),
+                (RESERVE_SLOT, "reserve"),
+            ]:
+                if candidate_slot is None:
+                    continue
+                if candidate_slot in [s for s, _ in slot_attempts]:
+                    continue
+                slot_attempts.append((candidate_slot, candidate_role))
+
+            for try_slot, try_role in slot_attempts:
                 if rl.is_slot_cooldown(try_slot):
                     continue
                 items, gres = await self._try_fetch_group(group_name, platforms, try_slot, try_role, custom_params=send_params)
@@ -731,18 +776,16 @@ class DiscoveryRunner:
 
         return passed_groups, stage_diag, smart_degen_holders if passed_groups else None
 
-    async def _save_top3_smart_money_baselines(self, token_mint: str, degen_holders: List[Dict[str, Any]]):
-        """Save TOP3 smart money baselines for the most recent SIM/LIVE positions."""
+    async def _save_top3_smart_money_baselines(self, position_id: int, token_mint: str, degen_holders: List[Dict[str, Any]]):
+        """Save TOP3 smart money baselines for a concrete created position."""
         if not degen_holders:
             return
         try:
-            pos_rows = await self.repo.list_positions_by_token(token_mint, limit=5)
-            if not pos_rows:
-                return
-            pos = pos_rows[0]
-            pos_id = int(pos.get("id", 0))
+            pos_id = int(position_id)
             if not pos_id:
                 return
+            if hasattr(self.repo, "delete_smart_money_baselines_for_position"):
+                await self.repo.delete_smart_money_baselines_for_position(pos_id)
             holders_sorted = sorted(degen_holders, reverse=True,
                 key=lambda h: (float(h.get("amount_percentage", 0) or 0) / 100.0 if (h.get("amount_percentage") and float(str(h.get("amount_percentage", 0))) > 1.0) else float(h.get("amount_percentage", 0) or 0)))
             top3 = holders_sorted[:3]
@@ -761,7 +804,9 @@ class DiscoveryRunner:
                 except Exception:
                     pass
         except Exception as e:
-            logger.warning(f"save_top3_smart_money_baselines failed for {token_mint}: {e}")
+            logger.warning(f"save_top3_smart_money_baselines failed for position_id={position_id} token={token_mint}: {e}")
+
+    async def run_once(self):
         async with self._run_lock:
             await self._run_once_locked()
 
@@ -910,14 +955,20 @@ class DiscoveryRunner:
 
                     if final_passed:
                         try:
-                            await self.pipeline.handle_token_second_filter_result(
+                            result = await self.pipeline.handle_token_second_filter_result(
                                 token_mint, final_passed,
                                 snapshot_id=snapshot_id,
                                 discovery_event_id=discovery_event_ids.get(int(final_passed[0].get('id') or 0)),
                                 discovery_event_ids_by_strategy=discovery_event_ids,
                             )
                             if degen_holders:
-                                await self._save_top3_smart_money_baselines(token_mint, degen_holders)
+                                for created in (result or {}).get("created", []):
+                                    try:
+                                        position_id = int(created.get("position_id") or 0)
+                                    except Exception:
+                                        position_id = 0
+                                    if position_id:
+                                        await self._save_top3_smart_money_baselines(position_id, token_mint, degen_holders)
                         except Exception as e:
                             logger.error(f"pipeline entry failed for {token_mint}: {e}")
 
