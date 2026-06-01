@@ -219,7 +219,7 @@ async def ensure_runtime_defaults(repo: Any) -> None:
 
         if updates and hasattr(repo, "update_strategy_group"):
             await repo.update_strategy_group(int(target["id"]), updates)
-            if any(key in updates for key in {"x", "y"}) and hasattr(repo, "increment_config_version"):
+            if any(key in updates for key in {"x"}) and hasattr(repo, "increment_config_version"):
                 await repo.increment_config_version(int(target["id"]))
 
 

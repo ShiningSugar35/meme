@@ -12,7 +12,7 @@ from ..providers.base import MarketDataProvider, SwapProvider, ExecutionProvider
 from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from ..strategy.filters import (
-    run_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
+    run_entry_local_risk_filter as run_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
     _parse_creation_ts, _compute_age_minutes, sort_klines,
 )
 from ..trading.executor import TradingPipeline

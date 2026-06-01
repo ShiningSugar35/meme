@@ -6,6 +6,7 @@ import json
 
 from ..db.repositories import Repositories
 from ..strategy.exit_rules import decide_exit
+from ..strategy.thresholds import compute_thresholds
 try:
     from ..strategy.filters import run_risk_filter
 except Exception:  # Backward compatibility with older filters.py
@@ -479,7 +480,8 @@ class PositionRiskRunner:
                 pass
 
         x_val = float(cfg.get("x") if cfg.get("x") is not None else settings.STRATEGY_DEFAULT_X)
-        threshold = 0.048 + 0.01 * x_val
+        t = compute_thresholds(x_val)
+        threshold = t.top1_addr_type0_max
 
         try:
             holders = await self.gmgn.fetch_top_holders(token, limit=20)
@@ -607,7 +609,7 @@ class PositionRiskRunner:
             if await self.repo.has_exit_rule_executed(pos_id, reason_code):
                 return
 
-        if self.trading_pipeline is not None and hasattr(self.trading_pipeline, "execute_sell"):
+        if self.trading_pipeline is not None and hasattr(self.trading_pipeline, "execute_sell") and is_live:
             ok = await self._try_pipeline_execute_sell(
                 position=position,
                 exit_pct=exit_pct,

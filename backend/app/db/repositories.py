@@ -258,7 +258,7 @@ class Repositories:
 
         allowed = {
             "name", "enabled", "is_live", "priority", "config_version",
-            "x", "y",
+            "x",
             "buy_slippage_cap_bps", "sell_slippage_cap_bps",
             "emergency_slippage_cap_bps", "price_impact_hard_cap_pct",
             "raw_config_json",

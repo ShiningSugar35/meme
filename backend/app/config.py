@@ -191,7 +191,7 @@ class Settings(BaseSettings):
     LIVE_ROLLING_10_LOSS_LIMIT: float = Field(-0.20)
     MAX_REQUOTE_RETRY: int = Field(2)
     ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.015)
-    ENTRY_MAX_USD: float = Field(200.0)
+    ENTRY_MAX_USD: float = Field(150.0)
 
     # Risk Feature Scan Tiers, USD based.
     RISK_FEATURE_SCAN_TIER_1_USD: float = Field(150.0)
