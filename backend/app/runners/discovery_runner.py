@@ -15,7 +15,7 @@ from ..strategy.filters import (
     run_entry_local_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
     _parse_creation_ts, _compute_age_minutes, sort_klines,
 )
-from ..strategy.thresholds import compute_thresholds, StrategyThresholds, build_trench_filters_for_x, strip_internal_debug_fields
+from ..strategy.thresholds import compute_thresholds, StrategyThresholds, build_trench_filters_for_x, strip_internal_debug_fields, normalize_rate_fraction
 from ..trading.executor import TradingPipeline
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
@@ -46,6 +46,23 @@ DISCOVERY_GROUPS = [
 PRIMARY_SLOT = settings.get_discovery_primary_slot()
 RESERVE_SLOT = settings.get_discovery_reserve_slot()
 FEATURE_SLOTS = settings.get_feature_slots()
+
+_feature_slot_cursor_global = 0
+
+
+def acquire_feature_slot(stage: str = "") -> Optional[int]:
+    global _feature_slot_cursor_global
+    rl = get_rate_limiter()
+    if not FEATURE_SLOTS:
+        return None
+    cursor = _feature_slot_cursor_global
+    for offset in range(len(FEATURE_SLOTS)):
+        idx = (cursor + offset) % len(FEATURE_SLOTS)
+        slot = FEATURE_SLOTS[idx]
+        if not rl.is_slot_cooldown(slot):
+            _feature_slot_cursor_global = (cursor + offset + 1) % len(FEATURE_SLOTS)
+            return slot
+    return None
 
 
 def _json_dumps(obj: Any) -> str:
@@ -642,7 +659,7 @@ class DiscoveryRunner:
 
             rate = None
             if top1_holder:
-                rate = _to_float(_first_present(top1_holder, "top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"))
+                rate = normalize_rate_fraction(_to_float(_first_present(top1_holder, "top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate")))
 
             passed = rate is not None and rate < top1_threshold
             detail = {"rule": "top1_holder_addr_type0", "passed": passed,

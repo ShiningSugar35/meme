@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..config import settings
-from .thresholds import compute_thresholds, StrategyThresholds
+from .thresholds import compute_thresholds, StrategyThresholds, normalize_rate_fraction
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -313,7 +313,7 @@ def evaluate_top1_holder(top1_holder: Optional[Dict[str, Any]], x: float) -> Fil
             missing_reason = f"addr_type={addr_type} != 0, skipped"
             top1_holder = None
         else:
-            rate = _to_float(_first_present(top1_holder, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"]))
+            rate = normalize_rate_fraction(_to_float(_first_present(top1_holder, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"])))
     passed = rate is not None and rate < t.top1_addr_type0_max
     details = [FilterDetail(name="top1_holder_addr_type0", passed=passed, value=rate, threshold=t.top1_addr_type0_max,
                             reason=f"top1 rate={rate}, threshold={t.top1_addr_type0_max}" if rate is not None else missing_reason,
@@ -415,7 +415,8 @@ async def evaluate_price_activity_rules(
         "price_change_percent1h", "price_change_1h", "change_1h", "price_change_percent_1h",
         "price_change_1h_pct",
     ]))
-    if pct_change_1h is not None:
+    # Only fall back to nested containers if top-level is missing
+    if pct_change_1h is None:
         for nest_key in ("price", "pool", "token", "info"):
             nested = latest_price.get(nest_key)
             if isinstance(nested, dict):

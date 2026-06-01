@@ -6,7 +6,29 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from ..logging_config import logger
+
+
+KNOWN_TRENCH_FILTER_KEYS: List[str] = [
+    "max_rug_ratio", "max_entrapment_ratio", "max_insider_ratio", "max_bundler_rate",
+    "min_liquidity", "min_top_holder_rate", "max_top_holder_rate", "max_fresh_wallet_rate",
+    "max_creator_balance_rate", "max_progress",
+    "min_holder_count", "min_marketcap", "min_volume_24h",
+    "min_smart_degen_count",
+]
+
+
+def normalize_rate_fraction(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    if 0.0 <= value <= 1.0:
+        return value
+    if 1.0 < value <= 100.0:
+        return value / 100.0
+    logger.warning(f"normalize_rate_fraction: unexpected value {value}")
+    return None
 
 
 @dataclass(frozen=True)

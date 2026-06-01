@@ -5,12 +5,13 @@ from typing import Any, Dict, Optional
 import json
 
 from ..db.repositories import Repositories
-from ..strategy.thresholds import compute_thresholds
+from ..strategy.thresholds import compute_thresholds, normalize_rate_fraction
 from ..strategy.filters import run_holding_risk_filter
 from ..services.event_bus import event_bus
 from ..config import settings
 from ..logging_config import logger
 from ..strategy.exit_rules import _executed_exit_rules
+from .discovery_runner import acquire_feature_slot
 
 
 def _utc_now() -> datetime:
@@ -299,8 +300,9 @@ class PositionRiskRunner:
         # TOP3 smart degen dump, completed, and dust force exit.
 
     async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
+        slot = acquire_feature_slot("risk_price")
         try:
-            return await self.gmgn.fetch_latest_price(token)
+            return await self.gmgn.fetch_latest_price(token, credential_slot=slot)
         except Exception as e:
             await self.repo.append_system_event(
                 "ERROR",
@@ -450,8 +452,9 @@ class PositionRiskRunner:
         t = compute_thresholds(x_val)
         threshold = t.top1_addr_type0_max
 
+        slot = acquire_feature_slot("risk_top1_holder")
         try:
-            holders = await self.gmgn.fetch_top_holders(token, limit=20)
+            holders = await self.gmgn.fetch_top_holders(token, limit=20, credential_slot=slot)
         except Exception as e:
             await self.repo.append_system_event(
                 "WARN",
@@ -464,7 +467,7 @@ class PositionRiskRunner:
 
         for h in holders:
             if int(h.get("addr_type", 0)) == 0:
-                top1_rate = _to_float(h.get("top1_holder_rate") or h.get("rate") or h.get("amount_percentage"))
+                top1_rate = normalize_rate_fraction(_to_float(h.get("top1_holder_rate") or h.get("rate") or h.get("amount_percentage")))
                 if top1_rate is not None and top1_rate >= threshold:
                     await self.repo.append_system_event(
                         "WARN",
@@ -501,8 +504,9 @@ class PositionRiskRunner:
         token = position["token_mint"]
         account_type = _account_type(position)
 
+        slot = acquire_feature_slot("risk_smart_money")
         try:
-            holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20)
+            holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=slot)
         except Exception:
             return False
 
@@ -575,8 +579,9 @@ class PositionRiskRunner:
             if rule.startswith("TOP3_SMART_DEGEN_DUMP:"):
                 already_triggered_wallets.add(rule.split(":", 1)[1])
 
+        slot = acquire_feature_slot("risk_top3_degen")
         try:
-            holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20)
+            holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=slot)
         except Exception:
             return False
 

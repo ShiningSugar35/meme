@@ -15,6 +15,7 @@ from ..config import settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
 from ..services.event_bus import event_bus
+from .discovery_runner import acquire_feature_slot
 
 
 def _utc_now() -> datetime:
@@ -221,8 +222,9 @@ class ActivePositionPriceRunner:
         await self._execute_exit(position, exit_pct, reason_code, current_price, now)
 
     async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
+        slot = acquire_feature_slot("price_runner")
         try:
-            return await self.gmgn.fetch_latest_price(token)
+            return await self.gmgn.fetch_latest_price(token, credential_slot=slot)
         except Exception as e:
             return {}
 

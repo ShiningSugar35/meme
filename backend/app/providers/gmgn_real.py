@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
+from ..strategy.thresholds import KNOWN_TRENCH_FILTER_KEYS, normalize_rate_fraction
 from .base import MarketDataProvider
 from .mock_data import MockData
 from .rate_limiter import get_rate_limiter, _endpoint_weight
@@ -457,13 +458,16 @@ class GMGNProvider(MarketDataProvider):
             body["new_creation"]["max_created"] = f"{int(max_created)}s"
 
         # Merge x-based risk filters into trenches body (from StrategyThresholds.to_trench_filters)
+        # Support both nested trench_filters dict and flattened top-level keys.
         trench_filters = params.get("trench_filters", {})
         if isinstance(trench_filters, dict):
             for k, v in trench_filters.items():
                 if v is not None:
-                    # Convert kebab-case keys: max-rug-ratio -> max_rug_ratio
                     db_key = k.replace("-", "_")
                     body["new_creation"][db_key] = v
+        for k in KNOWN_TRENCH_FILTER_KEYS:
+            if k in params and params[k] is not None and k not in body["new_creation"]:
+                body["new_creation"][k] = params[k]
 
         data = await self._make_request(path, {"chain": chain}, method="POST", json_body=body, credential_slot=credential_slot)
         items = self._extract_v2_trench_items(data)
@@ -626,7 +630,7 @@ class GMGNProvider(MarketDataProvider):
         for item in items:
             if not isinstance(item, dict):
                 continue
-            rate = self._to_float(self._first_present(item, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"]))
+            rate = normalize_rate_fraction(self._to_float(self._first_present(item, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"])))
             addr_type = self._first_present(item, ["addr_type", "address_type", "type"], 0)
             try:
                 addr_type = int(addr_type)
