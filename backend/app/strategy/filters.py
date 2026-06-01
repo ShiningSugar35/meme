@@ -207,6 +207,23 @@ PLATFORMS = {
 BURN_VALUES = {"burn", "burned", "burnt", "true", "1", "yes"}
 
 # ---------------------------------------------------------------------------
+# Helpers for renounced_* / bool-one checks
+# ---------------------------------------------------------------------------
+
+def _check_bool_one(details, snapshot, name, keys, required=True):
+    raw = _first_present(snapshot, keys)
+    value = _to_int_bool(raw)
+    if value is None:
+        if required:
+            details.append(_mk_failed(name, raw, "missing required boolean=1 field", 1, missing=True))
+        else:
+            details.append(_mk_pass(name, raw, "optional field missing; treated as pass", 1))
+        return value
+    details.append(_mk_pass(name, value, "equals 1", 1) if value == 1 else _mk_failed(name, value, "must equal 1", 1))
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Stage 2: Entry local risk filter (post-fetch, pre-buy)
 # ---------------------------------------------------------------------------
 
@@ -225,6 +242,8 @@ async def run_entry_local_risk_filter(
     details: List[FilterDetail] = []
     fv: Dict[str, Any] = {"x": x}
 
+    _check_bool_one(details, snapshot, "renounced_mint", ["renounced_mint", "mint_renounced", "is_mint_renounced"])
+    _check_bool_one(details, snapshot, "renounced_freeze_account", ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced", "freeze_authority_renounced"])
     _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected"])
 
     _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate"],
@@ -236,11 +255,11 @@ async def run_entry_local_risk_filter(
     raw_tax = _to_float(_first_present(snapshot, ["sell_tax", "sell_tax_rate"]))
     if raw_tax is not None and raw_tax > 1:
         raw_tax = raw_tax / 100.0
-    sell_tax_ok = True if raw_tax is None else raw_tax < t.sell_tax_max
+    sell_tax_ok = raw_tax is not None and raw_tax < t.sell_tax_max
     details.append(
         _mk_pass("sell_tax", raw_tax, f"< {t.sell_tax_max:.6g}", f"< {t.sell_tax_max:.6g}")
         if sell_tax_ok
-        else _mk_failed("sell_tax", raw_tax, f">= {t.sell_tax_max:.6g}", t.sell_tax_max, missing=(raw_tax is None))
+        else _mk_failed("sell_tax", raw_tax, f">= {t.sell_tax_max:.6g} or missing", t.sell_tax_max, missing=(raw_tax is None))
     )
 
     if x < 0.15:
@@ -276,13 +295,28 @@ async def run_entry_local_risk_filter(
 # ---------------------------------------------------------------------------
 
 def evaluate_top1_holder(top1_holder: Optional[Dict[str, Any]], x: float) -> FilterResult:
+    """Evaluate top1 holder with addr_type==0.
+
+    Only regular addresses (addr_type==0) are considered for the top1 check.
+    If the provided holder dict has addr_type != 0, it is treated as missing.
+    """
     t = compute_thresholds(x)
     rate = None
+    missing_reason = "missing"
     if top1_holder:
-        rate = _to_float(_first_present(top1_holder, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"]))
+        addr_type = top1_holder.get("addr_type", None)
+        try:
+            addr_type = int(addr_type) if addr_type is not None else None
+        except (TypeError, ValueError):
+            addr_type = None
+        if addr_type is None or addr_type != 0:
+            missing_reason = f"addr_type={addr_type} != 0, skipped"
+            top1_holder = None
+        else:
+            rate = _to_float(_first_present(top1_holder, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"]))
     passed = rate is not None and rate < t.top1_addr_type0_max
     details = [FilterDetail(name="top1_holder_addr_type0", passed=passed, value=rate, threshold=t.top1_addr_type0_max,
-                            reason=f"top1 rate={rate}, threshold={t.top1_addr_type0_max}" if not passed else "",
+                            reason=f"top1 rate={rate}, threshold={t.top1_addr_type0_max}" if rate is not None else missing_reason,
                             missing=rate is None)]
     return FilterResult(passed, details, {"top1_holder_rate": rate, "top1_threshold": t.top1_addr_type0_max})
 
@@ -424,6 +458,18 @@ async def evaluate_price_activity_rules(
 # Stage 4: Smart degen holders evaluation
 # ---------------------------------------------------------------------------
 
+def _normalize_pct(pct: Optional[float]) -> Tuple[Optional[float], str]:
+    """Normalize amount_percentage to decimal (0.015 = 1.5%).
+
+    Returns (normalized, source_desc) where source_desc is 'raw_decimal' or 'pct_divided_by_100'.
+    """
+    if pct is None:
+        return None, "missing"
+    if pct > 1.0:
+        return pct / 100.0, "pct_divided_by_100"
+    return pct, "raw_decimal"
+
+
 async def evaluate_smart_degen(
     strategy_group: Dict[str, Any],
     smart_degen_holders: List[Dict[str, Any]],
@@ -432,7 +478,9 @@ async def evaluate_smart_degen(
     x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
     t = compute_thresholds(x)
 
-    required_count = max(1, math.ceil(t.min_smart_degen_count))
+    # min_smart_degen_count = max(0, 2 - 10*x). Strictly greater: required > that value.
+    raw_required = t.min_smart_degen_count
+    required_count = int(math.floor(raw_required)) + 1
     degen_count = len(smart_degen_holders)
     cond_degen = degen_count >= required_count
 
@@ -444,20 +492,22 @@ async def evaluate_smart_degen(
         max_holder = top_n[0]
         max_pct = _to_float(max_holder.get("amount_percentage"))
         max_usd = _to_float(max_holder.get("usd_value"))
-        max_pct_norm = max_pct / 100.0 if max_pct is not None and max_pct > 1.0 else max_pct
+        max_pct_norm, max_norm_src = _normalize_pct(max_pct)
         max_ok = (max_pct_norm is not None and max_pct_norm > t.smart_degen_max_pct) or (max_usd is not None and max_usd > t.smart_degen_max_usd)
 
         min_holder = top_n[-1] if len(top_n) > 1 else top_n[0]
         min_pct = _to_float(min_holder.get("amount_percentage"))
         min_usd = _to_float(min_holder.get("usd_value"))
-        min_pct_norm = min_pct / 100.0 if min_pct is not None and min_pct > 1.0 else min_pct
+        min_pct_norm, min_norm_src = _normalize_pct(min_pct)
         min_ok = (min_pct_norm is not None and min_pct_norm > t.smart_degen_min_pct) or (min_usd is not None and min_usd > t.smart_degen_min_usd)
 
         degen_hold_ok = max_ok and min_ok
         degen_hold_detail = {
-            "required_count": required_count, "actual_count": len(top_n),
-            "max_holder_pct": max_pct, "max_holder_pct_norm": max_pct_norm, "max_holder_usd": max_usd, "max_ok": max_ok,
-            "min_holder_pct": min_pct, "min_holder_pct_norm": min_pct_norm, "min_holder_usd": min_usd, "min_ok": min_ok,
+            "required_count": required_count, "raw_required": raw_required, "actual_count": len(top_n),
+            "max_holder_pct_raw": max_pct, "max_holder_pct_norm": max_pct_norm, "max_holder_pct_norm_src": max_norm_src,
+            "max_holder_usd": max_usd, "max_ok": max_ok,
+            "min_holder_pct_raw": min_pct, "min_holder_pct_norm": min_pct_norm, "min_holder_pct_norm_src": min_norm_src,
+            "min_holder_usd": min_usd, "min_ok": min_ok,
             "threshold_max_pct": t.smart_degen_max_pct, "threshold_min_pct": t.smart_degen_min_pct,
             "threshold_max_usd": t.smart_degen_max_usd, "threshold_min_usd": t.smart_degen_min_usd,
         }
@@ -523,3 +573,7 @@ async def run_holding_risk_filter(
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count"],
                  lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}")
     return FilterResult(all(d.passed for d in details), details, {"x": x})
+
+
+# --- Legacy aliases (kept after all function definitions) ---
+run_risk_filter = run_holding_risk_filter

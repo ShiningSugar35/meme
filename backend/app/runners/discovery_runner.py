@@ -3,7 +3,7 @@ import json
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
@@ -12,9 +12,10 @@ from ..providers.base import MarketDataProvider, SwapProvider, ExecutionProvider
 from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from ..strategy.filters import (
-    run_entry_local_risk_filter as run_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
+    run_entry_local_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
     _parse_creation_ts, _compute_age_minutes, sort_klines,
 )
+from ..strategy.thresholds import compute_thresholds, StrategyThresholds
 from ..trading.executor import TradingPipeline
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
@@ -106,6 +107,14 @@ class DiscoveryRunner:
         self._run_lock = asyncio.Lock()
         self._feature_slot_cursor = 0
 
+    @staticmethod
+    def _unique_x_values(strategy_groups: List[dict]) -> List[float]:
+        xs: Set[float] = set()
+        for sg in strategy_groups:
+            x = float(sg.get("x") if sg.get("x") is not None else settings.STRATEGY_DEFAULT_X)
+            xs.add(round(x, 6))
+        return sorted(xs)
+
     def _next_feature_slot(self, stage: str = "") -> Optional[int]:
         rl = get_rate_limiter()
         if not FEATURE_SLOTS:
@@ -160,7 +169,7 @@ class DiscoveryRunner:
         self.strategy_groups = groups
         return groups
 
-    def _build_trench_params(self, platforms: Optional[List[str]] = None) -> Dict[str, Any]:
+    def _build_trench_params(self, platforms: Optional[List[str]] = None, x: Optional[float] = None) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             'chain': 'sol',
             'type': 'new_creation',
@@ -172,6 +181,10 @@ class DiscoveryRunner:
             params['type'] = types[0]
         if platforms:
             params['platforms'] = platforms
+        if x is not None:
+            t = compute_thresholds(x)
+            params['trench_filters'] = t.to_trench_filters()
+            params['_x'] = x
         return params
 
     @staticmethod
@@ -216,9 +229,19 @@ class DiscoveryRunner:
         )
         return token_mint, pool_address, pool_created_at, snapshot_id
 
-    async def _try_fetch_group(self, group_name: str, platforms: List[str], request_slot: int, role: str) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, Any]]:
+    async def _try_fetch_group(self, group_name: str, platforms: List[str], request_slot: int, role: str, custom_params: Optional[Dict[str, Any]] = None) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, Any]]:
         t0 = time.perf_counter()
-        params = self._build_trench_params(platforms=platforms)
+        params = dict(custom_params) if custom_params else {}
+        params.setdefault('platforms', platforms)
+        params['platforms'] = platforms
+        params.setdefault('chain', 'sol')
+        params.setdefault('min_created', MIN_CREATED)
+        params.setdefault('max_created', MAX_CREATED)
+        types = _csv_list(getattr(settings, 'GMGN_TRENCHES_TYPES', ''))
+        if types:
+            params['type'] = types[0]
+        elif 'type' not in params:
+            params['type'] = 'new_creation'
         gres: Dict[str, Any] = {
             "group_name": group_name, "platforms": platforms,
             "slot": request_slot, "role": role, "ok": False,
@@ -238,7 +261,7 @@ class DiscoveryRunner:
             logger.warning(f"trenches fetch failed for {group_name} slot={request_slot}: {e}")
             return None, gres
 
-    async def _fetch_trenches_two_group(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    async def _fetch_trenches_two_group(self, custom_params: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         mode = settings.get_provider_mode()
         groups_results: List[Dict[str, Any]] = []
         all_items: List[Dict[str, Any]] = []
@@ -251,9 +274,11 @@ class DiscoveryRunner:
             platforms = ginfo["platforms"]
 
             if mode == ProviderMode.MOCK:
-                params = self._build_trench_params(platforms=platforms)
+                params_base = dict(custom_params) if custom_params else {}
+                params_base.setdefault('platforms', platforms)
+                params_base['platforms'] = platforms
                 t0 = time.perf_counter()
-                items = await self.gmgn.fetch_trenches(params)
+                items = await self.gmgn.fetch_trenches(params_base)
                 gres = {"group_name": group_name, "platforms": platforms, "slot": 0, "role": "mock",
                         "ok": True, "raw_count": len(items), "unique_count": 0, "duplicate_count": 0,
                         "status_code": None, "error": None, "latency_ms": int((time.perf_counter()-t0)*1000)}
@@ -266,6 +291,15 @@ class DiscoveryRunner:
                     dedup[key] += 1
                 continue
 
+            # Merge custom_params (x filters) with platform-specific params
+            params_base = dict(custom_params) if custom_params else {}
+            params_base['platforms'] = platforms
+            params = self._build_trench_params(platforms=platforms)
+            if custom_params:
+                if 'trench_filters' in custom_params:
+                    params['trench_filters'] = custom_params['trench_filters']
+                    params['_x'] = custom_params.get('_x')
+
             # Try primary first, then reserve immediately on failure
             final_items: Optional[List] = None
             final_gres: Optional[Dict] = None
@@ -273,7 +307,7 @@ class DiscoveryRunner:
             for try_slot, try_role in [(PRIMARY_SLOT, "primary"), (RESERVE_SLOT, "reserve")]:
                 if rl.is_slot_cooldown(try_slot):
                     continue
-                items, gres = await self._try_fetch_group(group_name, platforms, try_slot, try_role)
+                items, gres = await self._try_fetch_group(group_name, platforms, try_slot, try_role, custom_params=params)
                 if gres["ok"]:
                     final_items = items or []
                     final_gres = gres
@@ -347,7 +381,7 @@ class DiscoveryRunner:
                 if existing:
                     continue
 
-                res = await run_risk_filter(token, sg, now)
+                res = await run_entry_local_risk_filter(token, sg, now)
                 status = 'RISK_PASSED' if res.passed else 'RISK_FAILED'
 
                 discovery_id, created = await self.repo.create_discovery_event_idempotent(
@@ -677,9 +711,45 @@ class DiscoveryRunner:
             self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
             return
 
+        # Group strategy groups by unique x value for trenches pushdown
+        unique_xs = self._unique_x_values(strategy_groups)
+        if not unique_xs:
+            await self.repo.append_system_event(
+                'WARNING', 'DISCOVERY', 'No unique x values from strategy groups; skip discovery',
+                '{}', account_type='SIM'
+            )
+            self.processed_count = 0
+            self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
+            return
+
+        # For simplicity when multiple x values exist, use the "most permissive"
+        # (lowest common_risk) x to avoid missing tokens that could match any group.
+        # Each token is then evaluated against all strategy groups via local filters.
+        # This avoids N x 2 API calls per discovery run.
+        # TODO: For full unique-x pushdown, iterate over unique_xs and call
+        # _fetch_trenches_two_group per x with trench_filters, then route tokens
+        # to matching x strategy groups.
+        most_permissive_x = min(unique_xs) if len(unique_xs) > 1 else unique_xs[0]
+        logger.info(
+            "discovery trenches pushdown",
+            unique_xs=unique_xs,
+            most_permissive_x=most_permissive_x,
+            count=len(unique_xs),
+            strategy_groups=len(strategy_groups),
+        )
+
         for timing_key, groups_for_t in self._group_by_timing(strategy_groups):
-            trenches, trench_diag = await self._fetch_trenches_two_group()
+            # Fetch trenches with most permissive x filters (or no x at all for backward compat)
+            if len(unique_xs) > 1:
+                params = self._build_trench_params(x=most_permissive_x)
+                trenches, trench_diag = await self._fetch_trenches_two_group(custom_params=params)
+            else:
+                # Single x: use exact trench filters for that x
+                params = self._build_trench_params(x=unique_xs[0])
+                trenches, trench_diag = await self._fetch_trenches_two_group(custom_params=params)
             total_fetched = trench_diag.get("unique_fetched_count", 0)
+            trench_diag["unique_xs"] = unique_xs
+            trench_diag["most_permissive_x"] = most_permissive_x
 
             for token in trenches:
                 token_mint = token.get('token_mint')

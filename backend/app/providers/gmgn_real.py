@@ -227,7 +227,7 @@ class GMGNProvider(MarketDataProvider):
                         logged_request["body_summary"] = {
                             "new_creation": {
                                 k: v for k, v in post_body.get("new_creation", {}).items()
-                                if k in ("launchpad_platform", "launchpad_platform_v2", "min_created", "max_created", "limit", "filters", "quote_address_type")
+                                if k not in ("api_key", "x-api-key", "client_id")
                             }
                         } if isinstance(post_body.get("new_creation"), dict) else {"body_type": type(post_body).__name__}
                     else:
@@ -449,6 +449,15 @@ class GMGNProvider(MarketDataProvider):
             body["new_creation"]["min_created"] = f"{int(min_created)}s"
         if max_created is not None:
             body["new_creation"]["max_created"] = f"{int(max_created)}s"
+
+        # Merge x-based risk filters into trenches body (from StrategyThresholds.to_trench_filters)
+        trench_filters = params.get("trench_filters", {})
+        if isinstance(trench_filters, dict):
+            for k, v in trench_filters.items():
+                if v is not None:
+                    # Convert kebab-case keys: max-rug-ratio -> max_rug_ratio
+                    db_key = k.replace("-", "_")
+                    body["new_creation"][db_key] = v
 
         data = await self._make_request(path, {"chain": chain}, method="POST", json_body=body, credential_slot=credential_slot)
         items = self._extract_v2_trench_items(data)

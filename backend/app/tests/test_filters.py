@@ -3,10 +3,11 @@ import math
 from datetime import datetime, timedelta, timezone
 from ..strategy.filters import (
     run_entry_local_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
-    run_holding_risk_filter, evaluate_top1_holder,
+    run_holding_risk_filter, evaluate_top1_holder, run_risk_filter,
+    _normalize_pct,
     _parse_creation_ts, _compute_age_minutes,
 )
-from ..strategy.thresholds import compute_thresholds, entry_size_usd
+from ..strategy.thresholds import compute_thresholds, entry_size_usd, StrategyThresholds
 from ..providers.gmgn_real import GMGNProvider
 
 
@@ -294,3 +295,197 @@ def test_platform_field_launchpad_platform():
     normalized = GMGNProvider._normalize_token_data(raw)
     assert normalized.get("platform") == "Pump.fun"
     assert normalized.get("launchpad") == "Pump.fun"
+
+
+# ---------------------------------------------------------------------------
+# Enhanced entry local risk tests
+# ---------------------------------------------------------------------------
+
+def test_entry_risk_renounced_mint_0_fails():
+    s = make_snapshot(renounced_mint=0)
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "renounced_mint" and not d.passed for d in res.details)
+
+
+def test_entry_risk_renounced_mint_missing_fails():
+    s = make_snapshot()
+    s.pop("renounced_mint", None)
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "renounced_mint" and not d.passed and d.missing for d in res.details)
+
+
+def test_entry_risk_renounced_freeze_0_fails():
+    s = make_snapshot(renounced_freeze_account=0)
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "renounced_freeze_account" and not d.passed for d in res.details)
+
+
+def test_entry_risk_sell_tax_missing_fails():
+    s = make_snapshot()
+    s.pop("sell_tax", None)
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "sell_tax" and not d.passed and d.missing for d in res.details)
+
+
+def test_entry_risk_burn_not_burn_fails():
+    s = make_snapshot(burn_status="not_burn")
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "burn_status" and not d.passed for d in res.details)
+
+
+def test_entry_risk_x_014_no_social_fails():
+    s = make_snapshot(x=0.14)
+    s.pop("has_social", None)
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.14}))
+    assert any("social" in d.name and not d.passed for d in res.details)
+
+
+# ---------------------------------------------------------------------------
+# Enhanced holding risk tests
+# ---------------------------------------------------------------------------
+
+def test_holding_risk_rug_fails():
+    s = make_snapshot(max_rug_ratio=0.5)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "rug_ratio" and not d.passed for d in res.details)
+
+
+def test_holding_risk_entrapment_fails():
+    s = make_snapshot(max_entrapment_ratio=0.5)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "entrapment_ratio" and not d.passed for d in res.details)
+
+
+def test_holding_risk_insider_fails():
+    s = make_snapshot(suspected_insider_hold_rate=0.5)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "suspected_insider_hold_rate" and not d.passed for d in res.details)
+
+
+def test_holding_risk_bundler_fails():
+    s = make_snapshot(max_bundler_rate=0.5)
+    s.pop("top_10_holder_rate", None)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "bundler_trader_amount_rate" and not d.passed for d in res.details)
+
+
+def test_holding_risk_top_holder_out_of_range_fails():
+    s = make_snapshot(top_10_holder_rate=0.5)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any("top_10_holder_rate" in d.name and not d.passed for d in res.details)
+
+
+def test_holding_risk_holder_count_too_low_fails():
+    s = make_snapshot(top_10_holder_rate=0.2, holder_count=1)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "holder_count" and not d.passed for d in res.details)
+
+
+def test_holding_risk_fresh_wallet_fails():
+    s = make_snapshot(top_10_holder_rate=0.2, fresh_wallet_rate=0.5)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "fresh_wallet_rate" and not d.passed for d in res.details)
+
+
+def test_holding_risk_creator_balance_fails():
+    s = make_snapshot(top_10_holder_rate=0.2, dev_team_hold_rate=0.5)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "creator_balance_rate" and not d.passed for d in res.details)
+
+
+def test_holding_risk_sniper_fails():
+    s = make_snapshot(top_10_holder_rate=0.2, sniper_count=99)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "sniper_count" and not d.passed for d in res.details)
+
+
+def test_holding_risk_wash_trading_fails():
+    s = make_snapshot(top_10_holder_rate=0.2, is_wash_trading=1)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "is_wash_trading" and not d.passed for d in res.details)
+
+
+# ---------------------------------------------------------------------------
+# Smart degen normalization tests
+# ---------------------------------------------------------------------------
+
+def test_normalize_pct_decimal():
+    n, src = _normalize_pct(0.015)
+    assert math.isclose(n, 0.015)
+    assert src == "raw_decimal"
+
+
+def test_normalize_pct_large():
+    n, src = _normalize_pct(1.5)
+    assert math.isclose(n, 0.015)
+    assert src == "pct_divided_by_100"
+
+
+def test_normalize_pct_none():
+    n, src = _normalize_pct(None)
+    assert n is None
+
+
+def test_smart_degen_015_pct_format():
+    sg = {"x": 0.2}
+    holders = [{"amount_percentage": 0.03, "usd_value": 300}, {"amount_percentage": 0.02, "usd_value": 200}]
+    res = asyncio.run(evaluate_smart_degen(sg, holders))
+    assert res.passed is True
+    detail = res.details[0]
+    h = detail["holdings"]
+    assert h["max_holder_pct_norm_src"] == "raw_decimal"
+    assert math.isclose(h["max_holder_pct_norm"], 0.03)
+
+
+def test_smart_degen_15_pct_format():
+    sg = {"x": 0.2}
+    holders = [{"amount_percentage": 1.6, "usd_value": 300}, {"amount_percentage": 1.2, "usd_value": 200}]
+    res = asyncio.run(evaluate_smart_degen(sg, holders))
+    assert res.passed is True
+    detail = res.details[0]
+    h = detail["holdings"]
+    assert h["max_holder_pct_norm_src"] == "pct_divided_by_100"
+    assert math.isclose(h["max_holder_pct_norm"], 0.016)
+
+
+# ---------------------------------------------------------------------------
+# Trenches parameter tests
+# ---------------------------------------------------------------------------
+
+def test_trench_filters_x_02():
+    t = StrategyThresholds.compute(0.2)
+    filters = t.to_trench_filters()
+    assert math.isclose(filters["min_liquidity"], 5250.0, rel_tol=1e-9)
+    assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
+    assert math.isclose(filters["min_top_holder_rate"], 0.145, rel_tol=1e-9)
+    assert math.isclose(filters["max_top_holder_rate"], 0.275, rel_tol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Legacy alias test: run_risk_filter points to run_holding_risk_filter
+# ---------------------------------------------------------------------------
+
+def test_run_risk_filter_alias():
+    assert run_risk_filter is run_holding_risk_filter
+
+
+# ---------------------------------------------------------------------------
+# Import smoke tests
+# ---------------------------------------------------------------------------
+
+def test_import_strategy_filters():
+    from ..strategy import filters as _f
+    assert hasattr(_f, "run_entry_local_risk_filter")
+    assert hasattr(_f, "run_holding_risk_filter")
+    assert hasattr(_f, "evaluate_smart_degen")
+    assert hasattr(_f, "evaluate_top1_holder")
+
+
+def test_import_discovery_runner():
+    from ..runners import discovery_runner as _d
+    assert hasattr(_d, "DiscoveryRunner")
+
+
+def test_import_position_risk_runner():
+    from ..runners import position_risk_runner as _p
+    assert hasattr(_p, "PositionRiskRunner")

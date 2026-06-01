@@ -7,11 +7,7 @@ import json
 from ..db.repositories import Repositories
 from ..strategy.exit_rules import decide_exit
 from ..strategy.thresholds import compute_thresholds
-try:
-    from ..strategy.filters import run_risk_filter
-except Exception:  # Backward compatibility with older filters.py
-    run_risk_filter = None
-from ..strategy.filters import run_initial_filter
+from ..strategy.filters import run_holding_risk_filter
 from ..services.event_bus import event_bus
 from ..config import settings
 from ..logging_config import logger
@@ -257,6 +253,20 @@ class PositionRiskRunner:
             )
             return
 
+        # TOP3 smart degen reduction check: if any of the original TOP3 reduced
+        # holdings by >25%, exit 50%
+        top3_dump = await self._check_top3_smart_degen_reduction(position_for_decision, now)
+        if top3_dump:
+            await self._request_exit(
+                position=position_for_decision,
+                exit_pct=0.5,
+                reason_code="TOP3_SMART_DEGEN_DUMP",
+                emergency=False,
+                latest=latest,
+                current_price_usd=price_usd,
+            )
+            return
+
         decision = await decide_exit(
             position_for_decision,
             tick,
@@ -366,10 +376,7 @@ class PositionRiskRunner:
             snapshot.setdefault("pool_address", token_info.get("pool_address"))
             snapshot.setdefault("launchpad", token_info.get("launchpad"))
 
-        if run_risk_filter is not None:
-            res = await run_risk_filter(snapshot, cfg, now)
-        else:
-            res = await self._fallback_risk_filter(snapshot, cfg, now)
+        res = await run_holding_risk_filter(snapshot, cfg, now)
 
         strategy_id = cfg.get("id") or cfg.get("strategy_id") or position.get("live_strategy_id") or 0
         strategy_version = cfg.get("config_version") or position.get("strategy_config_version") or 1
@@ -411,45 +418,6 @@ class PositionRiskRunner:
             },
         )
         return False
-
-    async def _fallback_risk_filter(self, snapshot: Dict[str, Any], cfg: Dict[str, Any], now: datetime):
-        """
-        Compatibility fallback for older filters.py.
-
-        It calls run_initial_filter but ignores lifecycle-only failures such as
-        type/time window. This prevents mature held positions from being closed
-        merely because they are no longer within the original entry-age window.
-        """
-        res = await run_initial_filter(snapshot, cfg, now)
-
-        ignored_rule_names = {
-            "type_new_creation",
-            "type_is_new_creation",
-            "pool_age_window",
-            "time_window",
-            "pool_created_at",
-            "pool_created_at_parse",
-        }
-
-        details = list(getattr(res, "details", []) or [])
-        failing_details = []
-        for d in details:
-            name = getattr(d, "name", None) or getattr(d, "rule", None) or ""
-            passed = bool(getattr(d, "passed", False))
-            if not passed and str(name) not in ignored_rule_names:
-                failing_details.append(d)
-
-        class _CompatResult:
-            def __init__(self, passed, details, feature_vector):
-                self.passed = passed
-                self.details = details
-                self.feature_vector = feature_vector
-
-        return _CompatResult(
-            passed=(len(failing_details) == 0),
-            details=details,
-            feature_vector=getattr(res, "feature_vector", {}),
-        )
 
     async def _check_top1_holder(self, position: Dict[str, Any], now: datetime) -> bool:
         """Check top1 holder (addr_type=0) share against threshold per tiered schedule.
@@ -571,6 +539,68 @@ class PositionRiskRunner:
             addr = h.get("address") or ""
             snapshot[addr] = _to_float(h.get("sell_volume_cur")) or 0.0
         self._last_smart_degen_sell[pos_id] = snapshot
+
+        return triggered
+
+    async def _check_top3_smart_degen_reduction(self, position: Dict[str, Any], now: datetime) -> bool:
+        """Check if any of the original TOP3 smart degen holders reduced holdings by >25%.
+
+        Returns True if risk is triggered (50% exit needed), False otherwise.
+        """
+        locked = position.get("locked_strategy_config_json")
+        if not locked:
+            return False
+        try:
+            cfg = json.loads(locked)
+        except (json.JSONDecodeError, TypeError):
+            return False
+
+        top3_snapshot = cfg.get("top3_smart_degen_snapshot")
+        if not top3_snapshot or not isinstance(top3_snapshot, list):
+            return False
+
+        token = position["token_mint"]
+        pos_id = int(position["id"])
+        account_type = _account_type(position)
+
+        try:
+            holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20)
+        except Exception:
+            return False
+
+        if not holders:
+            return False
+
+        # Build current map of address -> amount_percentage
+        current_map: Dict[str, float] = {}
+        for h in holders:
+            addr = h.get("address", "")
+            if addr:
+                current_map[addr] = float(h.get("amount_percentage") or 0)
+
+        triggered = False
+        for snap in top3_snapshot:
+            addr = snap.get("address", "")
+            if not addr or addr not in current_map:
+                continue
+            initial_pct = float(snap.get("amount_percentage") or 0)
+            current_pct = current_map[addr]
+            if initial_pct <= 0:
+                continue
+            reduction = (initial_pct - current_pct) / initial_pct
+            if reduction > 0.25:
+                triggered = True
+                await self.repo.append_system_event(
+                    "WARN", "RISK",
+                    f"TOP3 smart degen dump detected: {addr} reduced {reduction*100:.0f}%",
+                    _safe_json_dumps({
+                        "position_id": pos_id, "token": token,
+                        "address": addr, "initial_pct": initial_pct,
+                        "current_pct": current_pct, "reduction_pct": reduction,
+                    }),
+                    account_type=account_type,
+                )
+                break
 
         return triggered
 

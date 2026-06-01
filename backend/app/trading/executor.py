@@ -250,6 +250,7 @@ class TradingPipeline:
         token_decimals: int,
         discovery_event_id: Optional[int],
         entry_size_usd: Optional[float] = None,
+        top3_smart_degen_snapshot: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         locked = dict(strategy)
         locked["token_decimals"] = token_decimals
@@ -260,7 +261,27 @@ class TradingPipeline:
         locked.setdefault("sell_slippage_cap_bps", getattr(settings, "SELL_SLIPPAGE_CAP_BPS", SELL_SLIPPAGE_CAP_BPS))
         locked.setdefault("emergency_slippage_cap_bps", getattr(settings, "EMERGENCY_SLIPPAGE_CAP_BPS", EMERGENCY_SLIPPAGE_CAP_BPS))
         locked.setdefault("price_impact_hard_cap_pct", getattr(settings, "PRICE_IMPACT_HARD_CAP_PCT", 10.0))
+        if top3_smart_degen_snapshot:
+            locked["top3_smart_degen_snapshot"] = top3_smart_degen_snapshot
         return self._safe_json(locked)
+
+    async def _fetch_top3_smart_degen_snapshot(self, token_mint: str) -> Optional[List[Dict[str, Any]]]:
+        """Fetch TOP3 smart degen holders at entry time for position locking."""
+        try:
+            holders = await self.gmgn.fetch_smart_degen_holders(token_mint, limit=5)
+        except Exception:
+            return None
+        if not holders:
+            return None
+        sorted_h = sorted(holders, key=lambda h: float(h.get("amount_percentage") or 0), reverse=True)
+        top3 = []
+        for h in sorted_h[:3]:
+            top3.append({
+                "address": h.get("address", ""),
+                "amount_percentage": float(h.get("amount_percentage") or 0),
+                "usd_value": float(h.get("usd_value") or 0),
+            })
+        return top3 if top3 else None
 
     def _is_emergency_exit(self, exit_reason: str) -> bool:
         r = (exit_reason or "").upper()
@@ -322,6 +343,14 @@ class TradingPipeline:
                 snapshot_id=snapshot_id,
             )
 
+        # Capture TOP3 smart degen snapshot BEFORE creating positions
+        # so it can be embedded in locked_strategy_config_json at creation time.
+        top3_snapshot = None
+        try:
+            top3_snapshot = await self._fetch_top3_smart_degen_snapshot(token_mint)
+        except Exception:
+            pass
+
         live_strategies = [s for s in passed_strategies if bool(s.get("is_live"))]
         sim_strategies = [s for s in passed_strategies if not bool(s.get("is_live"))]
 
@@ -330,7 +359,10 @@ class TradingPipeline:
         # Sim positions are paper tracking only. Keep one SIM position per passed
         # strategy/cycle so the bandit data is not lost.
         for strategy in sim_strategies:
-            pos = await self._create_sim_position(token_mint, strategy, snapshot_id, discovery_event_id)
+            pos = await self._create_sim_position(
+                token_mint, strategy, snapshot_id, discovery_event_id,
+                top3_smart_degen_snapshot=top3_snapshot,
+            )
             if pos:
                 created.append(pos)
 
@@ -366,7 +398,7 @@ class TradingPipeline:
                 return {"status": "SKIPPED_EXISTING_LIVE_POSITION", "created": created, "position_id": existing.get("id")}
 
             # Only one live strategy is allowed by Control Center validation.
-            res = await self._execute_buy(token_mint, live_strategies[0], snapshot_id, discovery_event_id)
+            res = await self._execute_buy(token_mint, live_strategies[0], snapshot_id, discovery_event_id, top3_smart_degen_snapshot=top3_snapshot)
             if res:
                 created.append(res)
 
@@ -378,6 +410,7 @@ class TradingPipeline:
         strategy: Dict[str, Any],
         snapshot_id: Optional[int],
         discovery_event_id: Optional[int],
+        top3_smart_degen_snapshot: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         # Per-strategy dedup: if an open SIM position already exists for this strategy+token, skip
         try:
@@ -490,6 +523,7 @@ class TradingPipeline:
                 token_decimals=token_decimals,
                 discovery_event_id=discovery_event_id,
                 entry_size_usd=size_usd,
+                top3_smart_degen_snapshot=top3_smart_degen_snapshot,
             ),
             "POSITION_OPEN",
             price_usd,
@@ -539,6 +573,7 @@ class TradingPipeline:
         strategy: Dict[str, Any],
         snapshot_id: Optional[int] = None,
         discovery_event_id: Optional[int] = None,
+        top3_smart_degen_snapshot: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         gate = self._safety_gate()
         if gate:
@@ -705,6 +740,7 @@ class TradingPipeline:
                 token_decimals=token_decimals,
                 discovery_event_id=discovery_event_id,
                 entry_size_usd=size_usd,
+                top3_smart_degen_snapshot=top3_smart_degen_snapshot,
             ),
             "POSITION_OPEN",
             price_usd,
