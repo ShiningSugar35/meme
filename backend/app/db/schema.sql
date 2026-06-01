@@ -78,14 +78,7 @@ CREATE TABLE IF NOT EXISTS strategy_groups (
   priority INTEGER NOT NULL DEFAULT 100,
   config_version INTEGER NOT NULL DEFAULT 1,
 
-  x REAL NOT NULL,
-  y REAL NOT NULL,
-
-  buy_slippage_cap_bps INTEGER NOT NULL DEFAULT 1500,
-  sell_slippage_cap_bps INTEGER NOT NULL DEFAULT 2000,
-  emergency_slippage_cap_bps INTEGER NOT NULL DEFAULT 3500,
-  price_impact_hard_cap_pct REAL NOT NULL DEFAULT 10,
-
+  x REAL NOT NULL DEFAULT 0.2,
   raw_config_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

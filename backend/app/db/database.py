@@ -435,6 +435,9 @@ async def _migrate_strategy_groups(db: aiosqlite.Connection):
     await _drop_column_if_exists(db, "discovery_events", "second_filter_checked_at")
     await _drop_column_if_exists(db, "discovery_events", "second_filter_match_id")
     await _drop_index_if_exists(db, "idx_discovery_events_status_next")
+    await _drop_column_if_exists(db, "strategy_groups", "y")
+    await _drop_column_if_exists(db, "strategy_groups", "min_created")
+    await _drop_column_if_exists(db, "discovery_events", "min_created")
 
 
 def get_db_sync():

@@ -83,7 +83,7 @@ def _resolve_rule_meta(rule: str) -> Dict[str, str]:
 
 
 DEFAULT_SIM_STRATEGIES: List[Dict[str, Any]] = [
-    {"name": "模拟盘1", "x": settings.STRATEGY_DEFAULT_X, "y": settings.STRATEGY_DEFAULT_Y, "is_live": False, "priority": 10},
+    {"name": "模拟盘1", "x": settings.STRATEGY_DEFAULT_X, "is_live": False, "priority": 10},
 ]
 
 TRADING_PARAM_SPECS: List[Dict[str, Any]] = [
@@ -188,7 +188,6 @@ async def ensure_runtime_defaults(repo: Any) -> None:
                 for row in existing
                 if not _as_bool(row.get("is_live"))
                 and _close_number(row.get("x"), spec["x"])
-                and _close_number(row.get("y"), spec["y"])
             ),
             None,
         )
@@ -198,7 +197,6 @@ async def ensure_runtime_defaults(repo: Any) -> None:
             new_id = await repo.create_strategy_group(
                 name=spec["name"],
                 x=float(spec["x"]),
-                y=float(spec["y"]),
                 is_live=False,
                 priority=int(spec["priority"]),
                 raw_config_json="{}",
@@ -216,8 +214,6 @@ async def ensure_runtime_defaults(repo: Any) -> None:
             updates["enabled"] = 1
         if not _close_number(target.get("x"), spec["x"]):
             updates["x"] = float(spec["x"])
-        if not _close_number(target.get("y"), spec["y"]):
-            updates["y"] = float(spec["y"])
         if int(target.get("priority") or 0) != int(spec["priority"]):
             updates["priority"] = int(spec["priority"])
 
@@ -466,7 +462,6 @@ async def create_strategy(request: Request, payload: Dict[str, Any] = Body(...))
         strategy_id = await repo.create_strategy_group(
             name=str(payload.get("name") or "策略组"),
             x=_safe_float(payload, "x", settings.STRATEGY_DEFAULT_X),
-            y=_safe_float(payload, "y", settings.STRATEGY_DEFAULT_Y),
             is_live=bool(payload.get("is_live", False)),
             priority=int(payload.get("priority", 100)),
             raw_config_json=raw_config_json,
@@ -484,7 +479,7 @@ async def create_strategy(request: Request, payload: Dict[str, Any] = Body(...))
 @router.patch("/strategies/{strategy_id}")
 async def upsert_strategy(strategy_id: int, request: Request, payload: Dict[str, Any] = Body(...)):
     allowed = {
-        "name", "enabled", "is_live", "priority", "config_version", "x", "y",
+        "name", "enabled", "is_live", "priority", "config_version", "x",
         "buy_slippage_cap_bps", "sell_slippage_cap_bps", "emergency_slippage_cap_bps",
         "price_impact_hard_cap_pct", "raw_config_json",
     }
@@ -500,7 +495,7 @@ async def upsert_strategy(strategy_id: int, request: Request, payload: Dict[str,
     try:
         if updates:
             await repo.update_strategy_group(strategy_id, updates)
-            if any(k in updates for k in {"x", "y", "raw_config_json"}):
+            if any(k in updates for k in {"x", "raw_config_json"}):
                 await repo.increment_config_version(strategy_id)
         strategy = await repo.get_strategy_group(strategy_id) if hasattr(repo, "get_strategy_group") else None
         return {"ok": True, "strategy": strategy}

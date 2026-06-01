@@ -59,7 +59,6 @@ export interface StrategyGroup {
   priority?: number;
   config_version?: number;
   x: number;
-  y: number;
   raw_config_json?: string;
   created_at?: string;
   updated_at?: string;
@@ -71,7 +70,6 @@ export interface StrategyPayload {
   enabled: boolean;
   is_live: boolean;
   x: number;
-  y: number;
 }
 
 export interface TradingParamSpec {

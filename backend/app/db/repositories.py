@@ -197,7 +197,6 @@ class Repositories:
         self,
         name: str,
         x: float,
-        y: float,
         is_live: bool = False,
         priority: int = 100,
         raw_config_json: str = "{}",
@@ -206,7 +205,7 @@ class Repositories:
 
         async def _do():
             cur = await self.db.execute(
-                "INSERT INTO strategy_groups(name, enabled, is_live, priority, config_version, x, y, raw_config_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO strategy_groups(name, enabled, is_live, priority, config_version, x, raw_config_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (
                     name,
                     1,
@@ -214,7 +213,6 @@ class Repositories:
                     priority,
                     1,
                     x,
-                    y,
                     raw_config_json,
                     created_at,
                     created_at,
@@ -342,7 +340,6 @@ class Repositories:
             await self.create_strategy_group(
                 "模拟盘1",
                 settings.STRATEGY_DEFAULT_X,
-                settings.STRATEGY_DEFAULT_Y,
                 is_live=False,
                 priority=10,
                 raw_config_json="{}",

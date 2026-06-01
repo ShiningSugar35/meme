@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..config import settings
+from .thresholds import compute_thresholds
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -438,7 +439,7 @@ async def run_price_filter(
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
-    y = float(strategy_group.get("y") if strategy_group.get("y") is not None else settings.STRATEGY_DEFAULT_Y)
+    t = compute_thresholds(x)
 
     current_price = _current_price(latest_price, token)
     if current_price is None or current_price <= 0:
@@ -480,7 +481,7 @@ async def run_price_filter(
             divisor = min(12.0, max(1.0, age_minutes / 5.0))
         else:
             divisor = 12.0
-        swaps_threshold = max(0, swaps_1h / divisor)
+        swaps_threshold = max(0, t.swaps_5m_multiplier * swaps_1h / divisor)
         cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
     else:
         divisor = 12.0
@@ -489,7 +490,7 @@ async def run_price_filter(
     details.append({
         "rule": "swaps_5m_scaled", "passed": cond_swaps,
         "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
-        "threshold": swaps_threshold, "y": y, "age_minutes": age_minutes,
+        "threshold": swaps_threshold, "age_minutes": age_minutes,
         "divisor": divisor, "source": swaps_source,
         "age_missing": age_missing,
     })
@@ -499,7 +500,7 @@ async def run_price_filter(
     # Priority when age >= 60min: 1) computed from price_1h
     # Unit: pct_change_1h is in percent_points (already multiplied by 100).
     #       threshold = 10.0 * y.  For y=2.0, threshold = 20.0 (i.e. need >20% gain).
-    pct_threshold = 10.0 * y
+    pct_threshold = t.price_change_1h_min_pct
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
     price_change_age_mode: str = "unknown"
@@ -538,7 +539,7 @@ async def run_price_filter(
     price_change_detail = {
         "rule": "price_change_1h", "passed": cond_pct,
         "current": current_price,
-        "pct_change": pct_change_1h, "threshold": pct_threshold, "y": y,
+        "pct_change": pct_change_1h, "threshold": pct_threshold,
         "source": price_change_source,
         "age_mode": price_change_age_mode,
         "age_minutes": age_minutes,
@@ -584,7 +585,7 @@ async def run_price_filter(
 
     passed = all(d.get("passed") for d in details)
     feature_vector = {
-        "x": x, "y": y, "current_price": current_price,
+        "x": x, "current_price": current_price,
         "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
         "price_change_1h_pct": pct_change_1h,
         "price_change_source": price_change_source,
@@ -612,7 +613,7 @@ async def evaluate_price_activity_rules(
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
-    y = float(strategy_group.get("y") if strategy_group.get("y") is not None else settings.STRATEGY_DEFAULT_Y)
+    t = compute_thresholds(x)
     divisor = 12.0
 
     current_price = _current_price(latest_price, token)
@@ -649,7 +650,7 @@ async def evaluate_price_activity_rules(
             divisor = min(12.0, max(1.0, age_minutes / 5.0))
         else:
             divisor = 12.0
-        swaps_threshold = max(0, swaps_1h / divisor)
+        swaps_threshold = max(0, t.swaps_5m_multiplier * swaps_1h / divisor)
         cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
     else:
         swaps_threshold = None
@@ -657,11 +658,11 @@ async def evaluate_price_activity_rules(
     details.append({
         "rule": "swaps_5m_scaled", "passed": cond_swaps,
         "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
-        "threshold": swaps_threshold, "y": y, "age_minutes": age_minutes,
+        "threshold": swaps_threshold, "age_minutes": age_minutes,
         "divisor": divisor, "source": swaps_source, "age_missing": age_missing,
     })
 
-    pct_threshold = 10.0 * y
+    pct_threshold = t.price_change_1h_min_pct
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
     price_change_age_mode: str = "unknown"
@@ -698,7 +699,7 @@ async def evaluate_price_activity_rules(
     details.append({
         "rule": "price_change_1h", "passed": cond_pct,
         "current": current_price, "pct_change": pct_change_1h,
-        "threshold": pct_threshold, "y": y, "source": price_change_source,
+        "threshold": pct_threshold, "source": price_change_source,
         "age_mode": price_change_age_mode, "age_minutes": age_minutes,
         "age_missing": age_missing, "price_change_unit": "percent_points",
         "creation_ts": creation_ts if creation_ts is not None else None,
@@ -706,7 +707,7 @@ async def evaluate_price_activity_rules(
 
     passed = all(d.get("passed") for d in details)
     feature_vector = {
-        "x": x, "y": y, "current_price": current_price,
+        "x": x, "current_price": current_price,
         "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
         "price_change_1h_pct": pct_change_1h, "price_change_source": price_change_source,
         "price_change_age_mode": price_change_age_mode, "price_change_unit": "percent_points",

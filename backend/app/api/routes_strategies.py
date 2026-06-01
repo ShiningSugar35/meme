@@ -11,7 +11,6 @@ class StrategyCreate(BaseModel):
     name: str
     is_live: bool = False
     x: Optional[float] = None
-    y: Optional[float] = None
     priority: int = 100
     raw_config_json: str = "{}"
 
@@ -20,7 +19,6 @@ class StrategyUpdate(BaseModel):
     name: Optional[str] = None
     is_live: Optional[bool] = None
     x: Optional[float] = None
-    y: Optional[float] = None
     priority: Optional[int] = None
     raw_config_json: Optional[str] = None
 
@@ -35,9 +33,8 @@ async def list_strategies(request: Request):
 async def create_strategy(body: StrategyCreate, request: Request):
     repo = request.app.state.repo
     x_val = body.x if body.x is not None else settings.STRATEGY_DEFAULT_X
-    y_val = body.y if body.y is not None else settings.STRATEGY_DEFAULT_Y
     sid = await repo.create_strategy_group(
-        name=body.name, x=x_val, y=y_val,
+        name=body.name, x=x_val,
         is_live=body.is_live, priority=body.priority, raw_config_json=body.raw_config_json
     )
     return {"id": sid, "status": "created"}

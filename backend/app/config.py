@@ -138,7 +138,6 @@ class Settings(BaseSettings):
     GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
 
     STRATEGY_DEFAULT_X: float = Field(0.20)
-    STRATEGY_DEFAULT_Y: float = Field(2.0)
 
     # GMGN tuning
     GMGN_TRENCHES_LIMIT: int = Field(200)

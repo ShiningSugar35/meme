@@ -2,6 +2,7 @@ import asyncio
 import math
 from datetime import datetime, timedelta, timezone
 from ..strategy.filters import run_initial_filter, run_price_filter, _parse_creation_ts, _compute_age_minutes, evaluate_price_activity_rules, evaluate_smart_degen
+from ..strategy.thresholds import compute_thresholds
 
 
 def make_snapshot(**kwargs):
@@ -118,7 +119,7 @@ def test_price_filter_swaps_divisor_age_30m():
         "swaps_1h": 120,
         "price_1h": 0.0009,
     }
-    sg = {"x": 0.2, "y": 2.25}
+    sg = {"x": 0.2}
     res = asyncio.run(run_price_filter(token, sg, latest, []))
     swaps_detail = next((d for d in res.details if d.get("rule") == "swaps_5m_scaled"), None)
     assert swaps_detail is not None
@@ -165,7 +166,7 @@ def test_price_filter_price_change_age_45m():
         "swaps_1h": 200,
         "price_1h": 0.001,
     }
-    sg = {"x": 0.2, "y": 2.25}
+    sg = {"x": 0.2}
     res = asyncio.run(run_price_filter(token, sg, latest, []))
     pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
     assert pct_detail is not None
@@ -174,8 +175,8 @@ def test_price_filter_price_change_age_45m():
     assert pct_detail.get("age_mode") == "young_no_kline_fallback"
     # (0.0015 - 0.001) / 0.001 * 100 = 50%
     assert pct_detail.get("pct_change") == 50.0
-    # threshold = 10 * y = 10 * 2.25 = 22.5
-    assert math.isclose(pct_detail.get("threshold") or 0, 22.5, rel_tol=1e-9)
+    # threshold = 100 * (0.3 - 0.2) = 10.0
+    assert math.isclose(pct_detail.get("threshold") or 0, 10.0, rel_tol=1e-9)
     # unit should be percent_points
     assert pct_detail.get("price_change_unit") == "percent_points"
     assert pct_detail.get("passed") is True, "50% > 25% should pass"
@@ -194,7 +195,7 @@ def test_price_change_unit_in_feature_vector():
         "swaps_1h": 200,
         "price_1h": 0.00099,
     }
-    sg = {"x": 0.2, "y": 2.25}
+    sg = {"x": 0.2}
     res = asyncio.run(run_price_filter(token, sg, latest, []))
     assert res.feature_vector.get("price_change_unit") == "percent_points"
     assert res.feature_vector.get("price_change_source") == "computed_from_price_1h"
@@ -239,7 +240,7 @@ def test_price_filter_fallback_to_price_1h():
         "swaps_1h": 500,
         "price_1h": 0.001,
     }
-    sg = {"x": 0.2, "y": 2.25}
+    sg = {"x": 0.2}
     res = asyncio.run(run_price_filter(token, sg, latest, []))
     pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
     assert pct_detail is not None
@@ -251,7 +252,7 @@ def test_price_filter_fallback_to_price_1h():
 def test_price_filter_missing_price_fails():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()}
     latest = {}
-    sg = {"x": 0.2, "y": 2.25}
+    sg = {"x": 0.2}
     res = asyncio.run(run_price_filter(token, sg, latest, []))
     assert res.passed is False
     p_detail = next((d for d in res.details if d.get("rule") == "latest_price_present"), None)
@@ -275,7 +276,7 @@ def test_price_filter_swaps_from_token_fallback():
         "swaps_1h": 500,
     }
     latest = {"price": 0.001, "price_usd": 0.001, "price_1h": 0.0009}
-    sg = {"x": 0.2, "y": 2.25}
+    sg = {"x": 0.2}
     res = asyncio.run(run_price_filter(token, sg, latest, []))
     swaps_detail = next((d for d in res.details if d.get("rule") == "swaps_5m_scaled"), None)
     assert swaps_detail is not None
@@ -289,7 +290,7 @@ def test_price_filter_swaps_from_token_fallback():
 def test_stage_price_activity_rules_basic():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
     latest = {"price": 0.002, "price_usd": 0.002, "swaps_5m": 100, "swaps_1h": 500, "price_1h": 0.0015}
-    sg = {"x": 0.2, "y": 2.25}
+    sg = {"x": 0.2}
     res = asyncio.run(evaluate_price_activity_rules(token, sg, latest))
     assert isinstance(res.passed, bool)
     pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
@@ -302,7 +303,7 @@ def test_stage_price_activity_with_kline_fallback():
     klines = [{"open_time": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
                "open": 0.001, "high": 0.002, "low": 0.001, "close": 0.002}]
     latest = {"price": 0.002, "price_usd": 0.002, "swaps_5m": 100, "swaps_1h": 500}
-    sg = {"x": 0.2, "y": 2.25}
+    sg = {"x": 0.2}
     res = asyncio.run(evaluate_price_activity_rules(token, sg, latest, klines=klines))
     pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
     assert pct_detail is not None
@@ -347,3 +348,18 @@ def test_stage_smart_degen_insufficient_holders():
     # ceil(3-1.5) = ceil(1.5) = 2, only 1 holder -> fail
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     assert res.passed is False
+
+
+def test_thresholds_x_02():
+    import math
+    t = compute_thresholds(0.2)
+    assert math.isclose(t.max_risk_ratio, 0.15, rel_tol=1e-9)
+    assert math.isclose(t.min_liquidity_usd, 5250.0, rel_tol=1e-9)
+    assert math.isclose(t.min_holder_count, 29.0, rel_tol=1e-9)
+    assert math.isclose(t.min_marketcap, 2900.0, rel_tol=1e-9)
+    assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_min_pct, 10.0, rel_tol=1e-9)
+    assert math.isclose(t.sell_tax_max, 0.02, rel_tol=1e-9)
+    assert math.isclose(t.sniper_count_max, 10.0, rel_tol=1e-9)
+    assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
+
