@@ -266,7 +266,7 @@ class TestTop3BaselineFallback:
 
         result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
 
-        assert result is False
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_fallback_amount_percentage_reduction_triggers(self, repo):
@@ -289,7 +289,7 @@ class TestTop3BaselineFallback:
 
         result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
 
-        assert result is True
+        assert result is not None
 
     @pytest.mark.asyncio
     async def test_current_percentage_normalizes_percent_units(self, repo):
@@ -314,7 +314,7 @@ class TestTop3BaselineFallback:
 
         result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
 
-        assert result is True
+        assert result is not None
 
 
 # ============================================================================

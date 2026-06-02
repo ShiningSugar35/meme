@@ -33,6 +33,10 @@ async def list_strategies(request: Request):
 async def create_strategy(body: StrategyCreate, request: Request):
     repo = request.app.state.repo
     x_val = body.x if body.x is not None else settings.STRATEGY_DEFAULT_X
+    if body.is_live:
+        live = await repo.get_live_strategy_groups()
+        if live:
+            raise HTTPException(400, "实盘策略只能保留一条。请先禁用现有实盘策略后再创建新的。")
     sid = await repo.create_strategy_group(
         name=body.name, x=x_val,
         is_live=body.is_live, priority=body.priority, raw_config_json=body.raw_config_json
@@ -46,6 +50,12 @@ async def update_strategy(strategy_id: int, body: StrategyUpdate, request: Reque
     updates = {k: v for k, v in body.dict().items() if v is not None}
     if not updates:
         raise HTTPException(400, "No fields to update")
+    turning_live = body.is_live is True
+    if turning_live:
+        live = await repo.get_live_strategy_groups()
+        other_live = [g for g in live if int(g.get("id", 0)) != strategy_id]
+        if other_live:
+            raise HTTPException(400, "实盘策略只能保留一条。请先禁用现有实盘策略后再启用新的。")
     await repo.update_strategy_group(strategy_id, updates)
     return {"status": "updated"}
 

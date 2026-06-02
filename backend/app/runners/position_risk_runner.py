@@ -286,8 +286,8 @@ class PositionRiskRunner:
 
         # TOP3 smart degen reduction check: if any of the original TOP3 reduced
         # holdings by >25%, exit 50%
-        top3_dump = await self._check_top3_smart_degen_reduction(position_for_decision, now)
-        if top3_dump:
+        top3_triggered_wallet = await self._check_top3_smart_degen_reduction(position_for_decision, now)
+        if top3_triggered_wallet:
             await self._request_exit(
                 position=position_for_decision,
                 exit_pct=0.5,
@@ -295,6 +295,7 @@ class PositionRiskRunner:
                 emergency=False,
                 latest=latest,
                 current_price_usd=price_usd,
+                triggered_wallet=top3_triggered_wallet,
             )
             return
 
@@ -548,7 +549,7 @@ class PositionRiskRunner:
 
         return triggered
 
-    async def _check_top3_smart_degen_reduction(self, position: Dict[str, Any], now: datetime) -> bool:
+    async def _check_top3_smart_degen_reduction(self, position: Dict[str, Any], now: datetime) -> Optional[str]:
         """Check if any of the original TOP3 smart degen holders reduced holdings by >25%.
 
         Per-wallet one-shot: once a wallet triggers an exit, it is recorded in
@@ -558,23 +559,23 @@ class PositionRiskRunner:
         Comparison priority: token amount > amount_percentage.  Do NOT use usd_value
         alone because price change affects it.
 
-        Returns True if risk is triggered (50% exit needed), False otherwise.
+        Returns the triggered wallet address if risk is detected, None otherwise.
+        IMPORTANT: does NOT mark exit rule as executed — that happens only after
+        the sell succeeds (in _request_exit), so a failed sell can be retried.
         """
         locked = position.get("locked_strategy_config_json")
         if not locked:
-            return False
+            return None
         try:
             cfg = json.loads(locked)
         except (json.JSONDecodeError, TypeError):
-            return False
+            return None
 
         token = position["token_mint"]
         pos_id = int(position["id"])
-        account_type = _account_type(position)
 
         top3_snapshot = cfg.get("top3_smart_degen_snapshot")
         if not top3_snapshot or not isinstance(top3_snapshot, list):
-            # Fall back to position_smart_money_baselines table
             baselines = []
             try:
                 baselines = await self.repo.get_position_smart_money_baselines(pos_id)
@@ -593,9 +594,8 @@ class PositionRiskRunner:
                     for b in baselines if b.get("wallet_address")
                 ]
         if not top3_snapshot or not isinstance(top3_snapshot, list):
-            return False
+            return None
 
-        # Check per-wallet one-shot rules
         executed = _executed_exit_rules(position)
         already_triggered_wallets: set[str] = set()
         for rule in executed:
@@ -606,9 +606,8 @@ class PositionRiskRunner:
         try:
             holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=slot)
         except Exception:
-            return False
+            return None
 
-        # Build current map — may be empty if all holders disappeared
         current_map: Dict[str, Dict[str, float]] = {}
         if holders:
             for h in holders:
@@ -625,7 +624,6 @@ class PositionRiskRunner:
             if not addr or addr in already_triggered_wallets:
                 continue
 
-            # Wallet disappeared from holders — treat as 100% reduction
             if addr not in current_map:
                 triggered_addr = addr
                 break
@@ -634,7 +632,6 @@ class PositionRiskRunner:
             initial_token = float(snap.get("token_amount") or 0)
             initial_pct = _normalize_amount_percentage(snap.get("amount_percentage")) or 0.0
 
-            # Prefer token_amount comparison
             if initial_token > 0:
                 current_token = curr["token_amount"]
                 if current_token <= 0:
@@ -655,6 +652,7 @@ class PositionRiskRunner:
                     break
 
         if triggered_addr is not None:
+            account_type = _account_type(position)
             await self.repo.append_system_event(
                 "WARN", "RISK",
                 f"TOP3 smart degen dump detected: {triggered_addr}",
@@ -664,13 +662,9 @@ class PositionRiskRunner:
                 }),
                 account_type=account_type,
             )
-            # Record per-wallet one-shot rule
-            wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_addr}"
-            if hasattr(self.repo, "mark_exit_rule_executed"):
-                await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
-            return True
+            return triggered_addr
 
-        return False
+        return None
 
     async def _request_exit(
         self,
@@ -680,6 +674,7 @@ class PositionRiskRunner:
         emergency: bool,
         latest: Dict[str, Any],
         current_price_usd: Optional[float],
+        triggered_wallet: Optional[str] = None,
     ):
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -708,6 +703,9 @@ class PositionRiskRunner:
             if ok:
                 if hasattr(self.repo, "mark_exit_rule_executed"):
                     await self.repo.mark_exit_rule_executed(pos_id, reason_code)
+                    if triggered_wallet:
+                        wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
+                        await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
                 if exit_pct < 1.0:
                     if hasattr(self.repo, "update_position_remaining"):
                         now_iso = _iso(_utc_now())
@@ -755,6 +753,7 @@ class PositionRiskRunner:
             exit_pct=exit_pct,
             reason_code=reason_code,
             current_price_usd=current_price_usd,
+            triggered_wallet=triggered_wallet,
         )
 
     async def _try_pipeline_execute_sell(
@@ -783,6 +782,8 @@ class PositionRiskRunner:
         if result is None:
             return True
         if isinstance(result, dict):
+            if result.get("ok") is False or result.get("success") is False:
+                return False
             status = str(result.get("status") or result.get("result") or "").upper()
             if result.get("ok") is True or result.get("success") is True:
                 return True
@@ -798,6 +799,7 @@ class PositionRiskRunner:
         exit_pct: float,
         reason_code: str,
         current_price_usd: Optional[float],
+        triggered_wallet: Optional[str] = None,
     ):
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -858,3 +860,6 @@ class PositionRiskRunner:
 
         if hasattr(self.repo, "mark_exit_rule_executed"):
             await self.repo.mark_exit_rule_executed(pos_id, reason_code)
+            if triggered_wallet:
+                wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
+                await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)

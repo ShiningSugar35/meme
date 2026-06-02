@@ -261,7 +261,7 @@ async def test_top3_wallet_disappears_triggers(repo):
     gmgn_mod.GMGNProvider.fetch_smart_degen_holders = empty_fetch
     try:
         result = await runner._check_top3_smart_degen_reduction(pos, now)
-        assert result is True
+        assert result is not None
     finally:
         gmgn_mod.GMGNProvider.fetch_smart_degen_holders = original
 
@@ -296,7 +296,7 @@ async def test_top3_reduction_25pct_triggers(repo):
     gmgn_mod.GMGNProvider.fetch_smart_degen_holders = reduced_holders
     try:
         result = await runner._check_top3_smart_degen_reduction(pos, now)
-        assert result is True
+        assert result is not None
     finally:
         gmgn_mod.GMGNProvider.fetch_smart_degen_holders = original
 
@@ -331,13 +331,13 @@ async def test_top3_same_wallet_idempotent(repo):
     gmgn_mod.GMGNProvider.fetch_smart_degen_holders = reduced_holders
     try:
         result1 = await runner._check_top3_smart_degen_reduction(pos, now)
-        assert result1 is True
+        assert result1 is not None
 
         # Mark exit rule as executed
         await repo.mark_exit_rule_executed(pos_id, "TOP3_SMART_DEGEN_DUMP:wallet1")
         pos = await repo.get_position(pos_id)
         result2 = await runner._check_top3_smart_degen_reduction(pos, now)
-        assert result2 is False
+        assert result2 is None
     finally:
         gmgn_mod.GMGNProvider.fetch_smart_degen_holders = original
 

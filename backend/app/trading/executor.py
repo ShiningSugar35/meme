@@ -799,14 +799,94 @@ class TradingPipeline:
     # ------------------------------------------------------------------
     # Exit execution
     # ------------------------------------------------------------------
+    async def _execute_sim_paper_sell(
+        self,
+        position: Dict[str, Any],
+        exit_pct: float,
+        exit_reason: str,
+    ) -> Dict[str, Any]:
+        """Paper-sell a SIM position — no Jupiter quote, no Jito send."""
+        pos_id = int(position["id"])
+        token_mint = position["token_mint"]
+        remaining_token = self._to_float(position.get("remaining_token_amount"), 0.0) or 0.0
+        pct = max(0.0, min(1.0, self._to_float(exit_pct, 1.0) or 1.0))
+        sell_amount_human = remaining_token * pct
+
+        try:
+            latest = await self.gmgn.fetch_latest_price(token_mint)
+        except Exception:
+            latest = {}
+        current_price_usd = self._get_price_usd(latest) or self._to_float(position.get("last_fill_price_usd"), 0.0) or 0.0
+
+        if remaining_token <= 0:
+            return {"ok": False, "error": "ZERO_REMAINING"}
+        if pct <= 0:
+            return {"ok": False, "error": "ZERO_EXIT_PCT"}
+
+        te = await self.repo.append_trade_event(
+            f"SIM_SELL:{pos_id}:{exit_reason}",
+            position_id=pos_id,
+            token_mint=token_mint,
+            strategy_id=position.get("live_strategy_id"),
+            side="SELL",
+            event_type="SIM_SELL",
+            status="CONFIRMED",
+            is_live=0,
+            account_type="SIM",
+            requested_pct=pct,
+            requested_token_amount=sell_amount_human,
+            executed_token_amount=sell_amount_human,
+            price_usd=current_price_usd,
+            exit_reason=exit_reason,
+            provider="PIPELINE_SIM",
+        )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if pct >= 0.999999:
+            await self.repo.close_position(
+                pos_id,
+                closed_at=now_iso,
+                close_reason=exit_reason,
+            )
+        else:
+            new_remaining = max(0.0, remaining_token - sell_amount_human)
+            remaining_value_usd = new_remaining * current_price_usd if current_price_usd > 0 else 0.0
+            await self.repo.update_position_remaining(
+                pos_id,
+                new_remaining,
+                remaining_value_usd,
+                last_fill_at=now_iso,
+                last_fill_price_usd=current_price_usd,
+            )
+
+        await self.repo.append_system_event(
+            "INFO", "TRADE",
+            "SIM sell executed (paper)",
+            self._safe_json({
+                "position_id": pos_id,
+                "exit_pct": pct,
+                "exit_reason": exit_reason,
+                "trade_event_id": te.get("id"),
+            }),
+            account_type="SIM",
+        )
+        return {"ok": True, "trade_event_id": te.get("id"), "executed_sol_amount": 0.0}
+
     async def execute_sell(
         self,
         position: Dict[str, Any],
         exit_pct: float = 1.0,
         exit_reason: str = "EXIT",
     ) -> Optional[Dict[str, Any]]:
-        gate = self._safety_gate()
+        # ---- SIM/LIVE hard protection ----
         account_type = position.get("account_type", "LIVE" if position.get("is_live") else "SIM")
+        is_live = bool(position.get("is_live"))
+
+        if not is_live or account_type != "LIVE":
+            return await self._execute_sim_paper_sell(position, exit_pct, exit_reason)
+
+        # ---- LIVE path: safety gate then real execution ----
+        gate = self._safety_gate()
         if gate:
             await self.repo.append_system_event(
                 "WARN",
@@ -906,8 +986,8 @@ class TradingPipeline:
             side="SELL",
             event_type="SELL_PENDING",
             status="PENDING",
-            is_live=1 if account_type == "LIVE" else 0,
-            account_type=account_type,
+            is_live=1,
+            account_type="LIVE",
             requested_pct=pct,
             requested_token_amount=sell_amount_human,
             requested_sol_amount=out_sol,
@@ -933,8 +1013,8 @@ class TradingPipeline:
             side="SELL",
             event_type="SELL_CONFIRMED",
             status="CONFIRMED" if bundle.get("ok", True) else "FAILED",
-            is_live=1 if account_type == "LIVE" else 0,
-            account_type=account_type,
+            is_live=1,
+            account_type="LIVE",
             requested_pct=pct,
             requested_token_amount=sell_amount_human,
             requested_sol_amount=out_sol,
@@ -961,7 +1041,7 @@ class TradingPipeline:
                 "TRADE",
                 "Sell execution failed",
                 self._safe_json({"position_id": pos_id, "bundle": bundle}),
-                account_type=account_type,
+                account_type="LIVE",
             )
             return {"ok": False, "error": bundle.get("error_code") or "BUNDLE_FAILED", "trade_event_id": te_confirmed.get("id")}
 
@@ -993,7 +1073,7 @@ class TradingPipeline:
                 "exit_reason": exit_reason,
                 "trade_event_id": te_confirmed.get("id"),
             }),
-            account_type=account_type,
+            account_type="LIVE",
         )
         return {"ok": True, "trade_event_id": te_confirmed.get("id"), "executed_sol_amount": out_sol}
 

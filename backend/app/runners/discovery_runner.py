@@ -21,6 +21,31 @@ from ..trading.executor import TradingPipeline
 
 MOCK_MINTS = {'PASS1', 'PASS1_150', 'PASS1_510', 'FAIL_INIT', 'FAIL_SECOND'}
 
+# Fields that run_entry_local_risk_filter (Stage 0) requires.
+# If any are missing in the raw trenches token, we attempt a lightweight enrich
+# from fetch_token_snapshot before running the filter.
+STAGE0_REQUIRED_FIELDS = [
+    "renounced_mint",
+    "renounced_freeze_account",
+    "is_wash_trading",
+    "rat_trader_amount_rate",
+    "suspected_insider_hold_rate",
+    "sell_tax",
+    "burn_status",
+    "sniper_count",
+]
+
+STAGE0_REQUIRED_ALIASES = {
+    "renounced_mint": ["renounced_mint", "mint_renounced", "is_mint_renounced"],
+    "renounced_freeze_account": ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced", "freeze_authority_renounced"],
+    "is_wash_trading": ["is_wash_trading", "wash_trading", "wash_trading_detected"],
+    "rat_trader_amount_rate": ["rat_trader_amount_rate", "rat_trader_rate"],
+    "suspected_insider_hold_rate": ["suspected_insider_hold_rate", "insider_hold_rate", "max_insider_ratio"],
+    "sell_tax": ["sell_tax", "sell_tax_rate"],
+    "burn_status": ["burn_status", "lp_burn_status", "burnt_status"],
+    "sniper_count": ["sniper_count", "snipers", "sniper_trader_count"],
+}
+
 SNAPSHOT_COLUMNS = [
     'pool_address', 'platform', 'launchpad',
     'type', 'liquidity_usd', 'sol_side_liquidity', 'volume_usd', 'market_cap',
@@ -445,6 +470,83 @@ class DiscoveryRunner:
             "groups": groups_results,
         }
         return all_items, diag
+
+    async def _enrich_token_if_needed(self, token: Dict[str, Any], token_mint: str) -> Dict[str, Any]:
+        """Lightweight enrich: fetch_token_snapshot only if Stage 0 fields are missing.
+
+        Returns the (possibly merged) token dict.  If enrichment was attempted,
+        logs diagnostic info about raw-vs-enriched fields.
+        """
+        missing: List[str] = []
+        for canonical, aliases in STAGE0_REQUIRED_ALIASES.items():
+            found = False
+            for a in aliases:
+                v = token.get(a)
+                if v is not None and v != "":
+                    found = True
+                    break
+            if not found:
+                missing.append(canonical)
+
+        if not missing:
+            return token
+
+        logger.info(
+            "trenches token missing stage0 fields; enriching",
+            token_mint=token_mint,
+            missing=missing,
+        )
+
+        try:
+            snap = await self.gmgn.fetch_token_snapshot(token_mint)
+        except Exception as e:
+            logger.warning("enrich fetch_token_snapshot failed", token_mint=token_mint, error=str(e))
+            return token
+
+        if not snap:
+            return token
+
+        enriched = dict(token)
+        merged_count = 0
+        for key, val in snap.items():
+            if key in ("raw_json", "source_mode", "token_mint"):
+                continue
+            if val is not None and val != "":
+                existing = token.get(key)
+                if existing is None or existing == "":
+                    enriched[key] = val
+                    merged_count += 1
+
+        still_missing = []
+        for canonical, aliases in STAGE0_REQUIRED_ALIASES.items():
+            found = False
+            for a in aliases:
+                v = enriched.get(a)
+                if v is not None and v != "":
+                    found = True
+                    break
+            if not found:
+                still_missing.append(canonical)
+
+        diag = {
+            "token_mint": token_mint,
+            "raw_keys": list(token.keys()),
+            "enrich_snap_keys": list(snap.keys()),
+            "merged_count": merged_count,
+            "was_missing": missing,
+            "still_missing": still_missing,
+        }
+        logger.info("enrich result", **diag)
+
+        if still_missing:
+            await self.repo.append_system_event(
+                "WARN", "DISCOVERY",
+                f"Token {token_mint} still missing Stage0 fields after enrich",
+                _json_dumps(diag),
+                account_type="SIM",
+            )
+
+        return enriched
 
     # ---- Staged filter pipeline ----
     # Stage 0: local trenches risk (w=0 extra API)
@@ -894,9 +996,14 @@ class DiscoveryRunner:
                         logger.error(f"store discovery snapshot failed token={token_mint}: {e}")
                         continue
 
+                    # Lightweight enrich: fetch_token_snapshot only if Stage 0 fields are missing
+                    enriched_token = await self._enrich_token_if_needed(token, token_mint)
+                    if enriched_token is not token:
+                        logger.info("enriched token for stage0", token_mint=token_mint)
+
                     # Stage 0: local risk filter — uses ONLY groups_for_x (this x's groups)
                     risk_passed, discovery_event_ids, dc, tc = await self._run_stage0_risk_filter(
-                        token, groups_for_x, now, snapshot_id, token_mint, pool_address,
+                        enriched_token, groups_for_x, now, snapshot_id, token_mint, pool_address,
                     )
                     discovered_count += dc
                     tracked_count += tc
