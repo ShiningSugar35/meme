@@ -14,7 +14,7 @@ from ..logging_config import logger
 KNOWN_TRENCH_FILTER_KEYS: List[str] = [
     "max_rug_ratio", "max_entrapment_ratio", "max_insider_ratio", "max_bundler_rate",
     "min_liquidity", "min_top_holder_rate", "max_top_holder_rate", "max_fresh_wallet_rate",
-    "max_creator_balance_rate", "max_progress",
+    "max_creator_balance_rate",
     "min_holder_count", "min_marketcap", "min_volume_24h",
     "min_smart_degen_count",
 ]
@@ -46,7 +46,6 @@ class StrategyThresholds:
     max_top_holder_rate: float
     max_fresh_wallet_rate: float
     max_creator_balance_rate: float
-    max_progress: float
 
     min_holder_count_raw: float
     min_holder_count_api: int
@@ -101,8 +100,6 @@ class StrategyThresholds:
         max_fresh_wallet_rate = 0.13 + 0.1 * xf
         max_creator_balance_rate = 0.049 + 0.01 * xf
 
-        max_progress = 0.7
-
         min_holder_count_raw = 37.0 - 40.0 * xf
         min_holder_count_api = int(math.floor(min_holder_count_raw)) + 1
 
@@ -122,7 +119,7 @@ class StrategyThresholds:
         sniper_count_max = 50.0 * xf
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
-        price_change_1h_min_pct = 100.0 * (0.3 - xf)
+        price_change_1h_min_pct = 50.0 * (0.3 - xf)
         volume_per_swap_5m_min = 14.0 - 20.0 * xf
         swaps_5m_multiplier = 1.75 - 2.5 * xf
 
@@ -138,7 +135,6 @@ class StrategyThresholds:
             max_top_holder_rate=max_top_holder_rate,
             max_fresh_wallet_rate=max_fresh_wallet_rate,
             max_creator_balance_rate=max_creator_balance_rate,
-            max_progress=max_progress,
             min_holder_count_raw=min_holder_count_raw,
             min_holder_count_api=min_holder_count_api,
             min_marketcap_raw=min_marketcap_raw,
@@ -171,7 +167,6 @@ class StrategyThresholds:
             "max_top_holder_rate": self.max_top_holder_rate,
             "max_fresh_wallet_rate": self.max_fresh_wallet_rate,
             "max_creator_balance_rate": self.max_creator_balance_rate,
-            "max_progress": self.max_progress,
             "min_holder_count": self.min_holder_count_api,
             "min_marketcap": self.min_marketcap_api,
             "min_volume_24h": self.min_volume_24h,

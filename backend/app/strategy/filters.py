@@ -368,7 +368,7 @@ async def evaluate_price_activity_rules(
     # swaps rule: swaps_1h > 12, then swaps_5m > multiplier * (swaps_1h / 12)
     divisor = 12.0
     cond_swaps_overall = False
-    if swaps_1h and swaps_1h > 12:
+    if swaps_1h and swaps_1h > 9:
         swaps_threshold = max(0, t.swaps_5m_multiplier * swaps_1h / divisor)
         cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
         cond_swaps_overall = cond_swaps

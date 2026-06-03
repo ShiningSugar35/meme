@@ -55,7 +55,7 @@ def test_thresholds_x_02():
     assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
     assert math.isclose(t.swaps_5m_multiplier, 1.25, rel_tol=1e-9)
     assert math.isclose(t.volume_per_swap_5m_min, 10.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_min_pct, 10.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_min_pct, 5.0, rel_tol=1e-9)
     assert math.isclose(t.sell_tax_max, 0.02, rel_tol=1e-9)
     assert math.isclose(t.sniper_count_max, 10.0, rel_tol=1e-9)
     assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
@@ -65,7 +65,7 @@ def test_thresholds_x_01():
     t = compute_thresholds(0.1)
     assert math.isclose(t.common_risk, 0.10, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1400.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_min_pct, 20.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_min_pct, 10.0, rel_tol=1e-9)
 
 
 def test_thresholds_x_03():
@@ -125,13 +125,13 @@ def test_top1_holder_missing():
 # Price filter tests
 # ---------------------------------------------------------------------------
 
-def test_swaps_1h_less_or_equal_12_fails():
+def test_swaps_1h_less_or_equal_9_fails():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
-    latest = {"price": 0.001, "price_usd": 0.001, "swaps_5m": 100, "swaps_1h": 10, "price_1h": 0.0009}
+    latest = {"price": 0.001, "price_usd": 0.001, "swaps_5m": 100, "swaps_1h": 8, "price_1h": 0.0009}
     res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest))
     swaps_detail = next((d for d in res.details if d.get("rule") == "swaps_5m_scaled"), None)
     assert swaps_detail is not None
-    assert swaps_detail.get("passed") is False, "swaps_1h <= 12 should fail"
+    assert swaps_detail.get("passed") is False, "swaps_1h <= 9 should fail"
 
 
 def test_volume_per_swap_fails():
@@ -154,9 +154,9 @@ def test_price_change_threshold():
     assert pct_detail is not None
     # (0.0015 - 0.001) / 0.001 * 100 = 50%
     assert math.isclose(pct_detail.get("pct_change") or 0, 50.0, rel_tol=1e-9)
-    # threshold = 100 * (0.3 - 0.2) = 10
-    assert math.isclose(pct_detail.get("threshold") or 0, 10.0, rel_tol=1e-9)
-    assert pct_detail.get("passed") is True, "50% > 10% should pass"
+    # threshold = 50 * (0.3 - 0.2) = 5
+    assert math.isclose(pct_detail.get("threshold") or 0, 5.0, rel_tol=1e-9)
+    assert pct_detail.get("passed") is True, "50% > 5% should pass"
 
 
 def test_missing_price_fails():
