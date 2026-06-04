@@ -46,6 +46,8 @@ class TestThresholds:
         assert math.isclose(t.volume_per_swap_5m_min, 10.0, rel_tol=1e-9)
         assert math.isclose(t.swaps_5m_multiplier, 1.25, rel_tol=1e-9)
         assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
+        assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
+        assert math.isclose(t.price_5m_anchor_multiplier, 0.9, rel_tol=1e-9)
 
     def test_x_05_formulas(self):
         t = compute_thresholds(0.5)

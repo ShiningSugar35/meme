@@ -60,6 +60,8 @@ def test_thresholds_x_02():
     assert math.isclose(t.sniper_count_max, 10.0, rel_tol=1e-9)
     assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
     assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
+    assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
+    assert math.isclose(t.price_5m_anchor_multiplier, 0.9, rel_tol=1e-9)
 
 
 def test_thresholds_x_01():
@@ -126,13 +128,14 @@ def test_top1_holder_missing():
 # Price filter tests
 # ---------------------------------------------------------------------------
 
-def test_swaps_1h_less_or_equal_9_fails():
+def test_swaps_1h_below_threshold_fails():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
     latest = {"price": 0.001, "price_usd": 0.001, "swaps_5m": 100, "swaps_1h": 8, "price_1h": 0.0009}
     res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest))
     swaps_detail = next((d for d in res.details if d.get("rule") == "swaps_5m_scaled"), None)
     assert swaps_detail is not None
-    assert swaps_detail.get("passed") is False, "swaps_1h <= 9 should fail"
+    # x=0.2 → threshold = 15-20*0.2 = 11, 8 < 11 should fail
+    assert swaps_detail.get("passed") is False, "swaps_1h below threshold should fail"
 
 
 def test_volume_per_swap_fails():
@@ -217,12 +220,12 @@ def test_smart_degen_too_few_holders():
     assert res.passed is False
 
 
-def test_smart_degen_uses_150_not_200():
+def test_smart_degen_passes_with_new_thresholds():
     sg = {"x": 0.2}
     holders = [{"amount_percentage": 0.02, "usd_value": 160}, {"amount_percentage": 0.015, "usd_value": 60}]
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     detail = res.details[0]
-    # max_usd=160 > 150, max_pct_norm=0.02 > 0.015 -> max_ok=True
+    # max_usd=160 > 100, max_pct_norm=0.02 > 0.01 -> max_ok=True
     # min_usd=60 > 50, min_pct_norm=0.015 > 0.005 -> min_ok=True
     assert detail["passed"] is True
 

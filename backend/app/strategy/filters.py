@@ -365,10 +365,10 @@ async def evaluate_price_activity_rules(
     if age_minutes is None and not age_missing:
         age_missing = True
 
-    # swaps rule: swaps_1h > 12, then swaps_5m > multiplier * (swaps_1h / 12)
+    # swaps rule: swaps_1h > min threshold, then swaps_5m > multiplier * (swaps_1h / 12)
     divisor = 12.0
     cond_swaps_overall = False
-    if swaps_1h and swaps_1h > 9:
+    if swaps_1h and swaps_1h > t.swaps_1h_min:
         swaps_threshold = max(0, t.swaps_5m_multiplier * swaps_1h / divisor)
         cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
         cond_swaps_overall = cond_swaps
@@ -470,7 +470,28 @@ async def evaluate_price_activity_rules(
         "price_change_unit": "percent_points",
     })
 
+    # price_5m anchor: current price > (1.1 - x) * price_5m
+    price_5m = _to_float(_first_present(latest_price, ["price_5m", "price5m"]))
+    if price_5m is None:
+        for nest_key in ("price", "pool", "token", "info"):
+            nested = latest_price.get(nest_key)
+            if isinstance(nested, dict):
+                price_5m = _to_float(_first_present(nested, ["price_5m", "price5m"]))
+                if price_5m is not None:
+                    break
+    price_5m_anchor = t.price_5m_anchor_multiplier * price_5m if price_5m and price_5m > 0 else None
+    cond_anchor = current_price > price_5m_anchor if price_5m_anchor is not None else True
+    details.append({
+        "rule": "price_5m_anchor", "passed": cond_anchor,
+        "current_price": current_price, "price_5m": price_5m,
+        "anchor_multiplier": t.price_5m_anchor_multiplier,
+        "anchor_threshold": price_5m_anchor,
+    })
+    if not cond_anchor:
+        cond_pct = False
+
     passed = all(d.get("passed") for d in details)
+
     fv = {
         "x": x, "current_price": current_price,
         "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
@@ -478,6 +499,7 @@ async def evaluate_price_activity_rules(
         "price_change_age_mode": price_change_age_mode, "price_change_unit": "percent_points",
         "age_minutes": age_minutes, "creation_ts": creation_ts,
         "swaps_divisor": divisor, "swaps_source": swaps_source, "age_missing": age_missing,
+        "price_5m": price_5m, "price_5m_anchor_threshold": price_5m_anchor,
     }
     return PriceFilterResult(passed, details, fv)
 
