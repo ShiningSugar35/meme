@@ -61,7 +61,8 @@ def test_thresholds_x_02():
     assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
     assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
     assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
-    assert math.isclose(t.price_5m_anchor_multiplier, 0.9, rel_tol=1e-9)
+    assert math.isclose(t.price_5m_lower_multiplier, 1.0, rel_tol=1e-9)
+    assert math.isclose(t.price_5m_upper_multiplier, 1.5, rel_tol=1e-9)
 
 
 def test_thresholds_x_01():
