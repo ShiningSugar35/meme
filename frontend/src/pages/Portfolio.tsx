@@ -33,7 +33,7 @@ function ruleLabel(name: string): string {
     sniper_count: 'sniper数量超标',
     platform: '平台不在白名单',
     top1_holder: 'TOP1持仓超标',
-    swaps_5m_scaled: 'swaps_5m不达标',
+    swaps_5m_scaled: '过去一小时交易数',
     price_change_1h: '1h价格涨幅不足',
     smart_degen: '聪明钱指标不满足',
   };

@@ -473,16 +473,19 @@ class PositionRiskRunner:
         for h in holders:
             if int(h.get("addr_type", 0)) == 0:
                 top1_rate = normalize_rate_fraction(_to_float(h.get("top1_holder_rate") or h.get("rate") or h.get("amount_percentage")))
-                if top1_rate is not None and top1_rate >= threshold:
+                min_threshold = t.top1_addr_type0_min
+                if top1_rate is not None and (top1_rate >= threshold or top1_rate <= min_threshold):
+                    reason = "exceeds upper bound" if top1_rate >= threshold else "below lower bound"
                     await self.repo.append_system_event(
                         "WARN",
                         "RISK",
-                        "Top1 holder rate exceeds threshold; requesting full exit",
+                        f"Top1 holder rate {reason}; requesting full exit",
                         _safe_json_dumps({
                             "position_id": pos_id,
                             "token": token,
                             "top1_rate": top1_rate,
-                            "threshold": threshold,
+                            "max_threshold": threshold,
+                            "min_threshold": min_threshold,
                             "x": x_val,
                         }),
                         account_type=account_type,

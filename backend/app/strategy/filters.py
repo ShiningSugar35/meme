@@ -314,9 +314,9 @@ def evaluate_top1_holder(top1_holder: Optional[Dict[str, Any]], x: float) -> Fil
             top1_holder = None
         else:
             rate = normalize_rate_fraction(_to_float(_first_present(top1_holder, ["top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"])))
-    passed = rate is not None and rate < t.top1_addr_type0_max
+    passed = rate is not None and t.top1_addr_type0_min < rate < t.top1_addr_type0_max
     details = [FilterDetail(name="top1_holder_addr_type0", passed=passed, value=rate, threshold=t.top1_addr_type0_max,
-                            reason=f"top1 rate={rate}, threshold={t.top1_addr_type0_max}" if rate is not None else missing_reason,
+                            reason=f"top1 rate={rate}, range=[{t.top1_addr_type0_min}, {t.top1_addr_type0_max})" if rate is not None else missing_reason,
                             missing=rate is None)]
     return FilterResult(passed, details, {"top1_holder_rate": rate, "top1_threshold": t.top1_addr_type0_max})
 

@@ -59,6 +59,7 @@ class StrategyThresholds:
 
     sell_tax_max: float
     sniper_count_max: float
+    top1_addr_type0_min: float
     top1_addr_type0_max: float
 
     price_change_1h_min_pct: float
@@ -92,7 +93,7 @@ class StrategyThresholds:
         max_insider_ratio = common_risk
         max_bundler_rate = common_risk
 
-        min_liquidity = 5750.0 - 2500.0 * xf
+        min_liquidity = 5500.0 - 2500.0 * xf
 
         min_top_holder_rate = 0.155 - 0.05 * xf
         max_top_holder_rate = 0.225 + 0.25 * xf
@@ -117,6 +118,7 @@ class StrategyThresholds:
 
         sell_tax_max = 0.1 * xf
         sniper_count_max = 50.0 * xf
+        top1_addr_type0_min = 0.031 - 0.01 * xf
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
         price_change_1h_min_pct = 50.0 * (0.3 - xf)
@@ -144,6 +146,7 @@ class StrategyThresholds:
             min_volume_24h=min_volume_24h,
             sell_tax_max=sell_tax_max,
             sniper_count_max=sniper_count_max,
+            top1_addr_type0_min=top1_addr_type0_min,
             top1_addr_type0_max=top1_addr_type0_max,
             price_change_1h_min_pct=price_change_1h_min_pct,
             volume_per_swap_5m_min=volume_per_swap_5m_min,

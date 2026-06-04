@@ -47,7 +47,7 @@ class TestTrenchesPushdown:
         assert math.isclose(payload["max_entrapment_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_insider_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_bundler_rate"], 0.15, rel_tol=1e-9)
-        assert math.isclose(payload["min_liquidity"], 5250.0, rel_tol=1e-9)
+        assert math.isclose(payload["min_liquidity"], 5000.0, rel_tol=1e-9)
         assert math.isclose(payload["min_top_holder_rate"], 0.145, rel_tol=1e-9)
         assert math.isclose(payload["max_top_holder_rate"], 0.275, rel_tol=1e-9)
         assert math.isclose(payload["max_fresh_wallet_rate"], 0.15, rel_tol=1e-9)
@@ -173,7 +173,7 @@ class TestTrenchesPushdown:
         assert math.isclose(params["_x"], settings.STRATEGY_DEFAULT_X, rel_tol=1e-9)
         filters = params["trench_filters"]
         assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
-        assert math.isclose(filters["min_liquidity"], 5250.0, rel_tol=1e-9)
+        assert math.isclose(filters["min_liquidity"], 5000.0, rel_tol=1e-9)
 
     @pytest.mark.asyncio
     async def test_save_top3_baselines_does_not_run_discovery_loop(self, repo):

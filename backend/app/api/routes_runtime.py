@@ -41,7 +41,7 @@ RULE_META: Dict[str, Dict[str, str]] = {
     "top1_holder": {"label": "TOP1持仓超标", "stage": "risk_filter", "section": "风控指标"},
     "top1_holder_addr_type0": {"label": "TOP1普通地址持仓超标", "stage": "top_holder_filter", "section": "风控指标"},
     "latest_price_present": {"label": "最新价格缺失", "stage": "price_filter", "section": "价格面及其他指标"},
-    "swaps_5m_scaled": {"label": "swaps_5m不达标", "stage": "price_filter", "section": "价格面及其他指标"},
+    "swaps_5m_scaled": {"label": "过去一小时交易数", "stage": "price_filter", "section": "价格面及其他指标"},
     "price_change_1h": {"label": "1h价格涨幅不足", "stage": "price_filter", "section": "价格面及其他指标"},
     "smart_degen": {"label": "聪明钱指标不满足", "stage": "smart_degen_filter", "section": "价格面及其他指标"},
     "top1_holder_rate_observed": {"label": "TOP1持有率观测", "stage": "risk_filter", "section": "observed_only"},

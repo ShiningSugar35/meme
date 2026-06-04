@@ -792,7 +792,8 @@ class DiscoveryRunner:
             config_version = int(sg.get('config_version') or 1)
             discovery_id = discovery_event_ids.get(sg_id)
             x = float(sg.get("x") if sg.get("x") is not None else settings.STRATEGY_DEFAULT_X)
-            top1_threshold = 0.049 + 0.01 * x
+            top1_min_threshold = 0.031 - 0.01 * x
+            top1_max_threshold = 0.049 + 0.01 * x
 
             top1_holder = None
             for h in holders:
@@ -808,7 +809,7 @@ class DiscoveryRunner:
             if top1_holder:
                 rate = normalize_rate_fraction(_to_float(_first_present(top1_holder, "top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate")))
 
-            passed = rate is not None and rate < top1_threshold
+            passed = rate is not None and top1_min_threshold < rate < top1_max_threshold
             detail = {"rule": "top1_holder_addr_type0", "passed": passed,
                       "value": rate, "threshold": top1_threshold,
                       "missing": rate is None}
