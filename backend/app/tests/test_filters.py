@@ -56,6 +56,7 @@ def test_thresholds_x_02():
     assert math.isclose(t.swaps_5m_multiplier, 1.25, rel_tol=1e-9)
     assert math.isclose(t.volume_per_swap_5m_min, 10.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_min_pct, 5.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_max_pct, 105.0, rel_tol=1e-9)
     assert math.isclose(t.sell_tax_max, 0.02, rel_tol=1e-9)
     assert math.isclose(t.sniper_count_max, 10.0, rel_tol=1e-9)
     assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
@@ -70,6 +71,7 @@ def test_thresholds_x_01():
     assert math.isclose(t.common_risk, 0.10, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1400.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_min_pct, 10.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_max_pct, 110.0, rel_tol=1e-9)
 
 
 def test_thresholds_x_03():
@@ -159,8 +161,10 @@ def test_price_change_threshold():
     assert pct_detail is not None
     # (0.0015 - 0.001) / 0.001 * 100 = 50%
     assert math.isclose(pct_detail.get("pct_change") or 0, 50.0, rel_tol=1e-9)
-    # threshold = 50 * (0.3 - 0.2) = 5
-    assert math.isclose(pct_detail.get("threshold") or 0, 5.0, rel_tol=1e-9)
+    # lower_threshold = 50 * (0.3 - 0.2) = 5
+    assert math.isclose(pct_detail.get("lower_threshold") or 0, 5.0, rel_tol=1e-9)
+    # upper_threshold = 100 + 50 * (0.3 - 0.2) = 105
+    assert math.isclose(pct_detail.get("upper_threshold") or 0, 105.0, rel_tol=1e-9)
     assert pct_detail.get("passed") is True, "50% > 5% should pass"
 
 

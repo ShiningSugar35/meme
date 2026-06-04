@@ -404,7 +404,8 @@ async def evaluate_price_activity_rules(
     })
 
     # price_change_1h rule — prefer direct API field, then compute from price_1h or klines
-    pct_threshold = t.price_change_1h_min_pct
+    lower_pct = t.price_change_1h_min_pct
+    upper_pct = t.price_change_1h_max_pct
     pct_change_1h: Optional[float] = None
     price_change_source: str = "missing"
     price_change_age_mode: str = "unknown"
@@ -428,7 +429,7 @@ async def evaluate_price_activity_rules(
     if pct_change_1h is not None:
         price_change_source = "direct_price_change_percent1h"
         price_change_age_mode = "direct_api"
-        cond_pct = pct_change_1h > pct_threshold
+        cond_pct = lower_pct < pct_change_1h < upper_pct
 
     # Fallback: kline computation for young tokens
     if pct_change_1h is None and age_minutes is not None and age_minutes < 60 and klines:
@@ -439,7 +440,7 @@ async def evaluate_price_activity_rules(
                 pct_change_1h = ((current_price - open_price) / open_price) * 100.0
                 price_change_source = "kline_since_open"
                 price_change_age_mode = "young_kline_priority"
-                cond_pct = pct_change_1h > pct_threshold
+                cond_pct = lower_pct < pct_change_1h < upper_pct
         if pct_change_1h is None:
             price_change_age_mode = "young_no_kline_fallback"
 
@@ -458,14 +459,14 @@ async def evaluate_price_activity_rules(
         if price_1h and price_1h > 0:
             pct_change_1h = ((current_price - price_1h) / price_1h) * 100.0
             price_change_source = "computed_from_price_1h"
-            cond_pct = pct_change_1h > pct_threshold
+            cond_pct = lower_pct < pct_change_1h < upper_pct
         else:
             price_change_source = "missing"
 
     details.append({
         "rule": "price_change_1h", "passed": cond_pct,
         "current": current_price, "pct_change": pct_change_1h,
-        "threshold": pct_threshold, "source": price_change_source,
+        "lower_threshold": lower_pct, "upper_threshold": upper_pct, "source": price_change_source,
         "age_mode": price_change_age_mode, "age_minutes": age_minutes, "age_missing": age_missing,
         "price_change_unit": "percent_points",
     })

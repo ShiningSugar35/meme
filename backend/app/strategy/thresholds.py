@@ -63,6 +63,7 @@ class StrategyThresholds:
     top1_addr_type0_max: float
 
     price_change_1h_min_pct: float
+    price_change_1h_max_pct: float
     price_5m_lower_multiplier: float
     price_5m_upper_multiplier: float
     swaps_1h_min: float
@@ -125,6 +126,7 @@ class StrategyThresholds:
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
         price_change_1h_min_pct = 50.0 * (0.3 - xf)
+        price_change_1h_max_pct = 100.0 + 50.0 * (0.3 - xf)
         price_5m_lower_multiplier = 1.2 - xf
         price_5m_upper_multiplier = 1.7 - xf
         swaps_1h_min = 15.0 - 20.0 * xf
@@ -155,6 +157,7 @@ class StrategyThresholds:
             top1_addr_type0_min=top1_addr_type0_min,
             top1_addr_type0_max=top1_addr_type0_max,
             price_change_1h_min_pct=price_change_1h_min_pct,
+            price_change_1h_max_pct=price_change_1h_max_pct,
             price_5m_lower_multiplier=price_5m_lower_multiplier,
             price_5m_upper_multiplier=price_5m_upper_multiplier,
             swaps_1h_min=swaps_1h_min,
