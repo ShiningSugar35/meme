@@ -225,8 +225,8 @@ def test_smart_degen_passes_with_new_thresholds():
     holders = [{"amount_percentage": 0.02, "usd_value": 160}, {"amount_percentage": 0.015, "usd_value": 60}]
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     detail = res.details[0]
-    # max_usd=160 > 100, max_pct_norm=0.02 > 0.01 -> max_ok=True
-    # min_usd=60 > 50, min_pct_norm=0.015 > 0.005 -> min_ok=True
+    # max_usd=160 > 50, max_pct_norm=0.02 > 0.005 -> max_ok=True
+    # min_usd=60 > 25, min_pct_norm=0.015 > 0.0025 -> min_ok=True
     assert detail["passed"] is True
 
 

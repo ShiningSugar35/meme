@@ -68,10 +68,10 @@ class StrategyThresholds:
     volume_per_swap_5m_min: float
     swaps_5m_multiplier: float
 
-    smart_degen_max_pct: float = 0.01
-    smart_degen_min_pct: float = 0.005
-    smart_degen_max_usd: float = 100.0
-    smart_degen_min_usd: float = 50.0
+    smart_degen_max_pct: float = 0.005
+    smart_degen_min_pct: float = 0.0025
+    smart_degen_max_usd: float = 50.0
+    smart_degen_min_usd: float = 25.0
 
     @property
     def min_holder_count(self) -> float:
