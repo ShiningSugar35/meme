@@ -47,13 +47,13 @@ class TestTrenchesPushdown:
         assert math.isclose(payload["max_entrapment_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_insider_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_bundler_rate"], 0.15, rel_tol=1e-9)
-        assert math.isclose(payload["min_liquidity"], 4750.0, rel_tol=1e-9)
+        assert math.isclose(payload["min_liquidity"], 4500.0, rel_tol=1e-9)
         assert math.isclose(payload["min_top_holder_rate"], 0.145, rel_tol=1e-9)
         assert math.isclose(payload["max_top_holder_rate"], 0.275, rel_tol=1e-9)
         assert math.isclose(payload["max_fresh_wallet_rate"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_creator_balance_rate"], 0.051, rel_tol=1e-9)
         assert payload["min_holder_count"] == 30
-        assert math.isclose(payload["min_marketcap"], 4350.0, rel_tol=1e-9)
+        assert math.isclose(payload["min_marketcap"], 4950.0, rel_tol=1e-9)
         assert math.isclose(payload["min_volume_24h"], 1200.0, rel_tol=1e-9)
         assert payload.get("min_smart_degen_count") == 1
 
@@ -173,7 +173,7 @@ class TestTrenchesPushdown:
         assert math.isclose(params["_x"], settings.STRATEGY_DEFAULT_X, rel_tol=1e-9)
         filters = params["trench_filters"]
         assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
-        assert math.isclose(filters["min_liquidity"], 4750.0, rel_tol=1e-9)
+        assert math.isclose(filters["min_liquidity"], 4500.0, rel_tol=1e-9)
 
     @pytest.mark.asyncio
     async def test_save_top3_baselines_does_not_run_discovery_loop(self, repo):
