@@ -53,7 +53,7 @@ class TestTrenchesPushdown:
         assert math.isclose(payload["max_fresh_wallet_rate"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_creator_balance_rate"], 0.051, rel_tol=1e-9)
         assert payload["min_holder_count"] == 30
-        assert math.isclose(payload["min_marketcap"], 2900.0, rel_tol=1e-9)
+        assert math.isclose(payload["min_marketcap"], 4350.0, rel_tol=1e-9)
         assert math.isclose(payload["min_volume_24h"], 1200.0, rel_tol=1e-9)
         assert payload.get("min_smart_degen_count") == 1
 

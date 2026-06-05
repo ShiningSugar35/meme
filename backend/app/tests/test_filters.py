@@ -51,7 +51,7 @@ def test_thresholds_x_02():
     assert math.isclose(t.min_liquidity, 4750.0, rel_tol=1e-9)
     assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
     assert math.isclose(t.min_holder_count, 29.0, rel_tol=1e-9)
-    assert math.isclose(t.min_marketcap, 2900.0, rel_tol=1e-9)
+    assert math.isclose(t.min_marketcap, 4350.0, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
     assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_min_pct, -5.0, rel_tol=1e-9)

@@ -91,7 +91,7 @@ async def probe():
                 "max_top_holder_rate": 0.275,
                 "max_fresh_wallet_rate": 0.15,
                 "min_holder_count": 29,
-                "min_marketcap": 2900,
+                "min_marketcap": 4350,
                 "min_volume_24h": 1200,
                 "min_smart_degen_count": 1,
             }),

@@ -107,8 +107,8 @@ class StrategyThresholds:
         min_holder_count_raw = 37.0 - 40.0 * xf
         min_holder_count_api = int(math.floor(min_holder_count_raw)) + 1
 
-        min_marketcap_raw = 100.0 * min_holder_count_raw
-        min_marketcap_api = 100.0 * min_holder_count_raw
+        min_marketcap_raw = 150.0 * min_holder_count_raw
+        min_marketcap_api = 150.0 * min_holder_count_raw
 
         min_smart_degen_count_raw = 2.0 - 10.0 * xf
         min_smart_degen_count_api = (

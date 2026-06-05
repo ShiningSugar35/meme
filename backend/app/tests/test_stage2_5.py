@@ -38,7 +38,7 @@ class TestThresholds:
         assert math.isclose(t.max_fresh_wallet_rate, 0.15, rel_tol=1e-9)
         assert math.isclose(t.max_creator_balance_rate, 0.051, rel_tol=1e-9)
         assert t.min_holder_count_api == 30
-        assert math.isclose(t.min_marketcap_api, 2900.0, rel_tol=1e-9)
+        assert math.isclose(t.min_marketcap_api, 4350.0, rel_tol=1e-9)
         assert t.min_smart_degen_count_api == 1
         assert t.min_smart_degen_count_raw == 0.0
         assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
