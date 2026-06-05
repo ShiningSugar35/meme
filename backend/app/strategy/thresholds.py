@@ -64,11 +64,10 @@ class StrategyThresholds:
 
     price_change_1h_min_pct: float
     price_change_1h_max_pct: float
-    price_5m_lower_multiplier: float
-    price_5m_upper_multiplier: float
     swaps_1h_min: float
-    volume_per_swap_5m_min: float
-    swaps_5m_multiplier: float
+    volume_per_swap_1h_min: float
+    price_range_24h_percentile_min: float
+    price_range_24h_percentile_max: float
 
     smart_degen_max_pct: float = 0.005
     smart_degen_min_pct: float = 0.0025
@@ -97,7 +96,7 @@ class StrategyThresholds:
         max_insider_ratio = common_risk
         max_bundler_rate = common_risk
 
-        min_liquidity = 5500.0 - 2500.0 * xf
+        min_liquidity = 5250.0 - 2500.0 * xf
 
         min_top_holder_rate = 0.155 - 0.05 * xf
         max_top_holder_rate = 0.225 + 0.25 * xf
@@ -125,13 +124,12 @@ class StrategyThresholds:
         top1_addr_type0_min = 0.031 - 0.01 * xf
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
-        price_change_1h_min_pct = 50.0 * (0.3 - xf)
-        price_change_1h_max_pct = 100.0 + 50.0 * (0.3 - xf)
-        price_5m_lower_multiplier = 1.2 - xf
-        price_5m_upper_multiplier = 1.7 - xf
-        swaps_1h_min = 15.0 - 20.0 * xf
-        volume_per_swap_5m_min = 14.0 - 20.0 * xf
-        swaps_5m_multiplier = 1.75 - 2.5 * xf
+        price_change_1h_min_pct = 50.0 * (xf - 0.3)
+        price_change_1h_max_pct = 27.5 - 25.0 * xf
+        swaps_1h_min = 7.0 + 20.0 * xf
+        volume_per_swap_1h_min = 23.0 + 20.0 * xf
+        price_range_24h_percentile_min = 0.0
+        price_range_24h_percentile_max = 0.4 - 0.5 * xf
 
         return cls(
             x=xf,
@@ -158,11 +156,10 @@ class StrategyThresholds:
             top1_addr_type0_max=top1_addr_type0_max,
             price_change_1h_min_pct=price_change_1h_min_pct,
             price_change_1h_max_pct=price_change_1h_max_pct,
-            price_5m_lower_multiplier=price_5m_lower_multiplier,
-            price_5m_upper_multiplier=price_5m_upper_multiplier,
             swaps_1h_min=swaps_1h_min,
-            volume_per_swap_5m_min=volume_per_swap_5m_min,
-            swaps_5m_multiplier=swaps_5m_multiplier,
+            volume_per_swap_1h_min=volume_per_swap_1h_min,
+            price_range_24h_percentile_min=price_range_24h_percentile_min,
+            price_range_24h_percentile_max=price_range_24h_percentile_max,
         )
 
     def to_trench_filters(self) -> Dict[str, Any]:

@@ -47,7 +47,7 @@ class TestTrenchesPushdown:
         assert math.isclose(payload["max_entrapment_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_insider_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_bundler_rate"], 0.15, rel_tol=1e-9)
-        assert math.isclose(payload["min_liquidity"], 5000.0, rel_tol=1e-9)
+        assert math.isclose(payload["min_liquidity"], 4750.0, rel_tol=1e-9)
         assert math.isclose(payload["min_top_holder_rate"], 0.145, rel_tol=1e-9)
         assert math.isclose(payload["max_top_holder_rate"], 0.275, rel_tol=1e-9)
         assert math.isclose(payload["max_fresh_wallet_rate"], 0.15, rel_tol=1e-9)
@@ -173,7 +173,7 @@ class TestTrenchesPushdown:
         assert math.isclose(params["_x"], settings.STRATEGY_DEFAULT_X, rel_tol=1e-9)
         filters = params["trench_filters"]
         assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
-        assert math.isclose(filters["min_liquidity"], 5000.0, rel_tol=1e-9)
+        assert math.isclose(filters["min_liquidity"], 4750.0, rel_tol=1e-9)
 
     @pytest.mark.asyncio
     async def test_save_top3_baselines_does_not_run_discovery_loop(self, repo):
@@ -328,9 +328,9 @@ class TestPriceChangePercent1h:
         latest = {
             "price_usd": 0.011,
             "price_change_percent1h": 20.0,
-            "swaps_5m": 15,
             "swaps_1h": 100,
-            "volume_5m": 2000,
+            "volume_1h": 3000,
+            "price_range_24h_percentile": 0.15,
             "pool": {"price_change_percent1h": 5.0},
         }
         res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
@@ -345,9 +345,9 @@ class TestPriceChangePercent1h:
         strategy = {"x": 0.2}
         latest = {
             "price_usd": 0.011,
-            "swaps_5m": 15,
             "swaps_1h": 100,
-            "volume_5m": 2000,
+            "volume_1h": 3000,
+            "price_range_24h_percentile": 0.15,
             "pool": {"price_change_percent1h": 20.0},
         }
         res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
@@ -362,9 +362,9 @@ class TestPriceChangePercent1h:
         strategy = {"x": 0.2}
         latest = {
             "price_usd": 0.011,
-            "swaps_5m": 15,
             "swaps_1h": 100,
-            "volume_5m": 2000,
+            "volume_1h": 3000,
+            "price_range_24h_percentile": 0.15,
         }
         res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
         detail = next(d for d in res.details if d["rule"] == "price_change_1h")
@@ -441,7 +441,7 @@ class TestTop1HolderNormalization:
 class TestSimStopLossIsolation:
     @pytest.mark.asyncio
     async def test_sim_hard_tp_closes_position_without_pipeline(self, repo):
-        """SIM HARD_TP_270 trigger closes position, does NOT call execute_sell."""
+        """SIM HARD_TP_250 trigger closes position, does NOT call execute_sell."""
         gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
         runner = ActivePositionPriceRunner(repo, gmgn)
         pos_id = await repo.create_position(
@@ -459,7 +459,7 @@ class TestSimStopLossIsolation:
         })):
             await runner._process_position(pos, datetime.now(timezone.utc))
         updated = await repo.get_position(pos_id)
-        assert updated["status"] == "CLOSED", "SIM position closed on HARD_TP_270"
+        assert updated["status"] == "CLOSED", "SIM position closed on HARD_TP_250"
 
     @pytest.mark.asyncio
     async def test_sim_risk_recheck_paper_exit_closes(self, repo):

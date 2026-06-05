@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import json
 
 from ..db.repositories import Repositories
-from ..strategy.thresholds import compute_thresholds, normalize_rate_fraction
+from ..strategy.thresholds import normalize_rate_fraction
 from ..strategy.filters import run_holding_risk_filter
 from ..services.event_bus import event_bus
 from ..config import settings
@@ -103,6 +103,24 @@ def _safe_json_dumps(value: Any) -> str:
         return str(value)
 
 
+def _risk_detail_summary(details: Any) -> List[str]:
+    out: List[str] = []
+    for d in details or []:
+        if isinstance(d, dict):
+            passed = d.get("passed")
+            name = d.get("name") or d.get("rule") or "?"
+            value = d.get("value")
+            threshold = d.get("threshold")
+        else:
+            passed = getattr(d, "passed", None)
+            name = getattr(d, "name", getattr(d, "rule", "?"))
+            value = getattr(d, "value", None)
+            threshold = getattr(d, "threshold", None)
+        if passed is False:
+            out.append(f"{name}={value}(阈:{threshold})")
+    return out
+
+
 def _normalize_amount_percentage(value: Any) -> Optional[float]:
     return normalize_rate_fraction(_to_float(value))
 
@@ -112,7 +130,7 @@ class PositionRiskRunner:
     Risk and exit runner.
 
     This runner now does two separate jobs:
-    1. Price-based exit decisions: hard TP/SL, dynamic TP/SL, dust, completed, time stop.
+    1. Non-price safety exits: dust, completed, holder/smart-money checks.
     2. Risk recheck: after entry, re-run the initial risk-threshold filter on a dynamic schedule:
        >=1.5 SOL every 2s; >=1.0 every 4s; >=0.5 every 8s;
        >=0.25 every 16s; <0.25 every 32s.
@@ -127,6 +145,7 @@ class PositionRiskRunner:
         self.trading_pipeline = trading_pipeline
         self._legacy_warned: set[int] = set()
         self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
+        self._last_risk_fail_details: Dict[int, List[str]] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -221,6 +240,7 @@ class PositionRiskRunner:
         # Risk recheck first: if security/risk thresholds degrade, full exit immediately.
         risk_ok = await self._risk_recheck(position_for_decision, latest_snapshot, now)
         if not risk_ok:
+            risk_details = self._last_risk_fail_details.get(pos_id, [])
             await self._request_exit(
                 position=position_for_decision,
                 exit_pct=1.0,
@@ -228,6 +248,7 @@ class PositionRiskRunner:
                 emergency=True,
                 latest=latest,
                 current_price_usd=price_usd,
+                risk_details=risk_details,
             )
             return
 
@@ -252,19 +273,6 @@ class PositionRiskRunner:
                 position=position_for_decision,
                 exit_pct=1.0,
                 reason_code="DUST_FORCE_EXIT",
-                emergency=True,
-                latest=latest,
-                current_price_usd=price_usd,
-            )
-            return
-
-        # Top1 holder continuous monitoring: check addr_type=0 share against threshold
-        top1_failed = await self._check_top1_holder(position_for_decision, now)
-        if top1_failed:
-            await self._request_exit(
-                position=position_for_decision,
-                exit_pct=1.0,
-                reason_code="TOP1_HOLDER_RISK",
                 emergency=True,
                 latest=latest,
                 current_price_usd=price_usd,
@@ -299,9 +307,9 @@ class PositionRiskRunner:
             )
             return
 
-        # NOTE: Price-based exit rules (HARD_TP, HARD_SL, DYN_SL, TIME_STOPLOSS)
+        # NOTE: Price-based exit rules (HARD_TP, HARD_SL)
         # are handled exclusively by ActivePositionPriceRunner to avoid duplicate triggers.
-        # PositionRiskRunner covers only holding risk, TOP1 holder, smart money sell,
+        # PositionRiskRunner covers only holding risk, smart money sell,
         # TOP3 smart degen dump, completed, and dust force exit.
 
     async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
@@ -410,7 +418,11 @@ class PositionRiskRunner:
         )
 
         if res.passed:
+            self._last_risk_fail_details.pop(pos_id, None)
             return True
+
+        fail_summary = _risk_detail_summary(getattr(res, "details", []))
+        self._last_risk_fail_details[pos_id] = fail_summary
 
         await self.repo.append_system_event(
             "WARN",
@@ -420,6 +432,7 @@ class PositionRiskRunner:
                 {
                     "position_id": pos_id,
                     "token": token,
+                    "failed_rules": fail_summary,
                     "details": [getattr(d, "__dict__", d) for d in getattr(res, "details", [])],
                 }
             ),
@@ -430,69 +443,9 @@ class PositionRiskRunner:
             {
                 "level": "WARN",
                 "category": "RISK",
-                "message": f"Risk recheck failed for {token}",
+                "message": f"Risk recheck failed for {token}: {', '.join(fail_summary)[:160]}",
             },
         )
-        return False
-
-    async def _check_top1_holder(self, position: Dict[str, Any], now: datetime) -> bool:
-        """Check top1 holder (addr_type=0) share against threshold.
-
-        Called inline during the risk scan cycle (no independent TOP1_HOLDER_SCAN_TIER).
-        Returns True if risk is triggered (full exit needed), False otherwise.
-        """
-        pos_id = int(position["id"])
-        token = position["token_mint"]
-        account_type = _account_type(position)
-
-        locked = position.get("locked_strategy_config_json")
-        cfg: Dict[str, Any] = {}
-        if locked:
-            try:
-                cfg = json.loads(locked)
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        x_val = float(cfg.get("x") if cfg.get("x") is not None else settings.STRATEGY_DEFAULT_X)
-        t = compute_thresholds(x_val)
-        threshold = t.top1_addr_type0_max
-
-        slot = acquire_feature_slot("risk_top1_holder")
-        try:
-            holders = await self.gmgn.fetch_top_holders(token, limit=20, credential_slot=slot)
-        except Exception as e:
-            await self.repo.append_system_event(
-                "WARN",
-                "RISK",
-                "Top1 holder fetch failed, skipping check",
-                _safe_json_dumps({"position_id": pos_id, "token": token, "error": str(e)}),
-                account_type=account_type,
-            )
-            return False
-
-        for h in holders:
-            if int(h.get("addr_type", 0)) == 0:
-                top1_rate = normalize_rate_fraction(_to_float(h.get("top1_holder_rate") or h.get("rate") or h.get("amount_percentage")))
-                min_threshold = t.top1_addr_type0_min
-                if top1_rate is not None and (top1_rate >= threshold or top1_rate <= min_threshold):
-                    reason = "exceeds upper bound" if top1_rate >= threshold else "below lower bound"
-                    await self.repo.append_system_event(
-                        "WARN",
-                        "RISK",
-                        f"Top1 holder rate {reason}; requesting full exit",
-                        _safe_json_dumps({
-                            "position_id": pos_id,
-                            "token": token,
-                            "top1_rate": top1_rate,
-                            "max_threshold": threshold,
-                            "min_threshold": min_threshold,
-                            "x": x_val,
-                        }),
-                        account_type=account_type,
-                    )
-                    return True
-                break
-
         return False
 
     async def _check_smart_money_sell(self, position: Dict[str, Any], now: datetime) -> bool:
@@ -678,6 +631,7 @@ class PositionRiskRunner:
         latest: Dict[str, Any],
         current_price_usd: Optional[float],
         triggered_wallet: Optional[str] = None,
+        risk_details: Optional[List[str]] = None,
     ):
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -739,14 +693,17 @@ class PositionRiskRunner:
                 requested_pct=exit_pct,
                 price_usd=current_price_usd,
                 error_code="TRADING_PIPELINE_MISSING",
-                error_message="LIVE exit was requested, but no TradingPipeline.execute_sell was available.",
+                error_message=(
+                    "LIVE exit was requested, but no TradingPipeline.execute_sell was available."
+                    + (f" Risk details: {', '.join(risk_details)}" if risk_details else "")
+                ),
                 provider="POSITION_RISK",
             )
             await self.repo.append_system_event(
                 "ERROR",
                 "RISK",
                 "LIVE exit requested but TradingPipeline is missing; position not closed",
-                _safe_json_dumps({"position_id": pos_id, "token": token, "reason": reason_code}),
+                _safe_json_dumps({"position_id": pos_id, "token": token, "reason": reason_code, "risk_details": risk_details or []}),
                 account_type=account_type,
             )
             return
@@ -757,6 +714,7 @@ class PositionRiskRunner:
             reason_code=reason_code,
             current_price_usd=current_price_usd,
             triggered_wallet=triggered_wallet,
+            risk_details=risk_details,
         )
 
     async def _try_pipeline_execute_sell(
@@ -803,6 +761,7 @@ class PositionRiskRunner:
         reason_code: str,
         current_price_usd: Optional[float],
         triggered_wallet: Optional[str] = None,
+        risk_details: Optional[List[str]] = None,
     ):
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -828,6 +787,7 @@ class PositionRiskRunner:
             requested_token_amount=sell_token_amount,
             executed_token_amount=sell_token_amount,
             price_usd=current_price_usd,
+            error_message=(f"Risk details: {', '.join(risk_details)}" if risk_details else None),
             provider="POSITION_RISK_SIM",
         )
 
@@ -841,7 +801,7 @@ class PositionRiskRunner:
                 {
                     "level": "INFO",
                     "category": "RISK",
-                    "message": f"Full SIM exit for {token}: {reason_code}",
+                    "message": f"Full SIM exit for {token}: {reason_code}" + (f" ({', '.join(risk_details)[:160]})" if risk_details else ""),
                 },
             )
         else:

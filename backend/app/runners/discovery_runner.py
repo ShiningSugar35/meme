@@ -58,9 +58,6 @@ SNAPSHOT_COLUMNS = [
     'source_mode',
 ]
 
-MIN_CREATED = getattr(settings, 'GMGN_MIN_CREATED_SECONDS', 1800) or 1800
-MAX_CREATED = getattr(settings, 'GMGN_MAX_CREATED_SECONDS', 2100) or 2100
-
 DISCOVERY_GROUPS = [
     {"group_name": "pump_fun", "platforms": ["Pump.fun"]},
     {"group_name": "other_platforms", "platforms": [
@@ -237,8 +234,6 @@ class DiscoveryRunner:
         params: Dict[str, Any] = {
             'chain': 'sol',
             'type': 'new_creation',
-            'min_created': MIN_CREATED,
-            'max_created': MAX_CREATED,
         }
         types = _csv_list(getattr(settings, 'GMGN_TRENCHES_TYPES', ''))
         if types:
@@ -299,8 +294,6 @@ class DiscoveryRunner:
         params.setdefault('platforms', platforms)
         params['platforms'] = platforms
         params.setdefault('chain', 'sol')
-        params.setdefault('min_created', MIN_CREATED)
-        params.setdefault('max_created', MAX_CREATED)
         types = _csv_list(getattr(settings, 'GMGN_TRENCHES_TYPES', ''))
         if types:
             params['type'] = types[0]
@@ -653,6 +646,8 @@ class DiscoveryRunner:
             stage_diag["failed"] = len(groups)
             return passed_groups, needs_kline_groups, stage_diag
 
+        token["_latest_price_for_kline_fallback"] = latest
+
         creation_ts, _, age_missing = _parse_creation_ts(token)
         age_minutes = _compute_age_minutes(creation_ts)
 
@@ -675,9 +670,12 @@ class DiscoveryRunner:
                 )
             else:
                 pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
-                young_need_kline = (age_minutes is not None and age_minutes < 60 and
-                                    pct_detail and pct_detail.get("age_mode") == "young_no_kline_fallback" and
-                                    str(pct_detail.get("source")) == "missing")
+                range_detail = next((d for d in res.details if d.get("rule") == "price_range_24h_percentile"), None)
+                price_change_need_kline = (age_minutes is not None and age_minutes < 60 and
+                                           pct_detail and pct_detail.get("age_mode") == "young_no_kline_fallback" and
+                                           str(pct_detail.get("source")) == "missing")
+                range_need_kline = bool(range_detail and range_detail.get("data_unavailable"))
+                young_need_kline = price_change_need_kline or range_need_kline
 
                 if young_need_kline:
                     needs_kline_groups.append(sg)
@@ -716,10 +714,12 @@ class DiscoveryRunner:
             return passed_groups, stage_diag
 
         try:
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
             klines = await self.gmgn.fetch_kline(
-                token_mint, "1m", 60,
-                from_ts=int(creation_ts) if creation_ts else None,
-                to_ts=int(datetime.now(timezone.utc).timestamp()),
+                token_mint, "1m", 1440,
+                from_ts=from_ts,
+                to_ts=now_ts,
                 credential_slot=slot,
             )
             stage_diag["kline_used"] = 1
@@ -735,7 +735,9 @@ class DiscoveryRunner:
             sg_id = int(sg.get('id') or 0)
             config_version = int(sg.get('config_version') or 1)
             discovery_id = discovery_event_ids.get(sg_id)
-            res = await evaluate_price_activity_rules(token, sg, {}, klines=klines)
+            latest = token.get("_latest_price_for_kline_fallback")
+            latest = latest if isinstance(latest, dict) else {}
+            res = await evaluate_price_activity_rules(token, sg, latest, klines=klines)
             await self.repo.insert_strategy_match(
                 token_mint, sg_id, config_version, snapshot_id,
                 'kline_fallback', res.passed,

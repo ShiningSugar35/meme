@@ -32,7 +32,7 @@ class TestThresholds:
     def test_x_02_formulas(self):
         t = compute_thresholds(0.2)
         assert math.isclose(t.common_risk, 0.15, rel_tol=1e-9)
-        assert math.isclose(t.min_liquidity, 5000.0, rel_tol=1e-9)
+        assert math.isclose(t.min_liquidity, 4750.0, rel_tol=1e-9)
         assert math.isclose(t.min_top_holder_rate, 0.145, rel_tol=1e-9)
         assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
         assert math.isclose(t.max_fresh_wallet_rate, 0.15, rel_tol=1e-9)
@@ -42,27 +42,25 @@ class TestThresholds:
         assert t.min_smart_degen_count_api == 1
         assert t.min_smart_degen_count_raw == 0.0
         assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
-        assert math.isclose(t.price_change_1h_min_pct, 5.0, rel_tol=1e-9)
-        assert math.isclose(t.price_change_1h_max_pct, 105.0, rel_tol=1e-9)
-        assert math.isclose(t.volume_per_swap_5m_min, 10.0, rel_tol=1e-9)
-        assert math.isclose(t.swaps_5m_multiplier, 1.25, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_min_pct, -5.0, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_max_pct, 22.5, rel_tol=1e-9)
+        assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
         assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
         assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
-        assert math.isclose(t.price_5m_lower_multiplier, 1.0, rel_tol=1e-9)
-        assert math.isclose(t.price_5m_upper_multiplier, 1.5, rel_tol=1e-9)
+        assert math.isclose(t.price_range_24h_percentile_min, 0.0, rel_tol=1e-9)
+        assert math.isclose(t.price_range_24h_percentile_max, 0.3, rel_tol=1e-9)
 
     def test_x_05_formulas(self):
         t = compute_thresholds(0.5)
         assert math.isclose(t.common_risk, 0.30, rel_tol=1e-9)
-        assert math.isclose(t.min_liquidity, 4250.0, rel_tol=1e-9)
+        assert math.isclose(t.min_liquidity, 4000.0, rel_tol=1e-9)
         assert math.isclose(t.min_top_holder_rate, 0.13, rel_tol=1e-9)
         assert math.isclose(t.max_top_holder_rate, 0.35, rel_tol=1e-9)
         assert math.isclose(t.min_holder_count_raw, 17.0, rel_tol=1e-9)
         assert t.min_holder_count_api == 18
-        assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
-        assert math.isclose(t.price_change_1h_max_pct, 90.0, rel_tol=1e-9)
-        assert math.isclose(t.volume_per_swap_5m_min, 4.0, rel_tol=1e-9)
-        assert math.isclose(t.swaps_5m_multiplier, 0.5, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_min_pct, 10.0, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_max_pct, 15.0, rel_tol=1e-9)
+        assert math.isclose(t.volume_per_swap_1h_min, 33.0, rel_tol=1e-9)
         assert t.min_smart_degen_count_api is None
         assert t.min_smart_degen_count_raw == -3.0
 
@@ -72,7 +70,7 @@ class TestThresholds:
         assert "_computed_from_x" not in payload
         assert isinstance(payload["min_liquidity"], float)
         assert isinstance(payload["min_holder_count"], int)
-        assert payload["min_liquidity"] == 5000.0
+        assert payload["min_liquidity"] == 4750.0
         assert payload["min_holder_count"] == 30
 
     def test_default_x_when_no_strategy(self):
@@ -359,29 +357,29 @@ class TestPriceFieldAliases:
         latest = {
             "price_usd": 0.011,
             "price_change_percent1h": 10.5,
-            "swaps_5m": 15,
             "swaps_1h": 100,
-            "volume_5m": 2000,
+            "volume_1h": 3000,
+            "price_range_24h_percentile": 0.15,
         }
         res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
         detail = next(d for d in res.details if d["rule"] == "price_change_1h")
         assert detail["passed"] is True
         assert detail["source"] == "direct_price_change_percent1h"
 
-    def test_volume_5m_from_nested_pool(self):
+    def test_volume_1h_from_nested_pool(self):
         from ..strategy.filters import evaluate_price_activity_rules
         token = {"price_usd": 0.01}
         strategy = {"x": 0.2}
         latest = {
             "price_usd": 0.011,
             "price_change_percent1h": 10.5,
-            "swaps_5m": 15,
             "swaps_1h": 100,
-            "pool": {"volume_5m": 2000},
+            "price_range_24h_percentile": 0.15,
+            "pool": {"volume_1h": 3000},
         }
         res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
-        vol_detail = next(d for d in res.details if d["rule"] == "volume_per_swap_5m")
-        assert vol_detail["volume_5m"] == 2000
+        vol_detail = next(d for d in res.details if d["rule"] == "volume_per_swap_1h")
+        assert vol_detail["volume_1h"] == 3000
 
     def test_missing_price_change_logs(self):
         from ..strategy.filters import evaluate_price_activity_rules
@@ -389,9 +387,9 @@ class TestPriceFieldAliases:
         strategy = {"x": 0.2}
         latest = {
             "price_usd": 0.011,
-            "swaps_5m": 15,
             "swaps_1h": 100,
-            "volume_5m": 2000,
+            "volume_1h": 3000,
+            "price_range_24h_percentile": 0.15,
         }
         res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
         detail = next(d for d in res.details if d["rule"] == "price_change_1h")

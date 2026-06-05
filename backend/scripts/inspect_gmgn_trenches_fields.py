@@ -56,8 +56,6 @@ async def probe():
         base_payload = {
             "chain": "sol",
             "type": "new_creation",
-            "min_created": settings.GMGN_MIN_CREATED_SECONDS,
-            "max_created": settings.GMGN_MAX_CREATED_SECONDS,
         }
 
         # Fields of interest for probe

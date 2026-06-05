@@ -133,8 +133,6 @@ class Settings(BaseSettings):
     GMGN_FEATURE_SLOTS: str = Field("2,3,4,5,6,7,8,9,10,11")
     GMGN_DISCOVERY_MODE: str = Field("two_group")
     GMGN_DISCOVERY_GROUP_DELAY_SECONDS: float = Field(2.0)
-    GMGN_MIN_CREATED_SECONDS: int = Field(1800)
-    GMGN_MAX_CREATED_SECONDS: int = Field(2100)
     GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
 
     STRATEGY_DEFAULT_X: float = Field(0.20)

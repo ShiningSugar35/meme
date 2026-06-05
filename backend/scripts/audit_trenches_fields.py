@@ -53,8 +53,6 @@ async def audit():
             "chain": "sol",
             "type": "new_creation",
             "platforms": ["Pump.fun", "Moonshot"],
-            "min_created": 1800,
-            "max_created": 14400,
         }
         # Merge filters into params at top level (flattened)
         for k, v in filters.items():

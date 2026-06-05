@@ -1,14 +1,14 @@
 """Second-level price monitoring runner for open positions.
 
 This runner polls all open positions every ACTIVE_POSITION_PRICE_POLL_SECONDS
-(1 second by default) and evaluates price-based exit rules (HARD_TP, HARD_SL,
-DYN_SL, TIME_STOPLOSS) independently of the slower risk-scan cycle.
+(1 second by default) and evaluates hard TP/SL plus completed exits
+independently of the slower risk-scan cycle.
 """
 from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set
 
 from ..config import settings
@@ -36,21 +36,6 @@ def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
         return v if math.isfinite(v) else default
     except (TypeError, ValueError):
         return default
-
-
-def _parse_dt(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        try:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except Exception:
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def _account_type(position: Dict[str, Any]) -> str:
@@ -89,7 +74,6 @@ class ActivePositionPriceRunner:
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
         self._last_price_update: Dict[int, Dict[str, Any]] = {}
-        self._dyn_sl_cooldown: Dict[int, datetime] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -107,7 +91,6 @@ class ActivePositionPriceRunner:
 
     async def _process_position(self, position: Dict[str, Any], now: datetime):
         token = position["token_mint"]
-        pos_id = int(position["id"])
         account_type = _account_type(position)
 
         # Fetch latest price
@@ -117,23 +100,6 @@ class ActivePositionPriceRunner:
         )
         if current_price is None or current_price <= 0:
             return
-
-        # Extract price change percentages
-        pct1m = _to_float(
-            latest.get("price_change_percent1m") or latest.get("price_change_1m") or
-            latest.get("change_1m")
-        )
-        pct5m = _to_float(
-            latest.get("price_change_percent5m") or latest.get("price_change_5m") or
-            latest.get("change_5m")
-        )
-        for nest_key in ("price", "pool"):
-            nested = latest.get(nest_key)
-            if isinstance(nested, dict):
-                if pct1m is None:
-                    pct1m = _to_float(nested.get("price_change_percent1m") or nested.get("change_1m"))
-                if pct5m is None:
-                    pct5m = _to_float(nested.get("price_change_percent5m") or nested.get("change_5m"))
 
         remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
         remaining_value_usd = remaining_token * current_price
@@ -145,9 +111,6 @@ class ActivePositionPriceRunner:
         if entry_price is None or entry_price <= 0:
             return
 
-        last_fill_at = _parse_dt(position.get("last_fill_at"))
-        last_fill_price = _to_float(position.get("last_fill_price_usd") or entry_price)
-
         executed_rules = _executed_exit_rules(position)
         multiple = current_price / entry_price
 
@@ -155,45 +118,25 @@ class ActivePositionPriceRunner:
         reasons: list[tuple[str, float]] = []
         multiple = current_price / entry_price
 
-        # HARD_TP_270: full exit
-        if multiple >= 2.70 and "HARD_TP_270" not in executed_rules:
-            reasons.append(("HARD_TP_270", 1.0))
+        # HARD_TP_250: full exit
+        if multiple >= 2.50 and "HARD_TP_250" not in executed_rules:
+            reasons.append(("HARD_TP_250", 1.0))
 
-        # HARD_TP_220: 50% exit
-        if multiple >= 2.20 and "HARD_TP_220" not in executed_rules and "HARD_TP_270" not in executed_rules:
-            reasons.append(("HARD_TP_220", 0.5))
+        # HARD_TP_210: 50% exit
+        if multiple >= 2.10 and "HARD_TP_210" not in executed_rules and "HARD_TP_250" not in executed_rules:
+            reasons.append(("HARD_TP_210", 0.5))
 
-        # HARD_TP_166: 50% exit
-        if multiple >= 1.66 and "HARD_TP_166" not in executed_rules and "HARD_TP_270" not in executed_rules:
-            reasons.append(("HARD_TP_166", 0.5))
+        # HARD_TP_160: 50% exit
+        if multiple >= 1.60 and "HARD_TP_160" not in executed_rules and "HARD_TP_250" not in executed_rules:
+            reasons.append(("HARD_TP_160", 0.5))
 
-        # HARD_SL_50: full exit
-        if multiple <= 0.50 and "HARD_SL_50" not in executed_rules:
-            reasons.append(("HARD_SL_50", 1.0))
+        # HARD_SL_55: full exit
+        if multiple <= 0.55 and "HARD_SL_55" not in executed_rules:
+            reasons.append(("HARD_SL_55", 1.0))
 
         # HARD_SL_75: 50% exit
-        if multiple <= 0.75 and "HARD_SL_75" not in executed_rules and "HARD_SL_50" not in executed_rules:
+        if multiple <= 0.75 and "HARD_SL_75" not in executed_rules and "HARD_SL_55" not in executed_rules:
             reasons.append(("HARD_SL_75", 0.5))
-
-        # DYN_SL: 50% exit with cooldown
-        dyn_sl_triggered = False
-        if pct1m is not None and pct1m < -10:
-            dyn_sl_triggered = True
-        if pct5m is not None and pct5m < -25:
-            dyn_sl_triggered = True
-
-        if dyn_sl_triggered:
-            last_dyn = self._dyn_sl_cooldown.get(pos_id)
-            if last_dyn is None or now >= last_dyn + timedelta(minutes=5):
-                reasons.append(("DYN_SL", 0.5))
-                self._dyn_sl_cooldown[pos_id] = now
-
-        # TIME_STOPLOSS: 50% exit
-        if last_fill_at and last_fill_price and last_fill_price > 0 and current_price > 0:
-            if now >= last_fill_at + timedelta(minutes=10):
-                growth = current_price / last_fill_price - 1.0
-                if growth < 0.05:
-                    reasons.append(("TIME_STOPLOSS", 0.5))
 
         # Completed type — also try fetching latest token snapshot for up-to-date type
         token_type = position.get("latest_token_type") or position.get("type")

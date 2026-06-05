@@ -333,7 +333,6 @@ async def evaluate_price_activity_rules(
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
     t = compute_thresholds(x)
-    divisor = 12.0
 
     current_price = _current_price(latest_price, token)
     if not latest_price:
@@ -343,64 +342,62 @@ async def evaluate_price_activity_rules(
                         "source": "missing", "current_price": current_price})
         return PriceFilterResult(False, details, {})
 
-    # swaps_5m / swaps_1h — support multiple GMGN field name conventions
-    swaps_5m = _to_float(_first_present(latest_price, ["swaps_5m", "swaps5m", "swap_5m", "trades_5m", "trade_5m"]))
-    swaps_1h = _to_float(_first_present(latest_price, ["swaps_1h", "swaps1h", "swap_1h", "trades_1h", "trade_1h"]))
-    if swaps_5m is None or swaps_1h is None:
+    def _first_price_field(keys: Sequence[str]) -> Tuple[Any, str]:
+        raw = _first_present(latest_price, keys)
+        if raw is not None:
+            return raw, "latest_price"
         for nest_key in ("price", "pool", "token", "info"):
             nested = latest_price.get(nest_key)
             if isinstance(nested, dict):
-                if swaps_5m is None:
-                    swaps_5m = _to_float(_first_present(nested, ["swaps_5m", "swaps5m", "swap_5m", "trades_5m"]))
-                if swaps_1h is None:
-                    swaps_1h = _to_float(_first_present(nested, ["swaps_1h", "swaps1h", "swap_1h", "trades_1h"]))
-    swaps_source = "latest_price"
-    if swaps_5m is None or swaps_1h is None:
-        swaps_5m = swaps_5m or _to_float(_first_present(token, ["swaps_5m", "swaps5m", "swap_5m", "trades_5m"]))
-        swaps_1h = swaps_1h or _to_float(_first_present(token, ["swaps_1h", "swaps1h", "swap_1h", "trades_1h"]))
-        swaps_source = "token_snapshot"
+                raw = _first_present(nested, keys)
+                if raw is not None:
+                    return raw, nest_key
+        raw = _first_present(token, keys)
+        if raw is not None:
+            return raw, "token_snapshot"
+        return None, "missing"
+
+    # swaps_1h rule — support multiple GMGN field name conventions
+    swaps_1h_raw, swaps_source = _first_price_field(["swaps_1h", "swaps1h", "swap_1h", "trades_1h", "trade_1h"])
+    swaps_1h = _to_float(swaps_1h_raw)
 
     creation_ts, _, age_missing = _parse_creation_ts(token)
     age_minutes = _compute_age_minutes(creation_ts)
     if age_minutes is None and not age_missing:
         age_missing = True
 
-    # swaps rule: swaps_1h > min threshold, then swaps_5m > multiplier * (swaps_1h / 12)
-    divisor = 12.0
-    cond_swaps_overall = False
-    if swaps_1h and swaps_1h > t.swaps_1h_min:
-        swaps_threshold = max(0, t.swaps_5m_multiplier * swaps_1h / divisor)
-        cond_swaps = swaps_5m is not None and swaps_5m > swaps_threshold
-        cond_swaps_overall = cond_swaps
-    else:
-        swaps_threshold = None
-        cond_swaps_overall = False
+    cond_swaps_overall = swaps_1h is not None and swaps_1h > t.swaps_1h_min
     details.append({
-        "rule": "swaps_5m_scaled", "passed": cond_swaps_overall,
-        "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
-        "threshold": swaps_threshold, "age_minutes": age_minutes, "divisor": divisor,
+        "rule": "swaps_1h_min", "passed": cond_swaps_overall,
+        "swaps_1h": swaps_1h,
+        "threshold": t.swaps_1h_min, "age_minutes": age_minutes,
         "source": swaps_source, "age_missing": age_missing,
     })
 
-    # volume_5m / swaps_5m rule
-    volume_5m = _to_float(_first_present(latest_price, ["volume_5m", "volume5m", "volume_5m_usd", "buy_volume_5m", "sell_volume_5m"]))
-    if volume_5m is None:
-        for nest_key in ("price", "pool", "token", "info"):
-            nested = latest_price.get(nest_key)
-            if isinstance(nested, dict):
-                volume_5m = _to_float(_first_present(nested, ["volume_5m", "volume5m", "volume_5m_usd"]))
-                if volume_5m is not None:
-                    break
+    # volume_1h / swaps_1h rule
+    volume_1h_raw, volume_1h_source = _first_price_field(["volume_1h", "volume1h", "volume_1h_usd", "volume_h1"])
+    volume_1h = _to_float(volume_1h_raw)
+    if volume_1h is None:
+        buy_volume_1h_raw, buy_volume_1h_source = _first_price_field(["buy_volume_1h", "buyVolume1h", "buy_volume1h"])
+        sell_volume_1h_raw, sell_volume_1h_source = _first_price_field(["sell_volume_1h", "sellVolume1h", "sell_volume1h"])
+        buy_volume_1h = _to_float(buy_volume_1h_raw)
+        sell_volume_1h = _to_float(sell_volume_1h_raw)
+        if buy_volume_1h is not None or sell_volume_1h is not None:
+            volume_1h = (buy_volume_1h or 0.0) + (sell_volume_1h or 0.0)
+            volume_1h_source = f"{buy_volume_1h_source}+{sell_volume_1h_source}"
     volume_per_swap_cond = False
     vps = None
-    if volume_5m is not None and swaps_5m is not None and swaps_5m > 0:
-        vps = volume_5m / swaps_5m
-        volume_per_swap_cond = vps > t.volume_per_swap_5m_min
+    if swaps_1h == 0:
+        vps = 0.0
+    elif volume_1h is not None and swaps_1h is not None and swaps_1h > 0:
+        vps = volume_1h / swaps_1h
+    if vps is not None:
+        volume_per_swap_cond = vps > t.volume_per_swap_1h_min
     details.append({
-        "rule": "volume_per_swap_5m", "passed": volume_per_swap_cond,
-        "volume_5m": volume_5m, "swaps_5m": swaps_5m, "vps": vps,
-        "threshold": t.volume_per_swap_5m_min,
-        "data_unavailable": volume_5m is None or swaps_5m is None,
+        "rule": "volume_per_swap_1h", "passed": volume_per_swap_cond,
+        "volume_1h": volume_1h, "swaps_1h": swaps_1h, "vps": vps, "value": vps,
+        "threshold": t.volume_per_swap_1h_min, "source": volume_1h_source,
+        "data_unavailable": volume_1h is None or swaps_1h is None,
     })
 
     # price_change_1h rule — prefer direct API field, then compute from price_1h or klines
@@ -471,41 +468,60 @@ async def evaluate_price_activity_rules(
         "price_change_unit": "percent_points",
     })
 
-    # price_5m anchor: (1.2 - x) * price_5m < current_price < (1.7 - x) * price_5m
-    price_5m = _to_float(_first_present(latest_price, ["price_5m", "price5m"]))
-    if price_5m is None:
-        for nest_key in ("price", "pool", "token", "info"):
-            nested = latest_price.get(nest_key)
-            if isinstance(nested, dict):
-                price_5m = _to_float(_first_present(nested, ["price_5m", "price5m"]))
-                if price_5m is not None:
-                    break
-    price_5m_lower = t.price_5m_lower_multiplier * price_5m if price_5m and price_5m > 0 else None
-    price_5m_upper = t.price_5m_upper_multiplier * price_5m if price_5m and price_5m > 0 else None
-    cond_anchor_lower = current_price > price_5m_lower if price_5m_lower is not None else True
-    cond_anchor_upper = current_price < price_5m_upper if price_5m_upper is not None else True
-    cond_anchor = cond_anchor_lower and cond_anchor_upper
+    # 24h price-range percentile: 0 < (current-low_24h)/(high_24h-low_24h) < 0.4 - 0.5*x
+    percentile_raw, percentile_source = _first_price_field([
+        "price_range_24h_percentile", "price_24h_range_percentile", "price_24h_percentile",
+        "h24_price_percentile", "price_position_24h", "price_24h_position",
+    ])
+    price_range_percentile = normalize_rate_fraction(_to_float(percentile_raw))
+    high_24h = None
+    low_24h = None
+    if price_range_percentile is None:
+        high_raw, high_source = _first_price_field(["high_24h", "price_high_24h", "highest_price_24h", "max_price_24h"])
+        low_raw, low_source = _first_price_field(["low_24h", "price_low_24h", "lowest_price_24h", "min_price_24h"])
+        high_24h = _to_float(high_raw)
+        low_24h = _to_float(low_raw)
+        if high_24h is not None and low_24h is not None and high_24h > low_24h:
+            price_range_percentile = (current_price - low_24h) / (high_24h - low_24h)
+            percentile_source = f"{high_source}+{low_source}"
+    if price_range_percentile is None and klines:
+        highs = [_kline_high(k) for k in klines]
+        lows = [_kline_low(k) for k in klines]
+        highs = [v for v in highs if v is not None and v > 0]
+        lows = [v for v in lows if v is not None and v > 0]
+        if highs and lows:
+            high_24h = max(highs)
+            low_24h = min(lows)
+            if high_24h > low_24h:
+                price_range_percentile = (current_price - low_24h) / (high_24h - low_24h)
+                percentile_source = "kline_24h"
+    cond_range = (
+        price_range_percentile is not None
+        and t.price_range_24h_percentile_min < price_range_percentile < t.price_range_24h_percentile_max
+    )
     details.append({
-        "rule": "price_5m_anchor", "passed": cond_anchor,
-        "current_price": current_price, "price_5m": price_5m,
-        "lower_multiplier": t.price_5m_lower_multiplier,
-        "upper_multiplier": t.price_5m_upper_multiplier,
-        "lower_threshold": price_5m_lower,
-        "upper_threshold": price_5m_upper,
+        "rule": "price_range_24h_percentile", "passed": cond_range,
+        "current_price": current_price, "high_24h": high_24h, "low_24h": low_24h,
+        "percentile": price_range_percentile, "value": price_range_percentile,
+        "lower_threshold": t.price_range_24h_percentile_min,
+        "upper_threshold": t.price_range_24h_percentile_max,
+        "source": percentile_source,
+        "data_unavailable": price_range_percentile is None,
     })
-    if not cond_anchor:
-        cond_pct = False
 
     passed = all(d.get("passed") for d in details)
 
     fv = {
         "x": x, "current_price": current_price,
-        "swaps_5m": swaps_5m, "swaps_1h": swaps_1h,
+        "swaps_1h": swaps_1h, "volume_1h": volume_1h, "volume_per_swap_1h": vps,
         "price_change_1h_pct": pct_change_1h, "price_change_source": price_change_source,
         "price_change_age_mode": price_change_age_mode, "price_change_unit": "percent_points",
         "age_minutes": age_minutes, "creation_ts": creation_ts,
-        "swaps_divisor": divisor, "swaps_source": swaps_source, "age_missing": age_missing,
-        "price_5m": price_5m, "price_5m_lower_threshold": price_5m_lower, "price_5m_upper_threshold": price_5m_upper,
+        "swaps_source": swaps_source, "age_missing": age_missing,
+        "price_range_24h_percentile": price_range_percentile,
+        "price_range_24h_percentile_source": percentile_source,
+        "price_range_24h_high": high_24h,
+        "price_range_24h_low": low_24h,
     }
     return PriceFilterResult(passed, details, fv)
 
@@ -610,35 +626,35 @@ async def run_holding_risk_filter(
     details: List[FilterDetail] = []
 
     _check_float(details, snapshot, "rug_ratio", ["rug_ratio", "max_rug_ratio", "max_rugged_ratio", "rug"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
     _check_float(details, snapshot, "entrapment_ratio", ["entrapment_ratio", "max_entrapment_ratio", "entrapment"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
     _check_float(details, snapshot, "insider_ratio", ["max_insider_ratio", "insider_ratio", "insider_rate"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
     _check_float(details, snapshot, "suspected_insider_hold_rate",
                  ["suspected_insider_hold_rate", "insider_hold_rate", "insider_rate"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
     _check_float(details, snapshot, "bundler_trader_amount_rate",
                  ["bundler_trader_amount_rate", "bundler_rate", "max_bundler_rate", "bundler"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
     _check_float(details, snapshot, "top_10_holder_rate_range",
                  ["top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate",
                   "top_holder_rate", "top10_holder_pct", "top10HolderRate", "top_10_holder_percent",
                   "top10HolderPercent"],
                  lambda v: t.min_top_holder_rate < v < t.max_top_holder_rate,
-                 f"({t.min_top_holder_rate:.6g}, {t.max_top_holder_rate:.6g})")
+                 f"({t.min_top_holder_rate:.6g}, {t.max_top_holder_rate:.6g})", required=False)
     _check_float(details, snapshot, "fresh_wallet_rate", ["fresh_wallet_rate", "fresh_wallets_rate", "fresh_wallet"],
-                 lambda v: v < t.max_fresh_wallet_rate, f"< {t.max_fresh_wallet_rate:.6g}")
+                 lambda v: v < t.max_fresh_wallet_rate, f"< {t.max_fresh_wallet_rate:.6g}", required=False)
     _check_float(details, snapshot, "creator_balance_rate",
                  ["creator_balance_rate", "dev_team_hold_rate", "creator_hold_rate", "dev_hold_rate"],
-                 lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}")
+                 lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}", required=False)
     _check_float(details, snapshot, "holder_count", ["holder_count", "holders", "total_holders", "holder"],
-                 lambda v: v > t.min_holder_count_raw, f"> {t.min_holder_count_raw:.6g}", required=True)
-    _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"])
+                 lambda v: v > t.min_holder_count_raw, f"> {t.min_holder_count_raw:.6g}", required=False)
+    _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"], required=False)
     _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate", "rat_trader"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}")
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count", "sniper_cnt"],
-                 lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}")
+                 lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}", required=False)
     return FilterResult(all(d.passed for d in details), details, {"x": x})
 
 

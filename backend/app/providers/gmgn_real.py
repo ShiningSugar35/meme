@@ -356,6 +356,7 @@ class GMGNProvider(MarketDataProvider):
             "liquidity_usd": cls._to_float(cls._first_present(raw, ["liquidity_usd", "liquidity", "pool_liquidity_usd", "reserve_usd"])),
             "sol_side_liquidity": cls._to_float(cls._first_present(raw, ["sol_side_liquidity", "sol_liquidity", "quote_reserve", "quote_liquidity"])),
             "volume_usd": cls._to_float(cls._first_present(raw, ["volume_usd", "volume", "volume_24h", "volume_h24", "volume_1h"])),
+            "volume_1h": cls._to_float(cls._first_present(raw, ["volume_1h", "volume1h", "volume_1h_usd", "volume_h1"])),
             "market_cap": cls._to_float(cls._first_present(raw, ["market_cap", "marketcap", "fdv", "fully_diluted_valuation", "usd_market_cap"])),
             "price_usd": cls._to_float(cls._first_present(raw, ["price_usd", "price", "usd_price"])),
             "price_sol": cls._to_float(cls._first_present(raw, ["price_sol", "sol_price", "native_price"])),
@@ -435,8 +436,6 @@ class GMGNProvider(MarketDataProvider):
             return tokens
 
         chain = params.get("chain", "sol")
-        min_created = params.get("min_created")
-        max_created = params.get("max_created")
         platforms = params.get("platforms", [])
 
         body: Dict[str, Any] = {
@@ -452,11 +451,6 @@ class GMGNProvider(MarketDataProvider):
         }
         if platforms:
             body["new_creation"]["launchpad_platform"] = list(platforms) if isinstance(platforms, list) else [str(platforms)]
-        if min_created is not None:
-            body["new_creation"]["min_created"] = f"{int(min_created)}s"
-        if max_created is not None:
-            body["new_creation"]["max_created"] = f"{int(max_created)}s"
-
         # Merge x-based risk filters into trenches body (from StrategyThresholds.to_trench_filters)
         # Support both nested trench_filters dict and flattened top-level keys.
         trench_filters = params.get("trench_filters", {})
@@ -611,6 +605,16 @@ class GMGNProvider(MarketDataProvider):
             "market_cap": market_cap,
             "swaps_5m": self._to_float(self._first_present(price_nested, ["swaps_5m", "swaps5m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["swaps_5m", "swaps5m"])),
             "swaps_1h": self._to_float(self._first_present(price_nested, ["swaps_1h", "swaps1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["swaps_1h", "swaps1h"])),
+            "volume_5m": self._to_float(self._first_present(price_nested, ["volume_5m", "volume5m", "volume_5m_usd"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["volume_5m", "volume5m", "volume_5m_usd"])),
+            "buy_volume_5m": self._to_float(self._first_present(price_nested, ["buy_volume_5m", "buyVolume5m", "buy_volume5m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["buy_volume_5m", "buyVolume5m", "buy_volume5m"])),
+            "sell_volume_5m": self._to_float(self._first_present(price_nested, ["sell_volume_5m", "sellVolume5m", "sell_volume5m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["sell_volume_5m", "sellVolume5m", "sell_volume5m"])),
+            "volume_1h": self._to_float(self._first_present(price_nested, ["volume_1h", "volume1h", "volume_1h_usd", "volume_h1"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["volume_1h", "volume1h", "volume_1h_usd", "volume_h1"])),
+            "buy_volume_1h": self._to_float(self._first_present(price_nested, ["buy_volume_1h", "buyVolume1h", "buy_volume1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["buy_volume_1h", "buyVolume1h", "buy_volume1h"])),
+            "sell_volume_1h": self._to_float(self._first_present(price_nested, ["sell_volume_1h", "sellVolume1h", "sell_volume1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["sell_volume_1h", "sellVolume1h", "sell_volume1h"])),
+            "price_change_percent1h": self._to_float(self._first_present(price_nested, ["price_change_percent1h", "price_change_1h", "change_1h", "price_change_percent_1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_change_percent1h", "price_change_1h", "change_1h", "price_change_percent_1h"])),
+            "price_range_24h_percentile": self._to_float(self._first_present(price_nested, ["price_range_24h_percentile", "price_24h_range_percentile", "price_24h_percentile", "h24_price_percentile", "price_position_24h", "price_24h_position"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_range_24h_percentile", "price_24h_range_percentile", "price_24h_percentile", "h24_price_percentile", "price_position_24h", "price_24h_position"])),
+            "high_24h": self._to_float(self._first_present(price_nested, ["high_24h", "price_high_24h", "highest_price_24h", "max_price_24h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["high_24h", "price_high_24h", "highest_price_24h", "max_price_24h"])),
+            "low_24h": self._to_float(self._first_present(price_nested, ["low_24h", "price_low_24h", "lowest_price_24h", "min_price_24h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["low_24h", "price_low_24h", "lowest_price_24h", "min_price_24h"])),
             "price_1m": self._to_float(self._first_present(price_nested, ["price_1m", "price1m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_1m", "price1m"])),
             "price_5m": self._to_float(self._first_present(price_nested, ["price_5m", "price5m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_5m", "price5m"])),
             "price_1h": self._to_float(self._first_present(price_nested, ["price_1h", "price1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_1h", "price1h"])),

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 import json
 import math
@@ -39,21 +39,6 @@ def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
 def _env_float(name: str, default: float) -> float:
     v = _to_float(os.getenv(name))
     return default if v is None else v
-
-
-def _parse_dt(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        try:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except Exception:
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def _executed_exit_rules(position: Dict[str, Any]) -> Set[str]:
@@ -118,9 +103,8 @@ async def decide_exit(
     Current strategy conventions:
     - price triggers use SOL-denominated token price;
     - dust force-exit is USD-denominated when a USD remaining value is present;
-    - dynamic stop exits 50% when 1m price change < -10% or 5m price change < -25%, with fallback to 1m low break;
-    - time stop exits 50% when there is no fill for 10 minutes and gain since the
-      last fill price is under 5%.
+    - hard TP exits 50% at 1.6x, 50% at 2.1x, and fully exits at 2.5x;
+    - hard SL exits 50% at 0.75x and fully exits at 0.55x.
     """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -174,66 +158,17 @@ async def decide_exit(
     # Hard TP/SL.  Use ladders so the highest applicable TP/SL dominates.
     if entry_price and entry_price > 0 and current_price and current_price > 0:
         multiple = current_price / entry_price
-        if multiple >= 2.70:
-            _append_reason(reasons, executed, "HARD_TP_270", 1.0, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
-        elif multiple >= 2.20:
-            _append_reason(reasons, executed, "HARD_TP_220", 0.5, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
-        elif multiple >= 1.66:
-            _append_reason(reasons, executed, "HARD_TP_166", 0.5, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
+        if multiple >= 2.50:
+            _append_reason(reasons, executed, "HARD_TP_250", 1.0, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
+        elif multiple >= 2.10:
+            _append_reason(reasons, executed, "HARD_TP_210", 0.5, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
+        elif multiple >= 1.60:
+            _append_reason(reasons, executed, "HARD_TP_160", 0.5, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
 
-        if multiple <= 0.50:
-            _append_reason(reasons, executed, "HARD_SL_50", 1.0, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price}, repeatable=True)
+        if multiple <= 0.55:
+            _append_reason(reasons, executed, "HARD_SL_55", 1.0, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price}, repeatable=True)
         elif multiple <= 0.75:
             _append_reason(reasons, executed, "HARD_SL_75", 0.5, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
-
-    # Dynamic stop: price momentum collapse within 1m or 5m window.
-    pct1m = _to_float(tick.get("price_change_percent1m") or position.get("price_change_percent1m"))
-    pct5m = _to_float(tick.get("price_change_percent5m") or position.get("price_change_percent5m"))
-    if (pct1m is not None and pct1m < -10) or (pct5m is not None and pct5m < -25):
-        _append_reason(
-            reasons,
-            executed,
-            "DYN_SL",
-            0.5,
-            {"price_change_percent1m": pct1m, "price_change_percent5m": pct5m},
-        )
-    elif pct1m is None and pct5m is None:
-        low_1m = _to_float(
-            rolling_60s.get("low_1m")
-            or rolling_60s.get("completed_1m_low")
-            or rolling_60s.get("low_excluding_current")
-            or rolling_60s.get("low")
-            or rolling_60s.get("low_sol")
-        )
-        if low_1m and low_1m > 0 and current_price and current_price > 0 and current_price < low_1m:
-            _append_reason(
-                reasons,
-                executed,
-                "DYN_SL",
-                0.5,
-                {"low_1m_usd": low_1m, "current_price_usd": current_price},
-            )
-
-    # Time stop: 10 minutes after the last fill, if price appreciation from the
-    # last fill is <5%, withdraw 50% rather than full exit.
-    last_fill_at = _parse_dt(position.get("last_fill_at"))
-    last_fill_price = _to_float(position.get("last_fill_price_usd") or position.get("entry_price_usd"))
-    if last_fill_at and last_fill_price and last_fill_price > 0 and current_price and current_price > 0:
-        if now >= last_fill_at + timedelta(minutes=10):
-            growth = current_price / last_fill_price - 1.0
-            if growth < 0.05:
-                _append_reason(
-                    reasons,
-                    executed,
-                    "TIME_STOPLOSS",
-                    0.5,
-                    {
-                        "growth_from_last_fill": growth,
-                        "last_fill_price_usd": last_fill_price,
-                        "current_price_usd": current_price,
-                        "last_fill_at": last_fill_at.isoformat(),
-                    },
-                )
 
     if not reasons:
         return ExitDecision(False, 0.0, [], False)
