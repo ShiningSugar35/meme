@@ -1,4 +1,4 @@
-# Environment variables
+﻿# Environment variables
 .env
 .env.*
 !.env.example
@@ -66,6 +66,10 @@ frontend/dist/
 tmp/
 temp/
 *.tmp
+tsconfig.tsbuildinfo
 
-# Simulation scripts
+# Simulation script (not committed)
+妯℃嫙浜ゆ槗.py
+
+# Simulation script (not committed)
 模拟交易.py
