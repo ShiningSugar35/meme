@@ -468,23 +468,12 @@ async def evaluate_price_activity_rules(
         "price_change_unit": "percent_points",
     })
 
-    # 24h price-range percentile: 0 < (current-low_24h)/(high_24h-low_24h) < 0.4 - 0.5*x
-    percentile_raw, percentile_source = _first_price_field([
-        "price_range_24h_percentile", "price_24h_range_percentile", "price_24h_percentile",
-        "h24_price_percentile", "price_position_24h", "price_24h_position",
-    ])
-    price_range_percentile = normalize_rate_fraction(_to_float(percentile_raw))
+    # 24h price-range percentile is derived from official OHLCV kline data.
+    price_range_percentile = None
+    percentile_source = "missing"
     high_24h = None
     low_24h = None
-    if price_range_percentile is None:
-        high_raw, high_source = _first_price_field(["high_24h", "price_high_24h", "highest_price_24h", "max_price_24h"])
-        low_raw, low_source = _first_price_field(["low_24h", "price_low_24h", "lowest_price_24h", "min_price_24h"])
-        high_24h = _to_float(high_raw)
-        low_24h = _to_float(low_raw)
-        if high_24h is not None and low_24h is not None and high_24h > low_24h:
-            price_range_percentile = (current_price - low_24h) / (high_24h - low_24h)
-            percentile_source = f"{high_source}+{low_source}"
-    if price_range_percentile is None and klines:
+    if klines:
         highs = [_kline_high(k) for k in klines]
         lows = [_kline_low(k) for k in klines]
         highs = [v for v in highs if v is not None and v > 0]
@@ -495,6 +484,8 @@ async def evaluate_price_activity_rules(
             if high_24h > low_24h:
                 price_range_percentile = (current_price - low_24h) / (high_24h - low_24h)
                 percentile_source = "kline_24h"
+    elif klines is not None:
+        percentile_source = "kline_empty"
     cond_range = (
         price_range_percentile is not None
         and t.price_range_24h_percentile_min < price_range_percentile < t.price_range_24h_percentile_max

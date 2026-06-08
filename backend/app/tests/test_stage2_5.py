@@ -48,7 +48,7 @@ class TestThresholds:
         assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
         assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
         assert math.isclose(t.price_range_24h_percentile_min, 0.0, rel_tol=1e-9)
-        assert math.isclose(t.price_range_24h_percentile_max, 0.3, rel_tol=1e-9)
+        assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
 
     def test_x_05_formulas(self):
         t = compute_thresholds(0.5)
@@ -350,6 +350,9 @@ async def test_top3_same_wallet_idempotent(repo):
 # ============================================================================
 
 class TestPriceFieldAliases:
+    def _klines(self):
+        return [{"open": 0.01, "high": 0.03, "low": 0.005, "close": 0.011}]
+
     def test_price_change_percent1h_direct(self):
         from ..strategy.filters import evaluate_price_activity_rules
         token = {"price_usd": 0.01}
@@ -359,9 +362,8 @@ class TestPriceFieldAliases:
             "price_change_percent1h": 10.5,
             "swaps_1h": 100,
             "volume_1h": 3000,
-            "price_range_24h_percentile": 0.15,
         }
-        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
+        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest, klines=self._klines()))
         detail = next(d for d in res.details if d["rule"] == "price_change_1h")
         assert detail["passed"] is True
         assert detail["source"] == "direct_price_change_percent1h"
@@ -374,10 +376,9 @@ class TestPriceFieldAliases:
             "price_usd": 0.011,
             "price_change_percent1h": 10.5,
             "swaps_1h": 100,
-            "price_range_24h_percentile": 0.15,
             "pool": {"volume_1h": 3000},
         }
-        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
+        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest, klines=self._klines()))
         vol_detail = next(d for d in res.details if d["rule"] == "volume_per_swap_1h")
         assert vol_detail["volume_1h"] == 3000
 
@@ -389,8 +390,7 @@ class TestPriceFieldAliases:
             "price_usd": 0.011,
             "swaps_1h": 100,
             "volume_1h": 3000,
-            "price_range_24h_percentile": 0.15,
         }
-        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
+        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest, klines=self._klines()))
         detail = next(d for d in res.details if d["rule"] == "price_change_1h")
         assert detail["source"] == "missing" or detail["source"].startswith("computed")

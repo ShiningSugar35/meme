@@ -530,9 +530,9 @@ class GMGNProvider(MarketDataProvider):
         path = settings.get_gmgn_kline_path() if hasattr(settings, "get_gmgn_kline_path") else (getattr(settings, "GMGN_KLINE_PATH", None) or "/v1/market/token_kline")
         params: Dict[str, Any] = {"chain": "sol", "address": token_mint, "resolution": interval, "limit": int(limit)}
         if from_ts is not None:
-            params["from"] = int(from_ts)
+            params["from"] = int(from_ts if int(from_ts) > 10_000_000_000 else int(from_ts) * 1000)
         if to_ts is not None:
-            params["to"] = int(to_ts)
+            params["to"] = int(to_ts if int(to_ts) > 10_000_000_000 else int(to_ts) * 1000)
         data = await self._make_request(path, params, method="GET", credential_slot=credential_slot)
         root = data.get("data", data) if isinstance(data, dict) else data
         raw_klines = self._extract_items(root, ("klines", "list", "items", "rows", "data"))
@@ -612,9 +612,6 @@ class GMGNProvider(MarketDataProvider):
             "buy_volume_1h": self._to_float(self._first_present(price_nested, ["buy_volume_1h", "buyVolume1h", "buy_volume1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["buy_volume_1h", "buyVolume1h", "buy_volume1h"])),
             "sell_volume_1h": self._to_float(self._first_present(price_nested, ["sell_volume_1h", "sellVolume1h", "sell_volume1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["sell_volume_1h", "sellVolume1h", "sell_volume1h"])),
             "price_change_percent1h": self._to_float(self._first_present(price_nested, ["price_change_percent1h", "price_change_1h", "change_1h", "price_change_percent_1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_change_percent1h", "price_change_1h", "change_1h", "price_change_percent_1h"])),
-            "price_range_24h_percentile": self._to_float(self._first_present(price_nested, ["price_range_24h_percentile", "price_24h_range_percentile", "price_24h_percentile", "h24_price_percentile", "price_position_24h", "price_24h_position"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_range_24h_percentile", "price_24h_range_percentile", "price_24h_percentile", "h24_price_percentile", "price_position_24h", "price_24h_position"])),
-            "high_24h": self._to_float(self._first_present(price_nested, ["high_24h", "price_high_24h", "highest_price_24h", "max_price_24h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["high_24h", "price_high_24h", "highest_price_24h", "max_price_24h"])),
-            "low_24h": self._to_float(self._first_present(price_nested, ["low_24h", "price_low_24h", "lowest_price_24h", "min_price_24h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["low_24h", "price_low_24h", "lowest_price_24h", "min_price_24h"])),
             "price_1m": self._to_float(self._first_present(price_nested, ["price_1m", "price1m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_1m", "price1m"])),
             "price_5m": self._to_float(self._first_present(price_nested, ["price_5m", "price5m"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_5m", "price5m"])),
             "price_1h": self._to_float(self._first_present(price_nested, ["price_1h", "price1h"])) if isinstance(price_nested, dict) else self._to_float(self._first_present(raw, ["price_1h", "price1h"])),

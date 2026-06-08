@@ -321,6 +321,9 @@ class TestTop3BaselineFallback:
 # ============================================================================
 
 class TestPriceChangePercent1h:
+    def _klines(self):
+        return [{"open": 0.01, "high": 0.03, "low": 0.005, "close": 0.011}]
+
     def test_top_level_takes_priority(self):
         """When top-level price_change_percent1h exists, nested must NOT overwrite."""
         token = {"price_usd": 0.01}
@@ -330,10 +333,9 @@ class TestPriceChangePercent1h:
             "price_change_percent1h": 20.0,
             "swaps_1h": 100,
             "volume_1h": 3000,
-            "price_range_24h_percentile": 0.15,
             "pool": {"price_change_percent1h": 5.0},
         }
-        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
+        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest, klines=self._klines()))
         detail = next(d for d in res.details if d["rule"] == "price_change_1h")
         assert detail["passed"] is True
         assert detail["pct_change"] == 20.0
@@ -347,10 +349,9 @@ class TestPriceChangePercent1h:
             "price_usd": 0.011,
             "swaps_1h": 100,
             "volume_1h": 3000,
-            "price_range_24h_percentile": 0.15,
             "pool": {"price_change_percent1h": 20.0},
         }
-        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
+        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest, klines=self._klines()))
         detail = next(d for d in res.details if d["rule"] == "price_change_1h")
         assert detail["passed"] is True
         assert detail["pct_change"] == 20.0
@@ -364,9 +365,8 @@ class TestPriceChangePercent1h:
             "price_usd": 0.011,
             "swaps_1h": 100,
             "volume_1h": 3000,
-            "price_range_24h_percentile": 0.15,
         }
-        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest))
+        res = asyncio.run(evaluate_price_activity_rules(token, strategy, latest, klines=self._klines()))
         detail = next(d for d in res.details if d["rule"] == "price_change_1h")
         assert detail["source"] in ("missing", "computed_from_price_1h")
 

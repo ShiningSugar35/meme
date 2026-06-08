@@ -104,7 +104,7 @@ async def decide_exit(
     - price triggers use SOL-denominated token price;
     - dust force-exit is USD-denominated when a USD remaining value is present;
     - hard TP exits 50% at 1.6x, 50% at 2.1x, and fully exits at 2.5x;
-    - hard SL exits 50% at 0.75x and fully exits at 0.55x.
+    - hard SL exits 50% at 0.7x and fully exits at 0.5x.
     """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -165,10 +165,10 @@ async def decide_exit(
         elif multiple >= 1.60:
             _append_reason(reasons, executed, "HARD_TP_160", 0.5, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
 
-        if multiple <= 0.55:
-            _append_reason(reasons, executed, "HARD_SL_55", 1.0, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price}, repeatable=True)
-        elif multiple <= 0.75:
-            _append_reason(reasons, executed, "HARD_SL_75", 0.5, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
+        if multiple <= 0.50:
+            _append_reason(reasons, executed, "HARD_SL_50", 1.0, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price}, repeatable=True)
+        elif multiple <= 0.70:
+            _append_reason(reasons, executed, "HARD_SL_70", 0.5, {"multiple": multiple, "entry_price_usd": entry_price, "current_price_usd": current_price})
 
     if not reasons:
         return ExitDecision(False, 0.0, [], False)

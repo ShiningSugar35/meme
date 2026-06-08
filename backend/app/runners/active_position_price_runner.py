@@ -130,13 +130,13 @@ class ActivePositionPriceRunner:
         if multiple >= 1.60 and "HARD_TP_160" not in executed_rules and "HARD_TP_250" not in executed_rules:
             reasons.append(("HARD_TP_160", 0.5))
 
-        # HARD_SL_55: full exit
-        if multiple <= 0.55 and "HARD_SL_55" not in executed_rules:
-            reasons.append(("HARD_SL_55", 1.0))
+        # HARD_SL_50: full exit
+        if multiple <= 0.50 and "HARD_SL_50" not in executed_rules:
+            reasons.append(("HARD_SL_50", 1.0))
 
-        # HARD_SL_75: 50% exit
-        if multiple <= 0.75 and "HARD_SL_75" not in executed_rules and "HARD_SL_55" not in executed_rules:
-            reasons.append(("HARD_SL_75", 0.5))
+        # HARD_SL_70: 50% exit
+        if multiple <= 0.70 and "HARD_SL_70" not in executed_rules and "HARD_SL_50" not in executed_rules:
+            reasons.append(("HARD_SL_70", 0.5))
 
         # Completed type — also try fetching latest token snapshot for up-to-date type
         token_type = position.get("latest_token_type") or position.get("type")

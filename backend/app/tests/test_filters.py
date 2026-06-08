@@ -62,7 +62,7 @@ def test_thresholds_x_02():
     assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
     assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
     assert math.isclose(t.price_range_24h_percentile_min, 0.0, rel_tol=1e-9)
-    assert math.isclose(t.price_range_24h_percentile_max, 0.3, rel_tol=1e-9)
+    assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
 
 
 def test_thresholds_x_01():
@@ -130,11 +130,17 @@ def test_top1_holder_missing():
 # Price filter tests
 # ---------------------------------------------------------------------------
 
+def _pass_range_klines(current_price: float):
+    return [{"open_time": datetime.now(timezone.utc).isoformat(),
+             "open": current_price, "high": current_price * 3,
+             "low": current_price * 0.5, "close": current_price}]
+
+
 def test_swaps_1h_below_threshold_fails():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
     latest = {"price": 0.001, "price_usd": 0.001, "swaps_1h": 8, "price_1h": 0.0009,
-              "volume_1h": 500, "price_range_24h_percentile": 0.15}
-    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest))
+              "volume_1h": 500}
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=_pass_range_klines(0.001)))
     swaps_detail = next((d for d in res.details if d.get("rule") == "swaps_1h_min"), None)
     assert swaps_detail is not None
     # x=0.2 → threshold = 7+20*0.2 = 11, 8 < 11 should fail
@@ -144,8 +150,8 @@ def test_swaps_1h_below_threshold_fails():
 def test_volume_per_swap_fails():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
     latest = {"price": 0.001, "price_usd": 0.001, "swaps_1h": 200,
-              "price_1h": 0.0009, "volume_1h": 1000, "price_range_24h_percentile": 0.15}
-    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest))
+              "price_1h": 0.0009, "volume_1h": 1000}
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=_pass_range_klines(0.001)))
     vps_detail = next((d for d in res.details if d.get("rule") == "volume_per_swap_1h"), None)
     assert vps_detail is not None
     assert vps_detail.get("vps") == 5.0
@@ -156,8 +162,8 @@ def test_volume_per_swap_fails():
 def test_volume_per_swap_zero_when_no_1h_swaps():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
     latest = {"price": 0.001, "price_usd": 0.001, "swaps_1h": 0,
-              "price_1h": 0.0009, "volume_1h": 0, "price_range_24h_percentile": 0.15}
-    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest))
+              "price_1h": 0.0009, "volume_1h": 0}
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=_pass_range_klines(0.001)))
     vps_detail = next((d for d in res.details if d.get("rule") == "volume_per_swap_1h"), None)
     assert vps_detail is not None
     assert vps_detail.get("vps") == 0.0
@@ -168,8 +174,8 @@ def test_volume_per_swap_zero_when_no_1h_swaps():
 def test_price_change_threshold():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
     latest = {"price": 0.0011, "price_usd": 0.0011, "swaps_1h": 500, "price_1h": 0.001,
-              "volume_1h": 14000, "price_range_24h_percentile": 0.15}
-    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest))
+              "volume_1h": 14000}
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=_pass_range_klines(0.0011)))
     pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
     assert pct_detail is not None
     # (0.0011 - 0.001) / 0.001 * 100 = 10%
@@ -189,9 +195,9 @@ def test_missing_price_fails():
 
 def test_swaps_fallback_from_token():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat(),
-             "swaps_1h": 500, "volume_1h": 14000, "price_range_24h_percentile": 0.15}
+             "swaps_1h": 500, "volume_1h": 14000}
     latest = {"price": 0.001, "price_usd": 0.001, "price_1h": 0.0009}
-    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest))
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=_pass_range_klines(0.001)))
     swaps_detail = next((d for d in res.details if d.get("rule") == "swaps_1h_min"), None)
     assert swaps_detail.get("swaps_1h") == 500
     assert swaps_detail.get("source") == "token_snapshot"
@@ -200,7 +206,7 @@ def test_swaps_fallback_from_token():
 def test_kline_fallback():
     token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()}
     klines = [{"open_time": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
-               "open": 0.001, "high": 0.002, "low": 0.001, "close": 0.002}]
+               "open": 0.001, "high": 0.006, "low": 0.001, "close": 0.002}]
     latest = {"price": 0.002, "price_usd": 0.002, "swaps_1h": 500, "volume_1h": 14000}
     res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=klines))
     pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)

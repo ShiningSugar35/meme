@@ -29,10 +29,15 @@ def test_exit_hard_levels_and_completed():
     res = asyncio.run(decide_exit(position, tick, rolling, {}))
     assert any(r.name.startswith("HARD_TP") for r in res.reasons)
 
-    # hard sl 0.6
-    tick2 = {"price_sol": 0.55}
+    # hard sl partial at 0.7x
+    tick2 = {"price_sol": 0.65}
     res2 = asyncio.run(decide_exit(position, tick2, rolling, {}))
-    assert any(r.name.startswith("HARD_SL") for r in res2.reasons)
+    assert any(r.name == "HARD_SL_70" and r.desired_exit_pct == 0.5 for r in res2.reasons)
+
+    # hard sl full at 0.5x
+    tick3 = {"price_sol": 0.49}
+    res3 = asyncio.run(decide_exit(position, tick3, rolling, {}))
+    assert any(r.name == "HARD_SL_50" and r.desired_exit_pct == 1.0 for r in res3.reasons)
 
     # remaining value dust
     pos4 = {"entry_price_sol": 1.0, "remaining_value_usd": 5}

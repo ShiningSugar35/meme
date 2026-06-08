@@ -129,7 +129,7 @@ class StrategyThresholds:
         swaps_1h_min = 7.0 + 20.0 * xf
         volume_per_swap_1h_min = 23.0 + 20.0 * xf
         price_range_24h_percentile_min = 0.0
-        price_range_24h_percentile_max = 0.4 - 0.5 * xf
+        price_range_24h_percentile_max = 0.45 - 0.5 * xf
 
         return cls(
             x=xf,
