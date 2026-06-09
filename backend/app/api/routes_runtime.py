@@ -567,6 +567,21 @@ async def runtime_portfolio_table(request: Request, account_type: str = "SIM", l
             await repo.close()
 
 
+@router.get("/trade-history")
+async def trade_history(request: Request, account_type: str = "ALL", limit: int = 500, since_session: bool = False):
+    repo, owned = await _get_repo(request)
+    try:
+        rows = await repo.list_trade_history(
+            account_type=str(account_type or "ALL").upper(),
+            limit=int(limit),
+            since_session=bool(since_session),
+        )
+        return {"ok": True, "items": rows}
+    finally:
+        if owned:
+            await repo.close()
+
+
 @router.get("/filter-stats")
 async def runtime_filter_stats(request: Request):
     repo, owned = await _get_repo(request)

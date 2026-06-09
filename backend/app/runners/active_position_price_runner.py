@@ -14,6 +14,8 @@ from typing import Any, Dict, Optional, Set
 from ..config import settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
+from ..providers.credential_router import get_credential_router
+from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from .discovery_runner import acquire_holding_slot
 
@@ -74,6 +76,7 @@ class ActivePositionPriceRunner:
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
         self._last_price_update: Dict[int, Dict[str, Any]] = {}
+        self._consecutive_price_failures: Dict[str, int] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -93,8 +96,8 @@ class ActivePositionPriceRunner:
         token = position["token_mint"]
         account_type = _account_type(position)
 
-        # Fetch latest price
-        latest = await self._fetch_latest_price(token, account_type)
+        # Fetch latest price with retry across slots
+        latest = await self._fetch_latest_price(token, account_type, position=position)
         current_price = _to_float(
             latest.get("price_usd") or latest.get("latest_price_usd") or latest.get("price")
         )
@@ -165,12 +168,113 @@ class ActivePositionPriceRunner:
 
         await self._execute_exit(position, exit_pct, reason_code, current_price, now)
 
-    async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
-        slot = acquire_holding_slot("price_runner")
+    async def _fetch_price_with_retry(self, token_mint: str, preferred_slot: Optional[int]) -> Dict[str, Any]:
+        rl = get_rate_limiter()
+        feature_pool = settings.get_feature_slots()
+        attempted: Set[int] = set()
+
+        for attempt in range(3):
+            slot = None
+            if attempt == 0 and preferred_slot is not None and rl.is_slot_available(preferred_slot):
+                slot = preferred_slot
+            elif feature_pool:
+                for s in feature_pool:
+                    if s not in attempted and rl.is_slot_available(s):
+                        slot = s
+                        break
+                if slot is None:
+                    for s in feature_pool:
+                        if s not in attempted:
+                            slot = s
+                            break
+
+            if slot is None:
+                break
+
+            attempted.add(slot)
+            try:
+                return await self.gmgn.fetch_latest_price(token_mint, credential_slot=slot)
+            except Exception:
+                continue
+
+        raise RuntimeError(f"Price fetch failed for {token_mint}: all 3 retry attempts exhausted")
+
+    async def _fetch_latest_price(self, token: str, account_type: str, position: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        preferred_slot = acquire_holding_slot("price_runner")
         try:
-            return await self.gmgn.fetch_latest_price(token, credential_slot=slot)
-        except Exception as e:
+            data = await self._fetch_price_with_retry(token, preferred_slot)
+            self._consecutive_price_failures.pop(token, None)
+            return data
+        except Exception:
+            fails = self._consecutive_price_failures.get(token, 0) + 1
+            self._consecutive_price_failures[token] = fails
+            if position is not None:
+                await self._emergency_price_exit(position)
             return {}
+
+    async def _emergency_price_exit(self, position: Dict[str, Any]):
+        token = position["token_mint"]
+        pos_id = int(position["id"])
+        account_type = _account_type(position)
+        is_live = bool(position.get("is_live"))
+
+        logger.warning("Emergency price exit triggered", token=token, account_type=account_type)
+
+        if is_live and self.trading_pipeline is not None:
+            try:
+                await self.trading_pipeline.execute_sell(
+                    position=position,
+                    exit_pct=1.0,
+                    exit_reason="PRICE_API_UNAVAILABLE_EXIT",
+                )
+                await self.repo.append_system_event(
+                    "WARN", "PRICE",
+                    f"Emergency LIVE exit for {token} (price API unavailable)",
+                    _safe_json({"position_id": pos_id, "reason": "PRICE_API_UNAVAILABLE_EXIT"}),
+                    account_type=account_type,
+                )
+            except Exception as e:
+                logger.error("Emergency LIVE exit failed", error=str(e), token=token)
+            return
+
+        if is_live:
+            await self.repo.append_system_event(
+                "WARN", "PRICE",
+                f"Emergency LIVE exit skipped (no pipeline): {token}",
+                _safe_json({"position_id": pos_id}),
+                account_type=account_type,
+            )
+            return
+
+        # SIM emergency exit
+        if self.trading_pipeline is not None and hasattr(self.trading_pipeline, "emergency_sim_exit"):
+            try:
+                await self.trading_pipeline.emergency_sim_exit(
+                    position=position,
+                    reason="PRICE_API_UNAVAILABLE_EXIT",
+                )
+                return
+            except Exception as e:
+                logger.error("Emergency SIM exit failed via pipeline", error=str(e), token=token)
+
+        # Fallback SIM close
+        await self.repo.append_trade_event(
+            f"SELL_PRICE:{pos_id}:PRICE_API_UNAVAILABLE_EXIT",
+            position_id=pos_id,
+            token_mint=token,
+            strategy_id=position.get("live_strategy_id"),
+            is_live=0,
+            account_type=account_type,
+            side="SELL",
+            event_type="SIM_SELL",
+            status="CONFIRMED",
+            requested_pct=1.0,
+            executed_token_amount=0,
+            price_usd=0,
+            exit_reason="PRICE_API_UNAVAILABLE_EXIT",
+            provider="PRICE_RUNNER_EMERGENCY",
+        )
+        await self.repo.close_position(pos_id, close_reason="PRICE_API_UNAVAILABLE_EXIT")
 
     async def _execute_exit(
         self,

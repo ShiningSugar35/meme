@@ -101,6 +101,43 @@ export interface PortfolioRow {
   [key: string]: unknown;
 }
 
+export interface TradeHistoryRow {
+  position_id: number;
+  account_type: string;
+  status: string;
+  token_mint: string;
+  mint_short: string;
+  symbol: string;
+  name: string;
+  strategy_id: number | null;
+  strategy_name: string | null;
+  opened_at: string;
+  closed_at: string | null;
+  entry_price_usd: number;
+  entry_token_amount: number;
+  entry_value_usd: number;
+  remaining_token_amount: number;
+  remaining_value_usd: number;
+  sell_value_usd: number;
+  current_or_exit_value_usd: number;
+  pnl_usd: number;
+  pnl_pct: number | null;
+  realized_pnl_pct: number | null;
+  close_reason: string | null;
+  last_exit_reason: string | null;
+  trade_count: number;
+  buy_count: number;
+  sell_count: number;
+}
+
+export async function getTradeHistory(account_type = "ALL", limit = 500, since_session = false): Promise<TradeHistoryRow[]> {
+  const params = new URLSearchParams({ account_type, limit: String(limit), since_session: String(since_session) });
+  const res = await fetch(`${API_BASE}/api/runtime/trade-history?${params}`);
+  if (!res.ok) throw new Error(`trade-history ${res.status}`);
+  const data = await res.json();
+  return data.items ?? [];
+}
+
 export interface TrenchHistoryItem {
   count: number;
   passed: number;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import warnings
 from enum import Enum
@@ -9,10 +10,12 @@ from typing import Dict, List, Optional
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .logging_config import logger
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
-except ImportError:  # pragma: no cover
+except ImportError:
     pass
 
 
@@ -61,7 +64,6 @@ class Settings(BaseSettings):
     JUPITER_API_BASE: Optional[str] = None
     SIMULATION_ENABLED: bool = Field(True)
 
-    # GMGN API configuration.
     GMGN_API_BASE_URL: Optional[str] = None
     GMGN_API_KEY: Optional[SecretStr] = None
     GMGN_PUBLIC_KEY: Optional[str] = None
@@ -122,8 +124,6 @@ class Settings(BaseSettings):
     GMGN_TRENCHES_PLATFORMS: str = Field("")
     GMGN_TOKEN_PRICE_PATH: str = Field("/v1/token/info")
     GMGN_KLINE_PATH: str = Field("/v1/market/token_kline")
-    # Backward-compatible alias for older provider code.  The old field caused
-    # AttributeError when only GMGN_KLINE_PATH existed in .env.
     GMGN_TOKEN_KLINE_PATH: Optional[str] = None
     GMGN_TOKEN_INFO_PATH: str = Field("/v1/token/info")
     GMGN_TOKEN_SECURITY_PATH: str = Field("/v1/token/security")
@@ -131,22 +131,17 @@ class Settings(BaseSettings):
     GMGN_TOKEN_HOLDERS_PATH: str = Field("/v1/market/token_top_holders")
     GMGN_TIMEOUT_SECONDS: float = Field(8.0)
 
-    # Rate limiter / credential role — GMGN_FEATURE_SLOTS retained for backward compat
-    # but get_feature_slots() currently returns get_discovery_slots() — there are no
-    # independent feature slots; all non-holding slots are discovery.
     GMGN_DISCOVERY_PRIMARY_SLOT: int = Field(0)
-    GMGN_DISCOVERY_RESERVE_SLOT: int = Field(1)
+    GMGN_DISCOVERY_RESERVE_SLOT: Optional[int] = Field(None)
     GMGN_FEATURE_SLOTS: str = Field("")
     GMGN_DISCOVERY_MODE: str = Field("two_group")
     GMGN_DISCOVERY_GROUP_DELAY_SECONDS: float = Field(2.0)
     GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
 
-    # Per-second token-bucket rate limiter (matches GMGN leaky-bucket: rate=20/s, capacity=20)
     GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_SECOND: float = Field(20.0)
     GMGN_RATE_LIMIT_BUCKET_CAPACITY: float = Field(20.0)
     GMGN_RATE_LIMIT_BUCKET_WAIT_MAX_SECONDS: float = Field(5.0)
 
-    # Stage delays and concurrency limits
     GMGN_POST_TRENCHES_STAGE_DELAY_SECONDS: float = Field(2.0)
     GMGN_FEATURE_CALL_DELAY_SECONDS: float = Field(0.15)
     GMGN_TRENCHES_CONCURRENCY: int = Field(2)
@@ -154,20 +149,106 @@ class Settings(BaseSettings):
     GMGN_TRENCHES_DEBUG_RELAXED_ON_ZERO: bool = Field(False)
 
     STRATEGY_DEFAULT_X: float = Field(0.20)
-
-    # GMGN tuning
     GMGN_TRENCHES_LIMIT: int = Field(200)
+
+    _slot_plan: Optional[dict] = None
+
+    def _compute_slot_plan(self) -> dict:
+        total = len(self.get_gmgn_credentials())
+        if total >= 4:
+            reserve = self.GMGN_DISCOVERY_RESERVE_SLOT
+            if reserve is None:
+                reserve = random.Random(str(os.getpid())).choice(range(total))
+            remaining = [s for s in range(total) if s != reserve]
+            discovery_slots = remaining[:2]
+            return {
+                "discovery_new_creation": [discovery_slots[0]] if len(discovery_slots) > 0 else [],
+                "discovery_near_completion": [discovery_slots[1]] if len(discovery_slots) > 1 else [],
+                "discovery_reserve": [reserve],
+                "feature_holding_pool": remaining[2:],
+            }
+        elif total == 3:
+            return {
+                "discovery_new_creation": [0],
+                "discovery_near_completion": [1],
+                "discovery_reserve": [],
+                "feature_holding_pool": [2],
+            }
+        elif total == 2:
+            return {
+                "discovery_new_creation": [0],
+                "discovery_near_completion": [],
+                "discovery_reserve": [],
+                "feature_holding_pool": [1],
+            }
+        elif total == 1:
+            return {
+                "discovery_new_creation": [0],
+                "discovery_near_completion": [],
+                "discovery_reserve": [],
+                "feature_holding_pool": [0],
+            }
+        else:
+            return {
+                "discovery_new_creation": [],
+                "discovery_near_completion": [],
+                "discovery_reserve": [],
+                "feature_holding_pool": [],
+            }
+
+    def _get_slot_plan(self) -> dict:
+        if self._slot_plan is None:
+            self._slot_plan = self._compute_slot_plan()
+            plan = self._slot_plan
+            logger.info(
+                "gmgn_slot_plan total_credentials=%d discovery_new_creation=%s discovery_near_completion=%s reserve=%s feature_count=%d",
+                len(self.get_gmgn_credentials()),
+                plan["discovery_new_creation"],
+                plan["discovery_near_completion"],
+                plan["discovery_reserve"],
+                len(plan["feature_holding_pool"]),
+            )
+        return self._slot_plan
 
     def get_discovery_primary_slot(self) -> int:
         return self.GMGN_DISCOVERY_PRIMARY_SLOT
 
-    def get_discovery_reserve_slot(self) -> int:
-        return self.GMGN_DISCOVERY_RESERVE_SLOT
+    def get_discovery_reserve_slot(self) -> Optional[int]:
+        plan = self._get_slot_plan()
+        slots = plan["discovery_reserve"]
+        return slots[0] if slots else None
+
+    def get_discovery_type_slots(self) -> Dict[str, Optional[int]]:
+        plan = self._get_slot_plan()
+        return {
+            "new_creation": plan["discovery_new_creation"][0] if plan["discovery_new_creation"] else None,
+            "near_completion": plan["discovery_near_completion"][0] if plan["discovery_near_completion"] else None,
+        }
+
+    def get_discovery_slots(self) -> List[int]:
+        plan = self._get_slot_plan()
+        return plan["discovery_new_creation"] + plan["discovery_near_completion"]
 
     def get_feature_slots(self) -> List[int]:
-        return self.get_discovery_slots()
+        return list(self._get_slot_plan()["feature_holding_pool"])
 
-    # Jupiter API Configuration
+    def get_holding_slots(self) -> List[int]:
+        return list(self._get_slot_plan()["feature_holding_pool"])
+
+    def get_gmgn_slot_pools(self) -> Dict[str, List[int]]:
+        plan = self._get_slot_plan()
+        feature_slots = list(plan["feature_holding_pool"])
+        return {
+            "discovery_new_creation": list(plan["discovery_new_creation"]),
+            "discovery_near_completion": list(plan["discovery_near_completion"]),
+            "discovery_reserve": list(plan["discovery_reserve"]),
+            "token_info": feature_slots,
+            "kline": feature_slots,
+            "holders": feature_slots,
+            "holding": feature_slots,
+            "feature": feature_slots,
+        }
+
     JUPITER_API_BASE_URL: Optional[str] = None
     JUPITER_API_KEY_1: Optional[SecretStr] = None
     JUPITER_API_KEY_2: Optional[SecretStr] = None
@@ -176,7 +257,6 @@ class Settings(BaseSettings):
     JUPITER_API_KEY_MEME2: Optional[SecretStr] = None
     JUPITER_API_KEY_MEME3: Optional[SecretStr] = None
 
-    # RPC configuration.
     SOLANA_RPC_HTTP_URLS: Optional[str] = None
     SOLANA_RPC_HTTP_PRIMARY: Optional[str] = None
     SOLANA_RPC_WS_PRIMARY: Optional[str] = None
@@ -190,13 +270,11 @@ class Settings(BaseSettings):
     ANKR_API_KEY_1: Optional[SecretStr] = None
     ANKR_API_KEY_2: Optional[SecretStr] = None
 
-    # Jito Configuration
     JITO_ENABLED: bool = Field(True)
     JITO_BLOCK_ENGINE_URL: str = Field("https://mainnet.block-engine.jito.wtf")
     JITO_TIP_FLOOR_URL: str = Field("https://bundles.jito.wtf/api/v1/bundles/tip_floor")
     JITO_TIP_STREAM_WS: str = Field("wss://bundles.jito.wtf/api/v1/bundles/tip_stream")
 
-    # Trading Parameters
     POLL_INTERVAL_SECONDS: int = Field(60)
     ACTIVE_POSITION_PRICE_POLL_SECONDS: int = Field(1)
     TIP_FLOOR_REFRESH_SECONDS: int = Field(3)
@@ -209,7 +287,6 @@ class Settings(BaseSettings):
     ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.015)
     ENTRY_MAX_USD: float = Field(150.0)
 
-    # Risk Feature Scan Tiers, USD based.
     RISK_FEATURE_SCAN_TIER_1_USD: float = Field(150.0)
     RISK_FEATURE_SCAN_TIER_1_SECONDS: int = Field(4)
     RISK_FEATURE_SCAN_TIER_2_USD: float = Field(100.0)
@@ -290,7 +367,6 @@ class Settings(BaseSettings):
     def _scan_gmgn_accounts(self, max_items: Optional[int] = None) -> List[dict]:
         env_keys = os.environ.keys()
         accounts_by_index: Dict[int, dict] = {}
-
         for field, values in (
             ("api_key", self._csv_env_values("GMGN_API_KEY")),
             ("public_key", self._csv_env_values("GMGN_PUBLIC_KEY")),
@@ -300,7 +376,6 @@ class Settings(BaseSettings):
             for idx, value in enumerate(values, start=1):
                 if value:
                     accounts_by_index.setdefault(idx, {"index": idx})[field] = value
-
         indexed_fields: Dict[int, Dict[str, str]] = {}
         for key in sorted(set(env_keys) | set(self._indexed_keys())):
             for pattern in (
@@ -317,12 +392,10 @@ class Settings(BaseSettings):
                 value = self._env_value(key)
                 if value:
                     indexed_fields.setdefault(idx, {})[field] = value
-
         for idx, values in indexed_fields.items():
             account = accounts_by_index.setdefault(idx, {"index": idx})
             for field, value in values.items():
                 account.setdefault(field, value)
-
         accounts: List[dict] = []
         for idx in sorted(accounts_by_index):
             raw = accounts_by_index[idx]
@@ -332,11 +405,8 @@ class Settings(BaseSettings):
             private_key = raw.get("private_key", "")
             if api_key or client_id or private_key:
                 accounts.append({
-                    "index": idx,
-                    "api_key": api_key,
-                    "client_id": client_id,
-                    "public_key": public_key,
-                    "private_key": private_key,
+                    "index": idx, "api_key": api_key, "client_id": client_id,
+                    "public_key": public_key, "private_key": private_key,
                 })
         return accounts
 
@@ -365,42 +435,13 @@ class Settings(BaseSettings):
         api_keys = self._scan_numbered_secrets("GMGN", "API_KEY")
         private_keys = self._scan_numbered_secrets("GMGN", "PRIVATE_KEY")
         return [
-            {"index": idx + 1, "api_key": api_key, "client_id": "", "public_key": "", "private_key": private_keys[idx] if idx < len(private_keys) else ""}
+            {"index": idx + 1, "api_key": api_key, "client_id": "", "public_key": "",
+             "private_key": private_keys[idx] if idx < len(private_keys) else ""}
             for idx, api_key in enumerate(api_keys)
         ]
 
     def get_gmgn_credential_count(self) -> int:
         return len(self.get_gmgn_credentials())
-
-    def get_holding_slots(self) -> List[int]:
-        total = self.get_gmgn_credential_count()
-        if total <= 0:
-            return []
-        holding_count = max(1, total // 6)
-        if total > 1:
-            holding_count = min(holding_count, total - 1)
-        else:
-            holding_count = 1
-        return list(range(holding_count))
-
-    def get_discovery_slots(self) -> List[int]:
-        total = self.get_gmgn_credential_count()
-        if total <= 0:
-            return []
-        holding = set(self.get_holding_slots())
-        discovery = [slot for slot in range(total) if slot not in holding]
-        return discovery or [0]
-
-    def get_gmgn_slot_pools(self) -> Dict[str, List[int]]:
-        discovery = self.get_discovery_slots()
-        holding = self.get_holding_slots()
-        return {
-            "discovery": discovery,
-            "holding": holding,
-            "token_info": discovery,
-            "kline": discovery,
-            "holders": discovery,
-        }
 
     def _scan_jupiter_api_keys(self) -> List[str]:
         env_keys = os.environ.keys()
@@ -560,14 +601,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_live_config(self):
-        # Mirror canonical kline path into the legacy field so any old call site
-        # using settings.GMGN_TOKEN_KLINE_PATH cannot raise AttributeError and
-        # still respects GMGN_KLINE_PATH from .env.
         if not self.GMGN_TOKEN_KLINE_PATH:
             self.GMGN_TOKEN_KLINE_PATH = self.GMGN_KLINE_PATH
         elif not self.GMGN_KLINE_PATH:
             self.GMGN_KLINE_PATH = self.GMGN_TOKEN_KLINE_PATH
-
         mode = self.get_provider_mode()
         if mode == ProviderMode.LIVE:
             missing: List[str] = []

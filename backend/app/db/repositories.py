@@ -1519,6 +1519,79 @@ class Repositories:
                 rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def list_trade_history(
+        self,
+        account_type: str = "ALL",
+        limit: int = 500,
+        since_session: bool = False,
+    ) -> List[Dict[str, Any]]:
+        sql = """
+            SELECT p.id AS position_id,
+                   p.account_type,
+                   p.status,
+                   p.token_mint,
+                   SUBSTR(p.token_mint, 1, 4) || '...' || SUBSTR(p.token_mint, -4) AS mint_short,
+                   COALESCE(t.symbol, '') AS symbol,
+                   COALESCE(t.name, '') AS name,
+                   p.live_strategy_id AS strategy_id,
+                   sg.name AS strategy_name,
+                   p.opened_at,
+                   p.closed_at,
+                   p.entry_price_usd,
+                   p.entry_token_amount,
+                   p.entry_price_usd * p.entry_token_amount AS entry_value_usd,
+                   p.remaining_token_amount,
+                   p.remaining_value_usd,
+                   COALESCE(sell_stats.sell_value_usd, 0) AS sell_value_usd,
+                   COALESCE(sell_stats.sell_value_usd, 0) + COALESCE(p.remaining_value_usd, 0) AS current_or_exit_value_usd,
+                   COALESCE(sell_stats.sell_value_usd, 0) + COALESCE(p.remaining_value_usd, 0) - (p.entry_price_usd * p.entry_token_amount) AS pnl_usd,
+                   CASE WHEN p.entry_price_usd * p.entry_token_amount > 0
+                        THEN (COALESCE(sell_stats.sell_value_usd, 0) + COALESCE(p.remaining_value_usd, 0) - (p.entry_price_usd * p.entry_token_amount)) / (p.entry_price_usd * p.entry_token_amount)
+                        ELSE NULL END AS pnl_pct,
+                   COALESCE(p.realized_pnl_pct, p.pnl_pct) AS realized_pnl_pct,
+                   p.close_reason,
+                   p.last_exit_reason,
+                   COALESCE(trade_stats.trade_count, 0) AS trade_count,
+                   COALESCE(trade_stats.buy_count, 0) AS buy_count,
+                   COALESCE(trade_stats.sell_count, 0) AS sell_count
+            FROM positions p
+            LEFT JOIN tokens t ON t.token_mint = p.token_mint
+            LEFT JOIN strategy_groups sg ON sg.id = p.live_strategy_id
+            LEFT JOIN (
+                SELECT position_id,
+                       SUM(COALESCE(executed_token_amount, 0) * COALESCE(price_usd, 0)) AS sell_value_usd
+                FROM trade_events
+                WHERE side = 'SELL' AND status = 'CONFIRMED'
+                GROUP BY position_id
+            ) sell_stats ON sell_stats.position_id = p.id
+            LEFT JOIN (
+                SELECT position_id,
+                       COUNT(*) AS trade_count,
+                       SUM(CASE WHEN side = 'BUY' THEN 1 ELSE 0 END) AS buy_count,
+                       SUM(CASE WHEN side = 'SELL' THEN 1 ELSE 0 END) AS sell_count
+                FROM trade_events
+                WHERE status = 'CONFIRMED'
+                GROUP BY position_id
+            ) trade_stats ON trade_stats.position_id = p.id
+            WHERE (account_type = 'ALL' OR p.account_type = ?)
+              AND (since_session = 0 OR ? = '' OR p.opened_at >= ?)
+            ORDER BY p.closed_at DESC NULLS LAST, p.opened_at DESC
+            LIMIT ?
+        """
+        session_started_at_q = "SELECT value FROM runtime_settings WHERE key = 'session_started_at'" if since_session else None
+        params = [account_type]
+        if since_session:
+            async with self.db.execute(session_started_at_q) as cur:
+                row = await cur.fetchone()
+            session_val = row[0] if row else ""
+            params.extend([session_val, session_val])
+        else:
+            params.extend(["", ""])
+        params.append(limit)
+        async with self.db.execute(sql, tuple(params)) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     # bandit_observations
 
     async def insert_bandit_observation(

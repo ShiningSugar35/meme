@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,12 +43,32 @@ class CredentialSlot:
     failed_calls: int = 0
     rate_limited_count: int = 0
     endpoints: Dict[str, int] = field(default_factory=dict)
+    consecutive_failures: int = 0
+    consecutive_non_network_failures: int = 0
+    recent_failures: deque = field(default_factory=lambda: deque(maxlen=50))
+    disabled_until: float = 0.0
+    disabled_reason: str = ""
+    disable_count: int = 0
+    last_failure_at: float = 0.0
+    last_success_at: float = 0.0
 
     def is_cooldown(self) -> bool:
         return time.monotonic() < self.cooldown_until
 
     def cooldown_remaining(self) -> float:
         return max(0.0, self.cooldown_until - time.monotonic())
+
+    def is_available(self) -> bool:
+        return not self.is_cooldown() and not self.is_disabled()
+
+    def is_disabled(self) -> bool:
+        return time.monotonic() < self.disabled_until
+
+    def disabled_remaining(self) -> float:
+        return max(0.0, self.disabled_until - time.monotonic())
+
+    def cooldown_or_disabled_remaining(self) -> float:
+        return max(self.cooldown_remaining(), self.disabled_remaining())
 
 
 @dataclass
@@ -96,7 +117,7 @@ class RateLimiter:
                 if cred is None:
                     return True
 
-                if cred.is_cooldown():
+                if not cred.is_available():
                     return False
 
                 ep_key = self._endpoint_key(path)
@@ -126,17 +147,47 @@ class RateLimiter:
                 return False
             await asyncio.sleep(min(remaining, 1.0))
 
-    async def report_success(self, slot: int):
+    async def report_success(self, slot: int, endpoint: Optional[str] = None):
         async with self._lock:
             cred = self.slots.get(slot)
             if cred:
+                cred.consecutive_failures = 0
+                cred.consecutive_non_network_failures = 0
+                cred.last_success_at = time.monotonic()
                 cred.ok_calls += 1
 
-    async def report_failure(self, slot: int):
+    async def report_failure(self, slot: int, endpoint: Optional[str] = None, kind: str = "unknown", status_code: Optional[int] = None):
         async with self._lock:
             cred = self.slots.get(slot)
             if cred:
                 cred.failed_calls += 1
+                now = time.monotonic()
+                cred.recent_failures.append((now, endpoint or "unknown", kind))
+                cred.consecutive_failures += 1
+                cred.last_failure_at = now
+
+                non_network_kinds = ("rate_limit", "auth", "schema", "http4xx", "empty")
+                if kind in non_network_kinds:
+                    cred.consecutive_non_network_failures += 1
+
+                if kind == "rate_limit" or status_code == 429:
+                    cred.rate_limited_count += 1
+
+                non_network_events = [(t, e, k) for t, e, k in cred.recent_failures if k in non_network_kinds]
+                if len(non_network_events) >= 2:
+                    first_ts = min(t for t, e, k in non_network_events)
+                    if now - first_ts < 60:
+                        if cred.consecutive_non_network_failures >= 2:
+                            cred.cooldown_until = max(cred.cooldown_until, now + 300)
+                        if cred.consecutive_non_network_failures >= 3:
+                            cred.disabled_until = max(cred.disabled_until, now + 900)
+                            cred.disabled_reason = "too many non-network failures"
+
+                if cred.disable_count >= 3:
+                    disabled_events = [t for t, e, k in cred.recent_failures if k == "disabled"]
+                    if len(disabled_events) >= 3 and (now - min(disabled_events)) < 3600:
+                        cred.disabled_until = max(cred.disabled_until, now + 3600)
+                        cred.disabled_reason = "repeated disables"
 
     async def report_429(
         self,
@@ -192,7 +243,12 @@ class RateLimiter:
             cred = self.slots.get(slot)
             if cred:
                 cred.cooldown_until = max(cred.cooldown_until, time.monotonic() + cooldown_s)
+                cred.failed_calls += 1
                 cred.rate_limited_count += 1
+                now = time.monotonic()
+                cred.recent_failures.append((now, path, "rate_limit"))
+                cred.consecutive_failures += 1
+                cred.last_failure_at = now
                 logger.warning(f"slot {slot} ({cred.role}) rate limited, cooldown {cooldown_s:.0f}s until {cred.cooldown_until}")
 
             ep_key = self._endpoint_key(path)
@@ -203,6 +259,44 @@ class RateLimiter:
             ep_cooldown.cooldown_until = max(ep_cooldown.cooldown_until, time.monotonic() + min(cooldown_s * 0.5, 60))
 
         return cooldown_s
+
+    async def report_response_anomaly(self, slot: int, endpoint: str, reason: str):
+        async with self._lock:
+            cred = self.slots.get(slot)
+            if cred:
+                cred.failed_calls += 1
+                now = time.monotonic()
+                cred.recent_failures.append((now, endpoint, "schema"))
+                cred.consecutive_failures += 1
+                cred.consecutive_non_network_failures += 1
+                cred.last_failure_at = now
+
+    async def disable_slot(self, slot: int, seconds: float, reason: str):
+        async with self._lock:
+            cred = self.slots.get(slot)
+            if cred:
+                now = time.monotonic()
+                cred.disabled_until = max(cred.disabled_until, now + seconds)
+                cred.disabled_reason = reason
+                cred.disable_count += 1
+                cred.recent_failures.append((now, "admin", "disabled"))
+
+    def is_slot_available(self, slot: int) -> bool:
+        cred = self.slots.get(slot)
+        return cred.is_available() if cred else False
+
+    def get_available_slots(self, pool_slots: List[int]) -> List[int]:
+        return [s for s in pool_slots if self.slots.get(s) and self.slots[s].is_available()]
+
+    def is_slot_429_cooldown(self, slot: int) -> bool:
+        cred = self.slots.get(slot)
+        return cred.is_cooldown() if cred else False
+
+    def is_slot_cooldown(self, slot: int) -> bool:
+        cred = self.slots.get(slot)
+        if cred:
+            return cred.is_cooldown() or cred.is_disabled()
+        return False
 
     def get_slot_health(self, slot: int) -> Dict[str, Any]:
         cred = self.slots.get(slot)
@@ -219,13 +313,12 @@ class RateLimiter:
             "rate_limited_count": cred.rate_limited_count,
             "cooldown_until": cred.cooldown_until if cred.is_cooldown() else None,
             "cooldown_remaining_s": round(cred.cooldown_remaining(), 1),
+            "disabled_until": cred.disabled_until if cred.is_disabled() else None,
+            "disabled_reason": cred.disabled_reason if cred.is_disabled() else "",
+            "disabled_remaining_s": round(cred.disabled_remaining(), 1) if cred.is_disabled() else 0.0,
             "ok_rate": round(cred.ok_calls / calls, 3),
             "endpoints": dict(cred.endpoints),
         }
-
-    def is_slot_cooldown(self, slot: int) -> bool:
-        cred = self.slots.get(slot)
-        return cred.is_cooldown() if cred else False
 
     def is_discovery_available(self) -> Tuple[bool, Optional[int]]:
         for slot in settings.get_discovery_slots():

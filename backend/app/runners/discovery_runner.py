@@ -68,55 +68,38 @@ DISCOVERY_GROUPS = [
 ]
 DISCOVERY_TRENCH_TYPES = ["new_creation", "near_completion"]
 
-_feature_slot_cursor_global = 0
-_holding_slot_cursor_global = 0
-
 
 def acquire_feature_slot(stage: str = "") -> Optional[int]:
     stage_lower = (stage or "").lower()
     if "kline" in stage_lower:
-        endpoint = getattr(settings, "GMGN_KLINE_PATH", "/v1/market/token_kline")
         task_type = "kline"
     elif "holder" in stage_lower or "degen" in stage_lower or "smart_money" in stage_lower:
-        endpoint = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
         task_type = "holders"
     else:
-        endpoint = getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
         task_type = "token_info"
     try:
-        slot = get_credential_router().choose_slot(endpoint=endpoint, task_type=task_type)
+        slot = get_credential_router().choose_slot(task_type=task_type)
         if slot is not None:
             return slot
-    except Exception as e:
-        logger.warning(f"credential router feature slot selection failed stage={stage}: {e}")
-
-    global _feature_slot_cursor_global
+    except Exception:
+        pass
     rl = get_rate_limiter()
-    feature_slots = settings.get_feature_slots()
-    if not feature_slots:
-        return None
-    cursor = _feature_slot_cursor_global
-    for offset in range(len(feature_slots)):
-        idx = (cursor + offset) % len(feature_slots)
-        slot = feature_slots[idx]
-        if not rl.is_slot_cooldown(slot):
-            _feature_slot_cursor_global = (cursor + offset + 1) % len(feature_slots)
+    for slot in settings.get_feature_slots():
+        if rl.is_slot_available(slot):
             return slot
     return None
 
 
 def acquire_holding_slot(stage: str = "") -> Optional[int]:
-    global _holding_slot_cursor_global
-    slots = settings.get_holding_slots()
-    if not slots:
-        return None
+    try:
+        slot = get_credential_router().choose_slot(task_type="holding")
+        if slot is not None:
+            return slot
+    except Exception:
+        pass
     rl = get_rate_limiter()
-    cursor = _holding_slot_cursor_global
-    for offset in range(len(slots)):
-        idx = (cursor + offset) % len(slots)
-        slot = slots[idx]
-        if not rl.is_slot_cooldown(slot):
-            _holding_slot_cursor_global = (cursor + offset + 1) % len(slots)
+    for slot in settings.get_holding_slots():
+        if rl.is_slot_available(slot):
             return slot
     return None
 
@@ -192,17 +175,9 @@ class DiscoveryRunner:
         slot = acquire_feature_slot(stage)
         if slot is not None:
             return slot
-
         rl = get_rate_limiter()
-        feature_slots = settings.get_feature_slots()
-        if not feature_slots:
-            return None
-        cursor = self._feature_slot_cursor
-        for offset in range(len(feature_slots)):
-            idx = (cursor + offset) % len(feature_slots)
-            slot = feature_slots[idx]
+        for slot in settings.get_feature_slots():
             if not rl.is_slot_cooldown(slot):
-                self._feature_slot_cursor = (cursor + offset + 1) % len(feature_slots)
                 return slot
         return None
 
@@ -216,11 +191,6 @@ class DiscoveryRunner:
                     seen.add(platform)
                     platforms.append(platform)
         return platforms
-
-    @staticmethod
-    def _slot_age_window(ordinal: int) -> Tuple[str, str]:
-        i = ordinal + 1
-        return f"{60 * i}m", f"{60 * i + 60}m"
 
     def _feature_slot_for_token(self, token: Dict[str, Any], stage: str, exclude: Optional[Set[int]] = None) -> Optional[int]:
         exclude = set(exclude or set())
@@ -266,6 +236,55 @@ class DiscoveryRunner:
         msg = str(exc).lower()
         return "credential_slot" in msg and ("unexpected keyword" in msg or "got an unexpected" in msg)
 
+    async def _call_with_slot_retry(
+        self,
+        stage: str,
+        method_ref,
+        params: tuple,
+        primary_slot: Optional[int],
+        validate_func,
+        max_retries: int = 2,
+    ) -> Tuple[Any, Optional[int], Dict[str, Any]]:
+        rl = get_rate_limiter()
+        feature_pool = settings.get_feature_slots()
+        diag = {"stage": stage, "attempts": 0, "slots_tried": [], "errors": []}
+        tried: Set[int] = set()
+
+        attempt_slots = []
+        if primary_slot is not None:
+            attempt_slots.append(primary_slot)
+        for s in feature_pool:
+            if s not in attempt_slots:
+                attempt_slots.append(s)
+
+        max_attempts = max_retries + 1
+        for idx, slot in enumerate(attempt_slots):
+            if idx >= max_attempts:
+                break
+            if slot in tried:
+                continue
+            tried.add(slot)
+            diag["attempts"] += 1
+            diag["slots_tried"].append(slot)
+
+            if not rl.is_slot_available(slot):
+                diag["errors"].append({"slot": slot, "error": "unavailable"})
+                continue
+
+            try:
+                result = await method_ref(slot)
+                if validate_func(result):
+                    diag["slot"] = slot
+                    return result, slot, diag
+                diag["errors"].append({"slot": slot, "error": "validation_failed"})
+            except Exception as e:
+                if self._is_slot_retryable_error(e):
+                    diag["errors"].append({"slot": slot, "error": str(e)[:200]})
+                    continue
+                diag["errors"].append({"slot": slot, "error": str(e)[:200]})
+
+        return None, None, diag
+
     async def _call_gmgn_with_token_slot(
         self,
         token: Dict[str, Any],
@@ -276,47 +295,27 @@ class DiscoveryRunner:
     ) -> Tuple[Any, Optional[int]]:
         method = getattr(self.gmgn, method_name)
         preferred = self._token_preferred_slot(token)
-        if preferred is None:
-            return await method(*args, **kwargs), None
 
-        # Small inter-call delay to smooth burst traffic
         call_delay = float(getattr(settings, 'GMGN_FEATURE_CALL_DELAY_SECONDS', 0.15) or 0.15)
-        if call_delay > 0:
-            await asyncio.sleep(call_delay)
 
-        tried: Set[int] = set()
-        last_exc: Optional[Exception] = None
-        while True:
-            slot = self._feature_slot_for_token(token, stage, exclude=tried)
-            if slot is None:
-                break
-            tried.add(slot)
-            try:
-                return await method(*args, **kwargs, credential_slot=slot), slot
-            except TypeError as exc:
-                if self._is_credential_kw_unsupported(exc):
-                    return await method(*args, **kwargs), None
-                raise
-            except Exception as exc:
-                last_exc = exc
-                if not self._is_slot_retryable_error(exc):
-                    raise
-                logger.warning(
-                    "GMGN feature call slot unavailable; trying fallback",
-                    token_mint=token.get("token_mint"),
-                    stage=stage,
-                    method=method_name,
-                    slot=slot,
-                    error=str(exc)[:200],
-                )
-
-            # Additional delay before fallback retry
+        async def call_with_slot(slot: int):
             if call_delay > 0:
                 await asyncio.sleep(call_delay)
+            try:
+                return await method(*args, **kwargs, credential_slot=slot)
+            except TypeError as exc:
+                if self._is_credential_kw_unsupported(exc):
+                    return await method(*args, **kwargs)
+                raise
 
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("all feature slots cooldown or bucket empty")
+        result, slot, _ = await self._call_with_slot_retry(
+            stage=stage,
+            method_ref=call_with_slot,
+            params=(),
+            primary_slot=preferred,
+            validate_func=lambda r: r is not None,
+        )
+        return result, slot
 
     async def _insert_match_data_unavailable(
         self, token_mint: str, groups: List[dict], snapshot_id: int,
@@ -431,15 +430,12 @@ class DiscoveryRunner:
             "slot": request_slot, "role": role, "ok": False,
             "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
             "status_code": None, "error": None, "latency_ms": 0,
-            "min_created": params.get("min_created"), "max_created": params.get("max_created"),
             "type": params.get("type") or params.get("types"),
         }
         try:
             items = await self.gmgn.fetch_trenches(params, credential_slot=request_slot)
             for item in items or []:
                 item["_credential_slot"] = request_slot
-                item["_trench_age_min"] = params.get("min_created")
-                item["_trench_age_max"] = params.get("max_created")
                 item["_trench_request_type"] = params.get("type") or params.get("types")
                 item["_trench_type"] = item.get("type")
             gres["ok"] = True
@@ -453,61 +449,59 @@ class DiscoveryRunner:
             logger.warning(f"trenches fetch failed for {group_name} slot={request_slot}: {e}")
             return None, gres
 
-    async def _fetch_trenches_two_group(self, custom_params: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    async def _fetch_trenches_by_type(self, custom_params: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         mode = settings.get_provider_mode()
         groups_results: List[Dict[str, Any]] = []
         all_items: List[Dict[str, Any]] = []
         dedup: Dict[Tuple[str, str], int] = {}
         rl = get_rate_limiter()
         platforms = self._all_discovery_platforms()
-        discovery_slots = settings.get_discovery_slots()
-        concurrency = int(getattr(settings, 'GMGN_TRENCHES_CONCURRENCY', 2) or 2)
 
-        if not discovery_slots:
+        type_slots = settings.get_discovery_type_slots()
+        reserve_slot = settings.get_discovery_reserve_slot()
+        feature_pool = settings.get_feature_slots()
+
+        if not type_slots or all(v is None for v in type_slots.values()):
             return [], {
-                "mode": "age_sharded_discovery",
+                "mode": "type_sharded_discovery",
                 "raw_fetched_count": 0,
                 "unique_fetched_count": 0,
                 "duplicate_count_estimate": 0,
                 "groups": [],
-                "error": "no GMGN discovery credential slots configured",
+                "error": "no GMGN discovery type slots configured",
             }
 
-        sem = asyncio.Semaphore(concurrency)
-
-        async def _fetch_one_slot(ordinal: int, slot: int):
-            min_created, max_created = self._slot_age_window(ordinal)
-            group_name = f"age_{min_created}_{max_created}"
+        async def _fetch_one_type(trench_type: str, primary_slot: Optional[int]) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, Any]]:
+            group_name = f"{trench_type}_shard"
 
             if mode == ProviderMode.MOCK:
                 params_base = dict(custom_params) if custom_params else {}
                 params_base.setdefault('platforms', platforms)
                 params_base['platforms'] = platforms
-                params_base['type'] = list(DISCOVERY_TRENCH_TYPES)
-                params_base['min_created'] = min_created
-                params_base['max_created'] = max_created
+                params_base['type'] = [trench_type]
                 t0 = time.perf_counter()
                 items = await self.gmgn.fetch_trenches(params_base)
                 for item in items or []:
-                    item["_credential_slot"] = slot
-                    item["_trench_age_min"] = min_created
-                    item["_trench_age_max"] = max_created
-                    item["_trench_request_type"] = list(DISCOVERY_TRENCH_TYPES)
+                    item["_credential_slot"] = primary_slot
+                    item["_trench_request_type"] = trench_type
                     item["_trench_type"] = item.get("type")
-                gres = {"group_name": group_name, "platforms": platforms, "slot": slot, "role": "mock",
+                gres = {"group_name": group_name, "platforms": platforms, "slot": primary_slot, "role": "mock",
                         "ok": True, "raw_count": len(items), "unique_count": 0, "duplicate_count": 0,
                         "status_code": None, "error": None, "latency_ms": int((time.perf_counter()-t0)*1000),
-                        "min_created": min_created, "max_created": max_created, "type": list(DISCOVERY_TRENCH_TYPES)}
-                return items, gres, slot, ordinal
+                        "type": [trench_type]}
+                return items, gres
 
-            if rl.is_slot_cooldown(slot):
-                gres = {"group_name": group_name, "platforms": platforms, "slot": slot, "role": "age_shard",
-                        "ok": False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
-                        "status_code": None, "error": "slot cooldown", "latency_ms": 0,
-                        "min_created": min_created, "max_created": max_created, "type": list(DISCOVERY_TRENCH_TYPES)}
-                return None, gres, slot, ordinal
+            # Build slot sequence: primary -> reserve -> borrow one feature slot
+            slot_sequence: List[int] = []
+            if primary_slot is not None:
+                slot_sequence.append(primary_slot)
+            if reserve_slot is not None:
+                slot_sequence.append(reserve_slot)
+            for s in feature_pool:
+                if s not in slot_sequence:
+                    slot_sequence.append(s)
+                    break
 
-            # Build base params, then merge trench_filters from custom_params.
             base_params = self._build_trench_params(platforms=platforms)
             if custom_params:
                 trench_filters = custom_params.get("trench_filters", {})
@@ -519,66 +513,118 @@ class DiscoveryRunner:
                 debug_ids = custom_params.get("_strategy_group_ids")
                 if debug_ids is not None:
                     base_params["_debug_strategy_group_ids"] = debug_ids
-            base_params["type"] = list(DISCOVERY_TRENCH_TYPES)
-            base_params["min_created"] = min_created
-            base_params["max_created"] = max_created
+            base_params["type"] = [trench_type]
 
-            send_params = strip_internal_debug_fields(base_params)
+            last_error: Optional[str] = None
+            attempts = 0
 
-            logger.info(
-                "trenches fetch params",
-                x=custom_params.get("_x") if custom_params else None,
-                platforms=platforms,
-                trench_filters=custom_params.get("trench_filters") if custom_params else None,
-                credential_slot=slot,
-                min_created=min_created,
-                max_created=max_created,
-                types=DISCOVERY_TRENCH_TYPES,
-                raw_params_sent=send_params,
-            )
+            for idx, slot in enumerate(slot_sequence):
+                if idx >= 3:
+                    break
+                attempts += 1
 
-            items, gres = await self._try_fetch_group(group_name, platforms, slot, "age_shard", custom_params=send_params)
-            final_items = items or [] if gres["ok"] else None
-            return final_items, gres, slot, ordinal
+                if not rl.is_slot_available(slot):
+                    gres_fail = {
+                        "group_name": group_name, "platforms": platforms, "slot": slot, "role": "type_shard",
+                        "ok": False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
+                        "status_code": None, "error": "slot unavailable", "latency_ms": 0, "type": [trench_type],
+                    }
+                    groups_results.append(gres_fail)
+                    last_error = "slot unavailable"
+                    continue
 
-        async def _fetch_with_sem(ordinal: int, slot: int):
-            async with sem:
-                return await _fetch_one_slot(ordinal, slot)
+                send_params = strip_internal_debug_fields(base_params)
 
-        tasks = [_fetch_with_sem(ordinal, slot) for ordinal, slot in enumerate(discovery_slots)]
+                logger.info(
+                    "trenches fetch params",
+                    x=custom_params.get("_x") if custom_params else None,
+                    platforms=platforms,
+                    trench_type=trench_type,
+                    credential_slot=slot,
+                    attempt=idx + 1,
+                    raw_params_sent=send_params,
+                )
+
+                items, gres = await self._try_fetch_group(group_name, platforms, slot, "type_shard", custom_params=send_params)
+                groups_results.append(gres)
+
+                if items is not None and len(items) > 0:
+                    for item in items:
+                        item["_credential_slot"] = slot
+                        item["_trench_request_type"] = trench_type
+                        item["_trench_type"] = item.get("type")
+
+                    if items:
+                        dup_count = 0
+                        for item in items:
+                            key = (str(item.get("token_mint", "")), str(item.get("pool_address", "")))
+                            if key not in dedup:
+                                dedup[key] = 0
+                                all_items.append(item)
+                            else:
+                                dup_count += 1
+                            dedup[key] += 1
+                        gres["duplicate_count"] = dup_count
+                        gres["unique_count"] = max(0, gres.get("raw_count", 0) - dup_count)
+
+                    logger.info(
+                        "trenches fetch result",
+                        group=group_name,
+                        trench_type=trench_type,
+                        x=custom_params.get("_x") if custom_params else None,
+                        raw_count=gres.get("raw_count", 0),
+                        unique_count=gres.get("unique_count", 0),
+                        slot=slot,
+                    )
+                    return items, gres
+
+                if items is not None and len(items) == 0:
+                    last_error = "empty response"
+                    continue
+
+                if items is None:
+                    last_error = gres.get("error", "unknown error")
+                    continue
+
+            # All attempts failed for this type
+            logger.critical(f"all {attempts} discovery attempts failed for {trench_type}")
+            event_data = {
+                "trench_type": trench_type,
+                "primary_slot": primary_slot,
+                "reserve_slot": reserve_slot,
+                "attempts": attempts,
+                "last_error": last_error,
+                "slots_tried": slot_sequence,
+            }
+            try:
+                await self.repo.append_system_event(
+                    'CRITICAL', 'DISCOVERY',
+                    f"All {attempts} discovery fetch attempts failed for {trench_type}: {last_error}",
+                    _json_dumps(event_data),
+                    account_type='SIM',
+                )
+            except Exception:
+                pass
+
+            gres_final = {
+                "group_name": group_name, "platforms": platforms, "slot": None, "role": "type_shard",
+                "ok": False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
+                "status_code": None, "error": last_error, "latency_ms": 0, "type": [trench_type],
+            }
+            groups_results.append(gres_final)
+            return None, gres_final
+
+        # Run two concurrent type-based fetch tasks
+        tasks = [
+            _fetch_one_type("new_creation", type_slots.get("new_creation")),
+            _fetch_one_type("near_completion", type_slots.get("near_completion")),
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in results:
             if isinstance(result, Exception):
-                logger.warning(f"trenches shard exception: {result}")
+                logger.warning(f"trenches type fetch exception: {result}")
                 continue
-            final_items, final_gres, slot, ordinal = result
-            min_created, max_created = self._slot_age_window(ordinal)
-            groups_results.append(final_gres)
-
-            if final_items:
-                duplicate_count = 0
-                for item in final_items:
-                    key = (str(item.get("token_mint", "")), str(item.get("pool_address", "")))
-                    if key not in dedup:
-                        dedup[key] = 0
-                        all_items.append(item)
-                    else:
-                        duplicate_count += 1
-                    dedup[key] += 1
-                final_gres["duplicate_count"] = duplicate_count
-                final_gres["unique_count"] = max(0, final_gres.get("raw_count", 0) - duplicate_count)
-
-                logger.info(
-                    "trenches fetch result",
-                    group=final_gres.get("group_name"),
-                    x=custom_params.get("_x") if custom_params else None,
-                    raw_count=final_gres.get("raw_count", 0),
-                    unique_count=final_gres.get("unique_count", 0),
-                    slot=slot if final_gres.get("ok") else None,
-                    min_created=min_created,
-                    max_created=max_created,
-                )
 
         for gr in groups_results:
             gr["unique_count"] = max(0, gr.get("unique_count", gr.get("raw_count", 0) - gr.get("duplicate_count", 0)))
@@ -588,7 +634,7 @@ class DiscoveryRunner:
         dup_total = raw_total - unique_total
 
         diag = {
-            "mode": "age_sharded_discovery",
+            "mode": "type_sharded_discovery",
             "raw_fetched_count": raw_total,
             "unique_fetched_count": unique_total,
             "duplicate_count_estimate": dup_total,
@@ -756,21 +802,19 @@ class DiscoveryRunner:
 
         try:
             latest, slot = await self._call_gmgn_with_token_slot(token, "price_info", "fetch_latest_price", token_mint)
-            stage_diag["credential_slot"] = slot
         except Exception as e:
             logger.warning(f"latest price fetch failed for {token_mint}: {e}")
+            latest, slot = None, None
+
+        if not latest:
+            reason = "API retries exhausted" if slot is None else "latest price response empty"
             await self._insert_match_data_unavailable(
                 token_mint, groups, snapshot_id, discovery_event_ids,
-                'price_filter', f"API failed: {e}")
+                'price_filter', reason)
             stage_diag["failed"] = len(groups)
             return passed_groups, needs_kline_groups, stage_diag
 
-        if not latest:
-            await self._insert_match_data_unavailable(
-                token_mint, groups, snapshot_id, discovery_event_ids,
-                'price_filter', 'latest price response empty')
-            stage_diag["failed"] = len(groups)
-            return passed_groups, needs_kline_groups, stage_diag
+        stage_diag["credential_slot"] = slot
 
         token["_latest_price_for_kline_fallback"] = latest
 
@@ -842,15 +886,19 @@ class DiscoveryRunner:
                 from_ts=from_ts,
                 to_ts=now_ts,
             )
-            stage_diag["kline_used"] = 1
-            stage_diag["credential_slot"] = slot
         except Exception as e:
             logger.warning(f"kline fetch failed for {token_mint}: {e}")
+            klines, slot = None, None
+
+        if not klines:
             await self._insert_match_data_unavailable(
                 token_mint, groups, snapshot_id, discovery_event_ids,
-                'kline_fallback', f"kline API failed: {e}")
+                'kline_fallback', 'kline API retries exhausted')
             stage_diag["failed"] = len(groups)
             return passed_groups, stage_diag
+
+        stage_diag["kline_used"] = 1
+        stage_diag["credential_slot"] = slot
 
         for sg in groups:
             sg_id = int(sg.get('id') or 0)
@@ -887,21 +935,19 @@ class DiscoveryRunner:
 
         try:
             holders, slot = await self._call_gmgn_with_token_slot(token, "top_holder", "fetch_top_holders", token_mint, limit=20)
-            stage_diag["credential_slot"] = slot
         except Exception as e:
             logger.warning(f"top holders fetch failed for {token_mint}: {e}")
+            holders, slot = None, None
+
+        if not holders:
+            reason = "API retries exhausted" if slot is None else "holders API returned empty"
             await self._insert_match_data_unavailable(
                 token_mint, groups, snapshot_id, discovery_event_ids,
-                'top_holder_filter', f"holders API failed: {e}")
+                'top_holder_filter', reason)
             stage_diag["failed"] = len(groups)
             return passed_groups, stage_diag
 
-        if not holders:
-            await self._insert_match_data_unavailable(
-                token_mint, groups, snapshot_id, discovery_event_ids,
-                'top_holder_filter', 'holders API returned empty')
-            stage_diag["failed"] = len(groups)
-            return passed_groups, stage_diag
+        stage_diag["credential_slot"] = slot
 
         for sg in groups:
             sg_id = int(sg.get('id') or 0)
@@ -961,14 +1007,19 @@ class DiscoveryRunner:
 
         try:
             smart_degen_holders, slot = await self._call_gmgn_with_token_slot(token, "smart_degen", "fetch_smart_degen_holders", token_mint, limit=30)
-            stage_diag["credential_slot"] = slot
         except Exception as e:
             logger.warning(f"smart degen fetch failed for {token_mint}: {e}")
+            smart_degen_holders, slot = None, None
+
+        if not smart_degen_holders:
+            reason = "API retries exhausted" if slot is None else "degen API returned empty"
             await self._insert_match_data_unavailable(
                 token_mint, groups, snapshot_id, discovery_event_ids,
-                'smart_degen_filter', f"degen API failed: {e}")
+                'smart_degen_filter', reason)
             stage_diag["failed"] = len(groups)
             return passed_groups, stage_diag, None
+
+        stage_diag["credential_slot"] = slot
 
         for sg in groups:
             sg_id = int(sg.get('id') or 0)
@@ -1081,7 +1132,7 @@ class DiscoveryRunner:
                     "_x": x,
                     "_strategy_group_ids": [g["id"] for g in groups_for_x],
                 }
-                x_trenches, x_diag = await self._fetch_trenches_two_group(custom_params=custom_params)
+                x_trenches, x_diag = await self._fetch_trenches_by_type(custom_params=custom_params)
                 x_diag["x"] = x
                 x_diag["strategy_group_ids"] = [g["id"] for g in groups_for_x]
                 per_x_diags[str(x)] = x_diag
@@ -1256,7 +1307,7 @@ class DiscoveryRunner:
             'elapsed_ms': self.last_elapsed_ms,
             'run_started_at': run_started_at,
             'run_finished_at': run_finished_at,
-            'fetch_mode': 'per_x_age_sharded_discovery',
+            'fetch_mode': 'per_x_type_sharded_discovery',
             'trench_groups': [
                 g for d in per_x_diags.values()
                 for g in (d.get("groups") or [])

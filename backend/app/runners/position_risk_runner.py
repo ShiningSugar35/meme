@@ -11,6 +11,7 @@ from ..services.event_bus import event_bus
 from ..config import settings
 from ..logging_config import logger
 from ..strategy.exit_rules import _executed_exit_rules
+from ..providers.credential_router import get_credential_router
 from .discovery_runner import acquire_holding_slot
 
 
@@ -147,9 +148,64 @@ class PositionRiskRunner:
         self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
         self._last_risk_fail_details: Dict[int, List[str]] = {}
         self._last_scan: Dict[int, datetime] = {}
+        self._consecutive_risk_failures: Dict[int, int] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
+
+    async def _fetch_risk_data_with_retry(self, method_ref, preferred_slot, validate_func):
+        """Call GMGN with retry across different slots.
+
+        Returns the result on success.
+        Raises RuntimeError after 3 consecutive failed attempts.
+        """
+        router = get_credential_router()
+        feature_pool = settings.get_feature_slots()
+        last_exc = None
+
+        for attempt in range(3):
+            if attempt == 0 and preferred_slot is not None:
+                slot = preferred_slot
+            else:
+                slot = None
+                # Pick a different slot from the feature pool
+                for s in feature_pool or ():
+                    if s != preferred_slot:
+                        if router.rl.is_slot_available(s):
+                            slot = s
+                            break
+                if slot is None:
+                    slot = preferred_slot
+
+            try:
+                result = await method_ref(credential_slot=slot)
+                if validate_func is None or validate_func(result):
+                    return result
+                last_exc = ValueError("Risk data validation failed")
+            except Exception as e:
+                last_exc = e
+
+        raise RuntimeError("Risk data unavailable after 3 attempts") from last_exc
+
+    async def _emergency_risk_exit(self, position, reason="RISK_DATA_UNAVAILABLE_EXIT"):
+        token = position["token_mint"]
+        pos_id = int(position["id"])
+        account_type = _account_type(position)
+        await self.repo.append_system_event(
+            "ERROR",
+            "RISK",
+            f"Emergency exit triggered for {token}: {reason}",
+            _safe_json_dumps({"position_id": pos_id, "token": token, "reason": reason}),
+            account_type=account_type,
+        )
+        await self._request_exit(
+            position=position,
+            exit_pct=1.0,
+            reason_code=reason,
+            emergency=True,
+            latest={},
+            current_price_usd=None,
+        )
 
     async def run_once(self):
         now = _utc_now()
@@ -184,7 +240,11 @@ class PositionRiskRunner:
         if not _recheck_due(position, now):
             return
 
-        latest = await self._fetch_latest_price(token, account_type)
+        try:
+            latest = await self._fetch_latest_price(token, account_type)
+        except RuntimeError:
+            await self._emergency_risk_exit(position)
+            return
         price_usd = _extract_price_usd(latest)
         remaining_value_usd = _remaining_value_usd(position, price_usd)
 
@@ -210,7 +270,12 @@ class PositionRiskRunner:
                 next_risk_check_at=_iso(next_check_at),
             )
 
-        latest_snapshot = await self._fetch_latest_snapshot(token, account_type)
+        try:
+            latest_snapshot = await self._fetch_latest_snapshot(token, account_type)
+        except RuntimeError:
+            await self._emergency_risk_exit(position)
+            return
+
         token_info = await self.repo.get_token(token)
         if token_info and token_info.get("latest_type") and "type" not in latest_snapshot:
             latest_snapshot["type"] = token_info["latest_type"]
@@ -282,7 +347,11 @@ class PositionRiskRunner:
             return
 
         # Smart money sell monitoring (feature-flagged, polling)
-        smart_dump = await self._check_smart_money_sell(position_for_decision, now)
+        try:
+            smart_dump = await self._check_smart_money_sell(position_for_decision, now)
+        except RuntimeError:
+            await self._emergency_risk_exit(position)
+            return
         if smart_dump:
             await self._request_exit(
                 position=position_for_decision,
@@ -296,7 +365,11 @@ class PositionRiskRunner:
 
         # TOP3 smart degen reduction check: if any of the original TOP3 reduced
         # holdings by >25%, exit 50%
-        top3_triggered_wallet = await self._check_top3_smart_degen_reduction(position_for_decision, now)
+        try:
+            top3_triggered_wallet = await self._check_top3_smart_degen_reduction(position_for_decision, now)
+        except RuntimeError:
+            await self._emergency_risk_exit(position)
+            return
         if top3_triggered_wallet:
             await self._request_exit(
                 position=position_for_decision,
@@ -315,9 +388,13 @@ class PositionRiskRunner:
         # TOP3 smart degen dump, completed, and dust force exit.
 
     async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
-        slot = acquire_holding_slot("risk_price")
+        preferred = acquire_holding_slot("risk_price")
+
+        async def _do_fetch(*, credential_slot):
+            return await self.gmgn.fetch_latest_price(token, credential_slot=credential_slot)
+
         try:
-            return await self.gmgn.fetch_latest_price(token, credential_slot=slot)
+            return await self._fetch_risk_data_with_retry(_do_fetch, preferred, None)
         except Exception as e:
             await self.repo.append_system_event(
                 "ERROR",
@@ -329,19 +406,23 @@ class PositionRiskRunner:
             raise
 
     async def _fetch_latest_snapshot(self, token: str, account_type: str) -> Dict[str, Any]:
-        try:
-            slot = acquire_holding_slot("risk_snapshot")
-            snap = await self.gmgn.fetch_token_snapshot(token, credential_slot=slot)
+        preferred = acquire_holding_slot("risk_snapshot")
+
+        async def _do_fetch(*, credential_slot):
+            snap = await self.gmgn.fetch_token_snapshot(token, credential_slot=credential_slot)
             return snap or {}
-        except Exception as e:
+
+        try:
+            return await self._fetch_risk_data_with_retry(_do_fetch, preferred, None)
+        except RuntimeError:
             await self.repo.append_system_event(
                 "ERROR",
                 "RISK",
-                f"GMGN token snapshot failed for {token}",
-                _safe_json_dumps({"error": str(e)}),
+                f"GMGN token snapshot failed for {token} (3 retries exhausted)",
+                _safe_json_dumps({"error": "RiskDataUnavailableError"}),
                 account_type=account_type,
             )
-            return {}
+            raise
 
     async def _risk_recheck(self, position: Dict[str, Any], snapshot: Dict[str, Any], now: datetime) -> bool:
         token = position["token_mint"]
@@ -468,11 +549,12 @@ class PositionRiskRunner:
         token = position["token_mint"]
         account_type = _account_type(position)
 
-        slot = acquire_holding_slot("risk_smart_money")
-        try:
-            holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=slot)
-        except Exception:
-            return False
+        preferred = acquire_holding_slot("risk_smart_money")
+
+        async def _do_fetch(*, credential_slot):
+            return await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=credential_slot)
+
+        holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None)
 
         if not holders:
             return False
@@ -561,11 +643,12 @@ class PositionRiskRunner:
             if rule.startswith("TOP3_SMART_DEGEN_DUMP:"):
                 already_triggered_wallets.add(rule.split(":", 1)[1])
 
-        slot = acquire_holding_slot("risk_top3_degen")
-        try:
-            holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=slot)
-        except Exception:
-            return None
+        preferred = acquire_holding_slot("risk_top3_degen")
+
+        async def _do_fetch(*, credential_slot):
+            return await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=credential_slot)
+
+        holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None)
 
         current_map: Dict[str, Dict[str, float]] = {}
         if holders:
