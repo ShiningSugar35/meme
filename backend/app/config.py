@@ -4,7 +4,7 @@ import os
 import re
 import warnings
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -63,6 +63,10 @@ class Settings(BaseSettings):
 
     # GMGN API configuration.
     GMGN_API_BASE_URL: Optional[str] = None
+    GMGN_API_KEY: Optional[SecretStr] = None
+    GMGN_PUBLIC_KEY: Optional[str] = None
+    GMGN_PRIVATE_KEY: Optional[SecretStr] = None
+    GMGN_CLIENT_ID: Optional[str] = None
     GMGN_API_KEY_1: Optional[SecretStr] = None
     GMGN_PUBLIC_KEY_1: Optional[str] = None
     GMGN_PRIVATE_KEY_1: Optional[SecretStr] = None
@@ -130,7 +134,7 @@ class Settings(BaseSettings):
     # Rate limiter / credential role configuration
     GMGN_DISCOVERY_PRIMARY_SLOT: int = Field(0)
     GMGN_DISCOVERY_RESERVE_SLOT: int = Field(1)
-    GMGN_FEATURE_SLOTS: str = Field("2,3,4,5,6,7,8,9,10,11")
+    GMGN_FEATURE_SLOTS: str = Field("")
     GMGN_DISCOVERY_MODE: str = Field("two_group")
     GMGN_DISCOVERY_GROUP_DELAY_SECONDS: float = Field(2.0)
     GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
@@ -147,7 +151,7 @@ class Settings(BaseSettings):
         return self.GMGN_DISCOVERY_RESERVE_SLOT
 
     def get_feature_slots(self) -> List[int]:
-        return [int(x.strip()) for x in self.GMGN_FEATURE_SLOTS.split(",") if x.strip().isdigit()]
+        return self.get_discovery_slots()
 
     # Jupiter API Configuration
     JUPITER_API_BASE_URL: Optional[str] = None
@@ -213,6 +217,7 @@ class Settings(BaseSettings):
     TOP1_HOLDER_SCAN_TIER_5_SECONDS: int = Field(0)
 
     DUST_FORCE_EXIT_USD: float = Field(12.5)
+    DUST_FORCE_EXIT_SOL: float = Field(0.125)
 
     WALLET_PUBLIC_KEY: Optional[str] = None
     WALLET_PRIVATE_KEY_BASE58: Optional[SecretStr] = None
@@ -225,8 +230,19 @@ class Settings(BaseSettings):
             value = value.get_secret_value()
         return str(value or "").strip()
 
-    def _numbered_indices(self, prefix: str, suffix: Optional[str] = None, max_items: int = 12) -> List[int]:
-        indices = set(range(1, max_items + 1))
+    def _csv_env_values(self, key: str) -> List[str]:
+        return _split_csv(self._env_value(key))
+
+    def _indexed_keys(self) -> List[str]:
+        keys = set(os.environ.keys())
+        try:
+            keys.update(self.__class__.model_fields.keys())
+        except Exception:
+            pass
+        return sorted(keys)
+
+    def _numbered_indices(self, prefix: str, suffix: Optional[str] = None, max_items: Optional[int] = None) -> List[int]:
+        indices = set()
         escaped_prefix = re.escape(prefix)
         if suffix is None:
             patterns = [re.compile(rf"^{escaped_prefix}_(\d+)$")]
@@ -236,14 +252,17 @@ class Settings(BaseSettings):
                 re.compile(rf"^{escaped_prefix}_(\d+)_{escaped_suffix}$"),
                 re.compile(rf"^{escaped_prefix}_{escaped_suffix}_(\d+)$"),
             ]
-        for key in os.environ.keys():
+        for key in self._indexed_keys():
             for pattern in patterns:
                 m = pattern.match(key)
-                if m:
-                    indices.add(int(m.group(1)))
+                if not m:
+                    continue
+                idx = int(m.group(1))
+                if max_items is None or idx <= int(max_items):
+                    indices.add(idx)
         return sorted(indices)
 
-    def _scan_numbered_secrets(self, prefix: str, suffix: Optional[str] = None, max_items: int = 12) -> List[str]:
+    def _scan_numbered_secrets(self, prefix: str, suffix: Optional[str] = None, max_items: Optional[int] = None) -> List[str]:
         values: List[str] = []
         for i in self._numbered_indices(prefix, suffix, max_items=max_items):
             keys = [f"{prefix}_{i}"] if suffix is None else [f"{prefix}_{i}_{suffix}", f"{prefix}_{suffix}_{i}"]
@@ -254,25 +273,57 @@ class Settings(BaseSettings):
                     break
         return values
 
-    def _scan_gmgn_accounts(self, max_items: int = 12) -> List[dict]:
-        indices = set(range(1, max_items + 1))
-        for key in os.environ.keys():
+    def _scan_gmgn_accounts(self, max_items: Optional[int] = None) -> List[dict]:
+        env_keys = os.environ.keys()
+        accounts_by_index: Dict[int, dict] = {}
+
+        for field, values in (
+            ("api_key", self._csv_env_values("GMGN_API_KEY")),
+            ("public_key", self._csv_env_values("GMGN_PUBLIC_KEY")),
+            ("client_id", self._csv_env_values("GMGN_CLIENT_ID")),
+            ("private_key", self._csv_env_values("GMGN_PRIVATE_KEY")),
+        ):
+            for idx, value in enumerate(values, start=1):
+                if value:
+                    accounts_by_index.setdefault(idx, {"index": idx})[field] = value
+
+        indexed_fields: Dict[int, Dict[str, str]] = {}
+        for key in sorted(set(env_keys) | set(self._indexed_keys())):
             for pattern in (
                 re.compile(r"^GMGN_(\d+)_(API_KEY|CLIENT_ID|PUBLIC_KEY|PRIVATE_KEY)$"),
                 re.compile(r"^GMGN_(API_KEY|CLIENT_ID|PUBLIC_KEY|PRIVATE_KEY)_(\d+)$"),
             ):
                 m = pattern.match(key)
-                if m:
-                    idx = m.group(1) if m.group(1).isdigit() else m.group(2)
-                    indices.add(int(idx))
+                if not m:
+                    continue
+                idx = int(m.group(1) if m.group(1).isdigit() else m.group(2))
+                if max_items is not None and idx > int(max_items):
+                    continue
+                field = (m.group(2) if m.group(1).isdigit() else m.group(1)).lower()
+                value = self._env_value(key)
+                if value:
+                    indexed_fields.setdefault(idx, {})[field] = value
+
+        for idx, values in indexed_fields.items():
+            account = accounts_by_index.setdefault(idx, {"index": idx})
+            for field, value in values.items():
+                account.setdefault(field, value)
+
         accounts: List[dict] = []
-        for i in sorted(indices):
-            api_key = self._env_value(f"GMGN_{i}_API_KEY") or self._env_value(f"GMGN_API_KEY_{i}")
-            public_key = self._env_value(f"GMGN_{i}_PUBLIC_KEY") or self._env_value(f"GMGN_PUBLIC_KEY_{i}")
-            client_id = self._env_value(f"GMGN_{i}_CLIENT_ID") or self._env_value(f"GMGN_CLIENT_ID_{i}") or public_key
-            private_key = self._env_value(f"GMGN_{i}_PRIVATE_KEY") or self._env_value(f"GMGN_PRIVATE_KEY_{i}")
+        for idx in sorted(accounts_by_index):
+            raw = accounts_by_index[idx]
+            api_key = raw.get("api_key", "")
+            public_key = raw.get("public_key", "")
+            client_id = raw.get("client_id", "") or public_key
+            private_key = raw.get("private_key", "")
             if api_key or client_id or private_key:
-                accounts.append({"index": i, "api_key": api_key, "client_id": client_id, "public_key": public_key, "private_key": private_key})
+                accounts.append({
+                    "index": idx,
+                    "api_key": api_key,
+                    "client_id": client_id,
+                    "public_key": public_key,
+                    "private_key": private_key,
+                })
         return accounts
 
     def get_gmgn_accounts(self) -> List[dict]:
@@ -281,6 +332,10 @@ class Settings(BaseSettings):
     def get_gmgn_api_keys(self) -> List[str]:
         keys = [a.get("api_key", "") for a in self.get_gmgn_accounts() if a.get("api_key")]
         return keys or self._scan_numbered_secrets("GMGN", "API_KEY")
+
+    def get_gmgn_api_key(self) -> Optional[str]:
+        keys = self.get_gmgn_api_keys()
+        return keys[0] if keys else None
 
     def get_gmgn_client_ids(self) -> List[str]:
         return [a.get("client_id", "") for a in self.get_gmgn_accounts() if a.get("client_id")]
@@ -300,12 +355,63 @@ class Settings(BaseSettings):
             for idx, api_key in enumerate(api_keys)
         ]
 
+    def get_gmgn_credential_count(self) -> int:
+        return len(self.get_gmgn_credentials())
+
+    def get_holding_slots(self) -> List[int]:
+        total = self.get_gmgn_credential_count()
+        if total <= 0:
+            return []
+        holding_count = max(1, total // 6)
+        if total > 1:
+            holding_count = min(holding_count, total - 1)
+        else:
+            holding_count = 1
+        return list(range(holding_count))
+
+    def get_discovery_slots(self) -> List[int]:
+        total = self.get_gmgn_credential_count()
+        if total <= 0:
+            return []
+        holding = set(self.get_holding_slots())
+        discovery = [slot for slot in range(total) if slot not in holding]
+        return discovery or [0]
+
+    def get_gmgn_slot_pools(self) -> Dict[str, List[int]]:
+        discovery = self.get_discovery_slots()
+        holding = self.get_holding_slots()
+        return {
+            "discovery": discovery,
+            "holding": holding,
+            "token_info": discovery,
+            "kline": discovery,
+            "holders": discovery,
+        }
+
+    def _scan_jupiter_api_keys(self) -> List[str]:
+        env_keys = os.environ.keys()
+        values = self._csv_env_values("JUPITER_API_KEY")
+        values.extend(self._scan_numbered_secrets("JUPITER_API_KEY"))
+        for key in env_keys:
+            if key == "JUPITER_API_KEY":
+                continue
+        return _dedupe(values)
+
+    def _scan_ankr_api_keys(self) -> List[str]:
+        env_keys = os.environ.keys()
+        values = self._csv_env_values("ANKR_API_KEY")
+        values.extend(self._scan_numbered_secrets("ANKR_API_KEY"))
+        for key in env_keys:
+            if key == "ANKR_API_KEY":
+                continue
+        return _dedupe(values)
+
     def get_gmgn_kline_path(self) -> str:
         return (self.GMGN_KLINE_PATH or self.GMGN_TOKEN_KLINE_PATH or "/v1/market/token_kline").strip()
 
     def get_jupiter_api_keys(self) -> List[SecretStr]:
         keys: List[SecretStr] = []
-        for raw in self._scan_numbered_secrets("JUPITER_API_KEY"):
+        for raw in self._scan_jupiter_api_keys():
             if raw:
                 keys.append(SecretStr(raw))
         existing = {_secret_to_str(k) for k in keys}
@@ -324,7 +430,7 @@ class Settings(BaseSettings):
         return (self.JUPITER_API_BASE_URL or self.JUPITER_API_BASE or "https://api.jup.ag/swap/v1").rstrip("/")
 
     def get_ankr_api_keys(self) -> List[SecretStr]:
-        return [SecretStr(v) for v in self._scan_numbered_secrets("ANKR_API_KEY") if v]
+        return [SecretStr(v) for v in self._scan_ankr_api_keys() if v]
 
     def get_alchemy_api_keys(self) -> List[SecretStr]:
         keys = [SecretStr(v) for v in self._scan_numbered_secrets("ALCHEMY_API_KEY") if v]
@@ -426,6 +532,12 @@ class Settings(BaseSettings):
             return ProviderMode.MOCK
         return ProviderMode.LIVE
 
+    def set_provider_mode(self, mode: ProviderMode | str | None) -> None:
+        if mode is None:
+            self.PROVIDER_MODE = None
+            return
+        self.PROVIDER_MODE = mode if isinstance(mode, ProviderMode) else ProviderMode(str(mode))
+
     def mask_key(self, s: Optional[SecretStr | str]) -> Optional[str]:
         val = _secret_to_str(s)
         if val is None:
@@ -448,13 +560,13 @@ class Settings(BaseSettings):
             if not self.GMGN_API_BASE_URL:
                 missing.append("GMGN_API_BASE_URL")
             if not (self.get_gmgn_api_keys() or self.get_gmgn_client_ids() or self.get_gmgn_credentials()):
-                missing.append("GMGN_API_KEY_N or GMGN_CLIENT_ID_N/GMGN_PUBLIC_KEY_N")
+                missing.append("GMGN_API_KEY or GMGN_CLIENT_ID/GMGN_PUBLIC_KEY")
             if not self.get_jupiter_api_base_url():
                 missing.append("JUPITER_API_BASE_URL")
             if not self.get_jupiter_api_keys():
-                missing.append("JUPITER_API_KEY_N")
+                missing.append("JUPITER_API_KEY")
             if not self.get_rpc_http_urls():
-                missing.append("SOLANA_RPC_HTTP_URLS or ALCHEMY_API_KEY_N")
+                missing.append("SOLANA_RPC_HTTP_URLS or ALCHEMY_API_KEY")
             if not self.JITO_ENABLED:
                 missing.append("JITO_ENABLED")
             if not self.JITO_BLOCK_ENGINE_URL:

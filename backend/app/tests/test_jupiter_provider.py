@@ -73,7 +73,7 @@ async def test_quote_timeout_logged(repo):
     assert len(jupiter_reqs) > 0, "Should have Jupiter provider requests"
     
     for req in jupiter_reqs:
-        assert req.get('endpoint') == '/v6/quote', "Endpoint should be /v6/quote"
+        assert req.get('endpoint') == '/quote', "Endpoint should be /quote"
         assert req.get('latency_ms') is not None, "Latency should be recorded"
         assert req.get('ok') is not None, "OK status should be recorded"
 

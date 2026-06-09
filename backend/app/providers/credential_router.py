@@ -6,15 +6,11 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Set
 
+from ..config import settings
 from .rate_limiter import get_rate_limiter
 
 
-SLOT_POOLS: Dict[str, List[int]] = {
-    "discovery": [0, 1, 2, 3],
-    "token_info": [4, 5],
-    "kline": [6, 7],
-    "holders": [8, 9, 10, 11],
-}
+SLOT_POOLS: Dict[str, List[int]] = settings.get_gmgn_slot_pools()
 
 ENDPOINT_TO_POOL: Dict[str, str] = {
     "/v1/trenches": "discovery",
@@ -33,13 +29,14 @@ class CredentialRouter:
         self.rl = get_rate_limiter()
 
     def _pool_slots(self, endpoint: str) -> List[int]:
+        pools = settings.get_gmgn_slot_pools()
         for ep_prefix, pool_name in ENDPOINT_TO_POOL.items():
             if ep_prefix in endpoint or endpoint in ep_prefix:
-                return SLOT_POOLS.get(pool_name, [4, 5, 6, 7, 8, 9, 10, 11])
-        return SLOT_POOLS.get("token_info", [4, 5, 6, 7])
+                return pools.get(pool_name, [])
+        return pools.get("token_info", [])
 
     def _pool_slots_for_task(self, task_type: str) -> List[int]:
-        return SLOT_POOLS.get(task_type, [4, 5, 6, 7, 8, 9, 10, 11])
+        return settings.get_gmgn_slot_pools().get(task_type, [])
 
     def choose_slot(self, endpoint: str, task_type: str = "", preferred: Optional[int] = None) -> Optional[int]:
         if preferred is not None and not self.rl.is_slot_cooldown(preferred):
@@ -55,11 +52,12 @@ class CredentialRouter:
         return None
 
     def choose_feature_slot(self, exclude_discovery: bool = True) -> Optional[int]:
-        excluded: Set[int] = set(SLOT_POOLS.get("discovery", [])) if exclude_discovery else set()
+        pools = settings.get_gmgn_slot_pools()
+        excluded: Set[int] = set(pools.get("discovery", [])) if exclude_discovery else set()
         all_feature_pools = (
-            SLOT_POOLS.get("token_info", [])
-            + SLOT_POOLS.get("kline", [])
-            + SLOT_POOLS.get("holders", [])
+            pools.get("token_info", [])
+            + pools.get("kline", [])
+            + pools.get("holders", [])
         )
         for slot in all_feature_pools:
             if slot in excluded:
@@ -69,7 +67,7 @@ class CredentialRouter:
         return None
 
     def get_pool_health(self, pool_name: str) -> Dict:
-        pool = SLOT_POOLS.get(pool_name, [])
+        pool = settings.get_gmgn_slot_pools().get(pool_name, [])
         slots_health = []
         for slot in pool:
             slots_health.append(self.rl.get_slot_health(slot))

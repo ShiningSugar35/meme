@@ -50,7 +50,7 @@ class GMGNProvider(MarketDataProvider):
         self.client_ids = [c.get("client_id", "") for c in self.credentials if c.get("client_id")]
         self._key_cursor = 0
         self.mock_data = MockData()
-        self.rate_limiter = get_rate_limiter(credential_count=max(len(self.credentials or []), 12))
+        self.rate_limiter = get_rate_limiter(credential_count=max(len(self.credentials or []), 1))
 
         if self.mode in (ProviderMode.ONLINE_READONLY, ProviderMode.LIVE):
             if not HAS_HTTPX:
@@ -231,12 +231,14 @@ class GMGNProvider(MarketDataProvider):
                             if "chain" in post_body:
                                 post_params["chain"] = post_body.pop("chain")
                         resp = await client.post(url, params=post_params, json=post_body, headers=headers)
-                        logged_request["body_summary"] = {
-                            "new_creation": {
-                                k: v for k, v in post_body.get("new_creation", {}).items()
-                                if k not in ("api_key", "x-api-key", "client_id")
-                            }
-                        } if isinstance(post_body.get("new_creation"), dict) else {"body_type": type(post_body).__name__}
+                        if isinstance(post_body, dict):
+                            logged_request["body_summary"] = {
+                                key: {k: v for k, v in value.items() if k not in ("api_key", "x-api-key", "client_id")}
+                                for key, value in post_body.items()
+                                if isinstance(value, dict)
+                            } or {"body_type": type(post_body).__name__}
+                        else:
+                            logged_request["body_summary"] = {"body_type": type(post_body).__name__}
                     else:
                         resp = await client.get(url, params=request_params, headers=headers)
                 latency = int((time.perf_counter() - started) * 1000)
@@ -411,19 +413,50 @@ class GMGNProvider(MarketDataProvider):
 
     @staticmethod
     def _extract_v2_trench_items(data: Any) -> List[Dict[str, Any]]:
+        return [item for _, item in GMGNProvider._extract_v2_trench_items_by_type(data)]
+
+    @staticmethod
+    def _extract_v2_trench_items_by_type(data: Any) -> List[Tuple[str, Dict[str, Any]]]:
         if not isinstance(data, dict):
             return []
         inner = data.get("data")
         if not isinstance(inner, dict):
             return []
-        items: List[Dict[str, Any]] = []
-        for key in ("new_creation", "pump", "completed"):
+        items: List[Tuple[str, Dict[str, Any]]] = []
+        for key, token_type in (
+            ("new_creation", "new_creation"),
+            ("pump", "near_completion"),
+            ("near_completion", "near_completion"),
+            ("completed", "completed"),
+        ):
             category = inner.get(key)
             if isinstance(category, list):
                 for item in category:
                     if isinstance(item, dict):
-                        items.append(item)
+                        items.append((token_type, item))
+            elif isinstance(category, dict):
+                nested = GMGNProvider._extract_items(category, ("list", "items", "rows", "data", "tokens"))
+                for item in nested:
+                    if isinstance(item, dict):
+                        items.append((token_type, item))
         return items
+
+    @staticmethod
+    def _normalize_trench_types(raw_types: Any) -> List[str]:
+        if raw_types is None or raw_types == "":
+            return ["new_creation"]
+        if isinstance(raw_types, str):
+            values = [x.strip() for x in raw_types.split(",") if x.strip()]
+        elif isinstance(raw_types, (list, tuple, set)):
+            values = [str(x).strip() for x in raw_types if str(x).strip()]
+        else:
+            values = [str(raw_types).strip()]
+        out: List[str] = []
+        for value in values:
+            token_type = "near_completion" if value == "pump" else value
+            if token_type in ("new_creation", "near_completion", "completed") and token_type not in out:
+                out.append(token_type)
+        return out or ["new_creation"]
 
     async def fetch_trenches(self, params: Dict[str, Any], credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         path = settings.GMGN_TRENCHES_PATH
@@ -438,19 +471,16 @@ class GMGNProvider(MarketDataProvider):
         chain = params.get("chain", "sol")
         platforms = params.get("platforms", [])
 
-        body: Dict[str, Any] = {
-            "version": "v2",
-            "new_creation": {
-                "filters": ["offchain", "onchain"],
-                "launchpad_platform_v2": True,
-                "quote_address_type": [4, 5, 3, 1, 13, 0],
-                "limit": int(getattr(settings, "GMGN_TRENCHES_LIMIT", 200) or 200),
-                "renounced_mint": 1,
-                "renounced_freeze_account": 1,
-            }
+        section: Dict[str, Any] = {
+            "filters": ["offchain", "onchain"],
+            "launchpad_platform_v2": True,
+            "quote_address_type": [4, 5, 3, 1, 13, 0],
+            "limit": int(params.get("limit") or getattr(settings, "GMGN_TRENCHES_LIMIT", 200) or 200),
+            "renounced_mint": 1,
+            "renounced_freeze_account": 1,
         }
         if platforms:
-            body["new_creation"]["launchpad_platform"] = list(platforms) if isinstance(platforms, list) else [str(platforms)]
+            section["launchpad_platform"] = list(platforms) if isinstance(platforms, list) else [str(platforms)]
         # Merge x-based risk filters into trenches body (from StrategyThresholds.to_trench_filters)
         # Support both nested trench_filters dict and flattened top-level keys.
         trench_filters = params.get("trench_filters", {})
@@ -458,24 +488,29 @@ class GMGNProvider(MarketDataProvider):
             for k, v in trench_filters.items():
                 if v is not None:
                     db_key = k.replace("-", "_")
-                    body["new_creation"][db_key] = v
-        for k in KNOWN_TRENCH_FILTER_KEYS:
-            if k in params and params[k] is not None and k not in body["new_creation"]:
-                body["new_creation"][k] = params[k]
+                    section[db_key] = v
+        for k in list(KNOWN_TRENCH_FILTER_KEYS) + ["min_created", "max_created", "min-created", "max-created"]:
+            db_key = k.replace("-", "_")
+            if k in params and params[k] is not None and db_key not in section:
+                section[db_key] = params[k]
+
+        selected_types = self._normalize_trench_types(params.get("types", params.get("type")))
+        body: Dict[str, Any] = {"version": "v2"}
+        for token_type in selected_types:
+            body[token_type] = dict(section)
 
         data = await self._make_request(path, {"chain": chain}, method="POST", json_body=body, credential_slot=credential_slot)
-        items = self._extract_v2_trench_items(data)
         out: List[Dict[str, Any]] = []
-        for item in items:
+        for token_type, item in self._extract_v2_trench_items_by_type(data):
             if isinstance(item, dict):
                 normalized = self._normalize_token_data(item)
                 if normalized:
                     normalized["source_mode"] = "REAL"
-                    normalized["type"] = "new_creation"
+                    normalized["type"] = token_type
                     out.append(normalized)
         return out
 
-    async def fetch_token_snapshot(self, token_mint: str) -> Dict[str, Any]:
+    async def fetch_token_snapshot(self, token_mint: str, credential_slot: Optional[int] = None) -> Dict[str, Any]:
         if self.mode == ProviderMode.MOCK:
             self.mock_data._maybe_refresh()
             token = dict(self.mock_data.tokens.get(token_mint) or {})
@@ -489,7 +524,7 @@ class GMGNProvider(MarketDataProvider):
         # Main info is required. Security/pool enrichments are best-effort because
         # some GMGN plans expose only a subset of endpoints.
         info_path = getattr(settings, "GMGN_TOKEN_INFO_PATH", None) or settings.GMGN_TOKEN_PRICE_PATH
-        info = await self._make_request(info_path, params, method="GET")
+        info = await self._make_request(info_path, params, method="GET", credential_slot=credential_slot)
         raw_bundle["token_info"] = info
         merged: Dict[str, Any] = {}
         if isinstance(self._unwrap_data(info), dict):
@@ -502,7 +537,7 @@ class GMGNProvider(MarketDataProvider):
             if not path:
                 continue
             try:
-                data = await self._make_request(path, params, method="GET")
+                data = await self._make_request(path, params, method="GET", credential_slot=credential_slot)
                 raw_bundle[label] = data
                 val = self._unwrap_data(data)
                 if isinstance(val, dict):

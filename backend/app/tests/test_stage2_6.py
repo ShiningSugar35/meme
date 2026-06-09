@@ -12,7 +12,7 @@ import pytest_asyncio
 
 from ..config import settings, ProviderMode
 from ..db.repositories import Repositories
-from ..providers.gmgn_real import GMGNProvider
+from ..providers.gmgn_real import GMGNProvider, GMGNAPIError
 from ..providers.jupiter_real import JupiterProvider
 from ..providers.jito_real import JitoProvider
 from ..providers.rpc_real import RpcRealProvider
@@ -149,9 +149,123 @@ class TestTrenchesPushdown:
         })
 
         assert captured_params
+        assert len(captured_params) == len(settings.get_discovery_slots())
         for params in captured_params:
             assert "trench_filters" not in params
             assert not any(key.startswith("_") for key in params), params
+            assert params.get("type") == ["new_creation", "near_completion"]
+            assert params.get("min_created", "").endswith("m")
+            assert params.get("max_created", "").endswith("m")
+
+    @pytest.mark.asyncio
+    async def test_provider_trenches_v2_body_and_pump_mapping(self, repo, monkeypatch):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        gmgn.mode = ProviderMode.ONLINE_READONLY
+        captured = {}
+
+        async def fake_make_request(path, params, method="GET", json_body=None, credential_slot=None):
+            captured.update({
+                "path": path,
+                "params": dict(params or {}),
+                "method": method,
+                "json_body": json_body,
+                "credential_slot": credential_slot,
+            })
+            return {
+                "data": {
+                    "new_creation": [{"token_mint": "NEW1", "pool_address": "POOL1", "symbol": "N1"}],
+                    "pump": [{"token_mint": "PUMP1", "pool_address": "POOL2", "symbol": "P1"}],
+                }
+            }
+
+        monkeypatch.setattr(gmgn, "_make_request", fake_make_request)
+        result = await gmgn.fetch_trenches({
+            "chain": "sol",
+            "type": ["new_creation", "near_completion"],
+            "platforms": ["Pump.fun"],
+            "min_created": "60m",
+            "max_created": "120m",
+            "trench_filters": {"min_liquidity": 4500.0},
+        }, credential_slot=3)
+
+        assert captured["path"] == settings.GMGN_TRENCHES_PATH
+        assert captured["method"] == "POST"
+        assert captured["params"] == {"chain": "sol"}
+        assert captured["credential_slot"] == 3
+        body = captured["json_body"]
+        assert body["version"] == "v2"
+        assert set(body.keys()) == {"version", "new_creation", "near_completion"}
+        assert body["new_creation"]["min_created"] == "60m"
+        assert body["new_creation"]["max_created"] == "120m"
+        assert body["near_completion"]["min_created"] == "60m"
+        assert body["near_completion"]["max_created"] == "120m"
+        assert body["new_creation"]["min_liquidity"] == 4500.0
+        assert [item["type"] for item in result] == ["new_creation", "near_completion"]
+
+    @pytest.mark.asyncio
+    async def test_discovery_age_shards_use_duration_windows(self, repo, monkeypatch):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = DiscoveryRunner(repo=repo, gmgn=gmgn, strategy_groups=[])
+        monkeypatch.setattr(type(settings), "get_provider_mode", lambda self: ProviderMode.ONLINE_READONLY)
+
+        calls = []
+
+        async def spy_try_fetch(group_name, platforms, request_slot, role, custom_params=None):
+            calls.append((request_slot, dict(custom_params or {})))
+            return [], {
+                "group_name": group_name,
+                "platforms": platforms,
+                "slot": request_slot,
+                "role": role,
+                "ok": True,
+                "raw_count": 0,
+                "unique_count": 0,
+                "duplicate_count": 0,
+                "status_code": None,
+                "error": None,
+                "latency_ms": 0,
+            }
+
+        runner._try_fetch_group = spy_try_fetch
+        await runner._fetch_trenches_two_group(custom_params={"trench_filters": build_trench_filters_for_x(0.2)})
+
+        assert [slot for slot, _ in calls] == settings.get_discovery_slots()
+        for slot, params in calls:
+            i = slot + 1
+            assert params["min_created"] == f"{60 * i}m"
+            assert params["max_created"] == f"{60 * i + 60}m"
+            assert params["type"] == ["new_creation", "near_completion"]
+
+    @pytest.mark.asyncio
+    async def test_feature_call_prefers_token_slot_and_falls_back_on_429(self, repo):
+        class FakeGMGN:
+            def __init__(self):
+                self.calls = []
+
+            async def fetch_latest_price(self, token_mint, credential_slot=None):
+                self.calls.append(credential_slot)
+                if credential_slot == 5:
+                    raise GMGNAPIError("rate limited", status_code=429)
+                return {"price": 1.0, "price_usd": 1.0}
+
+        fake = FakeGMGN()
+        runner = DiscoveryRunner(repo=repo, gmgn=fake, strategy_groups=[])
+
+        def choose_slot(token, stage, exclude=None):
+            exclude = exclude or set()
+            return 5 if 5 not in exclude else 6
+
+        runner._feature_slot_for_token = choose_slot
+        result, slot = await runner._call_gmgn_with_token_slot(
+            {"token_mint": "FALLBACK", "_credential_slot": 5},
+            "price_info",
+            "fetch_latest_price",
+            "FALLBACK",
+        )
+
+        assert result["price"] == 1.0
+        assert slot == 6
+        assert fake.calls == [5, 6]
 
     @pytest.mark.asyncio
     async def test_run_once_uses_default_x_for_trenches_filters(self, repo):

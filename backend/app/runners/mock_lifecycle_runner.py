@@ -4,6 +4,7 @@ from .position_risk_runner import PositionRiskRunner
 from .kill_switch_runner import KillSwitchRunner
 from ..db.repositories import Repositories
 from ..services.provider_factory import ProviderContainer
+from ..config import ProviderMode, settings
 from ..services.price_aggregator import PriceAggregator
 from ..providers.gmgn_subscriber import create_gmgn_subscriber
 from ..trading.executor import TradingPipeline
@@ -18,6 +19,8 @@ class MockLifecycleRunner:
 
     def __init__(self, repo: Repositories, providers: ProviderContainer, strategy_groups: list):
         self.repo = repo
+        if getattr(providers, "mode", None) != ProviderMode.MOCK:
+            providers = ProviderContainer(repo, mode=ProviderMode.MOCK)
         self.providers = providers
         self.strategy_groups = strategy_groups
 
@@ -34,7 +37,13 @@ class MockLifecycleRunner:
         self.kill = KillSwitchRunner(repo)
 
     async def run_once(self):
-        await self.discovery.run_once()
-        await self.price.run_once()
-        await self.risk.run_once()
-        await self.kill.run_once()
+        previous_mode = settings.PROVIDER_MODE
+        settings.set_provider_mode(ProviderMode.MOCK)
+        await self.repo.set_runtime_setting("user_mode", "SIM_TEST")
+        try:
+            await self.discovery.run_once()
+            await self.price.run_once()
+            await self.risk.run_once()
+            await self.kill.run_once()
+        finally:
+            settings.set_provider_mode(previous_mode)

@@ -11,7 +11,7 @@ from ..services.event_bus import event_bus
 from ..config import settings
 from ..logging_config import logger
 from ..strategy.exit_rules import _executed_exit_rules
-from .discovery_runner import acquire_feature_slot
+from .discovery_runner import acquire_holding_slot
 
 
 def _utc_now() -> datetime:
@@ -146,6 +146,7 @@ class PositionRiskRunner:
         self._legacy_warned: set[int] = set()
         self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
         self._last_risk_fail_details: Dict[int, List[str]] = {}
+        self._last_scan: Dict[int, datetime] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -178,6 +179,7 @@ class PositionRiskRunner:
         token = position["token_mint"]
         pos_id = int(position["id"])
         account_type = _account_type(position)
+        self._last_scan[pos_id] = now
 
         if not _recheck_due(position, now):
             return
@@ -313,7 +315,7 @@ class PositionRiskRunner:
         # TOP3 smart degen dump, completed, and dust force exit.
 
     async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
-        slot = acquire_feature_slot("risk_price")
+        slot = acquire_holding_slot("risk_price")
         try:
             return await self.gmgn.fetch_latest_price(token, credential_slot=slot)
         except Exception as e:
@@ -328,7 +330,8 @@ class PositionRiskRunner:
 
     async def _fetch_latest_snapshot(self, token: str, account_type: str) -> Dict[str, Any]:
         try:
-            snap = await self.gmgn.fetch_token_snapshot(token)
+            slot = acquire_holding_slot("risk_snapshot")
+            snap = await self.gmgn.fetch_token_snapshot(token, credential_slot=slot)
             return snap or {}
         except Exception as e:
             await self.repo.append_system_event(
@@ -465,7 +468,7 @@ class PositionRiskRunner:
         token = position["token_mint"]
         account_type = _account_type(position)
 
-        slot = acquire_feature_slot("risk_smart_money")
+        slot = acquire_holding_slot("risk_smart_money")
         try:
             holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=slot)
         except Exception:
@@ -558,7 +561,7 @@ class PositionRiskRunner:
             if rule.startswith("TOP3_SMART_DEGEN_DUMP:"):
                 already_triggered_wallets.add(rule.split(":", 1)[1])
 
-        slot = acquire_feature_slot("risk_top3_degen")
+        slot = acquire_holding_slot("risk_top3_degen")
         try:
             holders = await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=slot)
         except Exception:

@@ -197,10 +197,17 @@ class Repositories:
         self,
         name: str,
         x: float,
+        *legacy_args,
         is_live: bool = False,
         priority: int = 100,
         raw_config_json: str = "{}",
     ) -> int:
+        if legacy_args and isinstance(legacy_args[0], bool):
+            is_live = legacy_args[0]
+            if len(legacy_args) > 1:
+                priority = int(legacy_args[1])
+            if len(legacy_args) > 2:
+                raw_config_json = str(legacy_args[2])
         created_at = utc_now_iso()
 
         async def _do():
@@ -942,6 +949,8 @@ class Repositories:
         pool_address: Optional[str] = None,
         next_risk_check_at: Optional[str] = None,
         risk_check_interval_seconds: Optional[int] = None,
+        entry_price_sol: Optional[float] = None,
+        total_cost_sol: Optional[float] = None,
     ) -> int:
         now = utc_now_iso()
         opened_at = opened_at or now
@@ -1227,6 +1236,7 @@ class Repositories:
         close_reason: Optional[str] = None,
         realized_pnl_pct: Optional[float] = None,
         pnl_pct: Optional[float] = None,
+        total_return_sol: Optional[float] = None,
     ):
         closed_at = closed_at or utc_now_iso()
 

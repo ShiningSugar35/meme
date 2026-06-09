@@ -338,11 +338,21 @@ class TradingPipeline:
         if not passed_strategies:
             return {"status": "NO_PASSED_STRATEGY", "token_mint": token_mint}
 
+        discovery_created = True
         if discovery_event_id is None and not discovery_event_ids_by_strategy:
-            discovery_event_id, _ = await self.repo.create_discovery_event_idempotent(
+            discovery_event_id, discovery_created = await self.repo.create_discovery_event_idempotent(
                 token_mint=token_mint,
                 snapshot_id=snapshot_id,
             )
+            if snapshot_id is not None and not discovery_created:
+                await self.repo.append_system_event(
+                    "INFO",
+                    "TRADE",
+                    "Duplicate snapshot skipped",
+                    self._safe_json({"token": token_mint, "snapshot_id": snapshot_id, "discovery_event_id": discovery_event_id}),
+                    account_type="SIM",
+                )
+                return {"status": "SKIPPED_DUPLICATE_SNAPSHOT", "created": [], "discovery_event_id": discovery_event_id}
 
         # Capture TOP3 smart degen snapshot BEFORE creating positions
         # so it can be embedded in locked_strategy_config_json at creation time.
@@ -386,6 +396,22 @@ class TradingPipeline:
                     account_type="LIVE",
                 )
                 return {"status": "LIVE_DISABLED", "created": created, "discovery_event_id": discovery_event_id}
+
+            existing_positions = await self.repo.list_positions_by_token_and_is_live(token_mint, True)
+            existing_open = next((p for p in existing_positions if p.get("status") != "CLOSED"), None)
+            if existing_open:
+                await self.repo.append_system_event(
+                    "INFO",
+                    "TRADE",
+                    "Open live position already exists for this token",
+                    self._safe_json({
+                        "token": token_mint,
+                        "position_id": existing_open.get("id"),
+                        "discovery_event_id": discovery_event_id,
+                    }),
+                    account_type="LIVE",
+                )
+                return {"status": "SKIPPED_EXISTING_LIVE_POSITION", "created": created, "position_id": existing_open.get("id")}
 
             existing = await self._get_open_live_position_by_token_cycle(token_mint, discovery_event_id)
             if existing:
@@ -1083,14 +1109,26 @@ class TradingPipeline:
     async def _get_quote(
         self,
         input_mint: str,
-        output_mint: str,
-        amount_raw: int,
-        slippage_bps: int,
-        *,
+        output_mint: Any,
+        amount_raw: Optional[int] = None,
+        slippage_bps: Optional[int] = None,
+        *legacy_args,
         token_mint: Optional[str] = None,
         strategy: Optional[Dict[str, Any]] = None,
         context_id: Optional[int] = None,
+        is_sell: Optional[bool] = None,
     ) -> Dict[str, Any]:
+        if is_sell is not None and isinstance(output_mint, (int, float)):
+            legacy_token = input_mint
+            legacy_amount = int(output_mint)
+            legacy_slippage = int(amount_raw or slippage_bps or 0)
+            input_mint = legacy_token if is_sell else WRAPPED_SOL_MINT
+            output_mint = WRAPPED_SOL_MINT if is_sell else legacy_token
+            amount_raw = legacy_amount
+            slippage_bps = legacy_slippage
+
+        amount_raw = int(amount_raw or 0)
+        slippage_bps = int(slippage_bps or 0)
         if amount_raw <= 0:
             return {"error": "INVALID_QUOTE_AMOUNT", "amount_raw": amount_raw}
 

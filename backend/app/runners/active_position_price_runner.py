@@ -15,7 +15,7 @@ from ..config import settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
 from ..services.event_bus import event_bus
-from .discovery_runner import acquire_feature_slot
+from .discovery_runner import acquire_holding_slot
 
 
 def _utc_now() -> datetime:
@@ -142,7 +142,8 @@ class ActivePositionPriceRunner:
         token_type = position.get("latest_token_type") or position.get("type")
         if token_type != "completed":
             try:
-                snap = await self.gmgn.fetch_token_snapshot(token)
+                slot = acquire_holding_slot("price_runner_snapshot")
+                snap = await self.gmgn.fetch_token_snapshot(token, credential_slot=slot)
                 if snap:
                     snap_type = snap.get("type") or snap.get("token_type")
                     if snap_type:
@@ -165,7 +166,7 @@ class ActivePositionPriceRunner:
         await self._execute_exit(position, exit_pct, reason_code, current_price, now)
 
     async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
-        slot = acquire_feature_slot("price_runner")
+        slot = acquire_holding_slot("price_runner")
         try:
             return await self.gmgn.fetch_latest_price(token, credential_slot=slot)
         except Exception as e:

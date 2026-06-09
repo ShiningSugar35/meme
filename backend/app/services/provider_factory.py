@@ -8,9 +8,9 @@ from ..providers.mock_data import MockData
 
 
 class ProviderContainer:
-    def __init__(self, repo: Repositories):
+    def __init__(self, repo: Repositories, mode: ProviderMode | None = None):
         self.repo = repo
-        self.mode = settings.get_provider_mode()
+        self.mode = mode or settings.get_provider_mode()
         
         # Create providers based on mode
         if self.mode == ProviderMode.MOCK:

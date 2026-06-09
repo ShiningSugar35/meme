@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 
 from ..db.repositories import Repositories
-from ..config import settings, ProviderMode
+from ..config import Settings, settings, ProviderMode
 from ..providers.gmgn_real import GMGNProvider
 from ..providers.jupiter_real import JupiterProvider
 from ..providers.jito_real import JitoProvider
@@ -25,10 +25,12 @@ class TestSafetyGate:
         assert pipe._safety_gate() is None
 
     def test_dry_run_default_is_true(self):
-        assert settings.DRY_RUN is True
+        isolated = Settings(PROVIDER_MODE=None, DRY_RUN=True)
+        assert isolated.DRY_RUN is True
 
     def test_non_mock_mode_with_dry_run_would_block(self):
-        assert settings.DRY_RUN is True
+        isolated = Settings(PROVIDER_MODE=None, DRY_RUN=True)
+        assert isolated.get_provider_mode() == ProviderMode.MOCK
         # With DRY_RUN=true, get_provider_mode returns MOCK
 
 

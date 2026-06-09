@@ -30,6 +30,7 @@ async def repo_and_pipeline(tmp_path):
 
 
 async def _ensure_live(repo):
+    await repo.set_runtime_setting("live_entries_enabled", "true")
     groups = await repo.list_strategy_groups()
     live = [g for g in groups if g['is_live']]
     if not live:
@@ -38,10 +39,16 @@ async def _ensure_live(repo):
     return [g for g in groups if g['is_live']]
 
 
+def _mock_safety_gate():
+    import backend.app.trading.executor as exec_mod
+    exec_mod.TradingPipeline._safety_gate = lambda self: None
+
+
 @pytest.mark.asyncio
 async def test_same_snapshot_no_duplicate_discovery_event(repo_and_pipeline):
     """Same snapshot_id second call does not create second discovery event."""
     repo, pipeline = repo_and_pipeline
+    _mock_safety_gate()
     live_groups = await _ensure_live(repo)
     
     # First call with snapshot_id=100 using PASS1 (existing mock token)
@@ -64,6 +71,7 @@ async def test_same_snapshot_no_duplicate_discovery_event(repo_and_pipeline):
 async def test_same_snapshot_no_duplicate_live_position(repo_and_pipeline):
     """Same snapshot_id second call does not create second live position."""
     repo, pipeline = repo_and_pipeline
+    _mock_safety_gate()
     live_groups = await _ensure_live(repo)
     
     # First call
@@ -101,6 +109,7 @@ async def test_same_snapshot_no_duplicate_simulated_positions(repo_and_pipeline)
 async def test_diff_snapshot_allows_new_cycle(repo_and_pipeline):
     """Different snapshot_id allows new cycle but respects open live position rule."""
     repo, pipeline = repo_and_pipeline
+    _mock_safety_gate()
     live_groups = await _ensure_live(repo)
     
     # First cycle
@@ -134,6 +143,7 @@ async def test_discovery_event_id_in_strategy_matches(repo_and_pipeline):
 async def test_discovery_event_id_in_positions(repo_and_pipeline):
     """positions should have discovery_event_id set."""
     repo, pipeline = repo_and_pipeline
+    _mock_safety_gate()
     live_groups = await _ensure_live(repo)
     
     await pipeline.handle_token_second_filter_result('PASS1', live_groups, snapshot_id=600)

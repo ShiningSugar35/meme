@@ -17,7 +17,7 @@ import re
 from datetime import datetime, timezone
 
 from ..db.repositories import Repositories
-from ..config import settings, ProviderMode
+from ..config import Settings, settings, ProviderMode
 from ..providers.gmgn_real import GMGNProvider
 from ..providers.jupiter_real import JupiterProvider
 from ..providers.jito_real import JitoProvider
@@ -338,11 +338,13 @@ class TestPriceAggregatorSourceTracking:
 class TestProviderConfigValidation:
     def test_provider_mode_default_is_mock(self):
         """Default provider mode must be MOCK for safety."""
-        assert settings.get_provider_mode() == ProviderMode.MOCK
+        isolated = Settings(PROVIDER_MODE=None, DRY_RUN=True, LIVE_TRADING_ENABLED=None)
+        assert isolated.get_provider_mode() == ProviderMode.MOCK
 
     def test_dry_run_enabled_by_default(self):
         """DRY_RUN must be True by default for safety."""
-        assert settings.DRY_RUN is True
+        isolated = Settings(PROVIDER_MODE=None, DRY_RUN=True)
+        assert isolated.DRY_RUN is True
 
     def test_get_gmgn_api_key_backward_compatible(self):
         """get_gmgn_api_key() must return first available key."""

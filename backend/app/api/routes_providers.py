@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -126,7 +126,9 @@ async def test_gmgn():
     ok = bool(base) and (mode != ProviderMode.LIVE or bool(keys or client_ids or credentials))
     return _json_response(
         {
+            "provider": "GMGN",
             "ok": ok,
+            "error_code": None if ok else "GMGN_CONFIG_INCOMPLETE",
             "mode": _mode_value(),
             "base_url": base,
             "api_key_count": len(keys),
@@ -151,3 +153,43 @@ async def test_jupiter():
         },
         status_code=200 if ok else 400,
     )
+
+
+@router.post("/jupiter/quote-test")
+async def quote_test_jupiter(request: Request, payload: Dict[str, Any]):
+    """Backward-compatible safe quote test endpoint; always uses MOCK mode."""
+    from ..providers.jupiter_real import JupiterProvider
+
+    repo = request.app.state.repo
+    provider = JupiterProvider(repo, mode=ProviderMode.MOCK)
+    quote = await provider.quote_exact_in(
+        payload.get("input_mint") or "SOL",
+        payload.get("output_mint") or "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        int(payload.get("amount_lamports") or payload.get("amount") or 0),
+        int(payload.get("slippage_bps") or 1500),
+    )
+    return _json_response({
+        "provider": "Jupiter",
+        "ok": not bool(quote.get("error")),
+        "latency_ms": 1,
+        "error_code": quote.get("error"),
+        "summary": {"priceImpactPct": quote.get("priceImpactPct")},
+    })
+
+
+@router.post("/jito/tip-test")
+async def tip_test_jito(request: Request):
+    """Backward-compatible safe Jito tip test endpoint; always uses MOCK mode."""
+    from ..providers.jito_real import JitoProvider
+
+    repo = request.app.state.repo
+    provider = JitoProvider(repo, mode=ProviderMode.MOCK)
+    tip = await provider.get_tip_floor()
+    return _json_response({
+        "provider": "Jito",
+        "ok": True,
+        "summary": {
+            "mode": tip.get("mode"),
+            "has_50th": bool(tip.get("landed_tips_50th_percentile")),
+        },
+    })

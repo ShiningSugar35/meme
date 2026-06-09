@@ -111,9 +111,10 @@ async def test_settings_validate_live_requires_keys():
     """When PROVIDER_MODE=live, validate that required keys are present."""
     from pydantic import SecretStr
 
-    # Test: PROVIDER_MODE=live with missing wallet keys should fail
-    with pytest.raises(ValueError) as exc_info:
-        settings = Settings(
+    # Missing live wallet keys are reported as warnings so local live-read config
+    # can still boot while real trading remains blocked by provider/runtime gates.
+    with pytest.warns(UserWarning) as warnings:
+        Settings(
             PROVIDER_MODE='live',
             DRY_RUN=False,
             GMGN_API_BASE_URL='https://api.gmgn.ai',
@@ -126,8 +127,9 @@ async def test_settings_validate_live_requires_keys():
             WALLET_PUBLIC_KEY=None,
             WALLET_PRIVATE_KEY_BASE58=None,
         )
-    assert 'WALLET_PUBLIC_KEY' in str(exc_info.value)
-    assert 'WALLET_PRIVATE_KEY_BASE58' in str(exc_info.value)
+    combined = "\n".join(str(w.message) for w in warnings)
+    assert 'WALLET_PUBLIC_KEY' in combined
+    assert 'WALLET_PRIVATE_KEY_BASE58' in combined
 
 
 @pytest.mark.asyncio

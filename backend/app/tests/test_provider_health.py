@@ -31,8 +31,9 @@ async def test_mock_health_passes(repo, client):
     assert response.status_code == 200
     
     data = response.json()
-    assert 'overall_health' in data, "Should have overall_health"
-    assert data.get('provider_mode') == 'mock', "Mode should be mock"
+    assert 'GMGN' in data, "Should have GMGN health row"
+    assert 'Jupiter' in data, "Should have Jupiter health row"
+    assert all('ok' in row for row in data.values()), "Each provider row should expose ok"
 
 
 @pytest.mark.asyncio
@@ -63,7 +64,7 @@ async def test_health_no_key_exposure(repo, client):
     assert 'API_KEY' not in response_text or '****' in response_text, "Keys should be masked"
     
     # Check provider details
-    for provider in data.get('providers', []):
+    for provider in data.values():
         provider_text = str(provider)
         # Ensure no full keys (if any)
         assert len(provider_text) < 5000, "Response too long, may contain sensitive data"

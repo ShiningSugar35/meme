@@ -65,17 +65,14 @@ class RateLimiter:
         self._endpoint_cooldowns: Dict[str, EndpointCooldown] = {}
         self.default_cooldown_s = float(getattr(settings, "GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS", 300) or 300)
 
-        primary = getattr(settings, "GMGN_DISCOVERY_PRIMARY_SLOT", 0)
-        reserve = getattr(settings, "GMGN_DISCOVERY_RESERVE_SLOT", 1)
-        feature_slots = settings.get_feature_slots()
+        discovery_slots = set(settings.get_discovery_slots())
+        holding_slots = set(settings.get_holding_slots())
 
         for i in range(credential_count):
-            if i == primary:
-                role = "discovery_primary"
-            elif i == reserve:
-                role = "discovery_reserve"
-            elif i in feature_slots:
-                role = "feature"
+            if i in holding_slots:
+                role = "holding_poll"
+            elif i in discovery_slots:
+                role = "discovery"
             else:
                 role = "unassigned"
             self.slots[i] = CredentialSlot(slot=i, role=role)
@@ -232,12 +229,9 @@ class RateLimiter:
         return cred.is_cooldown() if cred else False
 
     def is_discovery_available(self) -> Tuple[bool, Optional[int]]:
-        primary = getattr(settings, "GMGN_DISCOVERY_PRIMARY_SLOT", 0)
-        reserve = getattr(settings, "GMGN_DISCOVERY_RESERVE_SLOT", 1)
-        if not self.is_slot_cooldown(primary):
-            return True, primary
-        if not self.is_slot_cooldown(reserve):
-            return True, reserve
+        for slot in settings.get_discovery_slots():
+            if not self.is_slot_cooldown(slot):
+                return True, slot
         return False, None
 
     def get_all_health(self) -> List[Dict[str, Any]]:

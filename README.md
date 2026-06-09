@@ -55,66 +55,15 @@ GMGN_KLINE_PATH=/v1/market/token_kline
 GMGN_TOKEN_HOLDERS_PATH=/v1/market/token_top_holders
 
 # GMGN 认证：不同 OpenAPI 部署可能要求 api_key 或 client_id。
-# 系统会同时支持 Header + query/body 传参，GMGN_CLIENT_ID_N 可不填；未填时默认使用 GMGN_PUBLIC_KEY_N 作为 client_id。
-GMGN_API_KEY_1=
-GMGN_PUBLIC_KEY_1=
-GMGN_CLIENT_ID_1=
-GMGN_PRIVATE_KEY_1=
+# 按顺序用逗号填写。GMGN_CLIENT_ID 可不填；未填时默认使用同位置 GMGN_PUBLIC_KEY 作为 client_id。
+GMGN_API_KEY=key1,key2,key3,key4,key5,key6,key7,key8,key9,key10,key11,key12
+GMGN_PUBLIC_KEY=pub1,pub2,pub3,pub4,pub5,pub6,pub7,pub8,pub9,pub10,pub11,pub12
+GMGN_CLIENT_ID=
+GMGN_PRIVATE_KEY=priv1,priv2,priv3,priv4,priv5,priv6,priv7,priv8,priv9,priv10,priv11,priv12
 
-GMGN_API_KEY_2=
-GMGN_PUBLIC_KEY_2=
-GMGN_CLIENT_ID_2=
-GMGN_PRIVATE_KEY_2=
-
-GMGN_API_KEY_3=
-GMGN_PUBLIC_KEY_3=
-GMGN_CLIENT_ID_3=
-GMGN_PRIVATE_KEY_3=
-
-GMGN_API_KEY_4=
-GMGN_PUBLIC_KEY_4=
-GMGN_CLIENT_ID_4=
-GMGN_PRIVATE_KEY_4=
-
-GMGN_API_KEY_5=
-GMGN_PUBLIC_KEY_5=
-GMGN_CLIENT_ID_5=
-GMGN_PRIVATE_KEY_5=
-
-GMGN_API_KEY_6=
-GMGN_PUBLIC_KEY_6=
-GMGN_CLIENT_ID_6=
-GMGN_PRIVATE_KEY_6=
-
-GMGN_API_KEY_7=
-GMGN_PUBLIC_KEY_7=
-GMGN_CLIENT_ID_7=
-GMGN_PRIVATE_KEY_7=
-
-GMGN_API_KEY_8=
-GMGN_PUBLIC_KEY_8=
-GMGN_CLIENT_ID_8=
-GMGN_PRIVATE_KEY_8=
-
-GMGN_API_KEY_9=
-GMGN_PUBLIC_KEY_9=
-GMGN_CLIENT_ID_9=
-GMGN_PRIVATE_KEY_9=
-
-GMGN_API_KEY_10=
-GMGN_PUBLIC_KEY_10=
-GMGN_CLIENT_ID_10=
-GMGN_PRIVATE_KEY_10=
-
-GMGN_API_KEY_11=
-GMGN_PUBLIC_KEY_11=
-GMGN_CLIENT_ID_11=
-GMGN_PRIVATE_KEY_11=
-
-GMGN_API_KEY_12=
-GMGN_PUBLIC_KEY_12=
-GMGN_CLIENT_ID_12=
-GMGN_PRIVATE_KEY_12=
+# API slot 分配：系统按 5:1 动态拆分拉池和持仓轮询 API，且至少保留 1 个 API 给持仓轮询。
+# 例如 12 个 GMGN API 时，slot 1-2 专供模拟盘/实盘持仓价格与风控轮询，slot 3-12 用于 Trenches 拉池。
+# Trenches 仍按 API 原始顺序分配 1 小时窗口：slot 3 对应 180m-240m，slot 12 对应 720m-780m。
 
 # Jupiter API Configuration (Swap Provider)
 JUPITER_API_BASE_URL=https://api.jup.ag/swap/v1
@@ -149,7 +98,7 @@ WALLET_PRIVATE_KEY_BASE58=
 
 ```
 
-API key 支持任意数量动态扫描，新增 key 只需在 `.env` 中按编号添加即可。
+GMGN API key 支持 CSV 任意数量动态扫描；旧的 `GMGN_API_KEY_1`、`GMGN_PUBLIC_KEY_1`、`GMGN_PRIVATE_KEY_1` 编号格式仍兼容，但推荐使用上面的 CSV 写法。
 
 ### 3. 启动后端
 
@@ -331,7 +280,7 @@ LIVE entry_usd = min(liquidity_usd * ENTRY_SIZE_LIQUIDITY_PCT, ENTRY_MAX_USD, wa
 若 LIVE entry_usd < 10，则跳过本轮实盘买入。
 ```
 
-执行层根据 `price_usd / price_sol` 或价格聚合器推导 SOL/USD，将 USD 目标仓位换算为 SOL 数量。模拟模式只记录虚拟成交；实盘模式会先读取钱包 SOL 余额并换算为 USD，确保买入额不超过当前余额；若计算结果小于 10 美元，不再发起报价和交易，直到余额/池子规模恢复到阈值以上。
+执行层根据 `price_usd / price_sol` 或价格聚合器推导 SOL/USD，将 USD 目标仓位换算为 SOL 数量。模拟模式只记录虚拟成交；实盘模式会先读取钱包 SOL 余额并换算为 USD，确保买入额不超过当前余额。
 
 ### 4. 持仓价格监控
 
@@ -382,7 +331,7 @@ LIVE entry_usd = min(liquidity_usd * ENTRY_SIZE_LIQUIDITY_PCT, ENTRY_MAX_USD, wa
 - `GET /v1/market/token_kline`：1m/5m K-line，二筛和动态止损使用。
 - `GET /v1/market/token_top_holders`：二筛末端与持仓期间低频 top1 holder 风控。
 
-若出现 `AUTH_INVALID: missing api key or client_id`，优先检查 `.env` 中 `GMGN_API_KEY_N` 是否有值；若 GMGN 控制台提供的是 client id，则填入 `GMGN_CLIENT_ID_N`。本版本会同时通过 `x-api-key`、`x-route-key`、`Authorization: Bearer`、`x-client-id`、`client-id` 以及 GET query / POST body 的 `api_key/client_id` 传递认证信息，以兼容不同 GMGN OpenAPI 网关。
+若出现 `AUTH_INVALID: missing api key or client_id`，优先检查 `.env` 中 `GMGN_API_KEY` 是否有值；若 GMGN 控制台提供的是 client id，则填入 `GMGN_CLIENT_ID`，或让系统用同位置 `GMGN_PUBLIC_KEY` 作为 client id。本版本会同时通过 `x-api-key`、`x-route-key`、`Authorization: Bearer`、`x-client-id`、`client-id` 以及 GET query / POST body 的 `api_key/client_id` 传递认证信息，以兼容不同 GMGN OpenAPI 网关。
 
 ### Jupiter / Jito / RPC
 
@@ -515,3 +464,6 @@ GMGN WebSocket subscription not yet implemented, using mock subscriber
 - 所有策略判定必须写入 rule detail，不能只写 pass/fail。
 - 实盘相关改动必须保留 mock/readonly 路径。
 - 涉及私钥、API key、raw transaction 的日志必须脱敏。
+- 请你先和我确认开发计划，再进行开发
+- 开发需要同步更新项目代码和模拟交易.py中的逻辑
+- 开发完毕后，请同步更新README.md

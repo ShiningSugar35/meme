@@ -12,18 +12,18 @@ class MarketDataProvider(ABC):
     """
 
     @abstractmethod
-    async def fetch_trenches(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    async def fetch_trenches(self, params: Dict[str, Any], credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         ...
 
     @abstractmethod
-    async def fetch_token_snapshot(self, token_mint: str) -> Dict[str, Any]:
+    async def fetch_token_snapshot(self, token_mint: str, credential_slot: Optional[int] = None) -> Dict[str, Any]:
         ...
 
     @abstractmethod
-    async def fetch_kline(self, token_mint: str, interval: str, limit: int, from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> List[Dict[str, Any]]:
+    async def fetch_kline(self, token_mint: str, interval: str, limit: int, from_ts: Optional[int] = None, to_ts: Optional[int] = None, credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         ...
 
-    async def fetch_top_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:
+    async def fetch_top_holders(self, token_mint: str, limit: int = 20, credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         """Optional provider hook for holder concentration checks.
 
         Implementations that do not support top holders may return an empty list.
@@ -41,10 +41,10 @@ class MarketDataProvider(ABC):
         return {"top1_holder_rate": None, "addr_type": addr_type}
 
     @abstractmethod
-    async def fetch_latest_price(self, token_mint: str) -> Dict[str, Any]:
+    async def fetch_latest_price(self, token_mint: str, credential_slot: Optional[int] = None) -> Dict[str, Any]:
         ...
 
-    async def fetch_top_holders(self, token_mint: str, limit: int = 20) -> List[Dict[str, Any]]:
+    async def fetch_top_holders(self, token_mint: str, limit: int = 20, credential_slot: Optional[int] = None) -> List[Dict[str, Any]]:
         """Optional provider hook for holder concentration checks."""
         return []
 

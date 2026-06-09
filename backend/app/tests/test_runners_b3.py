@@ -64,13 +64,11 @@ class TestDynamicAPIKeys:
         assert len(valid) >= 1, f"Expected at least 1 valid GMGN account, got {len(valid)}"
 
     def test_risk_scan_interval_tiers(self):
-        assert settings.get_risk_scan_interval_seconds(2.0) == 2, ">= 1.5 SOL should scan every 2s"
-        assert settings.get_risk_scan_interval_seconds(1.5) == 2, ">= 1.5 SOL boundary"
-        assert settings.get_risk_scan_interval_seconds(1.2) == 4, ">= 1.0 SOL should scan every 4s"
-        assert settings.get_risk_scan_interval_seconds(0.6) == 8, ">= 0.5 SOL should scan every 8s"
-        assert settings.get_risk_scan_interval_seconds(0.3) == 16, ">= 0.25 SOL should scan every 16s"
-        assert settings.get_risk_scan_interval_seconds(0.1) == 32, "< 0.25 SOL should scan every 32s"
-        assert settings.get_risk_scan_interval_seconds(0.0) == 32, "0 SOL should scan every 32s"
+        assert settings.get_risk_scan_interval_seconds(settings.RISK_FEATURE_SCAN_TIER_1_USD) == settings.RISK_FEATURE_SCAN_TIER_1_SECONDS
+        assert settings.get_risk_scan_interval_seconds(settings.RISK_FEATURE_SCAN_TIER_2_USD) == settings.RISK_FEATURE_SCAN_TIER_2_SECONDS
+        assert settings.get_risk_scan_interval_seconds(settings.RISK_FEATURE_SCAN_TIER_3_USD) == settings.RISK_FEATURE_SCAN_TIER_3_SECONDS
+        assert settings.get_risk_scan_interval_seconds(settings.RISK_FEATURE_SCAN_TIER_4_USD) == settings.RISK_FEATURE_SCAN_TIER_4_SECONDS
+        assert settings.get_risk_scan_interval_seconds(0.0) == settings.RISK_FEATURE_SCAN_TIER_5_SECONDS
 
     def test_dust_force_exit_default(self):
         assert settings.DUST_FORCE_EXIT_SOL == 0.125, "Default dust threshold should be 0.125 SOL"

@@ -4,7 +4,7 @@ Jito provider.
 Aligned to Jito docs:
 - Tip floor is read from settings.JITO_TIP_FLOOR_URL (default bundles.jito.wtf/api/v1/bundles/tip_floor).
 - Bundle-related calls use the block-engine JSON-RPC endpoint /api/v1/bundles.
-- send() is blocked in mock/online_readonly and only sends in live mode.
+- send() returns mock success in mock, is blocked in online_readonly, and only sends in live mode.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ class JitoProvider(ExecutionProvider):
         self._tip_cache_ttl = max(1, int(getattr(settings, "TIP_FLOOR_REFRESH_SECONDS", 3)))
 
         if self.mode == ProviderMode.MOCK:
-            logger.info("Jito Provider initialized in MOCK mode - send() is blocked from real network")
+            logger.info("Jito Provider initialized in MOCK mode - send() returns mock success")
         elif self.mode == ProviderMode.ONLINE_READONLY:
             if not HAS_HTTPX:
                 raise ImportError("httpx required for Jito online_readonly mode")
@@ -254,7 +254,12 @@ class JitoProvider(ExecutionProvider):
             return {"ok": False, "error": "SIMULATE_FAILED", "message": str(e), "mode": self.mode.value}
 
     async def send(self, transaction_or_bundle: Any) -> Dict[str, Any]:
-        if self.mode in (ProviderMode.MOCK, ProviderMode.ONLINE_READONLY):
+        if self.mode == ProviderMode.MOCK:
+            response = {"ok": True, "bundle_id": "MOCK_BUNDLE", "mode": "MOCK"}
+            await self._log("sendBundle", True, {"mode": "MOCK", "tx_or_bundle": "mock"}, response)
+            return response
+
+        if self.mode == ProviderMode.ONLINE_READONLY:
             error_msg = f"Jito send() is blocked in {self.mode.value} mode"
             await self._log("sendBundle", False, {"mode": self.mode.value}, {}, 403, 0,
                             "JITO_MODE_BLOCKED", error_msg)
