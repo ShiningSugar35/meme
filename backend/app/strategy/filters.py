@@ -640,7 +640,8 @@ async def run_holding_risk_filter(
                  ["creator_balance_rate", "dev_team_hold_rate", "creator_hold_rate", "dev_hold_rate"],
                  lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}", required=False)
     _check_float(details, snapshot, "holder_count", ["holder_count", "holders", "total_holders", "holder"],
-                 lambda v: v > t.min_holder_count_raw, f"> {t.min_holder_count_raw:.6g}", required=False)
+                 lambda v: t.min_holder_count_raw < v < t.max_holder_count_raw,
+                 f"({t.min_holder_count_raw:.6g}, {t.max_holder_count_raw:.6g})", required=False)
     _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"], required=False)
     _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate", "rat_trader"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)

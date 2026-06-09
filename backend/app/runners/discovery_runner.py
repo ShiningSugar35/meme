@@ -55,6 +55,7 @@ SNAPSHOT_COLUMNS = [
     'rat_trader_amount_rate', 'suspected_insider_hold_rate', 'max_bundler_rate',
     'fresh_wallet_rate', 'sell_tax', 'has_social', 'creator_token_status',
     'dev_team_hold_rate', 'dev_token_burn_ratio', 'sniper_count', 'burn_status',
+    'holder_count',
     'source_mode',
 ]
 
@@ -278,6 +279,11 @@ class DiscoveryRunner:
         if preferred is None:
             return await method(*args, **kwargs), None
 
+        # Small inter-call delay to smooth burst traffic
+        call_delay = float(getattr(settings, 'GMGN_FEATURE_CALL_DELAY_SECONDS', 0.15) or 0.15)
+        if call_delay > 0:
+            await asyncio.sleep(call_delay)
+
         tried: Set[int] = set()
         last_exc: Optional[Exception] = None
         while True:
@@ -303,6 +309,10 @@ class DiscoveryRunner:
                     slot=slot,
                     error=str(exc)[:200],
                 )
+
+            # Additional delay before fallback retry
+            if call_delay > 0:
+                await asyncio.sleep(call_delay)
 
         if last_exc is not None:
             raise last_exc
@@ -451,6 +461,7 @@ class DiscoveryRunner:
         rl = get_rate_limiter()
         platforms = self._all_discovery_platforms()
         discovery_slots = settings.get_discovery_slots()
+        concurrency = int(getattr(settings, 'GMGN_TRENCHES_CONCURRENCY', 2) or 2)
 
         if not discovery_slots:
             return [], {
@@ -462,9 +473,12 @@ class DiscoveryRunner:
                 "error": "no GMGN discovery credential slots configured",
             }
 
-        for slot in discovery_slots:
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _fetch_one_slot(slot: int):
             min_created, max_created = self._slot_age_window(slot)
             group_name = f"age_{min_created}_{max_created}"
+
             if mode == ProviderMode.MOCK:
                 params_base = dict(custom_params) if custom_params else {}
                 params_base.setdefault('platforms', platforms)
@@ -484,19 +498,14 @@ class DiscoveryRunner:
                         "ok": True, "raw_count": len(items), "unique_count": 0, "duplicate_count": 0,
                         "status_code": None, "error": None, "latency_ms": int((time.perf_counter()-t0)*1000),
                         "min_created": min_created, "max_created": max_created, "type": list(DISCOVERY_TRENCH_TYPES)}
-                groups_results.append(gres)
-                duplicate_count = 0
-                for item in items:
-                    key = (str(item.get("token_mint", "")), str(item.get("pool_address", "")))
-                    if key not in dedup:
-                        dedup[key] = 0
-                        all_items.append(item)
-                    else:
-                        duplicate_count += 1
-                    dedup[key] += 1
-                gres["duplicate_count"] = duplicate_count
-                gres["unique_count"] = max(0, gres.get("raw_count", 0) - duplicate_count)
-                continue
+                return items, gres, slot
+
+            if rl.is_slot_cooldown(slot):
+                gres = {"group_name": group_name, "platforms": platforms, "slot": slot, "role": "age_shard",
+                        "ok": False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
+                        "status_code": None, "error": "slot cooldown", "latency_ms": 0,
+                        "min_created": min_created, "max_created": max_created, "type": list(DISCOVERY_TRENCH_TYPES)}
+                return None, gres, slot
 
             # Build base params, then merge trench_filters from custom_params.
             base_params = self._build_trench_params(platforms=platforms)
@@ -514,7 +523,6 @@ class DiscoveryRunner:
             base_params["min_created"] = min_created
             base_params["max_created"] = max_created
 
-            # Strip internal debug fields before sending to GMGN
             send_params = strip_internal_debug_fields(base_params)
 
             logger.info(
@@ -529,23 +537,23 @@ class DiscoveryRunner:
                 raw_params_sent=send_params,
             )
 
-            final_items: Optional[List] = None
-            final_gres: Optional[Dict] = None
-            if rl.is_slot_cooldown(slot):
-                final_gres = {"group_name": group_name, "platforms": platforms, "slot": slot, "role": "age_shard",
-                              "ok": False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
-                              "status_code": None, "error": "slot cooldown", "latency_ms": 0,
-                              "min_created": min_created, "max_created": max_created, "type": list(DISCOVERY_TRENCH_TYPES)}
-            else:
-                items, gres = await self._try_fetch_group(group_name, platforms, slot, "age_shard", custom_params=send_params)
-                final_items = items or [] if gres["ok"] else None
-                final_gres = gres
+            items, gres = await self._try_fetch_group(group_name, platforms, slot, "age_shard", custom_params=send_params)
+            final_items = items or [] if gres["ok"] else None
+            return final_items, gres, slot
 
-            if final_gres is None:
-                final_gres = {"group_name": group_name, "platforms": platforms, "slot": None, "role": None,
-                              "ok": False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
-                              "status_code": None, "error": "slot unavailable", "latency_ms": 0,
-                              "min_created": min_created, "max_created": max_created, "type": list(DISCOVERY_TRENCH_TYPES)}
+        async def _fetch_with_sem(slot: int):
+            async with sem:
+                return await _fetch_one_slot(slot)
+
+        tasks = [_fetch_with_sem(slot) for slot in discovery_slots]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"trenches shard exception: {result}")
+                continue
+            final_items, final_gres, slot = result
+            min_created, max_created = self._slot_age_window(slot)
             groups_results.append(final_gres)
 
             if final_items:
@@ -561,18 +569,16 @@ class DiscoveryRunner:
                 final_gres["duplicate_count"] = duplicate_count
                 final_gres["unique_count"] = max(0, final_gres.get("raw_count", 0) - duplicate_count)
 
-            # Log result summary
-            logger.info(
-                "trenches fetch result",
-                group=group_name,
-                x=custom_params.get("_x") if custom_params else None,
-                raw_count=final_gres.get("raw_count", 0) if final_gres else 0,
-                unique_count=final_gres.get("unique_count", 0) if final_gres else 0,
-                slot=slot if final_gres and final_gres.get("ok") else None,
-                credential_slot=final_gres.get("slot") if final_gres else None,
-                min_created=min_created,
-                max_created=max_created,
-            )
+                logger.info(
+                    "trenches fetch result",
+                    group=final_gres.get("group_name"),
+                    x=custom_params.get("_x") if custom_params else None,
+                    raw_count=final_gres.get("raw_count", 0),
+                    unique_count=final_gres.get("unique_count", 0),
+                    slot=slot if final_gres.get("ok") else None,
+                    min_created=min_created,
+                    max_created=max_created,
+                )
 
         for gr in groups_results:
             gr["unique_count"] = max(0, gr.get("unique_count", gr.get("raw_count", 0) - gr.get("duplicate_count", 0)))
@@ -1079,6 +1085,13 @@ class DiscoveryRunner:
                 x_diag["x"] = x
                 x_diag["strategy_group_ids"] = [g["id"] for g in groups_for_x]
                 per_x_diags[str(x)] = x_diag
+
+                # Stage-gap cooling: pause before hitting same discovery slots with feature APIs
+                post_delay = float(getattr(settings, 'GMGN_POST_TRENCHES_STAGE_DELAY_SECONDS', 2.0) or 2.0)
+                if post_delay > 0 and mode != ProviderMode.MOCK and x_trenches:
+                    logger.info("post-trenches stage cooldown", delay_s=post_delay, x=x,
+                                unique_tokens=len(x_trenches))
+                    await asyncio.sleep(post_delay)
 
                 logger.info(
                     "discovery per-x trenches result",

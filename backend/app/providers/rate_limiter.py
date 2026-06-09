@@ -80,8 +80,7 @@ class RateLimiter:
         self._slot_buckets: Dict[int, float] = {}
         self._slot_last_refill: Dict[int, float] = {}
         self._bucket_capacity = float(getattr(settings, 'GMGN_RATE_LIMIT_BUCKET_CAPACITY', None) or 20)
-        self._bucket_refill_wpm = float(getattr(settings, 'GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_MINUTE', None) or 20)
-        self._bucket_refill_rate = self._bucket_refill_wpm / 60.0
+        self._bucket_refill_rate = float(getattr(settings, 'GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_SECOND', None) or 20)
         self._bucket_wait_max_s = float(getattr(settings, 'GMGN_RATE_LIMIT_BUCKET_WAIT_MAX_SECONDS', None) or 5.0)
 
     def _endpoint_key(self, path: str) -> str:

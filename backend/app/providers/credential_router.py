@@ -1,16 +1,15 @@
 """CredentialRouter — maps endpoint/task_type to slot pools.
 
 Integrates with existing RateLimiter for 429 cooldown and token bucket.
+Round-robins within each pool to avoid hammering a single slot.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 from ..config import settings
 from .rate_limiter import get_rate_limiter
 
-
-SLOT_POOLS: Dict[str, List[int]] = settings.get_gmgn_slot_pools()
 
 ENDPOINT_TO_POOL: Dict[str, str] = {
     "/v1/trenches": "discovery",
@@ -27,6 +26,7 @@ ENDPOINT_TO_POOL: Dict[str, str] = {
 class CredentialRouter:
     def __init__(self):
         self.rl = get_rate_limiter()
+        self._cursors: Dict[str, int] = {}
 
     def _pool_slots(self, endpoint: str) -> List[int]:
         pools = settings.get_gmgn_slot_pools()
@@ -46,23 +46,15 @@ class CredentialRouter:
         if task_type:
             pool = self._pool_slots_for_task(task_type) or pool
 
-        for slot in pool:
-            if not self.rl.is_slot_cooldown(slot):
-                return slot
-        return None
+        if not pool:
+            return None
 
-    def choose_feature_slot(self, exclude_discovery: bool = True) -> Optional[int]:
-        pools = settings.get_gmgn_slot_pools()
-        excluded: Set[int] = set(pools.get("discovery", [])) if exclude_discovery else set()
-        all_feature_pools = (
-            pools.get("token_info", [])
-            + pools.get("kline", [])
-            + pools.get("holders", [])
-        )
-        for slot in all_feature_pools:
-            if slot in excluded:
-                continue
+        cursor = self._cursors.setdefault(task_type or endpoint, 0)
+        for offset in range(len(pool)):
+            idx = (cursor + offset) % len(pool)
+            slot = pool[idx]
             if not self.rl.is_slot_cooldown(slot):
+                self._cursors[task_type or endpoint] = (idx + 1) % len(pool)
                 return slot
         return None
 

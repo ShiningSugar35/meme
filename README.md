@@ -64,6 +64,18 @@ GMGN_PRIVATE_KEY=priv1,priv2,priv3,priv4,priv5,priv6,priv7,priv8,priv9,priv10,pr
 # API slot 分配：系统按 5:1 动态拆分拉池和持仓轮询 API，且至少保留 1 个 API 给持仓轮询。
 # 例如 12 个 GMGN API 时，slot 1-2 专供模拟盘/实盘持仓价格与风控轮询，slot 3-12 用于 Trenches 拉池。
 # Trenches 仍按 API 原始顺序分配 1 小时窗口：slot 3 对应 180m-240m，slot 12 对应 720m-780m。
+#
+# 速率限制（GMGN leaky-bucket: rate=20/s, capacity=20）
+# GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_SECOND=20.0
+# GMGN_RATE_LIMIT_BUCKET_CAPACITY=20.0
+# GMGN_RATE_LIMIT_BUCKET_WAIT_MAX_SECONDS=5.0
+# GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS=300
+#
+# 阶段间冷却与并发控制
+# GMGN_POST_TRENCHES_STAGE_DELAY_SECONDS=2.0
+# GMGN_FEATURE_CALL_DELAY_SECONDS=0.15
+# GMGN_TRENCHES_CONCURRENCY=2
+# GMGN_FEATURE_CONCURRENCY=3
 
 # Jupiter API Configuration (Swap Provider)
 JUPITER_API_BASE_URL=https://api.jup.ag/swap/v1
@@ -248,7 +260,7 @@ meme/
 `DiscoveryRunner` 每分钟调用 GMGN Trenches，当前重点扫描 Solana `new_creation` 池子，并按配置的平台白名单过滤。候选池进入 `filters.py` 初筛，核心字段包括：
 
 - 流动性：`liquidity_usd`
-- 持仓集中度：`top_10_holder_rate`
+- 持仓集中度：`top_10_holder_rate`、`holder_count`（区间：`min_holder_count_raw ~ max_holder_count_raw`，x=0.2 时 29~800）
 - 合约/权限：`renounced_mint`、`renounced_freeze_account`
 - 风险比例：`rug_ratio`、`entrapment_ratio`、`rat_trader_amount_rate`、`suspected_insider_hold_rate`、`bundler_trader_amount_rate`
 - 交易风险：`is_wash_trading`、`sell_tax`、`fresh_wallet_rate`

@@ -381,6 +381,7 @@ class GMGNProvider(MarketDataProvider):
             "dev_token_burn_ratio": cls._to_float(cls._first_present(raw, ["dev_token_burn_ratio", "burn_ratio", "lp_burn_ratio"])),
             "burn_status": cls._first_present(raw, ["burn_status", "lp_burn_status", "burnt_status"]),
             "sniper_count": cls._to_float(cls._first_present(raw, ["sniper_count", "snipers", "sniper_trader_count"])),
+            "holder_count": cls._to_float(cls._first_present(raw, ["holder_count", "holders", "total_holders", "holder"])),
         }
         # Keep explicit falsy values; drop only None/empty for DB columns except raw_json.
         out = {k: v for k, v in out.items() if v is not None and v != ""}

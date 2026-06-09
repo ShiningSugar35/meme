@@ -132,12 +132,24 @@ class Settings(BaseSettings):
     GMGN_TIMEOUT_SECONDS: float = Field(8.0)
 
     # Rate limiter / credential role configuration
+    # Rate limiter / credential role configuration
     GMGN_DISCOVERY_PRIMARY_SLOT: int = Field(0)
     GMGN_DISCOVERY_RESERVE_SLOT: int = Field(1)
     GMGN_FEATURE_SLOTS: str = Field("")
     GMGN_DISCOVERY_MODE: str = Field("two_group")
     GMGN_DISCOVERY_GROUP_DELAY_SECONDS: float = Field(2.0)
     GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
+
+    # Per-second token-bucket rate limiter (matches GMGN leaky-bucket: rate=20, capacity=20)
+    GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_SECOND: float = Field(20.0)
+    GMGN_RATE_LIMIT_BUCKET_CAPACITY: float = Field(20.0)
+    GMGN_RATE_LIMIT_BUCKET_WAIT_MAX_SECONDS: float = Field(5.0)
+
+    # Stage delays and concurrency limits
+    GMGN_POST_TRENCHES_STAGE_DELAY_SECONDS: float = Field(2.0)
+    GMGN_FEATURE_CALL_DELAY_SECONDS: float = Field(0.15)
+    GMGN_TRENCHES_CONCURRENCY: int = Field(2)
+    GMGN_FEATURE_CONCURRENCY: int = Field(3)
 
     STRATEGY_DEFAULT_X: float = Field(0.20)
 

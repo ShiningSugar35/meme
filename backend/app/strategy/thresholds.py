@@ -15,7 +15,7 @@ KNOWN_TRENCH_FILTER_KEYS: List[str] = [
     "max_rug_ratio", "max_entrapment_ratio", "max_insider_ratio", "max_bundler_rate",
     "min_liquidity", "min_top_holder_rate", "max_top_holder_rate", "max_fresh_wallet_rate",
     "max_creator_balance_rate",
-    "min_holder_count", "min_marketcap", "min_volume_24h",
+    "min_holder_count", "max_holder_count", "min_marketcap", "min_volume_24h",
     "min_smart_degen_count",
 ]
 
@@ -49,6 +49,8 @@ class StrategyThresholds:
 
     min_holder_count_raw: float
     min_holder_count_api: int
+    max_holder_count_raw: float
+    max_holder_count_api: int
     min_marketcap_raw: float
     min_marketcap_api: float
 
@@ -106,6 +108,8 @@ class StrategyThresholds:
 
         min_holder_count_raw = 37.0 - 40.0 * xf
         min_holder_count_api = int(math.floor(min_holder_count_raw)) + 1
+        max_holder_count_raw = 400.0 + 2000.0 * xf
+        max_holder_count_api = int(math.ceil(max_holder_count_raw)) - 1
 
         min_marketcap_raw = min_liquidity * (1.3 - xf)
         min_marketcap_api = min_liquidity * (1.3 - xf)
@@ -145,6 +149,8 @@ class StrategyThresholds:
             max_creator_balance_rate=max_creator_balance_rate,
             min_holder_count_raw=min_holder_count_raw,
             min_holder_count_api=min_holder_count_api,
+            max_holder_count_raw=max_holder_count_raw,
+            max_holder_count_api=max_holder_count_api,
             min_marketcap_raw=min_marketcap_raw,
             min_marketcap_api=min_marketcap_api,
             min_smart_degen_count_raw=min_smart_degen_count_raw,
@@ -180,6 +186,7 @@ class StrategyThresholds:
             "max_fresh_wallet_rate": self.max_fresh_wallet_rate,
             "max_creator_balance_rate": self.max_creator_balance_rate,
             "min_holder_count": self.min_holder_count_api,
+            "max_holder_count": self.max_holder_count_api,
             "min_marketcap": self.min_marketcap_api,
             "min_volume_24h": self.min_volume_24h,
             "_x": self.x,
