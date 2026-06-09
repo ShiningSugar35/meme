@@ -230,8 +230,8 @@ class TestTrenchesPushdown:
         await runner._fetch_trenches_two_group(custom_params={"trench_filters": build_trench_filters_for_x(0.2)})
 
         assert [slot for slot, _ in calls] == settings.get_discovery_slots()
-        for slot, params in calls:
-            i = slot + 1
+        for ordinal, (slot, params) in enumerate(calls):
+            i = ordinal + 1
             assert params["min_created"] == f"{60 * i}m"
             assert params["max_created"] == f"{60 * i + 60}m"
             assert params["type"] == ["new_creation", "near_completion"]

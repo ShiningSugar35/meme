@@ -698,6 +698,7 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
     summary["risk_filter_count"] = all_time_trench
     summary["risk_filter_pass_count"] = await _count_stage_unique_pools(repo, "risk_filter", passed=True)
     summary["price_filter_count"] = await _count_stage_unique_pools(repo, "price_filter", passed=None)
+    summary["risk_passed_as_price_candidates"] = summary["price_filter_count"]
     summary["price_filter_pass_count"] = await _count_stage_unique_pools(repo, "price_filter", passed=True)
     summary["all_time_unique_pool_count"] = all_time_trench
 

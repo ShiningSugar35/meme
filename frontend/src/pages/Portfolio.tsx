@@ -207,7 +207,6 @@ export default function Portfolio() {
                 <p className="hint">统计口径：全历史池子去重</p>
                 <div className="metric-row"><span>风险筛选候选</span><strong>{String(dsh.summary.risk_filter_count ?? '-')}</strong></div>
                 <div className="metric-row"><span>风险筛选通过</span><strong>{String(dsh.summary.risk_filter_pass_count ?? '-')}</strong></div>
-                <div className="metric-row"><span>价格筛选候选</span><strong>{String(dsh.summary.price_filter_count ?? '-')}</strong></div>
                 <div className="metric-row"><span>价格筛选通过</span><strong>{String(dsh.summary.price_filter_pass_count ?? '-')}</strong></div>
                 {dsh.summary.total_429_count as number > 0 && (
                   <div className="metric-row"><span>最近窗口429次数</span><strong style={{color:'#f85149'}}>{String(dsh.summary.total_429_count)}</strong></div>

@@ -218,8 +218,8 @@ class DiscoveryRunner:
         return platforms
 
     @staticmethod
-    def _slot_age_window(slot: int) -> Tuple[str, str]:
-        i = int(slot) + 1
+    def _slot_age_window(ordinal: int) -> Tuple[str, str]:
+        i = ordinal + 1
         return f"{60 * i}m", f"{60 * i + 60}m"
 
     def _feature_slot_for_token(self, token: Dict[str, Any], stage: str, exclude: Optional[Set[int]] = None) -> Optional[int]:
@@ -475,8 +475,8 @@ class DiscoveryRunner:
 
         sem = asyncio.Semaphore(concurrency)
 
-        async def _fetch_one_slot(slot: int):
-            min_created, max_created = self._slot_age_window(slot)
+        async def _fetch_one_slot(ordinal: int, slot: int):
+            min_created, max_created = self._slot_age_window(ordinal)
             group_name = f"age_{min_created}_{max_created}"
 
             if mode == ProviderMode.MOCK:
@@ -498,14 +498,14 @@ class DiscoveryRunner:
                         "ok": True, "raw_count": len(items), "unique_count": 0, "duplicate_count": 0,
                         "status_code": None, "error": None, "latency_ms": int((time.perf_counter()-t0)*1000),
                         "min_created": min_created, "max_created": max_created, "type": list(DISCOVERY_TRENCH_TYPES)}
-                return items, gres, slot
+                return items, gres, slot, ordinal
 
             if rl.is_slot_cooldown(slot):
                 gres = {"group_name": group_name, "platforms": platforms, "slot": slot, "role": "age_shard",
                         "ok": False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
                         "status_code": None, "error": "slot cooldown", "latency_ms": 0,
                         "min_created": min_created, "max_created": max_created, "type": list(DISCOVERY_TRENCH_TYPES)}
-                return None, gres, slot
+                return None, gres, slot, ordinal
 
             # Build base params, then merge trench_filters from custom_params.
             base_params = self._build_trench_params(platforms=platforms)
@@ -539,21 +539,21 @@ class DiscoveryRunner:
 
             items, gres = await self._try_fetch_group(group_name, platforms, slot, "age_shard", custom_params=send_params)
             final_items = items or [] if gres["ok"] else None
-            return final_items, gres, slot
+            return final_items, gres, slot, ordinal
 
-        async def _fetch_with_sem(slot: int):
+        async def _fetch_with_sem(ordinal: int, slot: int):
             async with sem:
-                return await _fetch_one_slot(slot)
+                return await _fetch_one_slot(ordinal, slot)
 
-        tasks = [_fetch_with_sem(slot) for slot in discovery_slots]
+        tasks = [_fetch_with_sem(ordinal, slot) for ordinal, slot in enumerate(discovery_slots)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in results:
             if isinstance(result, Exception):
                 logger.warning(f"trenches shard exception: {result}")
                 continue
-            final_items, final_gres, slot = result
-            min_created, max_created = self._slot_age_window(slot)
+            final_items, final_gres, slot, ordinal = result
+            min_created, max_created = self._slot_age_window(ordinal)
             groups_results.append(final_gres)
 
             if final_items:
@@ -1211,6 +1211,32 @@ class DiscoveryRunner:
                 "groups": [],
             }
 
+        # Relaxed diagnostic request when all trenches came back empty
+        if getattr(settings, 'GMGN_TRENCHES_DEBUG_RELAXED_ON_ZERO', False):
+            all_raw_zero = all(
+                d.get("raw_fetched_count", 0) == 0
+                for d in per_x_diags.values()
+            )
+            diag_discovery_slots = settings.get_discovery_slots()
+            if all_raw_zero and diag_discovery_slots and mode != ProviderMode.MOCK:
+                logger.warning("all trenches returned 0 raw tokens; issuing relaxed diagnostic request")
+                diag_slot = diag_discovery_slots[0]
+                try:
+                    relaxed_params = {
+                        "chain": "sol",
+                        "platforms": self._all_discovery_platforms(),
+                        "type": list(DISCOVERY_TRENCH_TYPES),
+                        "limit": 5,
+                    }
+                    diag_items = await self.gmgn.fetch_trenches(relaxed_params, credential_slot=diag_slot)
+                    logger.info(
+                        "diagnostic relaxed trenches result",
+                        slot=diag_slot,
+                        count=len(diag_items) if diag_items else 0,
+                    )
+                except Exception as diag_e:
+                    logger.warning("diagnostic relaxed trenches failed", error=str(diag_e)[:200])
+
         self.processed_count = total_fetched
         self.last_elapsed_ms = int((datetime.now(timezone.utc).timestamp() - t0) * 1000)
 
@@ -1231,7 +1257,10 @@ class DiscoveryRunner:
             'run_started_at': run_started_at,
             'run_finished_at': run_finished_at,
             'fetch_mode': 'per_x_age_sharded_discovery',
-            'trench_groups': [],
+            'trench_groups': [
+                g for d in per_x_diags.values()
+                for g in (d.get("groups") or [])
+            ],
             'stage_diagnostics': stage_diags,
         }
 

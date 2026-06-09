@@ -63,7 +63,8 @@ GMGN_PRIVATE_KEY=priv1,priv2,priv3,priv4,priv5,priv6,priv7,priv8,priv9,priv10,pr
 
 # API slot 分配：系统按 5:1 动态拆分拉池和持仓轮询 API，且至少保留 1 个 API 给持仓轮询。
 # 例如 12 个 GMGN API 时，slot 1-2 专供模拟盘/实盘持仓价格与风控轮询，slot 3-12 用于 Trenches 拉池。
-# Trenches 仍按 API 原始顺序分配 1 小时窗口：slot 3 对应 180m-240m，slot 12 对应 720m-780m。
+# Trenches 年龄窗口由 enumerate(discovery_slots) 的序数决定：
+#   ordinal 0 → 60m-120m, ordinal 1 → 120m-180m, ordinal 2 → 180m-240m, ...
 #
 # 速率限制（GMGN leaky-bucket: rate=20/s, capacity=20）
 # GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_SECOND=20.0

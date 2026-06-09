@@ -151,6 +151,7 @@ class Settings(BaseSettings):
     GMGN_FEATURE_CALL_DELAY_SECONDS: float = Field(0.15)
     GMGN_TRENCHES_CONCURRENCY: int = Field(2)
     GMGN_FEATURE_CONCURRENCY: int = Field(3)
+    GMGN_TRENCHES_DEBUG_RELAXED_ON_ZERO: bool = Field(False)
 
     STRATEGY_DEFAULT_X: float = Field(0.20)
 
