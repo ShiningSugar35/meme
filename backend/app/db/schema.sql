@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS token_metric_snapshots (
   dev_token_burn_ratio REAL,
   sniper_count INTEGER,
   burn_status TEXT,
+  holder_count REAL,
 
   raw_json TEXT NOT NULL
 );

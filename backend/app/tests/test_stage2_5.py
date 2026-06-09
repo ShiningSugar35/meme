@@ -38,6 +38,9 @@ class TestThresholds:
         assert math.isclose(t.max_fresh_wallet_rate, 0.15, rel_tol=1e-9)
         assert math.isclose(t.max_creator_balance_rate, 0.051, rel_tol=1e-9)
         assert t.min_holder_count_api == 30
+        assert t.max_holder_count_api == 799
+        assert math.isclose(t.min_holder_count_raw, 29.0, rel_tol=1e-9)
+        assert math.isclose(t.max_holder_count_raw, 800.0, rel_tol=1e-9)
         assert math.isclose(t.min_marketcap_api, 4950.0, rel_tol=1e-9)
         assert t.min_smart_degen_count_api == 1
         assert t.min_smart_degen_count_raw == 0.0
@@ -72,6 +75,13 @@ class TestThresholds:
         assert isinstance(payload["min_holder_count"], int)
         assert payload["min_liquidity"] == 4500.0
         assert payload["min_holder_count"] == 30
+        assert payload["max_holder_count"] == 799
+
+    def test_build_trench_filters_x_05(self):
+        payload = build_trench_filters_for_x(0.5)
+        t = compute_thresholds(0.5)
+        assert payload["min_holder_count"] == t.min_holder_count_api
+        assert payload["max_holder_count"] == t.max_holder_count_api
 
     def test_default_x_when_no_strategy(self):
         assert math.isclose(settings.STRATEGY_DEFAULT_X, 0.20, rel_tol=1e-9)

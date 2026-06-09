@@ -408,6 +408,20 @@ def test_holding_risk_holder_count_too_low_fails():
     assert any(d.name == "holder_count" and not d.passed for d in res.details)
 
 
+def test_holding_risk_holder_count_too_high_fails():
+    s = make_snapshot(top_10_holder_rate=0.2, holder_count=1000)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "holder_count" and not d.passed for d in res.details)
+
+
+def test_holding_risk_holder_count_in_range_passes():
+    s = make_snapshot(top_10_holder_rate=0.2, holder_count=200)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    d = next((d for d in res.details if d.name == "holder_count"), None)
+    assert d is not None
+    assert d.passed is True
+
+
 def test_holding_risk_fresh_wallet_fails():
     s = make_snapshot(top_10_holder_rate=0.2, fresh_wallet_rate=0.5)
     res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))

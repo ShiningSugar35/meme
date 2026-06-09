@@ -131,8 +131,9 @@ class Settings(BaseSettings):
     GMGN_TOKEN_HOLDERS_PATH: str = Field("/v1/market/token_top_holders")
     GMGN_TIMEOUT_SECONDS: float = Field(8.0)
 
-    # Rate limiter / credential role configuration
-    # Rate limiter / credential role configuration
+    # Rate limiter / credential role — GMGN_FEATURE_SLOTS retained for backward compat
+    # but get_feature_slots() currently returns get_discovery_slots() — there are no
+    # independent feature slots; all non-holding slots are discovery.
     GMGN_DISCOVERY_PRIMARY_SLOT: int = Field(0)
     GMGN_DISCOVERY_RESERVE_SLOT: int = Field(1)
     GMGN_FEATURE_SLOTS: str = Field("")
@@ -140,7 +141,7 @@ class Settings(BaseSettings):
     GMGN_DISCOVERY_GROUP_DELAY_SECONDS: float = Field(2.0)
     GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS: int = Field(300)
 
-    # Per-second token-bucket rate limiter (matches GMGN leaky-bucket: rate=20, capacity=20)
+    # Per-second token-bucket rate limiter (matches GMGN leaky-bucket: rate=20/s, capacity=20)
     GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_SECOND: float = Field(20.0)
     GMGN_RATE_LIMIT_BUCKET_CAPACITY: float = Field(20.0)
     GMGN_RATE_LIMIT_BUCKET_WAIT_MAX_SECONDS: float = Field(5.0)

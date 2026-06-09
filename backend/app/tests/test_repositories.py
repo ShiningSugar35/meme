@@ -28,6 +28,20 @@ async def test_trade_event_idempotency(repo):
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_insert_metric_snapshot_with_holder_count(repo):
+    sid = await repo.insert_token_metric_snapshot(
+        "HOLDER_TEST", "2025-01-01T00:00:00", "{}",
+        holder_count=123,
+    )
+    assert sid is not None and sid > 0
+    snap = await repo.get_token_metric_snapshot(sid)
+    assert snap is not None
+    assert snap["token_mint"] == "HOLDER_TEST"
+    assert snap["holder_count"] == 123.0
+
+
+@pytest.mark.asyncio
 async def test_provider_requests_and_matches_and_bandit_and_positions(repo):
     # provider requests
     await repo.append_provider_request('GMGN', '/trenches', 'GET', 200, 10, True, None, None, '{"q":1}', '{"r":1}')
