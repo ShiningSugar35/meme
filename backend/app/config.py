@@ -155,8 +155,13 @@ class Settings(BaseSettings):
 
     def _compute_slot_plan(self) -> dict:
         total = len(self.get_gmgn_credentials())
+        if total < 4:
+            logger.warning("gmgn_slot_plan_low_key_count total=%d, discovery/feature slots reduced", total)
         if total >= 4:
             reserve = self.GMGN_DISCOVERY_RESERVE_SLOT
+            if reserve is not None and (reserve < 0 or reserve >= total):
+                logger.warning("gmgn_slot_plan_reserve_out_of_bounds requested=%d total=%d, falling back to random", reserve, total)
+                reserve = None
             if reserve is None:
                 reserve = random.Random(str(os.getpid())).choice(range(total))
             remaining = [s for s in range(total) if s != reserve]

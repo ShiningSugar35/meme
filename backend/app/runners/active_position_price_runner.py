@@ -172,6 +172,7 @@ class ActivePositionPriceRunner:
         rl = get_rate_limiter()
         feature_pool = settings.get_feature_slots()
         attempted: Set[int] = set()
+        endpoint = getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
 
         for attempt in range(3):
             slot = None
@@ -193,7 +194,12 @@ class ActivePositionPriceRunner:
 
             attempted.add(slot)
             try:
-                return await self.gmgn.fetch_latest_price(token_mint, credential_slot=slot)
+                data = await self.gmgn.fetch_latest_price(token_mint, credential_slot=slot)
+                price = data.get("price_usd") or data.get("price")
+                if price is not None and float(price) > 0:
+                    return data
+                rl.report_response_anomaly(slot, endpoint, f"price_invalid:{token_mint}")
+                continue
             except Exception:
                 continue
 
@@ -246,7 +252,7 @@ class ActivePositionPriceRunner:
             )
             return
 
-        # SIM emergency exit
+        # SIM emergency exit — set EXIT_PENDING, don't write fake 0-price SELL
         if self.trading_pipeline is not None and hasattr(self.trading_pipeline, "emergency_sim_exit"):
             try:
                 await self.trading_pipeline.emergency_sim_exit(
@@ -257,24 +263,13 @@ class ActivePositionPriceRunner:
             except Exception as e:
                 logger.error("Emergency SIM exit failed via pipeline", error=str(e), token=token)
 
-        # Fallback SIM close
-        await self.repo.append_trade_event(
-            f"SELL_PRICE:{pos_id}:PRICE_API_UNAVAILABLE_EXIT",
-            position_id=pos_id,
-            token_mint=token,
-            strategy_id=position.get("live_strategy_id"),
-            is_live=0,
+        # Fallback: mark as EXIT_PENDING instead of writing a fake 0-price SELL
+        await self.repo.append_system_event(
+            "WARN", "PRICE",
+            f"SIM exit pending for {token}: price API unavailable, will retry next cycle",
+            _safe_json({"position_id": pos_id, "reason": "PRICE_API_UNAVAILABLE_EXIT_PENDING"}),
             account_type=account_type,
-            side="SELL",
-            event_type="SIM_SELL",
-            status="CONFIRMED",
-            requested_pct=1.0,
-            executed_token_amount=0,
-            price_usd=0,
-            exit_reason="PRICE_API_UNAVAILABLE_EXIT",
-            provider="PRICE_RUNNER_EMERGENCY",
         )
-        await self.repo.close_position(pos_id, close_reason="PRICE_API_UNAVAILABLE_EXIT")
 
     async def _execute_exit(
         self,

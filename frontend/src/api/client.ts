@@ -262,6 +262,9 @@ export interface CredentialHealthItem {
   local_rate_limited_count?: number;
   cooldown_until?: number | null;
   cooldown_remaining_s?: number;
+  disabled_until?: number | null;
+  disabled_remaining_s?: number | null;
+  disabled_reason?: string | null;
   ok_rate: number;
   endpoints: Record<string, number>;
   severity: 'ok' | 'warn' | 'critical';

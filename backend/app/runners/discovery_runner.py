@@ -72,13 +72,13 @@ DISCOVERY_TRENCH_TYPES = ["new_creation", "near_completion"]
 def acquire_feature_slot(stage: str = "") -> Optional[int]:
     stage_lower = (stage or "").lower()
     if "kline" in stage_lower:
-        task_type = "kline"
+        endpoint = getattr(settings, "GMGN_KLINE_PATH", "/v1/market/token_kline")
     elif "holder" in stage_lower or "degen" in stage_lower or "smart_money" in stage_lower:
-        task_type = "holders"
+        endpoint = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
     else:
-        task_type = "token_info"
+        endpoint = getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
     try:
-        slot = get_credential_router().choose_slot(task_type=task_type)
+        slot = get_credential_router().choose_slot(endpoint=endpoint)
         if slot is not None:
             return slot
     except Exception:
@@ -91,8 +91,9 @@ def acquire_feature_slot(stage: str = "") -> Optional[int]:
 
 
 def acquire_holding_slot(stage: str = "") -> Optional[int]:
+    endpoint = getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
     try:
-        slot = get_credential_router().choose_slot(task_type="holding")
+        slot = get_credential_router().choose_slot(endpoint=endpoint)
         if slot is not None:
             return slot
     except Exception:
@@ -200,17 +201,23 @@ class DiscoveryRunner:
             preferred = int(preferred_raw) if preferred_raw is not None else None
         except Exception:
             preferred = None
-        if preferred is not None and preferred not in exclude and not rl.is_slot_cooldown(preferred):
+        if preferred is not None and preferred not in exclude and rl.is_slot_available(preferred):
+            if preferred in settings.get_discovery_slots():
+                logger.warning("emergency_feature_borrow_discovery_slot", slot=preferred, stage=stage)
+                return preferred
             return preferred
 
-        candidates: List[int] = []
-        for slot in settings.get_feature_slots() + settings.get_discovery_slots():
-            if slot not in candidates:
-                candidates.append(slot)
-        for slot in candidates:
+        for slot in settings.get_feature_slots():
             if slot in exclude:
                 continue
-            if not rl.is_slot_cooldown(slot):
+            if rl.is_slot_available(slot):
+                return slot
+
+        for slot in settings.get_discovery_slots():
+            if slot in exclude:
+                continue
+            if rl.is_slot_available(slot):
+                logger.warning("emergency_feature_borrow_discovery_slot", slot=slot, stage=stage)
                 return slot
         return None
 
@@ -285,6 +292,39 @@ class DiscoveryRunner:
 
         return None, None, diag
 
+    def _validate_for_stage(self, stage: str) -> Tuple:
+        if stage in ("price_info", "price_filter"):
+            def _validate(r):
+                if r is None:
+                    return False
+                price = r.get("price_usd") or r.get("price")
+                return price is not None and float(price) > 0
+            ep = getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
+            return _validate, ep
+        if stage == "snapshot":
+            def _validate(r):
+                return isinstance(r, dict) and bool(r) and "error" not in r
+            ep = getattr(settings, "GMGN_TOKEN_SNAPSHOT_PATH", "/v1/token/security")
+            return _validate, ep
+        if stage in ("kline", "kline_fallback"):
+            def _validate(r):
+                return isinstance(r, list) and len(r) > 0
+            ep = getattr(settings, "GMGN_KLINE_PATH", "/v1/market/token_kline")
+            return _validate, ep
+        if stage in ("top_holder", "top_holder_filter"):
+            def _validate(r):
+                if not isinstance(r, list) or len(r) == 0:
+                    return False
+                return any(h.get("addr_type") == 0 for h in r)
+            ep = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
+            return _validate, ep
+        if stage in ("smart_degen", "smart_degen_filter"):
+            def _validate(r):
+                return isinstance(r, list) and len(r) > 0
+            ep = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
+            return _validate, ep
+        return (lambda r: r is not None), "unknown"
+
     async def _call_gmgn_with_token_slot(
         self,
         token: Dict[str, Any],
@@ -295,6 +335,7 @@ class DiscoveryRunner:
     ) -> Tuple[Any, Optional[int]]:
         method = getattr(self.gmgn, method_name)
         preferred = self._token_preferred_slot(token)
+        validate_func, endpoint = self._validate_for_stage(stage)
 
         call_delay = float(getattr(settings, 'GMGN_FEATURE_CALL_DELAY_SECONDS', 0.15) or 0.15)
 
@@ -308,13 +349,16 @@ class DiscoveryRunner:
                     return await method(*args, **kwargs)
                 raise
 
-        result, slot, _ = await self._call_with_slot_retry(
+        result, slot, diag = await self._call_with_slot_retry(
             stage=stage,
             method_ref=call_with_slot,
             params=(),
             primary_slot=preferred,
-            validate_func=lambda r: r is not None,
+            validate_func=validate_func,
         )
+        if result is None and slot is not None:
+            rl = get_rate_limiter()
+            await rl.report_response_anomaly(slot, endpoint, f"validation_failed:{stage}")
         return result, slot
 
     async def _insert_match_data_unavailable(

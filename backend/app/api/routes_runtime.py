@@ -794,7 +794,9 @@ async def _build_credential_health() -> List[Dict[str, Any]]:
             else:
                 calls = max(cred.total_calls, 1)
                 ok_rate = cred.ok_calls / calls
-                if ok_rate < 0.5:
+                if cred.is_disabled():
+                    severity = "critical"
+                elif ok_rate < 0.5:
                     severity = "critical"
                 elif ok_rate < 0.9 or cred.is_cooldown():
                     severity = "warn"
@@ -811,6 +813,9 @@ async def _build_credential_health() -> List[Dict[str, Any]]:
                 "local_rate_limited_count": cred.rate_limited_count,
                 "cooldown_until": cred.cooldown_until if cred.is_cooldown() else None,
                 "cooldown_remaining_s": round(cred.cooldown_remaining(), 1),
+                "disabled_until": cred.disabled_until if cred.is_disabled() else None,
+                "disabled_remaining_s": round(cred.disabled_remaining(), 1) if cred.is_disabled() else None,
+                "disabled_reason": cred.disabled_reason if cred.is_disabled() else None,
                 "ok_rate": round(ok_rate, 3) if ok_rate is not None else None,
                 "endpoints": dict(cred.endpoints),
                 "severity": severity,

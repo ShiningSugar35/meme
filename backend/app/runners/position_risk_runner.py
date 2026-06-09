@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import json
 
 from ..db.repositories import Repositories
@@ -12,6 +12,7 @@ from ..config import settings
 from ..logging_config import logger
 from ..strategy.exit_rules import _executed_exit_rules
 from ..providers.credential_router import get_credential_router
+from ..providers.rate_limiter import get_rate_limiter
 from .discovery_runner import acquire_holding_slot
 
 
@@ -153,35 +154,38 @@ class PositionRiskRunner:
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
 
-    async def _fetch_risk_data_with_retry(self, method_ref, preferred_slot, validate_func):
+    async def _fetch_risk_data_with_retry(self, method_ref, preferred_slot, validate_func, endpoint=""):
         """Call GMGN with retry across different slots.
 
         Returns the result on success.
         Raises RuntimeError after 3 consecutive failed attempts.
         """
-        router = get_credential_router()
+        rl = get_rate_limiter()
         feature_pool = settings.get_feature_slots()
         last_exc = None
+        attempted: Set[int] = set()
 
         for attempt in range(3):
-            if attempt == 0 and preferred_slot is not None:
+            slot = None
+            if attempt == 0 and preferred_slot is not None and rl.is_slot_available(preferred_slot) and preferred_slot not in attempted:
                 slot = preferred_slot
             else:
-                slot = None
-                # Pick a different slot from the feature pool
                 for s in feature_pool or ():
-                    if s != preferred_slot:
-                        if router.rl.is_slot_available(s):
-                            slot = s
-                            break
-                if slot is None:
-                    slot = preferred_slot
+                    if s not in attempted and rl.is_slot_available(s):
+                        slot = s
+                        break
 
+            if slot is None:
+                break
+
+            attempted.add(slot)
             try:
                 result = await method_ref(credential_slot=slot)
                 if validate_func is None or validate_func(result):
                     return result
                 last_exc = ValueError("Risk data validation failed")
+                if endpoint:
+                    await rl.report_response_anomaly(slot, endpoint, "validation_failed")
             except Exception as e:
                 last_exc = e
 
@@ -405,15 +409,21 @@ class PositionRiskRunner:
             )
             raise
 
+    def _validate_snapshot(self, result) -> bool:
+        return isinstance(result, dict) and bool(result) and "error" not in result and any(
+            k in result for k in ("type", "price_usd", "liquidity_usd", "market_cap", "holders")
+        )
+
     async def _fetch_latest_snapshot(self, token: str, account_type: str) -> Dict[str, Any]:
         preferred = acquire_holding_slot("risk_snapshot")
+        endpoint = getattr(settings, "GMGN_TOKEN_SNAPSHOT_PATH", "/v1/token/security")
 
         async def _do_fetch(*, credential_slot):
             snap = await self.gmgn.fetch_token_snapshot(token, credential_slot=credential_slot)
             return snap or {}
 
         try:
-            return await self._fetch_risk_data_with_retry(_do_fetch, preferred, None)
+            return await self._fetch_risk_data_with_retry(_do_fetch, preferred, self._validate_snapshot, endpoint=endpoint)
         except RuntimeError:
             await self.repo.append_system_event(
                 "ERROR",

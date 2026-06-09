@@ -254,9 +254,19 @@ class GMGNProvider(MarketDataProvider):
                         cooldown_s = await self.rate_limiter.report_429(slot, path, headers=dict(resp.headers), body=data if isinstance(data, dict) else None)
                         logged_request["rate_limit_reset"] = True
                         logged_request["cooldown_until"] = cooldown_s
-                    retryable = self._retryable_status(resp.status_code)
+                        retryable = True
+                    else:
+                        retryable = self._retryable_status(resp.status_code)
+                        if resp.status_code in (401, 403):
+                            kind = "auth"
+                        elif resp.status_code in (400, 422):
+                            kind = "http4xx"
+                        elif resp.status_code in (500, 502, 503, 504):
+                            kind = "network"
+                        else:
+                            kind = "http4xx"
+                        await self.rate_limiter.report_failure(slot, endpoint=path, kind=kind, status_code=resp.status_code)
                     await self._log_request(path, False, logged_request, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
-                    await self.rate_limiter.report_failure(slot)
                     err = GMGNAPIError(f"GMGN HTTP {resp.status_code}: {str(data)[:500]}", status_code=resp.status_code, path=path, method=method, retryable=retryable)
                     last_exc = err
                     if credential_slot is not None:
@@ -274,7 +284,7 @@ class GMGNProvider(MarketDataProvider):
                 latency = int((time.perf_counter() - started) * 1000)
                 last_exc = exc
                 if slot < 999:
-                    await self.rate_limiter.report_failure(slot)
+                    await self.rate_limiter.report_failure(slot, endpoint=path, kind="network")
                 await self._log_request(path, False, logged_request, {}, None, latency, "REQUEST_ERROR", str(exc) or repr(exc), method)
                 if credential_slot is not None:
                     raise GMGNAPIError(f"GMGN request failed (slot={credential_slot}): {exc}", path=path, method=method, retryable=True)

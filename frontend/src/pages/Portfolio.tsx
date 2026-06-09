@@ -312,7 +312,7 @@ export default function Portfolio() {
             {dsh.credential_health && dsh.credential_health.length > 0 && (
               <>
                 <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>API Slot 状态</h3>
-                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>S</th><th>角色</th><th>调用</th><th>成功</th><th>429</th><th>冷却</th></tr></thead><tbody>
+                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>S</th><th>角色</th><th>调用</th><th>成功</th><th>429</th><th>冷却</th><th>禁用</th></tr></thead><tbody>
                 {dsh.credential_health.map((ch) => (
                   <tr key={ch.slot}>
                     <td>{severityDot(ch.severity)} {ch.slot}</td>
@@ -321,6 +321,7 @@ export default function Portfolio() {
                     <td>{rateFmt(ch.ok_rate)}</td>
                     <td style={{color: ch.rate_limited_count>0?'#f85149':''}}>{ch.rate_limited_count}</td>
                     <td style={{color: ch.cooldown_until?'#f85149':'#8892ae',fontSize:11}}>{ch.cooldown_until ? `${ch.cooldown_remaining_s ?? 0}s` : '-'}</td>
+                    <td style={{color: ch.disabled_until?'#f85149':'#8892ae',fontSize:11}}>{ch.disabled_until ? `${ch.disabled_remaining_s ?? 0}s` : '-'}</td>
                   </tr>))}</tbody></table></>)}
             {dsh.feature_stage_health && dsh.feature_stage_health.length > 0 && (
               <>

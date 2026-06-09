@@ -1525,7 +1525,20 @@ class Repositories:
         limit: int = 500,
         since_session: bool = False,
     ) -> List[Dict[str, Any]]:
-        sql = """
+        conditions = ["p.account_type = ?"] if account_type != "ALL" else []
+        params: List[Any] = [account_type] if account_type != "ALL" else []
+
+        if since_session:
+            async with self.db.execute("SELECT value FROM runtime_settings WHERE key = 'session_started_at'") as cur:
+                row = await cur.fetchone()
+            session_val = str(row[0]) if row else ""
+            if session_val:
+                conditions.append("p.opened_at >= ?")
+                params.append(session_val)
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        sql = f"""
             SELECT p.id AS position_id,
                    p.account_type,
                    p.status,
@@ -1573,20 +1586,10 @@ class Repositories:
                 WHERE status = 'CONFIRMED'
                 GROUP BY position_id
             ) trade_stats ON trade_stats.position_id = p.id
-            WHERE (account_type = 'ALL' OR p.account_type = ?)
-              AND (since_session = 0 OR ? = '' OR p.opened_at >= ?)
+            WHERE {where_clause}
             ORDER BY p.closed_at DESC NULLS LAST, p.opened_at DESC
             LIMIT ?
         """
-        session_started_at_q = "SELECT value FROM runtime_settings WHERE key = 'session_started_at'" if since_session else None
-        params = [account_type]
-        if since_session:
-            async with self.db.execute(session_started_at_q) as cur:
-                row = await cur.fetchone()
-            session_val = row[0] if row else ""
-            params.extend([session_val, session_val])
-        else:
-            params.extend(["", ""])
         params.append(limit)
         async with self.db.execute(sql, tuple(params)) as cur:
             rows = await cur.fetchall()
