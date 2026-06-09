@@ -1283,6 +1283,18 @@ class Repositories:
         except Exception as e:
             self._safe_log("mark_position_legacy_config failed", position_id=position_id, error=str(e))
 
+    async def mark_position_exit_pending(self, position_id: int, reason: str):
+        now = utc_now_iso()
+        async def _do():
+            await self.db.execute(
+                "UPDATE positions SET last_exit_reason = ?, updated_at = ? WHERE id = ?",
+                (reason, now, position_id),
+            )
+        try:
+            await self._write_txn(_do())
+        except Exception as e:
+            self._safe_log("mark_position_exit_pending failed", position_id=position_id, error=str(e))
+
     async def get_executed_exit_rules(self, position_id: int) -> set[str]:
         position = await self.get_position(position_id)
         if not position:

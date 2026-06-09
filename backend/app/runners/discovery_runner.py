@@ -331,7 +331,7 @@ class DiscoveryRunner:
         **kwargs,
     ) -> Tuple[Any, Optional[int]]:
         method = getattr(self.gmgn, method_name)
-        preferred = self._token_preferred_slot(token)
+        preferred = self._feature_slot_for_token(token, stage)
         validate_func, endpoint = self._validate_for_stage(stage)
 
         call_delay = float(getattr(settings, 'GMGN_FEATURE_CALL_DELAY_SECONDS', 0.15) or 0.15)

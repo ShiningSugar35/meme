@@ -216,7 +216,7 @@ export default function Portfolio() {
                   <td><span className={tab === 'LIVE' ? 'tag live' : 'tag sim'}>{tab}</span></td>
                   <td>{row.strategy_name || row.strategy_id || '-'}</td>
                   <td title={row.token_mint}>{row.mint_short || row.token_mint || '-'}</td>
-                  <td>{row.status}</td>
+                  <td>{row.status}{row.last_exit_reason ? ` / ${row.last_exit_reason}` : ''}</td>
                   <td>{usd(row.remaining_value_usd ?? row.remaining)}</td>
                   <td>{pct(row.pnl_pct)}</td>
                   <td>{row.ratio ?? '-'}</td>

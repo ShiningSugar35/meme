@@ -270,13 +270,7 @@ class ActivePositionPriceRunner:
             _safe_json({"position_id": pos_id, "reason": "PRICE_API_UNAVAILABLE_EXIT_PENDING"}),
             account_type=account_type,
         )
-        try:
-            await self.repo.db.execute(
-                "UPDATE positions SET last_exit_reason = ?, updated_at = ? WHERE id = ?",
-                ("PRICE_API_UNAVAILABLE_EXIT_PENDING", _iso(_utc_now()), pos_id),
-            )
-        except Exception:
-            pass
+        await self.repo.mark_position_exit_pending(pos_id, "PRICE_API_UNAVAILABLE_EXIT_PENDING")
 
     async def _execute_exit(
         self,
