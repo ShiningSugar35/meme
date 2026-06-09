@@ -642,6 +642,25 @@ async def run_holding_risk_filter(
     _check_float(details, snapshot, "holder_count", ["holder_count", "holders", "total_holders", "holder"],
                  lambda v: t.min_holder_count_raw < v < t.max_holder_count_raw,
                  f"({t.min_holder_count_raw:.6g}, {t.max_holder_count_raw:.6g})", required=False)
+
+    liquidity_val = _to_float(_first_present(snapshot, ["liquidity_usd", "liquidity", "pool_liquidity_usd"]))
+    holder_count_val = _to_float(_first_present(snapshot, ["holder_count", "holders", "total_holders", "holder"]))
+    if liquidity_val is not None and holder_count_val is not None and holder_count_val > 0:
+        ratio = liquidity_val / holder_count_val
+        ratio_ok = ratio > t.min_liquidity_holder_ratio
+        details.append(_mk_pass(name="liquidity_holder_ratio", value=ratio,
+                                reason=f"{ratio:.2f} > {t.min_liquidity_holder_ratio:.2f}" if ratio_ok
+                                else f"{ratio:.2f} <= {t.min_liquidity_holder_ratio:.2f}",
+                                threshold=t.min_liquidity_holder_ratio)
+                       if ratio_ok else
+                       _mk_failed(name="liquidity_holder_ratio", value=ratio,
+                                  reason=f"{ratio:.2f} <= {t.min_liquidity_holder_ratio:.2f}",
+                                  threshold=t.min_liquidity_holder_ratio))
+    else:
+        details.append(_mk_pass(name="liquidity_holder_ratio", value=None,
+                                reason="missing liquidity or holder_count; treated as pass",
+                                threshold=t.min_liquidity_holder_ratio))
+
     _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"], required=False)
     _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate", "rat_trader"],
                  lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)

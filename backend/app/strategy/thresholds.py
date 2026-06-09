@@ -42,6 +42,7 @@ class StrategyThresholds:
     max_bundler_rate: float
 
     min_liquidity: float
+    min_liquidity_holder_ratio: float
     min_top_holder_rate: float
     max_top_holder_rate: float
     max_fresh_wallet_rate: float
@@ -99,6 +100,7 @@ class StrategyThresholds:
         max_bundler_rate = common_risk
 
         min_liquidity = 5000.0 - 2500.0 * xf
+        min_liquidity_holder_ratio = 70.0 - 100.0 * xf
 
         min_top_holder_rate = 0.155 - 0.05 * xf
         max_top_holder_rate = 0.225 + 0.25 * xf
@@ -125,11 +127,11 @@ class StrategyThresholds:
 
         sell_tax_max = 0.1 * xf
         sniper_count_max = 50.0 * xf
-        top1_addr_type0_min = 0.031 - 0.01 * xf
+        top1_addr_type0_min = 0.032 - 0.02 * xf
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
-        price_change_1h_min_pct = 50.0 * (xf - 0.3)
-        price_change_1h_max_pct = 27.5 - 25.0 * xf
+        price_change_1h_min_pct = 50.0 * (xf - 0.4)
+        price_change_1h_max_pct = 40.0 - 50.0 * xf
         swaps_1h_min = 7.0 + 20.0 * xf
         volume_per_swap_1h_min = 23.0 + 20.0 * xf
         price_range_24h_percentile_min = 0.0
@@ -143,6 +145,7 @@ class StrategyThresholds:
             max_insider_ratio=max_insider_ratio,
             max_bundler_rate=max_bundler_rate,
             min_liquidity=min_liquidity,
+            min_liquidity_holder_ratio=min_liquidity_holder_ratio,
             min_top_holder_rate=min_top_holder_rate,
             max_top_holder_rate=max_top_holder_rate,
             max_fresh_wallet_rate=max_fresh_wallet_rate,

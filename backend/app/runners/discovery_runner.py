@@ -908,7 +908,7 @@ class DiscoveryRunner:
             config_version = int(sg.get('config_version') or 1)
             discovery_id = discovery_event_ids.get(sg_id)
             x = float(sg.get("x") if sg.get("x") is not None else settings.STRATEGY_DEFAULT_X)
-            top1_min_threshold = 0.031 - 0.01 * x
+            top1_min_threshold = 0.032 - 0.02 * x
             top1_max_threshold = 0.049 + 0.01 * x
 
             top1_holder = None

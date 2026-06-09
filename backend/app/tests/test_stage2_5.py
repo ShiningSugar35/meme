@@ -45,10 +45,10 @@ class TestThresholds:
         assert t.min_smart_degen_count_api == 1
         assert t.min_smart_degen_count_raw == 0.0
         assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
-        assert math.isclose(t.price_change_1h_min_pct, -5.0, rel_tol=1e-9)
-        assert math.isclose(t.price_change_1h_max_pct, 22.5, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_max_pct, 30.0, rel_tol=1e-9)
         assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
-        assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
+        assert math.isclose(t.top1_addr_type0_min, 0.028, rel_tol=1e-9)
         assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
         assert math.isclose(t.price_range_24h_percentile_min, 0.0, rel_tol=1e-9)
         assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
@@ -61,7 +61,7 @@ class TestThresholds:
         assert math.isclose(t.max_top_holder_rate, 0.35, rel_tol=1e-9)
         assert math.isclose(t.min_holder_count_raw, 17.0, rel_tol=1e-9)
         assert t.min_holder_count_api == 18
-        assert math.isclose(t.price_change_1h_min_pct, 10.0, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_min_pct, 5.0, rel_tol=1e-9)
         assert math.isclose(t.price_change_1h_max_pct, 15.0, rel_tol=1e-9)
         assert math.isclose(t.volume_per_swap_1h_min, 33.0, rel_tol=1e-9)
         assert t.min_smart_degen_count_api is None
