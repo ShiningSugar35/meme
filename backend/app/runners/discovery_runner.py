@@ -196,16 +196,6 @@ class DiscoveryRunner:
     def _feature_slot_for_token(self, token: Dict[str, Any], stage: str, exclude: Optional[Set[int]] = None) -> Optional[int]:
         exclude = set(exclude or set())
         rl = get_rate_limiter()
-        preferred_raw = token.get("_credential_slot") if isinstance(token, dict) else None
-        try:
-            preferred = int(preferred_raw) if preferred_raw is not None else None
-        except Exception:
-            preferred = None
-        if preferred is not None and preferred not in exclude and rl.is_slot_available(preferred):
-            if preferred in settings.get_discovery_slots():
-                logger.warning("emergency_feature_borrow_discovery_slot", slot=preferred, stage=stage)
-                return preferred
-            return preferred
 
         for slot in settings.get_feature_slots():
             if slot in exclude:
@@ -250,6 +240,7 @@ class DiscoveryRunner:
         params: tuple,
         primary_slot: Optional[int],
         validate_func,
+        endpoint: str = "unknown",
         max_retries: int = 2,
     ) -> Tuple[Any, Optional[int], Dict[str, Any]]:
         rl = get_rate_limiter()
@@ -284,6 +275,7 @@ class DiscoveryRunner:
                     diag["slot"] = slot
                     return result, slot, diag
                 diag["errors"].append({"slot": slot, "error": "validation_failed"})
+                await rl.report_failure(slot, endpoint=endpoint, kind="empty")
             except Exception as e:
                 if self._is_slot_retryable_error(e):
                     diag["errors"].append({"slot": slot, "error": str(e)[:200]})
@@ -312,10 +304,15 @@ class DiscoveryRunner:
             ep = getattr(settings, "GMGN_KLINE_PATH", "/v1/market/token_kline")
             return _validate, ep
         if stage in ("top_holder", "top_holder_filter"):
+            def _is_addr_type0(h):
+                try:
+                    return int(h.get("addr_type", -1)) == 0
+                except Exception:
+                    return False
             def _validate(r):
                 if not isinstance(r, list) or len(r) == 0:
                     return False
-                return any(h.get("addr_type") == 0 for h in r)
+                return any(_is_addr_type0(h) for h in r)
             ep = getattr(settings, "GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders")
             return _validate, ep
         if stage in ("smart_degen", "smart_degen_filter"):
@@ -355,10 +352,8 @@ class DiscoveryRunner:
             params=(),
             primary_slot=preferred,
             validate_func=validate_func,
+            endpoint=endpoint,
         )
-        if result is None and slot is not None:
-            rl = get_rate_limiter()
-            await rl.report_response_anomaly(slot, endpoint, f"validation_failed:{stage}")
         return result, slot
 
     async def _insert_match_data_unavailable(

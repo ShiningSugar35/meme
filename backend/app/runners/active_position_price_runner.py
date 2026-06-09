@@ -198,7 +198,7 @@ class ActivePositionPriceRunner:
                 price = data.get("price_usd") or data.get("price")
                 if price is not None and float(price) > 0:
                     return data
-                rl.report_response_anomaly(slot, endpoint, f"price_invalid:{token_mint}")
+                await rl.report_failure(slot, endpoint=endpoint, kind="empty")
                 continue
             except Exception:
                 continue
@@ -270,6 +270,13 @@ class ActivePositionPriceRunner:
             _safe_json({"position_id": pos_id, "reason": "PRICE_API_UNAVAILABLE_EXIT_PENDING"}),
             account_type=account_type,
         )
+        try:
+            await self.repo.db.execute(
+                "UPDATE positions SET last_exit_reason = ?, updated_at = ? WHERE id = ?",
+                ("PRICE_API_UNAVAILABLE_EXIT_PENDING", _iso(_utc_now()), pos_id),
+            )
+        except Exception:
+            pass
 
     async def _execute_exit(
         self,
