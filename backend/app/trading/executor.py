@@ -511,6 +511,7 @@ class TradingPipeline:
         # Try Jupiter quote for better token-amount estimation
         token_amount = 0.0
         jupiter_price_impact = None
+        quote: Dict[str, Any] = {}
         try:
             amount_lamports = int(size_sol * LAMPORTS_PER_SOL)
             quote = await self._get_quote(
@@ -528,6 +529,7 @@ class TradingPipeline:
                 token_amount = self._raw_to_human_amount(out_raw, token_decimals)
                 jupiter_price_impact = self._price_impact_fraction(quote)
         except Exception:
+            quote = {}
             token_amount = (size_usd / price_usd) if price_usd and price_usd > 0 else (size_sol / price_sol if price_sol and price_sol > 0 else 0.0)
 
         if token_amount <= 0:
@@ -559,6 +561,14 @@ class TradingPipeline:
             price_sol=price_sol,
             price_impact_pct=(jupiter_price_impact * 100.0) if jupiter_price_impact else None,
             trade_value_usd_net=-abs(size_usd),
+            quote_json=self._safe_json(quote) if quote else None,
+            route_plan_json=self._safe_json((quote.get("routePlan") or [])[:3]) if quote else None,
+            input_amount_raw=str(int(size_sol * LAMPORTS_PER_SOL)),
+            output_amount_raw=quote.get("outAmount") if isinstance(quote, dict) and quote.get("outAmount") else None,
+            quote_out_amount_raw=quote.get("outAmount") if isinstance(quote, dict) else None,
+            quote_price_impact_pct=quote.get("priceImpactPct") if isinstance(quote, dict) else None,
+            input_mint=WRAPPED_SOL_MINT,
+            output_mint=token_mint,
         )
 
         locked_json = self._locked_strategy_for_position(
@@ -611,6 +621,14 @@ class TradingPipeline:
         if discovery_event_id:
             await self.repo.update_discovery_event_status(discovery_event_id, "SIM_POSITION_OPEN")
 
+        entry_snap = None
+        entry_token_info = None
+        try:
+            entry_snap = await self.repo.get_latest_token_metric_snapshot(token_mint)
+            entry_token_info = await self.repo.get_token(token_mint)
+        except Exception:
+            pass
+
         await self.repo.insert_position_audit(
             position_id=pos_id,
             token_mint=token_mint,
@@ -626,6 +644,33 @@ class TradingPipeline:
                 "remaining_value_usd": remaining_value_usd,
                 "jupiter_quote_ok": jupiter_price_impact is not None,
                 "strategy_id": strategy.get("id"),
+                "liquidity_usd": liquidity_usd,
+                "sol_side_liquidity": sol_side_liquidity,
+                "entry_price_sol": price_sol,
+                "token_type": entry_token_info.get("latest_type") if entry_token_info else None,
+                "launchpad": entry_token_info.get("launchpad") if entry_token_info else None,
+                "pool_address": entry_token_info.get("pool_address") if entry_token_info else None,
+                "rug_ratio": entry_snap.get("max_rug_ratio") if entry_snap else None,
+                "entrapment_ratio": entry_snap.get("max_entrapment_ratio") if entry_snap else None,
+                "insider_ratio": entry_snap.get("suspected_insider_hold_rate") if entry_snap else None,
+                "bundler_rate": entry_snap.get("max_bundler_rate") if entry_snap else None,
+                "top_10_holder_rate": entry_snap.get("top_10_holder_rate") if entry_snap else None,
+                "fresh_wallet_rate": entry_snap.get("fresh_wallet_rate") if entry_snap else None,
+                "holder_count": entry_snap.get("holder_count") if entry_snap else None,
+                "market_cap": entry_snap.get("market_cap") if entry_snap else None,
+                "is_wash_trading": entry_snap.get("is_wash_trading") if entry_snap else None,
+                "rat_trader_amount_rate": entry_snap.get("rat_trader_amount_rate") if entry_snap else None,
+                "sell_tax": entry_snap.get("sell_tax") if entry_snap else None,
+                "burn_status": entry_snap.get("burn_status") if entry_snap else None,
+                "sniper_count": entry_snap.get("sniper_count") if entry_snap else None,
+                "has_social": entry_snap.get("has_social") if entry_snap else None,
+                "volume_usd_24h": entry_snap.get("volume_usd") if entry_snap else None,
+                "price_change_1h_pct": entry_snap.get("price_change_percent_1h") if entry_snap else None,
+                "swaps_1h": entry_snap.get("swaps_1h") if entry_snap else None,
+                "volume_1h": entry_snap.get("volume_1h") if entry_snap else None,
+                "top1_holder_rate": entry_snap.get("top1_holder_rate") if entry_snap else None,
+                "creator_balance_rate": entry_snap.get("creator_balance_rate") if entry_snap else None,
+                "smart_degen_count": entry_snap.get("smart_degen_count") if entry_snap else None,
             },
         )
 
@@ -855,6 +900,14 @@ class TradingPipeline:
             account_type="LIVE",
         )
 
+        entry_snap = None
+        entry_token_info = None
+        try:
+            entry_snap = await self.repo.get_latest_token_metric_snapshot(token_mint)
+            entry_token_info = await self.repo.get_token(token_mint)
+        except Exception:
+            pass
+
         await self.repo.insert_position_audit(
             position_id=pos_id,
             token_mint=token_mint,
@@ -871,6 +924,33 @@ class TradingPipeline:
                 "jupiter_quote_ok": True,
                 "strategy_id": sid,
                 "quote_error": quote.get("error"),
+                "liquidity_usd": liquidity_usd,
+                "sol_side_liquidity": sol_side_liquidity,
+                "entry_price_sol": price_sol,
+                "token_type": entry_token_info.get("latest_type") if entry_token_info else None,
+                "launchpad": entry_token_info.get("launchpad") if entry_token_info else None,
+                "pool_address": entry_token_info.get("pool_address") if entry_token_info else None,
+                "rug_ratio": entry_snap.get("max_rug_ratio") if entry_snap else None,
+                "entrapment_ratio": entry_snap.get("max_entrapment_ratio") if entry_snap else None,
+                "insider_ratio": entry_snap.get("suspected_insider_hold_rate") if entry_snap else None,
+                "bundler_rate": entry_snap.get("max_bundler_rate") if entry_snap else None,
+                "top_10_holder_rate": entry_snap.get("top_10_holder_rate") if entry_snap else None,
+                "fresh_wallet_rate": entry_snap.get("fresh_wallet_rate") if entry_snap else None,
+                "holder_count": entry_snap.get("holder_count") if entry_snap else None,
+                "market_cap": entry_snap.get("market_cap") if entry_snap else None,
+                "is_wash_trading": entry_snap.get("is_wash_trading") if entry_snap else None,
+                "rat_trader_amount_rate": entry_snap.get("rat_trader_amount_rate") if entry_snap else None,
+                "sell_tax": entry_snap.get("sell_tax") if entry_snap else None,
+                "burn_status": entry_snap.get("burn_status") if entry_snap else None,
+                "sniper_count": entry_snap.get("sniper_count") if entry_snap else None,
+                "has_social": entry_snap.get("has_social") if entry_snap else None,
+                "volume_usd_24h": entry_snap.get("volume_usd") if entry_snap else None,
+                "price_change_1h_pct": entry_snap.get("price_change_percent_1h") if entry_snap else None,
+                "swaps_1h": entry_snap.get("swaps_1h") if entry_snap else None,
+                "volume_1h": entry_snap.get("volume_1h") if entry_snap else None,
+                "top1_holder_rate": entry_snap.get("top1_holder_rate") if entry_snap else None,
+                "creator_balance_rate": entry_snap.get("creator_balance_rate") if entry_snap else None,
+                "smart_degen_count": entry_snap.get("smart_degen_count") if entry_snap else None,
             },
         )
 
@@ -941,7 +1021,8 @@ class TradingPipeline:
                 quote_json = self._safe_json(quote)
                 route_plan_json = self._safe_json((quote.get("routePlan") or [])[:3])
                 out_sol = (self._to_float(quote.get("outAmount"), 0.0) or 0.0) / LAMPORTS_PER_SOL
-                gross_value_usd = out_sol * (current_price_usd if current_price_usd > 0 else (current_price_sol or 0.000001))
+                sol_usd = _derive_sol_usd_price({}, latest) or 200.0
+                gross_value_usd = out_sol * sol_usd
             else:
                 fee_detail = json.dumps({"fallback": True})
         else:

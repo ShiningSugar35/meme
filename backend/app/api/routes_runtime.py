@@ -723,9 +723,9 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
             """SELECT COUNT(DISTINCT tsm.discovery_event_id || '|' || tsm.strategy_id) AS c
                FROM token_strategy_matches tsm
                WHERE tsm.stage='risk_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1)
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm3 WHERE tsm3.discovery_event_id=tsm.discovery_event_id AND tsm3.strategy_id=tsm.strategy_id AND tsm3.stage='smart_degen_filter' AND tsm3.passed=1)""",
-            (lower_bound, upper_bound))
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm3 WHERE tsm3.discovery_event_id=tsm.discovery_event_id AND tsm3.strategy_id=tsm.strategy_id AND tsm3.stage='smart_degen_filter' AND tsm3.passed=1 AND tsm3.created_at>=? AND tsm3.created_at<=?)""",
+            (lower_bound, upper_bound, lower_bound, upper_bound, lower_bound, upper_bound))
         summary["risk_surface_pass_count"] = int((risk_surface_pass_row or {}).get("c", 0))
 
         price_surface_checked_row = await _fetch_one(repo,
@@ -738,19 +738,19 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
             """SELECT COUNT(DISTINCT tsm.discovery_event_id || '|' || tsm.strategy_id) AS c
                FROM token_strategy_matches tsm
                WHERE tsm.stage='price_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='kline_fallback' AND tsm2.passed=1)""",
-            (lower_bound, upper_bound))
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='kline_fallback' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)""",
+            (lower_bound, upper_bound, lower_bound, upper_bound))
         summary["price_surface_pass_count"] = int((price_surface_pass_row or {}).get("c", 0))
 
         entry_ready_row = await _fetch_one(repo,
             """SELECT COUNT(DISTINCT tsm.discovery_event_id || '|' || tsm.strategy_id) AS c
                FROM token_strategy_matches tsm
                WHERE tsm.stage='risk_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1)
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm3 WHERE tsm3.discovery_event_id=tsm.discovery_event_id AND tsm3.strategy_id=tsm.strategy_id AND tsm3.stage='smart_degen_filter' AND tsm3.passed=1)
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm4 WHERE tsm4.discovery_event_id=tsm.discovery_event_id AND tsm4.strategy_id=tsm.strategy_id AND tsm4.stage='price_filter' AND tsm4.passed=1)
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm5 WHERE tsm5.discovery_event_id=tsm.discovery_event_id AND tsm5.strategy_id=tsm.strategy_id AND tsm5.stage='kline_fallback' AND tsm5.passed=1)""",
-            (lower_bound, upper_bound))
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm3 WHERE tsm3.discovery_event_id=tsm.discovery_event_id AND tsm3.strategy_id=tsm.strategy_id AND tsm3.stage='smart_degen_filter' AND tsm3.passed=1 AND tsm3.created_at>=? AND tsm3.created_at<=?)
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm4 WHERE tsm4.discovery_event_id=tsm.discovery_event_id AND tsm4.strategy_id=tsm.strategy_id AND tsm4.stage='price_filter' AND tsm4.passed=1 AND tsm4.created_at>=? AND tsm4.created_at<=?)
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm5 WHERE tsm5.discovery_event_id=tsm.discovery_event_id AND tsm5.strategy_id=tsm.strategy_id AND tsm5.stage='kline_fallback' AND tsm5.passed=1 AND tsm5.created_at>=? AND tsm5.created_at<=?)""",
+            (lower_bound, upper_bound, lower_bound, upper_bound, lower_bound, upper_bound, lower_bound, upper_bound, lower_bound, upper_bound))
         entry_ready_count = int((entry_ready_row or {}).get("c", 0))
         summary["entry_ready_count"] = entry_ready_count
 
@@ -1636,6 +1636,44 @@ async def export_trade_audit(request: Request):
                     "quote_summary": _safe_json_loads(e.get("quote_json"), {}),
                 })
 
+            entry_audit_json = {}
+            entry_metrics_source = "entry_audit"
+            try:
+                if entry_audit_rows and len(entry_audit_rows) > 0:
+                    raw = entry_audit_rows[0].get("audit_json") or {}
+                    if isinstance(raw, str):
+                        raw = json.loads(raw)
+                    entry_audit_json = raw if isinstance(raw, dict) else {}
+                if not entry_audit_json or not entry_audit_json.get("rug_ratio"):
+                    entry_audit_json = {
+                        "rug_ratio": latest_snap.get("max_rug_ratio") if latest_snap else None,
+                        "entrapment_ratio": latest_snap.get("max_entrapment_ratio") if latest_snap else None,
+                        "bundler_rate": latest_snap.get("max_bundler_rate") if latest_snap else None,
+                        "liquidity_usd": latest_snap.get("liquidity_usd") if latest_snap else None,
+                        "top_10_holder_rate": latest_snap.get("top_10_holder_rate") if latest_snap else None,
+                        "fresh_wallet_rate": latest_snap.get("fresh_wallet_rate") if latest_snap else None,
+                        "holder_count": latest_snap.get("holder_count") if latest_snap else None,
+                        "market_cap": latest_snap.get("market_cap") if latest_snap else None,
+                        "is_wash_trading": latest_snap.get("is_wash_trading") if latest_snap else None,
+                        "rat_trader_amount_rate": latest_snap.get("rat_trader_amount_rate") if latest_snap else None,
+                        "suspected_insider_hold_rate": latest_snap.get("suspected_insider_hold_rate") if latest_snap else None,
+                        "sell_tax": latest_snap.get("sell_tax") if latest_snap else None,
+                        "burn_status": latest_snap.get("burn_status") if latest_snap else None,
+                        "sniper_count": latest_snap.get("sniper_count") if latest_snap else None,
+                        "has_social": latest_snap.get("has_social") if latest_snap else None,
+                        "volume_usd_24h": latest_snap.get("volume_usd") if latest_snap else None,
+                        "price_change_1h_pct": latest_snap.get("price_change_percent_1h") if latest_snap else None,
+                        "swaps_1h": latest_snap.get("swaps_1h") if latest_snap else None,
+                        "volume_1h": latest_snap.get("volume_1h") if latest_snap else None,
+                        "top1_holder_rate": latest_snap.get("top1_holder_rate") if latest_snap else None,
+                        "creator_balance_rate": latest_snap.get("creator_balance_rate") if latest_snap else None,
+                        "smart_degen_count": latest_snap.get("smart_degen_count") if latest_snap else None,
+                    }
+                    entry_metrics_source = "latest_snapshot_fallback"
+            except Exception:
+                entry_audit_json = {}
+                entry_metrics_source = "error_fallback"
+
             item: Dict[str, Any] = {
                 "position_id": pid,
                 "account_type": account_type,
@@ -1650,9 +1688,9 @@ async def export_trade_audit(request: Request):
                     "last_buy_at": buys[-1].get("created_at") if buys else None,
                     "total_buy_value_usd": round(total_buy_value, 6),
                     "entry_avg_price_usd": round(sum(float(e.get("price_usd") or 0) for e in buys) / max(len(buys), 1), 6) if buys else None,
-                    "token_type": token_info.get("latest_type") if token_info else None,
-                    "launchpad": token_info.get("launchpad") if token_info else None,
-                    "pool_address": token_info.get("pool_address") if token_info else None,
+                    "token_type": entry_audit_json.get("token_type") or (token_info.get("latest_type") if token_info else None),
+                    "launchpad": entry_audit_json.get("launchpad") or (token_info.get("launchpad") if token_info else None),
+                    "pool_address": entry_audit_json.get("pool_address") or (token_info.get("pool_address") if token_info else None),
                 },
                 "exit_audit": {
                     "sell_count": len(sells),
@@ -1669,27 +1707,8 @@ async def export_trade_audit(request: Request):
                     ],
                     "sell_vs_buy_ratio": round(float(sells[-1].get("price_usd") or 0) / float(buys[0].get("price_usd") or 1), 2) if buys and sells else None,
                 },
-                "entry_metrics": {
-                    "rug_ratio": latest_snap.get("max_rug_ratio") if latest_snap else None,
-                    "entrapment_ratio": latest_snap.get("max_entrapment_ratio") if latest_snap else None,
-                    "bundler_rate": latest_snap.get("max_bundler_rate") if latest_snap else None,
-                    "liquidity_usd": latest_snap.get("liquidity_usd") if latest_snap else None,
-                    "top_10_holder_rate": latest_snap.get("top_10_holder_rate") if latest_snap else None,
-                    "fresh_wallet_rate": latest_snap.get("fresh_wallet_rate") if latest_snap else None,
-                    "holder_count": latest_snap.get("holder_count") if latest_snap else None,
-                    "market_cap": latest_snap.get("market_cap") if latest_snap else None,
-                    "is_wash_trading": latest_snap.get("is_wash_trading") if latest_snap else None,
-                    "rat_trader_amount_rate": latest_snap.get("rat_trader_amount_rate") if latest_snap else None,
-                    "suspected_insider_hold_rate": latest_snap.get("suspected_insider_hold_rate") if latest_snap else None,
-                    "sell_tax": latest_snap.get("sell_tax") if latest_snap else None,
-                    "burn_status": latest_snap.get("burn_status") if latest_snap else None,
-                    "sniper_count": latest_snap.get("sniper_count") if latest_snap else None,
-                    "has_social": latest_snap.get("has_social") if latest_snap else None,
-                    "volume_usd_24h": latest_snap.get("volume_usd") if latest_snap else None,
-                    "price_change_1h_pct": latest_snap.get("price_change_percent_1h") if latest_snap else None,
-                    "swaps_1h": latest_snap.get("swaps_1h") if latest_snap else None,
-                    "volume_1h": latest_snap.get("volume_1h") if latest_snap else None,
-                },
+                "entry_metrics": entry_audit_json,
+                "entry_metrics_source": entry_metrics_source,
                 "smart_money": [
                     {
                         "wallet_address": b.get("wallet_address"),

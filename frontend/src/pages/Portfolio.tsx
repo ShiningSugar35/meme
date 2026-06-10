@@ -59,6 +59,18 @@ function exitReasonLabel(code: string): string {
   return map[code] || code;
 }
 
+function toBeijing(iso: string | undefined | null) {
+  if (!iso) return '-';
+  try {
+    const d = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+    const bj = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${bj.getUTCFullYear()}-${pad(bj.getUTCMonth() + 1)}-${pad(bj.getUTCDate())} ${pad(bj.getUTCHours())}:${pad(bj.getUTCMinutes())}:${pad(bj.getUTCSeconds())}`;
+  } catch {
+    return iso.substring(0, 19);
+  }
+}
+
 function severityDot(sev: string) {
   if (sev === 'critical') return <span title="严重" className="tag live">!</span>;
   if (sev === 'warn') return <span title="警告" style={{display:'inline-flex',borderRadius:999,background:'#6e7a1b',color:'#d8e389',padding:'3px 9px',fontSize:12,fontWeight:700}}>!</span>;
@@ -91,7 +103,7 @@ export default function Portfolio() {
   const load = async (preferred?: AccountTab) => {
     const runtime = await api.getRuntimeStatus();
     setStatus(runtime);
-    const nextTab = preferred ?? (runtime.user_mode === 'SIM_TEST' ? 'SIM' : 'LIVE');
+    const nextTab = preferred ?? (runtime.live_entries_enabled && runtime.live_open_count > 0 ? 'LIVE' : 'SIM');
     setTab(nextTab);
 
     const data = await api.getPortfolio(nextTab);
@@ -264,7 +276,7 @@ export default function Portfolio() {
                   <td>{usd(row.remaining_value_usd ?? row.remaining)}</td>
                   <td>{pct(row.pnl_pct)}</td>
                   <td>{row.ratio ?? '-'}</td>
-                  <td>{(row.updated_at || '-').substring(0, 19)}</td>
+                  <td>{toBeijing(row.updated_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -296,7 +308,7 @@ export default function Portfolio() {
                   <td>{row.token_amount ?? '-'}</td>
                   <td style={pnlStyle(row.trade_value_usd_net)}>{usd(row.trade_value_usd_net)}</td>
                   <td>{row.exit_reason_label ? exitReasonLabel(row.exit_reason_label) : '-'}</td>
-                  <td style={{ fontSize: 12 }}>{(row.created_at_beijing || row.created_at_utc || '-').substring(0, 19)}</td>
+                  <td style={{ fontSize: 12 }}>{toBeijing(row.created_at_utc)}</td>
                 </tr>
               ))}
             </tbody>
