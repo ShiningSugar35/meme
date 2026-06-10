@@ -41,6 +41,20 @@ function ruleLabel(name: string): string {
   return map[name] || name;
 }
 
+function exitReasonLabel(code: string): string {
+  const map: Record<string, string> = {
+    HARD_TP_160: '止盈160%',
+    HARD_TP_210: '止盈210%全平',
+    HARD_SL_45: '硬止损45%全平',
+    HARD_SL_70: '硬止损70%一半',
+    PRICE_API_UNAVAILABLE_EXIT_PENDING: '价格接口不可用待平',
+    DUST_FORCE_EXIT: '尘埃仓强制清仓',
+    HOLDER_RISK: '持仓风险',
+    MANUAL: '手动平仓',
+  };
+  return map[code] || code;
+}
+
 function severityDot(sev: string) {
   if (sev === 'critical') return <span title="严重" className="tag live">!</span>;
   if (sev === 'warn') return <span title="警告" style={{display:'inline-flex',borderRadius:999,background:'#6e7a1b',color:'#d8e389',padding:'3px 9px',fontSize:12,fontWeight:700}}>!</span>;
@@ -214,7 +228,7 @@ export default function Portfolio() {
                   <td>{row.id}</td>
                   <td>{row.strategy_name || row.strategy_id || '-'}</td>
                   <td title={row.token_mint}>{row.mint_short || row.token_mint || '-'}</td>
-                  <td>{row.status}{row.last_exit_reason ? ` / ${row.last_exit_reason}` : ''}</td>
+                  <td>{row.status}{row.last_exit_reason ? ` / ${exitReasonLabel(String(row.last_exit_reason))}` : ''}</td>
                   <td>{usd(row.remaining_value_usd ?? row.remaining)}</td>
                   <td>{pct(row.pnl_pct)}</td>
                   <td>{row.ratio ?? '-'}</td>

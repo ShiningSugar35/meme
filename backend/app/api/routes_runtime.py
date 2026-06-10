@@ -2152,8 +2152,10 @@ async def pnl_summary(request: Request):
             pos_status_rows = []
 
         # Compute per-position realized PnL from trade_events
-        te_pnl_rows = await _fetch_all(repo,
-            "SELECT position_id, account_type, side, trade_value_usd_net FROM trade_events WHERE status='CONFIRMED' AND side IN ('BUY','SELL')") if await _table_exists(repo, "trade_events") else []
+        te_pnl_rows: List[Dict[str, Any]] = []
+        if await _table_exists(repo, "trade_events"):
+            te_pnl_rows = await _fetch_all(repo,
+                "SELECT position_id, account_type, side, trade_value_usd_net FROM trade_events WHERE status='CONFIRMED' AND side IN ('BUY','SELL')")
 
         pos_pnl: Dict[int, float] = {}
         for row in te_pnl_rows:
