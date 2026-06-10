@@ -699,3 +699,98 @@ async def test_live_sell_gross_value_uses_quote_out_amount(pipeline_factory):
     assert actual > old_calc * 10 or actual < old_calc * 0.1, \
         f"gross_value_usd {actual} should differ significantly from old calc {old_calc}"
     settings.PROVIDER_MODE = original_mode
+
+
+@pytest.mark.asyncio
+async def test_export_trade_audit_endpoint_with_data(pipeline_factory):
+    """API-level export_trade_audit returns correct position, entry_metrics, exit_audits."""
+    from fastapi.testclient import TestClient
+    from ..main import app
+
+    pipeline, mock = pipeline_factory()
+    repo = pipeline.repo
+    tok = "EXPORT_API_TEST"
+    mock.tokens[tok] = {
+        "token_mint": tok, "symbol": "EAT", "name": "Export API Test",
+        "pool_address": "pool1", "type": "new_creation",
+        "liquidity_usd": 50000.0, "price_usd": 0.001, "price_sol": 0.00001,
+    }
+    mock.latest[tok] = {"price_usd": 0.001, "price_sol": 0.00001, "liquidity_usd": 50000.0}
+
+    pos_id = await repo.create_position(
+        token_mint=tok, is_live=False,
+        locked_strategy_config_json='{"id": 1}',
+        status="POSITION_OPEN", entry_price_usd=0.001,
+        entry_token_amount=100.0, remaining_token_amount=0.0,
+        remaining_value_usd=0.0, account_type="SIM",
+    )
+
+    await repo.append_trade_event(
+        f"BUY_EAT:{tok}", position_id=pos_id,
+        token_mint=tok, side="BUY", event_type="SIM_BUY",
+        status="CONFIRMED", is_live=0, account_type="SIM",
+        executed_token_amount=100.0, price_usd=0.001,
+        trade_value_usd_net=-0.10,
+    )
+
+    sell_te = await repo.append_trade_event(
+        f"SELL_EAT:{tok}", position_id=pos_id,
+        token_mint=tok, side="SELL", event_type="SIM_SELL",
+        status="CONFIRMED", is_live=0, account_type="SIM",
+        executed_token_amount=100.0, price_usd=0.0016,
+        exit_reason="HARD_TP_160",
+        trade_value_usd_net=0.15, gross_value_usd=0.15,
+    )
+    sell_created_at = sell_te.get("created_at")
+
+    await repo.insert_position_audit(
+        position_id=pos_id, token_mint=tok, account_type="SIM",
+        strategy_id=1, discovery_event_id=None, snapshot_id=None,
+        audit_type="ENTRY",
+        audit_json={"buy_price_usd": 0.001, "rug_ratio": 0.05},
+    )
+    await repo.insert_position_audit(
+        position_id=pos_id, token_mint=tok, account_type="SIM",
+        strategy_id=1, discovery_event_id=None, snapshot_id=None,
+        audit_type="EXIT",
+        audit_json={
+            "sell_time_utc": sell_created_at,
+            "sell_price_multiple": 1.50,
+            "exit_reason_code": "HARD_TP_160",
+            "gross_value_usd": 0.15,
+        },
+    )
+
+    original_path = settings.SQLITE_PATH
+    settings.SQLITE_PATH = repo.db_path
+    try:
+        with TestClient(app) as client:
+            app_repo = client.app.state.repo
+            await app_repo.set_runtime_setting("session_started_at", "2020-01-01T00:00:00Z", "test")
+
+            r = client.post("/api/runtime/emergency/export-trade-audit")
+            assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+            data = r.json()
+            assert data.get("ok") is True
+            payload = data.get("data", {})
+            positions = payload.get("positions", [])
+            assert len(positions) == 1, f"Expected 1 position, got {len(positions)}"
+
+            p = positions[0]
+            assert p["position_id"] == pos_id
+            assert p["entry_metrics"]["rug_ratio"] == 0.05
+
+            trade_events = p.get("trade_events", [])
+            sells = [te for te in trade_events if te["side"] == "SELL"]
+            assert len(sells) == 1
+            # sell_price_multiple should come from EXIT audit (1.50), not spot price (0.0016/0.001=1.60)
+            assert sells[0]["sell_price_multiple"] == 1.50, \
+                f"Expected 1.50 from EXIT audit, got {sells[0]['sell_price_multiple']}"
+            assert sells[0]["exit_audit"] is not None
+            assert sells[0]["exit_audit"]["sell_price_multiple"] == 1.50
+
+            exit_audits = p.get("exit_audits", [])
+            assert len(exit_audits) == 1
+            assert exit_audits[0]["exit_reason_code"] == "HARD_TP_160"
+    finally:
+        settings.SQLITE_PATH = original_path

@@ -1612,6 +1612,7 @@ async def export_trade_audit(request: Request):
             token_info = await repo.get_token(token_mint)
             latest_snap = await repo.get_latest_token_metric_snapshot(token_mint)
             smart_money = await repo.get_position_smart_money_baselines(pid)
+            position = await repo.get_position(pid) or {}
 
             total_buy_value = sum(abs(float(e.get("trade_value_usd_net") or 0)) for e in buys)
             total_sell_value = sum(abs(float(e.get("trade_value_usd_net") or 0)) for e in sells)
@@ -1694,9 +1695,6 @@ async def export_trade_audit(request: Request):
 
                 sell_price_multiple = None
                 buy_price_usd = entry_audit_json.get("buy_price_usd") or (buys[0].get("price_usd") if buys else None)
-                if side == "SELL" and buy_price_usd and float(buy_price_usd) > 0:
-                    sell_price = float(e.get("price_usd") or 0)
-                    sell_price_multiple = round(sell_price / float(buy_price_usd), 2) if sell_price > 0 else None
 
                 sell_audit = None
                 if side == "SELL":
@@ -1708,6 +1706,11 @@ async def export_trade_audit(request: Request):
                                     break
                             except Exception:
                                 pass
+                    if sell_audit and sell_audit.get("sell_price_multiple") is not None:
+                        sell_price_multiple = sell_audit["sell_price_multiple"]
+                    elif buy_price_usd and float(buy_price_usd) > 0:
+                        sell_price = float(e.get("price_usd") or 0)
+                        sell_price_multiple = round(sell_price / float(buy_price_usd), 2) if sell_price > 0 else None
 
                 trade_events_list.append({
                     "side": side,

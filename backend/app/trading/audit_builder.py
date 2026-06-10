@@ -85,9 +85,9 @@ def _utc_to_beijing(iso_str: Optional[str]) -> str:
     if not iso_str:
         return ""
     try:
+        BJ = timezone(timedelta(hours=8))
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        bj = dt + timedelta(hours=8)
-        return bj.isoformat()
+        return dt.astimezone(BJ).isoformat()
     except Exception:
         return iso_str
 
