@@ -349,6 +349,28 @@ class RpcRealProvider(RpcProvider):
                           {}, 500, 0, 'RPC_ERROR', str(e))
             raise
 
+    async def get_transaction(self, signature: str) -> Dict[str, Any]:
+        if self.mode == ProviderMode.MOCK:
+            return {"ok": True, "mode": "MOCK", "result": None,
+                    "error": "MOCK_NO_TX_META"}
+
+        try:
+            params = [
+                signature,
+                {
+                    "encoding": "jsonParsed",
+                    "maxSupportedTransactionVersion": 0,
+                    "commitment": "confirmed",
+                },
+            ]
+            result = await self._make_request("getTransaction", params)
+            return {"ok": True, "result": result, "mode": self.mode.value}
+        except Exception as e:
+            await self._log('/getTransaction', False,
+                          {'method': 'getTransaction', 'params': [[signature]]},
+                          {}, 500, 0, 'RPC_ERROR', str(e))
+            return {"ok": False, "error": str(e), "message": "RPC getTransaction failed"}
+
     # Forbidden methods - must block in mock/online_readonly
     
     async def send_transaction(self, transaction: str, *args, **kwargs) -> Dict[str, Any]:

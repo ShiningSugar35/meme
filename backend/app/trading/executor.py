@@ -17,6 +17,15 @@ from ..logging_config import logger
 from ..providers.base import SwapProvider, ExecutionProvider, RpcProvider, MarketDataProvider
 from ..config import settings, ProviderMode
 from .audit_builder import build_entry_audit_payload, build_exit_audit_payload
+from .accounting import (
+    compute_sim_buy_accounting,
+    compute_sim_sell_accounting,
+    compute_effective_price_usd,
+    extract_account_keys,
+    find_wallet_index,
+    extract_token_delta_from_meta,
+    summarize_tx_meta,
+)
 
 
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -76,6 +85,96 @@ def _usd_to_sol_amount(size_usd: float, snapshot: Dict[str, Any], latest: Dict[s
     if not sol_usd or sol_usd <= 0:
         return 0.0
     return math.floor((size_usd / sol_usd) * 1_000_000_000) / 1_000_000_000
+
+
+async def _load_sell_tax_for_position(repo, position, gmgn) -> Optional[float]:
+    try:
+        pos_id = int(position["id"])
+        audits = await repo.get_position_audits(pos_id, audit_type="ENTRY")
+        if audits:
+            entry_json = audits[0].get("audit_json") or {}
+            if isinstance(entry_json, str):
+                entry_json = json.loads(entry_json)
+            if isinstance(entry_json, dict) and entry_json.get("sell_tax") is not None:
+                return float(entry_json["sell_tax"])
+    except Exception:
+        pass
+    try:
+        token_mint = position["token_mint"]
+        snap = await repo.get_latest_token_metric_snapshot(token_mint)
+        if snap and snap.get("sell_tax") is not None:
+            return float(snap["sell_tax"])
+    except Exception:
+        pass
+    try:
+        token_mint = position["token_mint"]
+        sec = await gmgn.fetch_token_security(token_mint) if gmgn else None
+        if isinstance(sec, dict) and sec.get("sell_tax") is not None:
+            return float(sec["sell_tax"])
+    except Exception:
+        pass
+    return None
+
+
+async def backfill_trade_event_from_solana_tx_meta(
+    repo,
+    rpc,
+    trade_event_id: int,
+    signature: str,
+    wallet_pubkey: str,
+    token_mint: str,
+    side: str,
+    sol_usd: float,
+):
+    tx = await rpc.get_transaction(signature)
+    result = tx.get("result") if isinstance(tx, dict) else tx
+    if isinstance(tx, dict) and tx.get("mode") == "MOCK":
+        return {"ok": False, "error": "MOCK_NO_TX_META"}
+    if not result or not result.get("meta"):
+        return {"ok": False, "error": "TX_META_NOT_FOUND"}
+
+    meta = result["meta"]
+    account_keys = extract_account_keys(result)
+    wallet_index = find_wallet_index(account_keys, wallet_pubkey)
+    if wallet_index is None:
+        return {"ok": False, "error": "WALLET_NOT_IN_TX"}
+
+    pre = meta.get("preBalances", [])
+    post = meta.get("postBalances", [])
+    wallet_delta_lamports = int(post[wallet_index]) - int(pre[wallet_index])
+    actual_usd = (wallet_delta_lamports / 1_000_000_000) * sol_usd
+
+    token_delta = extract_token_delta_from_meta(meta, wallet_pubkey, token_mint)
+
+    from .accounting import platform_fee_amount_raw as _pfar
+    fee_detail = {
+        "accounting_mode": "LIVE_TX_META_ACTUAL",
+        "wallet_delta_lamports": wallet_delta_lamports,
+        "gas_fee_lamports": meta.get("fee"),
+        "computeUnitsConsumed": meta.get("computeUnitsConsumed"),
+        "wallet_delta_includes_rent_or_ata": True,
+        "token_delta": token_delta,
+    }
+
+    effective_price = None
+    if token_delta and abs(token_delta) > 0:
+        effective_price = abs(actual_usd) / abs(token_delta)
+
+    await repo.update_trade_event_accounting(
+        trade_event_id,
+        trade_value_usd_actual=actual_usd,
+        trade_value_usd_net=actual_usd,
+        gas_fee_lamports=meta.get("fee"),
+        fee_detail_json=json.dumps(fee_detail, ensure_ascii=False),
+        execution_detail_json=json.dumps({"tx_meta": summarize_tx_meta(result)}, ensure_ascii=False),
+        accounting_source="solana_tx_meta_actual",
+        accounting_status="FINAL",
+        sell_price_usd_effective=effective_price if side == "SELL" else None,
+        buy_price_usd_effective=effective_price if side == "BUY" else None,
+        executed_token_amount=abs(token_delta) if token_delta is not None else None,
+    )
+    return {"ok": True}
+
 
 class TradingPipeline:
     def __init__(
@@ -546,6 +645,32 @@ class TradingPipeline:
             snapshot_id,
             extra=f":d{discovery_event_id or 0}",
         )
+
+        fee_upper_bound_usd = float(getattr(settings, "SIM_BUY_FEE_UPPER_BOUND_USD", 0.0))
+        sol_usd = _derive_sol_usd_price({}, latest) or 200.0
+        if isinstance(quote, dict) and not quote.get("error") and quote.get("inAmount"):
+            acct = compute_sim_buy_accounting(
+                quote=quote,
+                sol_usd=sol_usd,
+                fee_upper_bound_usd=fee_upper_bound_usd,
+            )
+        else:
+            acct = {
+                "trade_value_usd_expected": -abs(size_usd),
+                "trade_value_usd_conservative": -abs(size_usd + fee_upper_bound_usd),
+                "trade_value_usd_net": -abs(size_usd + fee_upper_bound_usd),
+                "gross_value_usd": size_usd,
+                "fee_usd_est": fee_upper_bound_usd,
+                "fee_detail": {"accounting_mode": "SIM_CONSERVATIVE_NO_QUOTE", "size_usd": size_usd, "fee_upper_bound_usd": fee_upper_bound_usd},
+                "accounting_source": "size_usd_conservative",
+                "accounting_status": "ESTIMATED",
+            }
+
+        buy_price_effective = compute_effective_price_usd(
+            trade_value_usd_net=acct["trade_value_usd_net"],
+            token_amount=token_amount,
+        )
+
         te = await self.repo.append_trade_event(
             idempotency_key,
             token_mint=token_mint,
@@ -561,7 +686,16 @@ class TradingPipeline:
             price_usd=price_usd,
             price_sol=price_sol,
             price_impact_pct=(jupiter_price_impact * 100.0) if jupiter_price_impact else None,
-            trade_value_usd_net=-abs(size_usd),
+            trade_value_usd_net=acct["trade_value_usd_net"],
+            trade_value_usd_expected=acct["trade_value_usd_expected"],
+            trade_value_usd_conservative=acct["trade_value_usd_conservative"],
+            gross_value_usd=acct["gross_value_usd"],
+            fee_usd_est=acct["fee_usd_est"],
+            fee_detail_json=json.dumps(acct["fee_detail"], ensure_ascii=False),
+            accounting_source=acct["accounting_source"],
+            accounting_status=acct["accounting_status"],
+            buy_price_usd_effective=buy_price_effective,
+            platform_fee_amount=acct["fee_detail"].get("platformFee_amount"),
             quote_json=self._safe_json(quote) if quote else None,
             route_plan_json=self._safe_json((quote.get("routePlan") or [])[:3]) if quote else None,
             input_amount_raw=str(int(size_sol * LAMPORTS_PER_SOL)),
@@ -782,6 +916,8 @@ class TradingPipeline:
         instructions = await self.jupiter.build_swap_instructions(quote, wallet_pubkey, extra={})
         bundle = await self.jito.send(instructions)
 
+        sol_usd = _derive_sol_usd_price({}, latest) or 200.0
+        priority_fee = instructions.get("prioritizationFeeLamports")
         te_confirmed = await self.repo.append_trade_event(
             idem + ":CONFIRMED",
             position_id=None,
@@ -802,15 +938,22 @@ class TradingPipeline:
             price_impact_pct=self._price_impact_fraction(quote) * 100.0,
             quote_json=self._safe_json(quote),
             route_plan_json=self._safe_json((quote.get("routePlan") or [])[:3]),
-            jito_tip_lamports=bundle.get("tip_lamports"),
-            priority_fee_lamports=bundle.get("priority_fee_lamports"),
+            jito_tip_lamports=bundle.get("jito_tip_lamports"),
+            priority_fee_lamports=priority_fee if priority_fee is not None else bundle.get("priority_fee_lamports"),
             tx_signature=bundle.get("signature"),
             bundle_id=bundle.get("bundle_id"),
             error_code=bundle.get("error_code"),
             error_message=bundle.get("error_message"),
             provider="JITO",
             trade_value_usd_net=-abs(size_usd),
+            trade_value_usd_expected=-abs(size_usd),
+            accounting_source="jupiter_quote_expected",
+            accounting_status="PENDING_RPC_BACKFILL",
+            fee_detail_json=json.dumps({"accounting_mode": "LIVE_PENDING", "note": "Awaiting Solana tx meta backfill"}, ensure_ascii=False),
         )
+
+        te_confirmed_id = te_confirmed.get("id")
+        signature = bundle.get("signature")
 
         if not bundle.get("ok", True):
             await self.repo.append_system_event(
@@ -820,7 +963,7 @@ class TradingPipeline:
                 self._safe_json({"token": token_mint, "bundle": bundle}),
                 account_type="LIVE",
             )
-            return {"ok": False, "error": bundle.get("error_code") or "BUNDLE_FAILED", "trade_event_id": te_confirmed.get("id")}
+            return {"ok": False, "error": bundle.get("error_code") or "BUNDLE_FAILED", "trade_event_id": te_confirmed_id}
 
         opened_at = datetime.now(timezone.utc).isoformat()
         locked_json = self._locked_strategy_for_position(
@@ -850,9 +993,35 @@ class TradingPipeline:
             legacy_config_status="VALID",
         )
 
-        te_confirmed_id = te_confirmed.get("id")
         if te_confirmed_id is not None:
             await self.repo.attach_trade_event_to_position(te_confirmed_id, pos_id)
+
+        if signature and te_confirmed_id:
+            try:
+                backfill_result = await backfill_trade_event_from_solana_tx_meta(
+                    repo=self.repo,
+                    rpc=self.rpc,
+                    trade_event_id=te_confirmed_id,
+                    signature=signature,
+                    wallet_pubkey=wallet_pubkey,
+                    token_mint=token_mint,
+                    side="BUY",
+                    sol_usd=sol_usd,
+                )
+                if not backfill_result.get("ok"):
+                    await self.repo.append_system_event(
+                        "WARN", "TRADE",
+                        "Backfill failed for live buy",
+                        json.dumps({"te_id": te_confirmed_id, "sig": signature, "err": backfill_result.get("error")}),
+                        account_type="LIVE",
+                    )
+            except Exception as e:
+                await self.repo.append_system_event(
+                    "WARN", "TRADE",
+                    "Backfill error for live buy",
+                    json.dumps({"te_id": te_confirmed_id, "error": str(e)}),
+                    account_type="LIVE",
+                )
 
         await self.repo.insert_bandit_observation(
             token_mint,
@@ -984,10 +1153,48 @@ class TradingPipeline:
                 out_sol = (self._to_float(quote.get("outAmount"), 0.0) or 0.0) / LAMPORTS_PER_SOL
                 sol_usd = _derive_sol_usd_price({}, latest) or 200.0
                 gross_value_usd = out_sol * sol_usd
+
+                fee_upper_bound_usd = float(getattr(settings, "SIM_SELL_FEE_UPPER_BOUND_USD", 0.0))
+                sell_tax = await _load_sell_tax_for_position(self.repo, position, self.gmgn)
+                acct = compute_sim_sell_accounting(
+                    quote=quote,
+                    sol_usd=sol_usd,
+                    sell_tax=sell_tax,
+                    fee_upper_bound_usd=fee_upper_bound_usd,
+                )
+                fee_detail = json.dumps(acct["fee_detail"], ensure_ascii=False)
             else:
-                fee_detail = json.dumps({"fallback": True})
+                fee_upper_bound_usd = float(getattr(settings, "SIM_SELL_FEE_UPPER_BOUND_USD", 0.0))
+                fallback_net = +abs(gross_value_usd - fee_upper_bound_usd)
+                acct = {
+                    "trade_value_usd_expected": gross_value_usd,
+                    "trade_value_usd_conservative": fallback_net,
+                    "trade_value_usd_net": fallback_net,
+                    "gross_value_usd": gross_value_usd,
+                    "fee_usd_est": fee_upper_bound_usd,
+                    "fee_detail": {"fallback": True, "reason": "no_quote_or_sell_amount_raw_rounds_to_zero"},
+                    "accounting_source": "gmgn_price_fallback",
+                    "accounting_status": "ESTIMATED",
+                }
+                fee_detail = json.dumps(acct["fee_detail"], ensure_ascii=False)
         else:
-            fee_detail = json.dumps({"fallback": True, "reason": "sell_amount_raw_rounds_to_zero"})
+            gross_value_usd = sell_amount_human * current_price_usd
+            acct = {
+                "trade_value_usd_expected": gross_value_usd,
+                "trade_value_usd_conservative": gross_value_usd,
+                "trade_value_usd_net": gross_value_usd,
+                "gross_value_usd": gross_value_usd,
+                "fee_usd_est": 0.0,
+                "fee_detail": {"fallback": True, "reason": "sell_amount_raw_rounds_to_zero"},
+                "accounting_source": "gmgn_price_fallback",
+                "accounting_status": "ESTIMATED",
+            }
+            fee_detail = json.dumps(acct["fee_detail"], ensure_ascii=False)
+
+        sell_price_effective = compute_effective_price_usd(
+            trade_value_usd_net=acct["trade_value_usd_net"],
+            token_amount=sell_amount_human,
+        )
 
         te = await self.repo.append_trade_event(
             f"SIM_SELL:{pos_id}:{exit_reason}",
@@ -1005,13 +1212,20 @@ class TradingPipeline:
             price_usd=current_price_usd,
             exit_reason=exit_reason,
             exit_reason_label=EXIT_REASON_LABELS.get(exit_reason, exit_reason),
-            gross_value_usd=gross_value_usd,
-            trade_value_usd_net=+abs(gross_value_usd),
+            gross_value_usd=acct["gross_value_usd"],
+            trade_value_usd_net=acct["trade_value_usd_net"],
+            trade_value_usd_expected=acct["trade_value_usd_expected"],
+            trade_value_usd_conservative=acct["trade_value_usd_conservative"],
+            fee_usd_est=acct["fee_usd_est"],
+            fee_detail_json=fee_detail,
+            accounting_source=acct["accounting_source"],
+            accounting_status=acct["accounting_status"],
+            sell_price_usd_effective=sell_price_effective,
+            platform_fee_amount=acct.get("fee_detail", {}).get("platformFee_amount"),
             provider="PIPELINE_SIM",
             price_impact_pct=(price_impact * 100.0) if price_impact else None,
             quote_json=quote_json,
             route_plan_json=route_plan_json,
-            fee_detail_json=fee_detail,
         )
 
         exit_audit = await build_exit_audit_payload(
@@ -1208,6 +1422,9 @@ class TradingPipeline:
         instructions = await self.jupiter.build_swap_instructions(quote, wallet_pubkey, extra={})
         bundle = await self.jito.send(instructions)
 
+        sol_usd_val = _derive_sol_usd_price({}, latest) or 200.0
+        priority_fee = instructions.get("prioritizationFeeLamports")
+
         idem_confirmed = f"SELL:{pos_id}:{exit_reason}:{bucket}:CONFIRMED"
         te_confirmed = await self.repo.append_trade_event(
             idem_confirmed,
@@ -1230,8 +1447,8 @@ class TradingPipeline:
             price_impact_pct=self._price_impact_fraction(quote) * 100.0,
             quote_json=self._safe_json(quote),
             route_plan_json=self._safe_json((quote.get("routePlan") or [])[:3]),
-            jito_tip_lamports=bundle.get("tip_lamports"),
-            priority_fee_lamports=bundle.get("priority_fee_lamports"),
+            jito_tip_lamports=bundle.get("jito_tip_lamports"),
+            priority_fee_lamports=priority_fee if priority_fee is not None else bundle.get("priority_fee_lamports"),
             tx_signature=bundle.get("signature"),
             bundle_id=bundle.get("bundle_id"),
             error_code=bundle.get("error_code"),
@@ -1241,6 +1458,10 @@ class TradingPipeline:
             exit_reason_label=EXIT_REASON_LABELS.get(exit_reason, exit_reason),
             gross_value_usd=gross_value_usd,
             trade_value_usd_net=+abs(gross_value_usd),
+            trade_value_usd_expected=+abs(gross_value_usd),
+            accounting_source="jupiter_quote_expected",
+            accounting_status="PENDING_RPC_BACKFILL",
+            fee_detail_json=json.dumps({"accounting_mode": "LIVE_PENDING", "note": "Awaiting Solana tx meta backfill"}, ensure_ascii=False),
         )
 
         if not bundle.get("ok", True):
@@ -1252,6 +1473,35 @@ class TradingPipeline:
                 account_type="LIVE",
             )
             return {"ok": False, "error": bundle.get("error_code") or "BUNDLE_FAILED", "trade_event_id": te_confirmed.get("id")}
+
+        te_confirmed_id = te_confirmed.get("id")
+        sig = bundle.get("signature")
+        if sig and te_confirmed_id:
+            try:
+                backfill_result = await backfill_trade_event_from_solana_tx_meta(
+                    repo=self.repo,
+                    rpc=self.rpc,
+                    trade_event_id=te_confirmed_id,
+                    signature=sig,
+                    wallet_pubkey=wallet_pubkey,
+                    token_mint=token_mint,
+                    side="SELL",
+                    sol_usd=sol_usd_val,
+                )
+                if not backfill_result.get("ok"):
+                    await self.repo.append_system_event(
+                        "WARN", "TRADE",
+                        "Backfill failed for live sell",
+                        json.dumps({"te_id": te_confirmed_id, "sig": sig, "err": backfill_result.get("error")}),
+                        account_type="LIVE",
+                    )
+            except Exception as e:
+                await self.repo.append_system_event(
+                    "WARN", "TRADE",
+                    "Backfill error for live sell",
+                    json.dumps({"te_id": te_confirmed_id, "error": str(e)}),
+                    account_type="LIVE",
+                )
 
         exit_audit = await build_exit_audit_payload(
             repo=self.repo,

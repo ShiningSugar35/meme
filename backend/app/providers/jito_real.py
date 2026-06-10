@@ -212,6 +212,34 @@ class JitoProvider(ExecutionProvider):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    async def get_tip_accounts(self) -> list:
+        if self.mode == ProviderMode.MOCK:
+            return [
+                "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+                "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+            ]
+        data = await self._block_engine_rpc("getTipAccounts", [])
+        result = data.get("result") if isinstance(data, dict) else None
+        return result if isinstance(result, list) else []
+
+    async def choose_tip_lamports(self, percentile: str = "75th") -> dict:
+        floor = await self.get_tip_floor()
+        key_map = {
+            "25th": "landed_tips_25th_percentile",
+            "50th": "landed_tips_50th_percentile",
+            "75th": "landed_tips_75th_percentile",
+            "95th": "landed_tips_95th_percentile",
+            "99th": "landed_tips_99th_percentile",
+        }
+        key = key_map.get(percentile, "landed_tips_75th_percentile")
+        from ..trading.accounting import normalize_jito_tip_floor_to_lamports
+        lamports = normalize_jito_tip_floor_to_lamports(floor.get(key))
+        return {
+            "jito_tip_lamports": lamports,
+            "jito_tip_source": f"tip_floor.{key}",
+            "tip_floor_raw": floor,
+        }
+
     async def get_tip_floor(self) -> Dict[str, Any]:
         now = time.time()
         if self._tip_cache and (now - self._tip_cache_time) < self._tip_cache_ttl:
@@ -255,7 +283,8 @@ class JitoProvider(ExecutionProvider):
 
     async def send(self, transaction_or_bundle: Any) -> Dict[str, Any]:
         if self.mode == ProviderMode.MOCK:
-            response = {"ok": True, "bundle_id": "MOCK_BUNDLE", "mode": "MOCK"}
+            response = {"ok": True, "bundle_id": "MOCK_BUNDLE", "jito_tip_lamports": 3000,
+                        "jito_tip_source": "tip_floor.75th_MOCK", "mode": "MOCK"}
             await self._log("sendBundle", True, {"mode": "MOCK", "tx_or_bundle": "mock"}, response)
             return response
 
@@ -278,17 +307,17 @@ class JitoProvider(ExecutionProvider):
             transactions = [transaction_or_bundle]
             encoding = "base64"
 
-        # Jito expects base64/base58 encoded signed transactions in a bundle array.
         if not transactions or not all(isinstance(tx, str) and tx for tx in transactions):
             return {"ok": False, "error": "INVALID_BUNDLE", "message": "sendBundle requires non-empty encoded transaction strings"}
 
-        tip_data = await self.get_tip_floor()
-        tip_used = tip_data.get("landed_tips_75th_percentile") or tip_data.get("landed_tips_50th_percentile") or 0
+        tip_data = await self.choose_tip_lamports("75th")
+        jito_tip_lamports = tip_data.get("jito_tip_lamports", 0)
 
         try:
             data = await self._block_engine_rpc("sendBundle", [transactions, {"encoding": encoding}])
             result = self._normalize_bundle_result(data)
-            result["tip_used"] = tip_used
+            result["jito_tip_lamports"] = jito_tip_lamports
+            result["jito_tip_source"] = tip_data.get("jito_tip_source")
             result["retry_count"] = 0
             return result
         except Exception as e:

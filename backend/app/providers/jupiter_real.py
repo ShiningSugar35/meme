@@ -255,6 +255,12 @@ class JupiterProvider(SwapProvider):
                     'instructions': [],
                     'addressLookupTableAddresses': [],
                     'swapTransaction': None,
+                    'lastValidBlockHeight': None,
+                    'prioritizationFeeLamports': None,
+                    'computeUnitLimit': None,
+                    'prioritizationType': None,
+                    'dynamicSlippageReport': None,
+                    'simulationError': None,
                     'mode': 'MOCK_NO_TRANSACTION'
                 }
                 await self._log('/swap', True, {'userPublicKey': user_public_key}, {'built': True, 'mode': 'MOCK'})
@@ -265,6 +271,12 @@ class JupiterProvider(SwapProvider):
                     'instructions': [],
                     'addressLookupTableAddresses': [],
                     'swapTransaction': None,
+                    'lastValidBlockHeight': None,
+                    'prioritizationFeeLamports': None,
+                    'computeUnitLimit': None,
+                    'prioritizationType': None,
+                    'dynamicSlippageReport': None,
+                    'simulationError': None,
                     'mode': 'ONLINE_READONLY_NO_TRANSACTION'
                 }
                 await self._log('/swap', True, {'userPublicKey': user_public_key}, {'built': True, 'mode': 'ONLINE_READONLY'})
@@ -275,6 +287,14 @@ class JupiterProvider(SwapProvider):
                     'quoteResponse': quote,
                     'userPublicKey': user_public_key,
                     'wrapUnwrapSOL': True,
+                    'dynamicComputeUnitLimit': True,
+                    'dynamicSlippage': True,
+                    'prioritizationFeeLamports': {
+                        'priorityLevelWithMaxLamports': {
+                            'maxLamports': int(getattr(settings, 'JUPITER_MAX_PRIORITY_FEE_LAMPORTS', 1_000_000)),
+                            'priorityLevel': getattr(settings, 'JUPITER_PRIORITY_LEVEL', 'veryHigh'),
+                        }
+                    },
                 }
                 if extra:
                     json_data.update(extra)
@@ -283,7 +303,14 @@ class JupiterProvider(SwapProvider):
                     'instructions': data.get('instructions', []),
                     'addressLookupTableAddresses': data.get('addressLookupTableAddresses', []),
                     'swapTransaction': data.get('swapTransaction'),
-                    'mode': 'LIVE'
+                    'lastValidBlockHeight': data.get('lastValidBlockHeight'),
+                    'prioritizationFeeLamports': data.get('prioritizationFeeLamports'),
+                    'computeUnitLimit': data.get('computeUnitLimit'),
+                    'prioritizationType': data.get('prioritizationType'),
+                    'dynamicSlippageReport': data.get('dynamicSlippageReport'),
+                    'simulationError': data.get('simulationError'),
+                    'raw_swap_response': data,
+                    'mode': 'LIVE',
                 }
                 await self._log('/swap', True, {'userPublicKey': user_public_key}, {'built': True, 'mode': 'LIVE'})
                 return instr

@@ -254,6 +254,19 @@ async def _migrate_trade_events(db: aiosqlite.Connection):
     for column, definition in new_fields_2025.items():
         await _add_column_if_missing(db, "trade_events", column, definition)
 
+    new_fields_2026 = {
+        "trade_value_usd_expected": "REAL",
+        "trade_value_usd_conservative": "REAL",
+        "trade_value_usd_actual": "REAL",
+        "sell_price_usd_effective": "REAL",
+        "buy_price_usd_effective": "REAL",
+        "accounting_source": "TEXT",
+        "accounting_status": "TEXT",
+        "platform_fee_amount": "TEXT",
+    }
+    for column, definition in new_fields_2026.items():
+        await _add_column_if_missing(db, "trade_events", column, definition)
+
     await _add_index_if_missing(db, "uq_trade_idempotency", "trade_events", "idempotency_key", unique=True)
     await _add_index_if_missing(db, "idx_trade_events_account", "trade_events", "account_type, created_at")
     await _add_index_if_missing(db, "idx_trade_events_token", "trade_events", "token_mint, created_at")

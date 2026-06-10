@@ -1474,6 +1474,14 @@ class Repositories:
             "quote_price_impact_pct",
             "fee_detail_json",
             "execution_detail_json",
+            "trade_value_usd_expected",
+            "trade_value_usd_conservative",
+            "trade_value_usd_actual",
+            "sell_price_usd_effective",
+            "buy_price_usd_effective",
+            "accounting_source",
+            "accounting_status",
+            "platform_fee_amount",
         ]
 
         cols = [
@@ -1533,6 +1541,20 @@ class Repositories:
                 "UPDATE trade_events SET position_id = ? WHERE id = ?",
                 (position_id, trade_event_id),
             )
+        await self._write_txn(_do())
+
+    async def update_trade_event_accounting(self, trade_event_id: int, **kwargs):
+        if not kwargs:
+            return
+        setters = []
+        vals = []
+        for k, v in kwargs.items():
+            setters.append(f"{k} = ?")
+            vals.append(v)
+        vals.append(trade_event_id)
+        sql = f"UPDATE trade_events SET {', '.join(setters)} WHERE id = ?"
+        async def _do():
+            await self.db.execute(sql, tuple(vals))
         await self._write_txn(_do())
 
     async def get_trade_event(self, id: int) -> Optional[Dict[str, Any]]:

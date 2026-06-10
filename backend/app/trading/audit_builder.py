@@ -47,7 +47,8 @@ ENTRY_AUDIT_REQUIRED_FIELDS = [
 EXIT_AUDIT_REQUIRED_FIELDS = [
     "sell_time_utc", "sell_time_beijing",
     "exit_reason_code", "exit_reason_label",
-    "exit_pct", "sell_price_usd", "buy_price_usd", "sell_price_multiple",
+    "exit_pct", "sell_price_usd", "sell_price_usd_spot", "sell_price_usd_effective",
+    "buy_price_usd", "sell_price_multiple",
     "sell_token_amount", "sell_value_usd_net", "gross_value_usd",
     "remaining_token_amount_before", "remaining_value_usd_before",
     "remaining_token_amount_after", "remaining_value_usd_after",
@@ -650,6 +651,9 @@ async def build_exit_audit_payload(
     payload["exit_reason_label"] = EXIT_REASON_LABELS.get(exit_reason, exit_reason)
     payload["exit_pct"] = exit_pct
     payload["sell_price_usd"] = current_price_usd
+    payload["sell_price_usd_spot"] = current_price_usd
+    sell_effective = _to_float(sell_trade_event.get("sell_price_usd_effective"))
+    payload["sell_price_usd_effective"] = sell_effective
     payload["sell_token_amount"] = sell_amount_human
     payload["sell_value_usd_net"] = abs(gross_value_usd)
     payload["gross_value_usd"] = gross_value_usd
@@ -683,9 +687,14 @@ async def build_exit_audit_payload(
 
     payload["buy_price_usd"] = buy_price_usd
     bp = _to_float(buy_price_usd, 0.0)
-    if bp is not None and bp > 0 and sell_amount_human > 0:
-        effective_sell_price_usd = abs(gross_value_usd) / sell_amount_human
-        payload["sell_price_multiple"] = round(effective_sell_price_usd / bp, 2)
+    if bp is not None and bp > 0:
+        sell_price_for_multiple = sell_effective if sell_effective is not None else (
+            abs(gross_value_usd) / sell_amount_human if sell_amount_human > 0 else None
+        )
+        if sell_price_for_multiple is not None:
+            payload["sell_price_multiple"] = round(sell_price_for_multiple / bp, 2)
+        else:
+            payload["sell_price_multiple"] = None
     else:
         payload["sell_price_multiple"] = None
 

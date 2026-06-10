@@ -1719,9 +1719,22 @@ async def export_trade_audit(request: Request):
                     "price_usd": e.get("price_usd"),
                     "token_amount": e.get("token_amount"),
                     "trade_value_usd_net": trade_value_usd_net,
+                    "trade_value_usd_expected": e.get("trade_value_usd_expected"),
+                    "trade_value_usd_conservative": e.get("trade_value_usd_conservative"),
+                    "trade_value_usd_actual": e.get("trade_value_usd_actual"),
                     "exit_reason_code": e.get("exit_reason"),
                     "exit_reason_label": e.get("exit_reason_label"),
                     "sell_price_multiple": sell_price_multiple,
+                    "sell_price_usd_effective": e.get("sell_price_usd_effective"),
+                    "buy_price_usd_effective": e.get("buy_price_usd_effective"),
+                    "fee_usd_est": e.get("fee_usd_est"),
+                    "gas_fee_lamports": e.get("gas_fee_lamports"),
+                    "priority_fee_lamports": e.get("priority_fee_lamports"),
+                    "jito_tip_lamports": e.get("jito_tip_lamports"),
+                    "platform_fee_amount": e.get("platform_fee_amount"),
+                    "fee_detail_json": _safe_json_loads(e.get("fee_detail_json"), None),
+                    "accounting_source": e.get("accounting_source"),
+                    "accounting_status": e.get("accounting_status"),
                     "quote_summary": _safe_json_loads(e.get("quote_json"), {}),
                     "exit_audit": sell_audit,
                 })
@@ -1762,8 +1775,11 @@ async def export_trade_audit(request: Request):
                 item["loss_debug_summary"] = {
                     "buy_price_usd": entry_audit_json.get("buy_price_usd") or (buys[0].get("price_usd") if buys else None),
                     "all_sell_prices": [s.get("price_usd") for s in sells],
+                    "all_sell_effective_prices": [s.get("sell_price_usd_effective") for s in sells],
                     "all_sell_multiples": [],
                     "all_sell_reasons": [s.get("exit_reason_label") for s in sells if s.get("exit_reason_label")],
+                    "all_sell_accounting_sources": [s.get("accounting_source") for s in sells],
+                    "all_fee_details": [s.get("fee_detail_json") for s in sells],
                     "risk_failed_rules": [],
                     "dust_events": [],
                     "smart_money_events": [],
@@ -2317,6 +2333,25 @@ async def pnl_summary(request: Request):
         combined_realized = out["SIM"]["realized_pnl_usd"] + out["LIVE"]["realized_pnl_usd"]
         combined_cost = max(out["SIM"]["closed_cost_basis"] + out["LIVE"]["closed_cost_basis"], 0.000001)
 
+        pending_rpc_backfill_count = 0
+        final_trade_count = 0
+        estimated_trade_count = 0
+        try:
+            if await _table_exists(repo, "trade_events"):
+                stats_rows = await _fetch_all(repo,
+                    "SELECT accounting_status, COUNT(*) AS cnt FROM trade_events WHERE status='CONFIRMED' AND accounting_status IS NOT NULL GROUP BY accounting_status")
+                for sr in stats_rows:
+                    s = str(sr.get("accounting_status") or "")
+                    c = int(sr.get("cnt") or 0)
+                    if s == "PENDING_RPC_BACKFILL":
+                        pending_rpc_backfill_count = c
+                    elif s == "FINAL":
+                        final_trade_count += c
+                    elif s == "ESTIMATED":
+                        estimated_trade_count += c
+        except Exception:
+            pass
+
         return {
             "sim": {
                 "realized_pnl_usd": out["SIM"]["realized_pnl_usd"],
@@ -2347,6 +2382,11 @@ async def pnl_summary(request: Request):
                 "closed_positions": out["SIM"]["closed_positions"] + out["LIVE"]["closed_positions"],
                 "losing_positions": out["SIM"]["losing_positions"] + out["LIVE"]["losing_positions"],
                 "winning_positions": out["SIM"]["winning_positions"] + out["LIVE"]["winning_positions"],
+            },
+            "accounting_status_summary": {
+                "pending_rpc_backfill_count": pending_rpc_backfill_count,
+                "final_trade_count": final_trade_count,
+                "estimated_trade_count": estimated_trade_count,
             },
         }
     finally:
