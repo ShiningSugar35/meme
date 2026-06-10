@@ -833,7 +833,7 @@ class PositionRiskRunner:
             if await self.repo.has_exit_rule_executed(pos_id, reason_code):
                 return
 
-        if self.trading_pipeline is not None and hasattr(self.trading_pipeline, "execute_sell") and is_live:
+        if self.trading_pipeline is not None and hasattr(self.trading_pipeline, "execute_sell"):
             ok = await self._try_pipeline_execute_sell(
                 position=position,
                 exit_pct=exit_pct,

@@ -99,6 +99,19 @@ def _first_present(data: Dict[str, Any], keys: List[str]) -> Any:
     return None
 
 
+def first_non_missing(*values: Any) -> Any:
+    for v in values:
+        if v is not None and v != "":
+            return v
+    return None
+
+
+def _normalize_pool_type(v: Any) -> Any:
+    if isinstance(v, str) and v.lower() == "pump":
+        return "near_completion"
+    return v
+
+
 def _build_socials(snapshot: Optional[Dict[str, Any]],
                    token_info: Optional[Dict[str, Any]],
                    discovery_raw: Optional[Dict[str, Any]],
@@ -371,61 +384,95 @@ async def build_entry_audit_payload(
     info_data = token_info_data or {}
     sec = security_data or {}
 
-    payload["symbol"] = _first_present(tok_info, ["symbol"]) or \
-                        _first_present(info_data, ["symbol"]) or \
-                        _first_present(disc, ["symbol"])
-    payload["name"] = _first_present(tok_info, ["name"]) or \
-                      _first_present(info_data, ["name"]) or \
-                      _first_present(disc, ["name"])
-    payload["pool_address"] = _first_present(tok_info, ["pool_address"]) or \
-                              _first_present(snap_extra, ["pool_address"]) or \
-                              _first_present(info_data, ["pool_address"]) or \
-                              _first_present(disc, ["pool_address"])
-    payload["pool_type"] = _first_present(tok_info, ["latest_type"]) or \
-                           _first_present(snap_extra, ["type"]) or \
-                           _first_present(disc, ["type"])
-    payload["launchpad"] = _first_present(tok_info, ["launchpad"]) or \
-                           _first_present(info_data, ["launchpad"]) or \
-                           _first_present(snap_extra, ["launchpad"])
-    payload["launchpad_platform"] = _first_present(info_data, ["launchpad_platform"]) or \
-                                    _first_present(disc, ["launchpad_platform"]) or \
-                                    _first_present(snap_extra, ["platform"]) or \
-                                    _first_present(tok_info, ["launchpad"])
-    payload["platform"] = _first_present(snap_extra, ["platform"]) or \
-                          _first_present(disc, ["launchpad_platform"]) or \
-                          _first_present(info_data, ["launchpad_platform"])
-    payload["exchange"] = _first_present(info_data, ["exchange"]) or \
-                          (info_data.get("pool", {}).get("exchange") if isinstance(info_data.get("pool"), dict) else None) or \
-                          _first_present(disc, ["exchange"])
+    payload["symbol"] = first_non_missing(
+        _first_present(tok_info, ["symbol"]),
+        _first_present(info_data, ["symbol"]),
+        _first_present(disc, ["symbol"]),
+    )
+    payload["name"] = first_non_missing(
+        _first_present(tok_info, ["name"]),
+        _first_present(info_data, ["name"]),
+        _first_present(disc, ["name"]),
+    )
+    payload["pool_address"] = first_non_missing(
+        _first_present(tok_info, ["pool_address"]),
+        _first_present(snap_extra, ["pool_address"]),
+        _first_present(info_data, ["pool_address"]),
+        _first_present(disc, ["pool_address"]),
+    )
+    payload["pool_type"] = _normalize_pool_type(first_non_missing(
+        _first_present(tok_info, ["latest_type"]),
+        _first_present(snap_extra, ["type"]),
+        _first_present(disc, ["type"]),
+    ))
+    payload["launchpad"] = first_non_missing(
+        _first_present(tok_info, ["launchpad"]),
+        _first_present(info_data, ["launchpad"]),
+        _first_present(snap_extra, ["launchpad"]),
+    )
+    payload["launchpad_platform"] = first_non_missing(
+        _first_present(info_data, ["launchpad_platform"]),
+        _first_present(disc, ["launchpad_platform"]),
+        _first_present(snap_extra, ["platform"]),
+        _first_present(tok_info, ["launchpad"]),
+    )
+    payload["platform"] = first_non_missing(
+        _first_present(snap_extra, ["platform"]),
+        _first_present(disc, ["launchpad_platform"]),
+        _first_present(info_data, ["launchpad_platform"]),
+    )
+    exchange = info_data.get("pool", {}).get("exchange") if isinstance(info_data.get("pool"), dict) else None
+    payload["exchange"] = first_non_missing(
+        _first_present(info_data, ["exchange"]),
+        exchange,
+        _first_present(disc, ["exchange"]),
+    )
 
-    payload["rug_ratio"] = _first_present(snap_extra, ["max_rug_ratio"]) or \
-                           _first_present(disc, ["rug_ratio"]) or \
-                           _first_present(sec, ["max_rug_ratio"])
-    payload["entrapment_ratio"] = _first_present(snap_extra, ["max_entrapment_ratio"]) or \
-                                  _first_present(disc, ["entrapment_ratio"])
-    payload["insider_ratio"] = _first_present(snap_extra, ["max_insider_ratio"]) or \
-                               _first_present(disc, ["insider_ratio"])
-    payload["bundler_rate"] = _first_present(snap_extra, ["max_bundler_rate"]) or \
-                              _first_present(disc, ["bundler_trader_amount_rate"]) or \
-                              _first_present(disc, ["bundler_rate"]) or \
-                              _first_present(sec, ["max_bundler_rate"])
-    payload["liquidity"] = _first_present(snap_extra, ["liquidity_usd"]) or \
-                           _first_present(disc, ["liquidity"]) or \
-                           _first_present(info_data, ["liquidity_usd"]) or \
-                           _first_present(info_data.get("pool", {}), ["liquidity", "liquidity_usd"]) or \
-                           liquidity_usd
-    payload["top_holder_rate"] = _first_present(snap_extra, ["top_10_holder_rate"]) or \
-                                 _first_present(disc, ["top_10_holder_rate"]) or \
-                                 _first_present(sec, ["top_10_holder_rate"]) or \
-                                 _first_present(info_data, ["top_10_holder_rate"])
-    payload["fresh_wallet_rate"] = _first_present(snap_extra, ["fresh_wallet_rate"]) or \
-                                   _first_present(info_data, ["fresh_wallet_rate"]) or \
-                                   _first_present(disc, ["fresh_wallet_rate"])
-    payload["creator_balance_rate"] = _first_present(snap_extra, ["creator_balance_rate"]) or \
-                                      _first_present(disc, ["creator_balance_rate"]) or \
-                                      _first_present(sec, ["creator_balance_rate"]) or \
-                                      _first_present(info_data, ["creator_balance_rate"]) or \
-                                      _first_present(info_data.get("stat", {}), ["creator_hold_rate", "creator_token_balance"])
+    payload["rug_ratio"] = first_non_missing(
+        _first_present(snap_extra, ["max_rug_ratio"]),
+        _first_present(disc, ["rug_ratio"]),
+        _first_present(sec, ["max_rug_ratio"]),
+    )
+    payload["entrapment_ratio"] = first_non_missing(
+        _first_present(snap_extra, ["max_entrapment_ratio"]),
+        _first_present(disc, ["entrapment_ratio"]),
+    )
+    payload["insider_ratio"] = first_non_missing(
+        _first_present(snap_extra, ["max_insider_ratio"]),
+        _first_present(disc, ["insider_ratio"]),
+    )
+    payload["bundler_rate"] = first_non_missing(
+        _first_present(snap_extra, ["max_bundler_rate"]),
+        _first_present(disc, ["bundler_trader_amount_rate"]),
+        _first_present(disc, ["bundler_rate"]),
+        _first_present(sec, ["max_bundler_rate"]),
+    )
+    pool_liquidity = _first_present(info_data.get("pool", {}), ["liquidity", "liquidity_usd"])
+    payload["liquidity"] = first_non_missing(
+        _first_present(snap_extra, ["liquidity_usd"]),
+        _first_present(disc, ["liquidity"]),
+        _first_present(info_data, ["liquidity_usd"]),
+        pool_liquidity,
+        liquidity_usd,
+    )
+    payload["top_holder_rate"] = first_non_missing(
+        _first_present(snap_extra, ["top_10_holder_rate"]),
+        _first_present(disc, ["top_10_holder_rate"]),
+        _first_present(sec, ["top_10_holder_rate"]),
+        _first_present(info_data, ["top_10_holder_rate"]),
+    )
+    payload["fresh_wallet_rate"] = first_non_missing(
+        _first_present(snap_extra, ["fresh_wallet_rate"]),
+        _first_present(info_data, ["fresh_wallet_rate"]),
+        _first_present(disc, ["fresh_wallet_rate"]),
+    )
+    payload["creator_balance_rate"] = first_non_missing(
+        _first_present(snap_extra, ["creator_balance_rate"]),
+        _first_present(disc, ["creator_balance_rate"]),
+        _first_present(sec, ["creator_balance_rate"]),
+        _first_present(info_data, ["creator_balance_rate"]),
+        _first_present(info_data.get("stat", {}), ["creator_hold_rate"]),
+    )
     if payload["creator_balance_rate"] is None and info_data:
         try:
             bal = _to_float(info_data.get("creator_token_balance"))
@@ -434,15 +481,21 @@ async def build_entry_audit_payload(
                 payload["creator_balance_rate"] = bal / sup
         except Exception:
             pass
-    payload["holder_count"] = _first_present(snap_extra, ["holder_count"]) or \
-                              _first_present(disc, ["holder_count"]) or \
-                              _first_present(info_data, ["holder_count"]) or \
-                              _first_present(info_data.get("stat", {}), ["holder_count"])
-    payload["marketcap"] = _first_present(snap_extra, ["market_cap"]) or \
-                           _first_present(disc, ["usd_market_cap"]) or \
-                           _first_present(disc, ["market_cap"]) or \
-                           _first_present(info_data, ["market_cap"]) or \
-                           _first_present(info_data.get("price", {}), ["market_cap"])
+    stat_holder_count = _first_present(info_data.get("stat", {}), ["holder_count"])
+    payload["holder_count"] = first_non_missing(
+        _first_present(snap_extra, ["holder_count"]),
+        _first_present(disc, ["holder_count"]),
+        _first_present(info_data, ["holder_count"]),
+        stat_holder_count,
+    )
+    price_market_cap = _first_present(info_data.get("price", {}), ["market_cap"])
+    payload["marketcap"] = first_non_missing(
+        _first_present(snap_extra, ["market_cap"]),
+        _first_present(disc, ["usd_market_cap"]),
+        _first_present(disc, ["market_cap"]),
+        _first_present(info_data, ["market_cap"]),
+        price_market_cap,
+    )
     if payload["marketcap"] is None and info_data:
         try:
             p = _to_float(info_data.get("price_usd") or info_data.get("price"))
@@ -451,47 +504,76 @@ async def build_entry_audit_payload(
                 payload["marketcap"] = p * cs
         except Exception:
             pass
-    payload["smart_degen_count"] = _first_present(snap_extra, ["smart_degen_count"]) or \
-                                   _first_present(disc, ["smart_degen_count"]) or \
-                                   _first_present(info_data.get("wallet_tags_stat", {}), ["smart_wallets"])
-    payload["volume_24h"] = _first_present(snap_extra, ["volume_usd"]) or \
-                            _first_present(disc, ["volume_24h"]) or \
-                            _first_present(info_data.get("price", {}), ["volume_24h"]) or \
-                            _first_present(info_data, ["volume_24h"])
-    payload["is_wash_trading"] = _first_present(snap_extra, ["is_wash_trading"]) or \
-                                 _first_present(disc, ["is_wash_trading"]) or \
-                                 _first_present(sec, ["is_wash_trading"])
-    payload["rat_trader_amount_rate"] = _first_present(snap_extra, ["rat_trader_amount_rate"]) or \
-                                        _first_present(disc, ["rat_trader_amount_rate"]) or \
-                                        _first_present(sec, ["rat_trader_amount_rate"])
-    payload["suspected_insider_hold_rate"] = _first_present(snap_extra, ["suspected_insider_hold_rate"]) or \
-                                             _first_present(disc, ["suspected_insider_hold_rate"]) or \
-                                             _first_present(sec, ["suspected_insider_hold_rate"])
-    payload["sell_tax"] = _first_present(snap_extra, ["sell_tax"]) or \
-                          _first_present(sec, ["sell_tax"]) or \
-                          _first_present(disc, ["sell_tax"]) or \
-                          _first_present(info_data, ["sell_tax"])
-    payload["burn_status"] = _first_present(snap_extra, ["burn_status"]) or \
-                             _first_present(disc, ["burn_status"]) or \
-                             _first_present(sec, ["burn_status"])
-    payload["sniper_count"] = _first_present(snap_extra, ["sniper_count"]) or \
-                              _first_present(disc, ["sniper_count"]) or \
-                              _first_present(sec, ["sniper_count"]) or \
-                              _first_present(info_data.get("wallet_tags_stat", {}), ["sniper_wallets"])
-    payload["swaps_1h"] = _first_present(snap_extra, ["swaps_1h"]) or \
-                          _first_present(disc, ["swaps_1h"]) or \
-                          _first_present(info_data.get("price", {}), ["swaps_1h"]) or \
-                          _first_present(info_data, ["swaps_1h"])
-    payload["volume_1h"] = _first_present(snap_extra, ["volume_1h"]) or \
-                           _first_present(disc, ["volume_1h"]) or \
-                           _first_present(info_data.get("price", {}), ["volume_1h"])
+    smart_wallets = _first_present(info_data.get("wallet_tags_stat", {}), ["smart_wallets"])
+    payload["smart_degen_count"] = first_non_missing(
+        _first_present(snap_extra, ["smart_degen_count"]),
+        _first_present(disc, ["smart_degen_count"]),
+        smart_wallets,
+    )
+    price_vol_24h = _first_present(info_data.get("price", {}), ["volume_24h"])
+    payload["volume_24h"] = first_non_missing(
+        _first_present(snap_extra, ["volume_usd"]),
+        _first_present(disc, ["volume_24h"]),
+        price_vol_24h,
+        _first_present(info_data, ["volume_24h"]),
+    )
+    payload["is_wash_trading"] = first_non_missing(
+        _first_present(snap_extra, ["is_wash_trading"]),
+        _first_present(disc, ["is_wash_trading"]),
+        _first_present(sec, ["is_wash_trading"]),
+    )
+    payload["rat_trader_amount_rate"] = first_non_missing(
+        _first_present(snap_extra, ["rat_trader_amount_rate"]),
+        _first_present(disc, ["rat_trader_amount_rate"]),
+        _first_present(sec, ["rat_trader_amount_rate"]),
+    )
+    payload["suspected_insider_hold_rate"] = first_non_missing(
+        _first_present(snap_extra, ["suspected_insider_hold_rate"]),
+        _first_present(disc, ["suspected_insider_hold_rate"]),
+        _first_present(sec, ["suspected_insider_hold_rate"]),
+    )
+    payload["sell_tax"] = first_non_missing(
+        _first_present(snap_extra, ["sell_tax"]),
+        _first_present(sec, ["sell_tax"]),
+        _first_present(disc, ["sell_tax"]),
+        _first_present(info_data, ["sell_tax"]),
+    )
+    payload["burn_status"] = first_non_missing(
+        _first_present(snap_extra, ["burn_status"]),
+        _first_present(disc, ["burn_status"]),
+        _first_present(sec, ["burn_status"]),
+    )
+    sniper_wallets = _first_present(info_data.get("wallet_tags_stat", {}), ["sniper_wallets"])
+    payload["sniper_count"] = first_non_missing(
+        _first_present(snap_extra, ["sniper_count"]),
+        _first_present(disc, ["sniper_count"]),
+        _first_present(sec, ["sniper_count"]),
+        sniper_wallets,
+    )
+    price_swaps_1h = _first_present(info_data.get("price", {}), ["swaps_1h"])
+    payload["swaps_1h"] = first_non_missing(
+        _first_present(snap_extra, ["swaps_1h"]),
+        _first_present(disc, ["swaps_1h"]),
+        price_swaps_1h,
+        _first_present(info_data, ["swaps_1h"]),
+    )
+    payload["volume_1h"] = first_non_missing(
+        _first_present(snap_extra, ["volume_1h"]),
+        _first_present(disc, ["volume_1h"]),
+        _first_present(info_data.get("price", {}), ["volume_1h"]),
+    )
     if payload["volume_1h"] is None and klines:
         try:
-            payload["volume_1h"] = sum(_to_float(k.get("volume_usd"), 0.0) or 0.0 for k in klines)
+            payload["volume_1h"] = sum(
+                _to_float(k.get("volume_usd") if k.get("volume_usd") is not None else k.get("volume"), 0.0) or 0.0
+                for k in klines
+            )
         except Exception:
             pass
-    payload["price_change_percent1h"] = _first_present(snap_extra, ["price_change_percent_1h"]) or \
-                                        _first_present(disc, ["price_change_percent1h"])
+    payload["price_change_percent1h"] = first_non_missing(
+        _first_present(snap_extra, ["price_change_percent_1h"]),
+        _first_present(disc, ["price_change_percent1h"]),
+    )
     if payload["price_change_percent1h"] is None and info_data:
         try:
             p_now = _to_float(info_data.get("price_usd") or info_data.get("price"))
@@ -587,9 +669,11 @@ async def build_exit_audit_payload(
             if isinstance(entry_json, str):
                 entry_json = json.loads(entry_json)
             if isinstance(entry_json, dict):
-                buy_price_usd = entry_json.get("buy_price_usd") or \
-                                entry_json.get("price_usd") or \
-                                position.get("entry_price_usd")
+                buy_price_usd = first_non_missing(
+                    entry_json.get("buy_price_usd"),
+                    entry_json.get("price_usd"),
+                    position.get("entry_price_usd"),
+                )
         if not buy_price_usd:
             buy_price_usd = position.get("entry_price_usd")
     except Exception:
