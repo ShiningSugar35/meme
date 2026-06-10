@@ -101,7 +101,8 @@ def _first_present(data: Dict[str, Any], keys: List[str]) -> Any:
 
 def _build_socials(snapshot: Optional[Dict[str, Any]],
                    token_info: Optional[Dict[str, Any]],
-                   discovery_raw: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+                   discovery_raw: Optional[Dict[str, Any]],
+                   gmgn_raw_json: Optional[str] = None) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     SOCIAL_MAP: List[Tuple[str, str, str]] = [
         ("twitter", "twitter", "twitter_username"),
@@ -134,6 +135,36 @@ def _build_socials(snapshot: Optional[Dict[str, Any]],
                 else:
                     url = stripped
                 out.append({"type": stype, "value": stripped, "url": url})
+
+    # Enrich from GMGN raw_json → data.link
+    if gmgn_raw_json:
+        try:
+            bundle = json.loads(gmgn_raw_json) if isinstance(gmgn_raw_json, str) else gmgn_raw_json
+            info_raw = bundle.get("token_info", {})
+            if isinstance(info_raw, dict):
+                from ..providers.gmgn_real import GMGNProvider
+                unwrapped = GMGNProvider._unwrap_data(info_raw)
+                if isinstance(unwrapped, dict):
+                    link = unwrapped.get("link", {})
+                    if isinstance(link, dict):
+                        for stype, disc_key, info_key in SOCIAL_MAP:
+                            if stype in seen:
+                                continue
+                            val = link.get(info_key) or link.get(stype) or link.get(disc_key)
+                            if val and isinstance(val, str) and val.strip():
+                                stripped = val.strip()
+                                seen.add(stype)
+                                if stype == "twitter":
+                                    url = stripped if stripped.startswith("http") else f"https://x.com/{stripped}"
+                                elif stype == "telegram":
+                                    url = stripped if stripped.startswith("http") else f"https://t.me/{stripped}"
+                                elif stype == "website":
+                                    url = stripped if stripped.startswith("http") else f"https://{stripped}"
+                                else:
+                                    url = stripped
+                                out.append({"type": stype, "value": stripped, "url": url})
+        except Exception:
+            pass
     return out
 
 
@@ -158,8 +189,12 @@ def _build_entry_data_sources(
 
 
 def _compute_missing_fields(payload: Dict[str, Any], required: List[str]) -> List[str]:
+    EXCLUDED = {"entry_missing_fields", "exit_missing_fields",
+                "entry_data_sources", "exit_data_sources"}
     missing: List[str] = []
     for field in required:
+        if field in EXCLUDED:
+            continue
         val = payload.get(field)
         if val is None or val == "" or val == [] or val == {}:
             missing.append(field)
@@ -463,9 +498,10 @@ async def build_entry_audit_payload(
         except Exception:
             pass
 
-    payload["socials"] = _build_socials(snap_extra, info_data, disc)
+    payload["socials"] = _build_socials(snap_extra, info_data, disc,
+                                        token_info_data.get("raw_json") if token_info_data else None)
 
-    addr_type0_holders = [h for h in holders if int(h.get("addr_type", 0)) == 0]
+    addr_type0_holders = [h for h in holders if int(h.get("addr_type", -1)) == 0]
     addr_type0_sorted = sorted(addr_type0_holders,
                                key=lambda h: _to_float(h.get("amount_percentage") or h.get("top1_holder_rate") or 0.0, 0.0) or 0.0,
                                reverse=True)
@@ -549,8 +585,9 @@ async def build_exit_audit_payload(
         buy_price_usd = position.get("entry_price_usd")
 
     payload["buy_price_usd"] = buy_price_usd
-    if buy_price_usd and _to_float(buy_price_usd, 0.0) or 0.0 > 0:
-        payload["sell_price_multiple"] = round((current_price_usd or 0.0) / float(buy_price_usd), 2)
+    bp = _to_float(buy_price_usd, 0.0)
+    if bp is not None and bp > 0:
+        payload["sell_price_multiple"] = round((current_price_usd or 0.0) / bp, 2)
     else:
         payload["sell_price_multiple"] = None
 

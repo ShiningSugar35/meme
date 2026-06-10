@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
+from ..trading.audit_builder import ENTRY_AUDIT_REQUIRED_FIELDS
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
@@ -1619,6 +1620,58 @@ async def export_trade_audit(request: Request):
             realized_pnl_pct = round(realized_pnl_usd / max(total_cost, 0.000001) * 100, 2)
             is_losing = realized_pnl_usd < 0
 
+            entry_audit_json = {}
+            entry_metrics_source = "entry_audit"
+            try:
+                if entry_audit_rows and len(entry_audit_rows) > 0:
+                    raw = entry_audit_rows[0].get("audit_json") or {}
+                    if isinstance(raw, str):
+                        raw = json.loads(raw)
+                    entry_audit_json = raw if isinstance(raw, dict) else {}
+                if not entry_audit_json or not entry_audit_json.get("rug_ratio"):
+                    fallback: Dict[str, Any] = {k: None for k in ENTRY_AUDIT_REQUIRED_FIELDS}
+                    if latest_snap:
+                        fallback.update({
+                            "rug_ratio": latest_snap.get("max_rug_ratio"),
+                            "entrapment_ratio": latest_snap.get("max_entrapment_ratio"),
+                            "bundler_rate": latest_snap.get("max_bundler_rate"),
+                            "liquidity": latest_snap.get("liquidity_usd"),
+                            "top_holder_rate": latest_snap.get("top_10_holder_rate"),
+                            "fresh_wallet_rate": latest_snap.get("fresh_wallet_rate"),
+                            "holder_count": latest_snap.get("holder_count"),
+                            "marketcap": latest_snap.get("market_cap"),
+                            "is_wash_trading": latest_snap.get("is_wash_trading"),
+                            "rat_trader_amount_rate": latest_snap.get("rat_trader_amount_rate"),
+                            "suspected_insider_hold_rate": latest_snap.get("suspected_insider_hold_rate"),
+                            "sell_tax": latest_snap.get("sell_tax"),
+                            "burn_status": latest_snap.get("burn_status"),
+                            "sniper_count": latest_snap.get("sniper_count"),
+                            "socials": [{"type": "twitter", "value": "unknown", "url": ""}] if latest_snap.get("has_social") else None,
+                            "volume_24h": latest_snap.get("volume_usd"),
+                            "price_change_percent1h": latest_snap.get("price_change_percent_1h"),
+                            "swaps_1h": latest_snap.get("swaps_1h"),
+                            "volume_1h": latest_snap.get("volume_1h"),
+                            "top1_addr_type0_holder_rate": latest_snap.get("top1_holder_rate"),
+                            "creator_balance_rate": latest_snap.get("creator_balance_rate"),
+                            "smart_degen_count": latest_snap.get("smart_degen_count"),
+                        })
+                    fallback["entry_metrics_source_label"] = "latest_snapshot_fallback"
+                    entry_audit_json = fallback
+                    entry_metrics_source = "latest_snapshot_fallback"
+            except Exception:
+                entry_audit_json = {}
+                entry_metrics_source = "error_fallback"
+
+            exit_audit_list: List[Dict[str, Any]] = []
+            for ae in exit_audit_rows:
+                try:
+                    raw = ae.get("audit_json") or {}
+                    if isinstance(raw, str):
+                        raw = json.loads(raw)
+                    exit_audit_list.append(raw if isinstance(raw, dict) else {})
+                except Exception:
+                    exit_audit_list.append({})
+
             trade_events_list: List[Dict[str, Any]] = []
             for e in evs:
                 created_at_utc = str(e.get("created_at") or "")
@@ -1665,55 +1718,6 @@ async def export_trade_audit(request: Request):
                     "quote_summary": _safe_json_loads(e.get("quote_json"), {}),
                     "exit_audit": sell_audit,
                 })
-
-            entry_audit_json = {}
-            entry_metrics_source = "entry_audit"
-            try:
-                if entry_audit_rows and len(entry_audit_rows) > 0:
-                    raw = entry_audit_rows[0].get("audit_json") or {}
-                    if isinstance(raw, str):
-                        raw = json.loads(raw)
-                    entry_audit_json = raw if isinstance(raw, dict) else {}
-                if not entry_audit_json or not entry_audit_json.get("rug_ratio"):
-                    entry_audit_json = {
-                        "rug_ratio": latest_snap.get("max_rug_ratio") if latest_snap else None,
-                        "entrapment_ratio": latest_snap.get("max_entrapment_ratio") if latest_snap else None,
-                        "bundler_rate": latest_snap.get("max_bundler_rate") if latest_snap else None,
-                        "liquidity_usd": latest_snap.get("liquidity_usd") if latest_snap else None,
-                        "top_10_holder_rate": latest_snap.get("top_10_holder_rate") if latest_snap else None,
-                        "fresh_wallet_rate": latest_snap.get("fresh_wallet_rate") if latest_snap else None,
-                        "holder_count": latest_snap.get("holder_count") if latest_snap else None,
-                        "market_cap": latest_snap.get("market_cap") if latest_snap else None,
-                        "is_wash_trading": latest_snap.get("is_wash_trading") if latest_snap else None,
-                        "rat_trader_amount_rate": latest_snap.get("rat_trader_amount_rate") if latest_snap else None,
-                        "suspected_insider_hold_rate": latest_snap.get("suspected_insider_hold_rate") if latest_snap else None,
-                        "sell_tax": latest_snap.get("sell_tax") if latest_snap else None,
-                        "burn_status": latest_snap.get("burn_status") if latest_snap else None,
-                        "sniper_count": latest_snap.get("sniper_count") if latest_snap else None,
-                        "has_social": latest_snap.get("has_social") if latest_snap else None,
-                        "volume_usd_24h": latest_snap.get("volume_usd") if latest_snap else None,
-                        "price_change_1h_pct": latest_snap.get("price_change_percent_1h") if latest_snap else None,
-                        "swaps_1h": latest_snap.get("swaps_1h") if latest_snap else None,
-                        "volume_1h": latest_snap.get("volume_1h") if latest_snap else None,
-                        "top1_holder_rate": latest_snap.get("top1_holder_rate") if latest_snap else None,
-                        "creator_balance_rate": latest_snap.get("creator_balance_rate") if latest_snap else None,
-                        "smart_degen_count": latest_snap.get("smart_degen_count") if latest_snap else None,
-                    }
-                    entry_metrics_source = "latest_snapshot_fallback"
-            except Exception:
-                entry_audit_json = {}
-                entry_metrics_source = "error_fallback"
-
-            # Match exit audits to sell trade events
-            exit_audit_list: List[Dict[str, Any]] = []
-            for ae in exit_audit_rows:
-                try:
-                    raw = ae.get("audit_json") or {}
-                    if isinstance(raw, str):
-                        raw = json.loads(raw)
-                    exit_audit_list.append(raw if isinstance(raw, dict) else {})
-                except Exception:
-                    exit_audit_list.append({})
 
             item: Dict[str, Any] = {
                 "position_id": pid,

@@ -1,5 +1,5 @@
-import pytest
 import json
+import pytest
 from datetime import datetime, timezone
 
 from ..trading.audit_builder import (
@@ -385,3 +385,65 @@ async def test_dust_exit_audit_detail(pipeline_factory):
     assert exit_audit["dust_detail"]["remaining_value_usd_before"] == 0.01
     assert exit_audit["dust_detail"]["dust_threshold"] == 12.5
     assert exit_audit["exit_reason_code"] == "DUST_FORCE_EXIT"
+
+
+@pytest.mark.asyncio
+async def test_export_trade_audit_complete_entry_exit_audit(repo):
+    """ENTRY audit persisted with all required fields;
+    EXIT audit persisted with all required fields;
+    entry/exit audit rows retrievable via repo."""
+    tok = "EXPORT_FULL"
+    pid = await repo.create_position(
+        token_mint=tok, is_live=False,
+        locked_strategy_config_json='{"id": 1}',
+        status="POSITION_OPEN", entry_price_usd=0.001,
+        entry_token_amount=100.0, remaining_token_amount=100.0,
+        remaining_value_usd=0.1, account_type="SIM",
+    )
+
+    entry_audit_json = {k: f"val_{k}" for k in ENTRY_AUDIT_REQUIRED_FIELDS}
+    entry_audit_json["buy_price_usd"] = 0.001
+    entry_audit_json["entry_missing_fields"] = []
+    entry_audit_json["entry_data_sources"] = {}
+    await repo.insert_position_audit(
+        position_id=pid, token_mint=tok, account_type="SIM",
+        strategy_id=1, discovery_event_id=None, snapshot_id=None,
+        audit_type="ENTRY",
+        audit_json=entry_audit_json,
+    )
+
+    exit_audit_json = {k: f"val_{k}" for k in EXIT_AUDIT_REQUIRED_FIELDS}
+    exit_audit_json["sell_price_multiple"] = 0.50
+    exit_audit_json["exit_reason_code"] = "RISK_RECHECK_FAILED"
+    exit_audit_json["exit_reason_label"] = "持仓风控复查失败"
+    exit_audit_json["exit_pct"] = 1.0
+    exit_audit_json["exit_missing_fields"] = []
+    exit_audit_json["exit_data_sources"] = {}
+    exit_audit_json["risk_failed_rules"] = []
+    await repo.insert_position_audit(
+        position_id=pid, token_mint=tok, account_type="SIM",
+        strategy_id=1, discovery_event_id=None, snapshot_id=None,
+        audit_type="EXIT",
+        audit_json=exit_audit_json,
+    )
+
+    entry_rows = await repo.get_position_audits(pid, audit_type="ENTRY")
+    assert len(entry_rows) == 1
+    stored_entry = entry_rows[0].get("audit_json") or {}
+    if isinstance(stored_entry, str):
+        stored_entry = json.loads(stored_entry)
+    for field in ENTRY_AUDIT_REQUIRED_FIELDS:
+        assert field in stored_entry, f"Stored ENTRY audit missing field: {field}"
+    assert stored_entry.get("buy_price_usd") == 0.001
+    assert stored_entry.get("entry_missing_fields") == []
+
+    exit_rows = await repo.get_position_audits(pid, audit_type="EXIT")
+    assert len(exit_rows) == 1
+    stored_exit = exit_rows[0].get("audit_json") or {}
+    if isinstance(stored_exit, str):
+        stored_exit = json.loads(stored_exit)
+    for field in EXIT_AUDIT_REQUIRED_FIELDS:
+        assert field in stored_exit, f"Stored EXIT audit missing field: {field}"
+    assert stored_exit.get("sell_price_multiple") == 0.50
+    assert stored_exit.get("exit_reason_code") == "RISK_RECHECK_FAILED"
+    assert stored_exit.get("exit_missing_fields") == []
