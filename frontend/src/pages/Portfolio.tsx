@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, FilterStats, PortfolioRow, RuntimeStatus, RuleFailItem, EndpointHealthItem, FieldHealthItem, PlatformHealthItem, DataSourceHealth, getTradeHistory, TradeHistoryRow } from '../api/client';
+import { api, FilterStats, PortfolioRow, RuntimeStatus, RuleFailItem, EndpointHealthItem, FieldHealthItem, PlatformHealthItem, DataSourceHealth, getTradeEventsLedger, TradeEventsLedgerRow } from '../api/client';
 
 type AccountTab = 'LIVE' | 'SIM';
 type PortfolioTab = 'CURRENT' | 'HISTORY';
@@ -36,7 +36,7 @@ function ruleLabel(name: string): string {
     top1_holder: 'TOP1持仓超标',
     swaps_5m_scaled: '过去一小时交易数',
     price_change_1h: '1h价格涨幅不足',
-    smart_degen: '聪明钱指标不满足',
+    smart_degen: '聪明钱持仓过少',
   };
   return map[name] || name;
 }
@@ -63,7 +63,7 @@ export default function Portfolio() {
   const [rows, setRows] = useState<PortfolioRow[]>([]);
   const [fstats, setFstats] = useState<FilterStats | null>(null);
   const [message, setMessage] = useState('');
-  const [historyRows, setHistoryRows] = useState<TradeHistoryRow[]>([]);
+  const [historyRows, setHistoryRows] = useState<TradeEventsLedgerRow[]>([]);
   const [historyAccount, setHistoryAccount] = useState<string>('ALL');
   const tabRef = useRef<AccountTab>('LIVE');
 
@@ -81,7 +81,7 @@ export default function Portfolio() {
 
   const loadHistory = async (account = historyAccount) => {
     try {
-      const data = await getTradeHistory(account);
+      const data = await getTradeEventsLedger(account === 'ALL' ? 'ALL' : account);
       setHistoryRows(data);
     } catch (e) {
       setMessage((e as Error).message);
@@ -196,7 +196,6 @@ export default function Portfolio() {
             <thead>
               <tr>
                 <th>仓位ID</th>
-                <th>交易属性</th>
                 <th>策略</th>
                 <th>Token</th>
                 <th>状态</th>
@@ -208,12 +207,11 @@ export default function Portfolio() {
             </thead>
             <tbody>
               {currentRows.length === 0 && (
-                <tr><td colSpan={9} className="empty">当前看板暂无持仓。</td></tr>
+                <tr><td colSpan={8} className="empty">当前看板暂无持仓。</td></tr>
               )}
               {currentRows.map((row) => (
                 <tr key={row.id}>
                   <td>{row.id}</td>
-                  <td><span className={tab === 'LIVE' ? 'tag live' : 'tag sim'}>{tab}</span></td>
                   <td>{row.strategy_name || row.strategy_id || '-'}</td>
                   <td title={row.token_mint}>{row.mint_short || row.token_mint || '-'}</td>
                   <td>{row.status}{row.last_exit_reason ? ` / ${row.last_exit_reason}` : ''}</td>
@@ -229,36 +227,30 @@ export default function Portfolio() {
           <table>
             <thead>
               <tr>
+                <th>方向</th>
                 <th>Token</th>
                 <th>Symbol</th>
-                <th>入场价</th>
-                <th>入场价值</th>
-                <th>卖出价值</th>
-                <th>PnL</th>
-                <th>PnL%</th>
-                <th>开仓时间</th>
-                <th>平仓时间</th>
-                <th>平仓原因</th>
-                <th>交易次数</th>
+                <th>价格</th>
+                <th>数量</th>
+                <th>价值(USD)</th>
+                <th>退出原因</th>
+                <th>北京时</th>
               </tr>
             </thead>
             <tbody>
               {historyRows.length === 0 && (
-                <tr><td colSpan={11} className="empty">暂无历史持仓。</td></tr>
+                <tr><td colSpan={8} className="empty">暂无交易记录。</td></tr>
               )}
               {historyRows.map((row) => (
-                <tr key={row.position_id}>
+                <tr key={row.trade_event_id}>
+                  <td><span className={row.side === 'BUY' ? 'tag sim' : 'tag live'}>{row.side}</span></td>
                   <td title={row.token_mint}>{row.mint_short || '-'}</td>
                   <td>{row.symbol || '-'}</td>
-                  <td>{usd(row.entry_price_usd)}</td>
-                  <td>{usd(row.entry_value_usd)}</td>
-                  <td>{usd(row.sell_value_usd)}</td>
-                  <td style={pnlStyle(row.pnl_usd)}>{usd(row.pnl_usd)}</td>
-                  <td style={pnlStyle(row.pnl_pct)}>{pct(row.pnl_pct)}</td>
-                  <td>{row.opened_at || '-'}</td>
-                  <td>{row.closed_at || '-'}</td>
-                  <td>{row.close_reason || row.last_exit_reason || '-'}</td>
-                  <td>{row.trade_count}</td>
+                  <td>{usd(row.price_usd)}</td>
+                  <td>{row.token_amount ?? '-'}</td>
+                  <td style={pnlStyle(row.trade_value_usd_net)}>{usd(row.trade_value_usd_net)}</td>
+                  <td>{row.exit_reason_label || '-'}</td>
+                  <td style={{ fontSize: 12 }}>{(row.created_at_beijing || row.created_at_utc || '-').substring(0, 19)}</td>
                 </tr>
               ))}
             </tbody>
@@ -291,10 +283,10 @@ export default function Portfolio() {
             <h2>数据源健康诊断</h2>
             {dsh.summary && Object.keys(dsh.summary).length > 0 && (
               <>
-                <p className="hint">统计口径：全历史池子去重</p>
-                <div className="metric-row"><span>风险筛选候选</span><strong>{String(dsh.summary.risk_filter_count ?? '-')}</strong></div>
-                <div className="metric-row"><span>风险筛选通过</span><strong>{String(dsh.summary.risk_filter_pass_count ?? '-')}</strong></div>
-                <div className="metric-row"><span>价格筛选通过</span><strong>{String(dsh.summary.price_filter_pass_count ?? '-')}</strong></div>
+                <p className="hint">统计口径：AND流水线(risk+holder+degen→price+kline→create)</p>
+                <div className="metric-row"><span>风控面通过(risk+holder+degen)</span><strong>{String(dsh.summary.risk_surface_pass_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>价格面通过(price+kline)</span><strong>{String(dsh.summary.price_surface_pass_count ?? '-')}</strong></div>
+                <div className="metric-row"><span>就绪可创建</span><strong>{String(dsh.summary.entry_ready_count ?? '-')}</strong></div>
                 {dsh.summary.total_429_count as number > 0 && (
                   <div className="metric-row"><span>最近窗口429次数</span><strong style={{color:'#f85149'}}>{String(dsh.summary.total_429_count)}</strong></div>
                 )}

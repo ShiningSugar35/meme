@@ -544,6 +544,7 @@ class TradingPipeline:
             price_usd=price_usd,
             price_sol=price_sol,
             price_impact_pct=(jupiter_price_impact * 100.0) if jupiter_price_impact else None,
+            trade_value_usd_net=-abs(size_usd),
         )
 
         locked_json = self._locked_strategy_for_position(
@@ -750,6 +751,7 @@ class TradingPipeline:
             error_code=bundle.get("error_code"),
             error_message=bundle.get("error_message"),
             provider="JITO",
+            trade_value_usd_net=-abs(size_usd),
         )
 
         if not bundle.get("ok", True):
@@ -864,6 +866,8 @@ class TradingPipeline:
             executed_token_amount=sell_amount_human,
             price_usd=current_price_usd,
             exit_reason=exit_reason,
+            exit_reason_label=exit_reason,
+            trade_value_usd_net=+abs(sell_amount_human * current_price_usd),
             provider="PIPELINE_SIM",
         )
 
@@ -1024,6 +1028,8 @@ class TradingPipeline:
             quote_json=self._safe_json(quote),
             route_plan_json=self._safe_json((quote.get("routePlan") or [])[:3]),
             provider="JUPITER",
+            exit_reason=exit_reason,
+            exit_reason_label=exit_reason,
         )
 
         wallet_pubkey = settings.WALLET_PUBLIC_KEY or "MOCK_WALLET"
@@ -1059,6 +1065,9 @@ class TradingPipeline:
             error_code=bundle.get("error_code"),
             error_message=bundle.get("error_message"),
             provider="JITO",
+            exit_reason=exit_reason,
+            exit_reason_label=exit_reason,
+            trade_value_usd_net=+abs(sell_amount_human * current_price_usd),
         )
 
         if not bundle.get("ok", True):

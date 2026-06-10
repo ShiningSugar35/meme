@@ -1542,22 +1542,22 @@ async def export_trade_audit(request: Request):
 
         if session_started_at:
             events = await _fetch_all(repo,
-                """SELECT te.*, p.symbol, p.name, p.token_mint, p.account_type AS pos_account_type, p.live_strategy_id,
+                """SELECT te.*, t.symbol, t.name,
                           sg.name AS strategy_name
                    FROM trade_events te
-                   LEFT JOIN positions p ON p.id = te.position_id
-                   LEFT JOIN strategy_groups sg ON sg.id = p.live_strategy_id
+                   LEFT JOIN tokens t ON t.mint_address = te.token_mint
+                   LEFT JOIN strategy_groups sg ON sg.id = te.strategy_id
                    WHERE te.status='CONFIRMED' AND te.side IN ('BUY','SELL')
                      AND te.created_at >= ?
                    ORDER BY te.position_id, te.created_at ASC""",
                 (session_started_at,))
         else:
             events = await _fetch_all(repo,
-                """SELECT te.*, p.symbol, p.name, p.token_mint, p.account_type AS pos_account_type, p.live_strategy_id,
+                """SELECT te.*, t.symbol, t.name,
                           sg.name AS strategy_name
                    FROM trade_events te
-                   LEFT JOIN positions p ON p.id = te.position_id
-                   LEFT JOIN strategy_groups sg ON sg.id = p.live_strategy_id
+                   LEFT JOIN tokens t ON t.mint_address = te.token_mint
+                   LEFT JOIN strategy_groups sg ON sg.id = te.strategy_id
                    WHERE te.status='CONFIRMED' AND te.side IN ('BUY','SELL')
                    ORDER BY te.position_id, te.created_at ASC
                    LIMIT 5000""")
@@ -1578,12 +1578,12 @@ async def export_trade_audit(request: Request):
 
         for pid, evs in pos_events.items():
             first = evs[0]
-            account_type = str(first.get("pos_account_type") or first.get("account_type") or "SIM")
+            account_type = str(first.get("account_type") or "SIM")
             symbol = str(first.get("symbol") or "")
             token_mint = str(first.get("token_mint") or "")
             name = str(first.get("name") or "")
             strategy_name = str(first.get("strategy_name") or "")
-            strategy_id = first.get("live_strategy_id")
+            strategy_id = first.get("strategy_id")
 
             buys = [e for e in evs if str(e.get("side") or "") == "BUY"]
             sells = [e for e in evs if str(e.get("side") or "") == "SELL"]
@@ -1618,9 +1618,9 @@ async def export_trade_audit(request: Request):
                     "price_usd": e.get("price_usd"),
                     "token_amount": e.get("token_amount"),
                     "trade_value_usd_net": trade_value_usd_net,
-                    "exit_reason_code": e.get("exit_reason_code"),
+                    "exit_reason_code": e.get("exit_reason"),
                     "exit_reason_label": e.get("exit_reason_label"),
-                    "quote_summary": _safe_json_loads(e.get("quote_summary_json"), {}),
+                    "quote_summary": _safe_json_loads(e.get("quote_json"), {}),
                 })
 
             item: Dict[str, Any] = {
@@ -2131,11 +2131,13 @@ async def pnl_summary(request: Request):
         live_unrealized = 0.0
         if await _table_exists(repo, "positions"):
             open_pos = await _fetch_all(repo,
-                f"SELECT account_type, remaining_value_usd, entry_value_usd FROM positions WHERE {_open_status_sql()}",
+                f"SELECT account_type, remaining_value_usd, entry_price_usd, entry_token_amount FROM positions WHERE {_open_status_sql()}",
                 OPEN_POSITION_EXCLUDED_STATUSES)
             for row in open_pos:
                 remaining = float(row.get("remaining_value_usd") or 0)
-                entry = float(row.get("entry_value_usd") or 0)
+                entry_price = float(row.get("entry_price_usd") or 0)
+                entry_token = float(row.get("entry_token_amount") or 0)
+                entry = entry_price * entry_token
                 unrealized = remaining - entry
                 if str(row.get("account_type") or "SIM") == "LIVE":
                     live_unrealized += unrealized
@@ -2144,29 +2146,37 @@ async def pnl_summary(request: Request):
                     sim_unrealized += unrealized
                     sim_entry_total += entry
 
-            pos_rows = await _fetch_all(repo,
-                "SELECT account_type, status, COALESCE(realized_pnl_usd,0) AS rpnl, COALESCE(entry_value_usd,0) AS entry_val FROM positions")
+            pos_status_rows = await _fetch_all(repo,
+                "SELECT id, account_type, status FROM positions")
         else:
-            pos_rows = []
+            pos_status_rows = []
+
+        # Compute per-position realized PnL from trade_events
+        te_pnl_rows = await _fetch_all(repo,
+            "SELECT position_id, account_type, side, trade_value_usd_net FROM trade_events WHERE status='CONFIRMED' AND side IN ('BUY','SELL')") if await _table_exists(repo, "trade_events") else []
+
+        pos_pnl: Dict[int, float] = {}
+        for row in te_pnl_rows:
+            pid = row.get("position_id")
+            if pid is None:
+                continue
+            pid = int(pid)
+            val = float(row.get("trade_value_usd_net") or 0)
+            side = str(row.get("side") or "")
+            signed = -abs(val) if side == "BUY" else abs(val)
+            pos_pnl[pid] = pos_pnl.get(pid, 0.0) + signed
 
         counts: Dict[str, Dict[str, int]] = {"SIM": {"open": 0, "closed": 0, "losing": 0, "winning": 0},
                                                "LIVE": {"open": 0, "closed": 0, "losing": 0, "winning": 0}}
-        for row in pos_rows:
+        for row in pos_status_rows:
             acct = str(row.get("account_type") or "SIM")
             if acct not in counts:
                 acct = "SIM"
+            pid = int(row.get("id", 0))
             status = str(row.get("status") or "")
-            rpnl = float(row.get("rpnl") or 0)
-            ev = float(row.get("entry_val") or 0)
-            if acct == "LIVE":
-                if status not in OPEN_POSITION_EXCLUDED_STATUSES:
-                    live_entry_total += ev
-            else:
-                if status not in OPEN_POSITION_EXCLUDED_STATUSES:
-                    sim_entry_total += ev
-
             if status in OPEN_POSITION_EXCLUDED_STATUSES:
                 counts[acct]["closed"] += 1
+                rpnl = pos_pnl.get(pid, 0.0)
                 if rpnl < 0:
                     counts[acct]["losing"] += 1
                 else:
@@ -2242,9 +2252,9 @@ async def trade_events_ledger(request: Request, account_type: str = "ALL", since
         params.append(int(limit))
 
         rows = await _fetch_all(repo,
-            f"""SELECT te.*, p.symbol, p.name, p.token_mint
+            f"""SELECT te.*, t.symbol, t.name
                 FROM trade_events te
-                LEFT JOIN positions p ON p.id = te.position_id
+                LEFT JOIN tokens t ON t.mint_address = te.token_mint
                 WHERE {where_clause}
                 ORDER BY te.created_at DESC LIMIT ?""",
             tuple(params))
@@ -2283,9 +2293,9 @@ async def trade_events_ledger(request: Request, account_type: str = "ALL", since
                 "trade_value_usd_net": trade_value_usd_net,
                 "price_usd": row.get("price_usd"),
                 "token_amount": row.get("token_amount"),
-                "exit_reason_code": row.get("exit_reason_code"),
+                "exit_reason_code": row.get("exit_reason"),
                 "exit_reason_label": row.get("exit_reason_label"),
-                "quote_json": _safe_json_loads(row.get("quote_summary_json"), row.get("quote_summary_json")),
+                "quote_json": _safe_json_loads(row.get("quote_json"), row.get("quote_json")),
             })
 
         return {"ok": True, "items": items, "count": len(items)}

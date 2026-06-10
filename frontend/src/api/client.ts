@@ -130,10 +130,30 @@ export interface TradeHistoryRow {
   sell_count: number;
 }
 
-export async function getTradeHistory(account_type = "ALL", limit = 500, since_session = false): Promise<TradeHistoryRow[]> {
+export interface TradeEventsLedgerRow {
+  trade_event_id: number;
+  position_id: number | null;
+  account_type: string;
+  side: string;
+  event_type: string;
+  created_at_utc: string;
+  created_at_beijing: string;
+  token_mint: string;
+  mint_short: string;
+  symbol: string | null;
+  name: string | null;
+  trade_value_usd_net: number;
+  price_usd: number | null;
+  token_amount: number | null;
+  exit_reason_code: string | null;
+  exit_reason_label: string | null;
+  quote_json: Record<string, unknown> | null;
+}
+
+export async function getTradeEventsLedger(account_type = "ALL", since_session = false, limit = 500): Promise<TradeEventsLedgerRow[]> {
   const params = new URLSearchParams({ account_type, limit: String(limit), since_session: String(since_session) });
-  const res = await fetch(`${API_BASE}/api/runtime/trade-history?${params}`);
-  if (!res.ok) throw new Error(`trade-history ${res.status}`);
+  const res = await fetch(`${API_BASE}/api/runtime/trade-events-ledger?${params}`);
+  if (!res.ok) throw new Error(`trade-events-ledger ${res.status}`);
   const data = await res.json();
   return data.items ?? [];
 }
@@ -357,6 +377,7 @@ export const api = {
   resumeLive: () => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/emergency/resume-live', { method: 'POST' }),
   backupDb: () => apiFetch<{ ok: boolean; export_path: string }>('/api/runtime/emergency/backup-db', { method: 'POST' }),
   exportLosing: () => apiFetch<{ ok: boolean; export_path: string; losing_count: number }>('/api/runtime/emergency/export-losing', { method: 'POST' }),
+  exportTradeAudit: () => apiFetch<{ ok: boolean; export_path: string; data: Record<string, unknown> }>('/api/runtime/emergency/export-trade-audit', { method: 'POST' }),
   exportLogs: () => apiFetch<{ ok: boolean; export_path: string; error_count: number }>('/api/runtime/emergency/export-logs', { method: 'POST' }),
   getFilterStats: () => apiFetch<FilterStats>('/api/runtime/filter-stats'),
 };
