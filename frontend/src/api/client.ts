@@ -150,6 +150,12 @@ export interface TradeEventsLedgerRow {
   quote_json: Record<string, unknown> | null;
 }
 
+export async function getPnlSummary(): Promise<PnlSummary> {
+  const res = await fetch(`${API_BASE}/api/runtime/pnl-summary`);
+  if (!res.ok) throw new Error(`pnl-summary ${res.status}`);
+  return res.json();
+}
+
 export async function getTradeEventsLedger(account_type = "ALL", since_session = false, limit = 500): Promise<TradeEventsLedgerRow[]> {
   const params = new URLSearchParams({ account_type, limit: String(limit), since_session: String(since_session) });
   const res = await fetch(`${API_BASE}/api/runtime/trade-events-ledger?${params}`);
@@ -319,6 +325,39 @@ export interface DataSourceHealth {
   price_face_health?: PriceFaceHealth;
   platform_health?: PlatformHealthItem[];
   system_event_warnings?: Record<string, unknown>[];
+}
+
+export interface PnlSummary {
+  sim: {
+    realized_pnl_usd: number;
+    unrealized_pnl_usd: number;
+    total_pnl_usd: number;
+    realized_pnl_pct: number;
+    open_positions: number;
+    closed_positions: number;
+    losing_positions: number;
+    winning_positions: number;
+  };
+  live: {
+    realized_pnl_usd: number;
+    unrealized_pnl_usd: number;
+    total_pnl_usd: number;
+    realized_pnl_pct: number;
+    open_positions: number;
+    closed_positions: number;
+    losing_positions: number;
+    winning_positions: number;
+  };
+  combined: {
+    realized_pnl_usd: number;
+    unrealized_pnl_usd: number;
+    total_pnl_usd: number;
+    realized_pnl_pct: number;
+    open_positions: number;
+    closed_positions: number;
+    losing_positions: number;
+    winning_positions: number;
+  };
 }
 
 export interface FilterStats {

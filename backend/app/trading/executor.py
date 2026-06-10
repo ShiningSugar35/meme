@@ -611,6 +611,24 @@ class TradingPipeline:
         if discovery_event_id:
             await self.repo.update_discovery_event_status(discovery_event_id, "SIM_POSITION_OPEN")
 
+        await self.repo.insert_position_audit(
+            position_id=pos_id,
+            token_mint=token_mint,
+            account_type="SIM",
+            strategy_id=strategy.get("id"),
+            discovery_event_id=discovery_event_id,
+            snapshot_id=snapshot_id,
+            audit_type="ENTRY",
+            audit_json={
+                "price_usd": price_usd,
+                "size_usd": size_usd,
+                "token_amount": token_amount,
+                "remaining_value_usd": remaining_value_usd,
+                "jupiter_quote_ok": jupiter_price_impact is not None,
+                "strategy_id": strategy.get("id"),
+            },
+        )
+
         return {"account_type": "SIM", "position_id": pos_id, "trade_event_id": te.get("id")}
 
     async def _execute_buy(
@@ -836,6 +854,26 @@ class TradingPipeline:
             self._safe_json({"token": token_mint, "position_id": pos_id, "trade_event_id": te_confirmed.get("id")}),
             account_type="LIVE",
         )
+
+        await self.repo.insert_position_audit(
+            position_id=pos_id,
+            token_mint=token_mint,
+            account_type="LIVE",
+            strategy_id=sid,
+            discovery_event_id=discovery_event_id,
+            snapshot_id=snapshot_id,
+            audit_type="ENTRY",
+            audit_json={
+                "price_usd": price_usd,
+                "size_usd": size_usd,
+                "token_amount": token_amount,
+                "remaining_value_usd": remaining_value_usd,
+                "jupiter_quote_ok": True,
+                "strategy_id": sid,
+                "quote_error": quote.get("error"),
+            },
+        )
+
         return {"ok": True, "account_type": "LIVE", "position_id": pos_id, "trade_event_id": te_confirmed.get("id")}
 
     # ------------------------------------------------------------------
@@ -847,24 +885,67 @@ class TradingPipeline:
         exit_pct: float,
         exit_reason: str,
     ) -> Dict[str, Any]:
-        """Paper-sell a SIM position — no Jupiter quote, no Jito send."""
+        """Paper-sell a SIM position — try Jupiter quote, no Jito send."""
         pos_id = int(position["id"])
         token_mint = position["token_mint"]
         remaining_token = self._to_float(position.get("remaining_token_amount"), 0.0) or 0.0
         pct = max(0.0, min(1.0, self._to_float(exit_pct, 1.0) or 1.0))
-        sell_amount_human = remaining_token * pct
-        gross_value_usd = sell_amount_human * current_price_usd
+
+        if remaining_token <= 0:
+            return {"ok": False, "error": "ZERO_REMAINING"}
+        if pct <= 0:
+            return {"ok": False, "error": "ZERO_EXIT_PCT"}
 
         try:
             latest = await self.gmgn.fetch_latest_price(token_mint)
         except Exception:
             latest = {}
         current_price_usd = self._get_price_usd(latest) or self._to_float(position.get("last_fill_price_usd"), 0.0) or 0.0
+        current_price_sol = self._get_price_sol(latest) or self._to_float(position.get("entry_price_sol"), 0.0) or 0.0
 
-        if remaining_token <= 0:
-            return {"ok": False, "error": "ZERO_REMAINING"}
-        if pct <= 0:
-            return {"ok": False, "error": "ZERO_EXIT_PCT"}
+        sell_amount_human = remaining_token * pct
+        gross_value_usd = sell_amount_human * current_price_usd
+
+        locked_cfg: Dict[str, Any] = {}
+        locked = position.get("locked_strategy_config_json")
+        if locked:
+            try:
+                locked_cfg = json.loads(locked)
+            except (json.JSONDecodeError, TypeError):
+                locked_cfg = {}
+
+        token_decimals = self._extract_token_decimals(token_mint, latest=latest, strategy=locked_cfg)
+        sell_amount_raw = self._human_to_raw_amount(sell_amount_human, token_decimals)
+
+        quote: Dict[str, Any] = {}
+        price_impact = None
+        quote_json = None
+        route_plan_json = None
+        fee_detail = None
+        if sell_amount_raw > 0:
+            try:
+                sell_cap = int(locked_cfg.get("sell_slippage_cap_bps", getattr(settings, "SELL_SLIPPAGE_CAP_BPS", SELL_SLIPPAGE_CAP_BPS)))
+                quote = await self._get_quote(
+                    token_mint,
+                    WRAPPED_SOL_MINT,
+                    sell_amount_raw,
+                    sell_cap,
+                    token_mint=token_mint,
+                    strategy=locked_cfg,
+                    context_id=pos_id,
+                )
+            except Exception:
+                quote = {}
+            if quote and not quote.get("error"):
+                price_impact = self._price_impact_fraction(quote)
+                quote_json = self._safe_json(quote)
+                route_plan_json = self._safe_json((quote.get("routePlan") or [])[:3])
+                out_sol = (self._to_float(quote.get("outAmount"), 0.0) or 0.0) / LAMPORTS_PER_SOL
+                gross_value_usd = out_sol * (current_price_usd if current_price_usd > 0 else (current_price_sol or 0.000001))
+            else:
+                fee_detail = json.dumps({"fallback": True})
+        else:
+            fee_detail = json.dumps({"fallback": True, "reason": "sell_amount_raw_rounds_to_zero"})
 
         te = await self.repo.append_trade_event(
             f"SIM_SELL:{pos_id}:{exit_reason}",
@@ -885,6 +966,28 @@ class TradingPipeline:
             gross_value_usd=gross_value_usd,
             trade_value_usd_net=+abs(gross_value_usd),
             provider="PIPELINE_SIM",
+            price_impact_pct=(price_impact * 100.0) if price_impact else None,
+            quote_json=quote_json,
+            route_plan_json=route_plan_json,
+            fee_detail_json=fee_detail,
+        )
+
+        await self.repo.insert_position_audit(
+            position_id=pos_id,
+            token_mint=token_mint,
+            account_type="SIM",
+            strategy_id=position.get("live_strategy_id"),
+            discovery_event_id=position.get("discovery_event_id"),
+            snapshot_id=None,
+            audit_type="EXIT",
+            audit_json={
+                "reason": exit_reason,
+                "exit_pct": pct,
+                "sell_amount_human": sell_amount_human,
+                "gross_value_usd": gross_value_usd,
+                "current_price_usd": current_price_usd,
+                "jupiter_quote_ok": bool(quote and not quote.get("error")),
+            },
         )
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -913,6 +1016,7 @@ class TradingPipeline:
                 "exit_pct": pct,
                 "exit_reason": exit_reason,
                 "trade_event_id": te.get("id"),
+                "jupiter_quote_ok": bool(quote and not quote.get("error")),
             }),
             account_type="SIM",
         )
@@ -1097,6 +1201,25 @@ class TradingPipeline:
                 account_type="LIVE",
             )
             return {"ok": False, "error": bundle.get("error_code") or "BUNDLE_FAILED", "trade_event_id": te_confirmed.get("id")}
+
+        await self.repo.insert_position_audit(
+            position_id=pos_id,
+            token_mint=token_mint,
+            account_type=account_type,
+            strategy_id=position.get("live_strategy_id"),
+            discovery_event_id=position.get("discovery_event_id"),
+            snapshot_id=None,
+            audit_type="EXIT",
+            audit_json={
+                "reason": exit_reason,
+                "exit_pct": pct,
+                "sell_amount_human": sell_amount_human,
+                "gross_value_usd": gross_value_usd,
+                "current_price_usd": current_price_usd,
+                "jupiter_quote_error": quote.get("error"),
+                "bundle_ok": True,
+            },
+        )
 
         now_iso = datetime.now(timezone.utc).isoformat()
         if pct >= 0.999999:

@@ -362,7 +362,7 @@ class PositionRiskRunner:
 
         # Dust force exit check
         remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
-        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 0.50))
+        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 12.5))
         if (
             remaining_value_usd is not None
             and remaining_value_usd < dust_threshold
@@ -782,7 +782,7 @@ class PositionRiskRunner:
         is_live = bool(position.get("is_live"))
 
         remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
-        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 0.50))
+        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 12.5))
         if remaining_value_usd < dust_threshold:
             exit_pct = 1.0
             if reason_code != "DUST_FORCE_EXIT":

@@ -1590,6 +1590,17 @@ async def export_trade_audit(request: Request):
             buys = [e for e in evs if str(e.get("side") or "") == "BUY"]
             sells = [e for e in evs if str(e.get("side") or "") == "SELL"]
 
+            entry_audit_rows = []
+            exit_audit_rows = []
+            try:
+                entry_audit_rows = await repo.get_position_audits(pid, audit_type="ENTRY")
+                exit_audit_rows = await repo.get_position_audits(pid, audit_type="EXIT")
+            except Exception:
+                pass
+            token_info = await repo.get_token(token_mint)
+            latest_snap = await repo.get_latest_token_metric_snapshot(token_mint)
+            smart_money = await repo.get_position_smart_money_baselines(pid)
+
             total_buy_value = sum(abs(float(e.get("trade_value_usd_net") or 0)) for e in buys)
             total_sell_value = sum(abs(float(e.get("trade_value_usd_net") or 0)) for e in sells)
             realized_pnl_usd = round(total_sell_value - total_buy_value, 6)
@@ -1639,6 +1650,9 @@ async def export_trade_audit(request: Request):
                     "last_buy_at": buys[-1].get("created_at") if buys else None,
                     "total_buy_value_usd": round(total_buy_value, 6),
                     "entry_avg_price_usd": round(sum(float(e.get("price_usd") or 0) for e in buys) / max(len(buys), 1), 6) if buys else None,
+                    "token_type": token_info.get("latest_type") if token_info else None,
+                    "launchpad": token_info.get("launchpad") if token_info else None,
+                    "pool_address": token_info.get("pool_address") if token_info else None,
                 },
                 "exit_audit": {
                     "sell_count": len(sells),
@@ -1646,7 +1660,47 @@ async def export_trade_audit(request: Request):
                     "last_sell_at": sells[-1].get("created_at") if sells else None,
                     "total_sell_value_usd": round(total_sell_value, 6),
                     "exit_avg_price_usd": round(sum(float(e.get("price_usd") or 0) for e in sells) / max(len(sells), 1), 6) if sells else None,
+                    "exit_reasons": [
+                        {
+                            "reason_code": e.get("exit_reason"),
+                            "reason_label": e.get("exit_reason_label"),
+                        }
+                        for e in sells if e.get("exit_reason")
+                    ],
+                    "sell_vs_buy_ratio": round(float(sells[-1].get("price_usd") or 0) / float(buys[0].get("price_usd") or 1), 2) if buys and sells else None,
                 },
+                "entry_metrics": {
+                    "rug_ratio": latest_snap.get("max_rug_ratio") if latest_snap else None,
+                    "entrapment_ratio": latest_snap.get("max_entrapment_ratio") if latest_snap else None,
+                    "bundler_rate": latest_snap.get("max_bundler_rate") if latest_snap else None,
+                    "liquidity_usd": latest_snap.get("liquidity_usd") if latest_snap else None,
+                    "top_10_holder_rate": latest_snap.get("top_10_holder_rate") if latest_snap else None,
+                    "fresh_wallet_rate": latest_snap.get("fresh_wallet_rate") if latest_snap else None,
+                    "holder_count": latest_snap.get("holder_count") if latest_snap else None,
+                    "market_cap": latest_snap.get("market_cap") if latest_snap else None,
+                    "is_wash_trading": latest_snap.get("is_wash_trading") if latest_snap else None,
+                    "rat_trader_amount_rate": latest_snap.get("rat_trader_amount_rate") if latest_snap else None,
+                    "suspected_insider_hold_rate": latest_snap.get("suspected_insider_hold_rate") if latest_snap else None,
+                    "sell_tax": latest_snap.get("sell_tax") if latest_snap else None,
+                    "burn_status": latest_snap.get("burn_status") if latest_snap else None,
+                    "sniper_count": latest_snap.get("sniper_count") if latest_snap else None,
+                    "has_social": latest_snap.get("has_social") if latest_snap else None,
+                    "volume_usd_24h": latest_snap.get("volume_usd") if latest_snap else None,
+                    "price_change_1h_pct": latest_snap.get("price_change_percent_1h") if latest_snap else None,
+                    "swaps_1h": latest_snap.get("swaps_1h") if latest_snap else None,
+                    "volume_1h": latest_snap.get("volume_1h") if latest_snap else None,
+                },
+                "smart_money": [
+                    {
+                        "wallet_address": b.get("wallet_address"),
+                        "rank_at_entry": b.get("rank_at_entry"),
+                        "baseline_amount_percentage": b.get("baseline_amount_percentage"),
+                        "baseline_usd_value": b.get("baseline_usd_value"),
+                        "latest_amount_percentage": b.get("latest_amount_percentage"),
+                        "latest_usd_value": b.get("latest_usd_value"),
+                    }
+                    for b in smart_money
+                ] if smart_money else [],
                 "realized_pnl_usd": realized_pnl_usd,
                 "realized_pnl_pct": realized_pnl_pct,
                 "is_losing": is_losing,

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, FilterStats, PortfolioRow, RuntimeStatus, RuleFailItem, EndpointHealthItem, FieldHealthItem, PlatformHealthItem, DataSourceHealth, getTradeEventsLedger, TradeEventsLedgerRow } from '../api/client';
+import { api, FilterStats, PnlSummary, PortfolioRow, RuntimeStatus, RuleFailItem, EndpointHealthItem, FieldHealthItem, PlatformHealthItem, DataSourceHealth, getPnlSummary, getTradeEventsLedger, TradeEventsLedgerRow } from '../api/client';
 
 type AccountTab = 'LIVE' | 'SIM';
 type PortfolioTab = 'CURRENT' | 'HISTORY';
@@ -83,6 +83,7 @@ export default function Portfolio() {
   const [message, setMessage] = useState('');
   const [historyRows, setHistoryRows] = useState<TradeEventsLedgerRow[]>([]);
   const [historyAccount, setHistoryAccount] = useState<string>('ALL');
+  const [pnlSummary, setPnlSummary] = useState<PnlSummary | null>(null);
   const tabRef = useRef<AccountTab>('LIVE');
 
   useEffect(() => { tabRef.current = tab; }, [tab]);
@@ -115,14 +116,25 @@ export default function Portfolio() {
     }
   };
 
+  const loadPnlSummary = async () => {
+    try {
+      const data = await getPnlSummary();
+      setPnlSummary(data);
+    } catch {
+      // pnl-summary load is best-effort
+    }
+  };
+
   useEffect(() => {
     load().catch((e) => setMessage(e.message));
     loadHistory();
     loadFilterStats();
+    loadPnlSummary();
     const timer = window.setInterval(() => load(tabRef.current).catch(() => undefined), 5000);
     const historyTimer = window.setInterval(() => loadHistory(), 30000);
     const statsTimer = window.setInterval(loadFilterStats, 60000);
-    return () => { window.clearInterval(timer); window.clearInterval(historyTimer); window.clearInterval(statsTimer); };
+    const pnlTimer = window.setInterval(() => loadPnlSummary().catch(() => undefined), 15000);
+    return () => { window.clearInterval(timer); window.clearInterval(historyTimer); window.clearInterval(statsTimer); window.clearInterval(pnlTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -153,8 +165,6 @@ export default function Portfolio() {
   const rawLast = latestTrench?.raw_count ?? latestTrench?.count ?? 0;
   const uniqueLast = latestTrench?.unique_count ?? latestTrench?.count ?? 0;
   const dupLast = latestTrench?.duplicate_count_estimate ?? 0;
-  const passLast = latestTrench?.passed ?? 0;
-  const passTotal = passLast;
   const dsh = fstats?.data_source_health;
 
   return (
@@ -186,9 +196,33 @@ export default function Portfolio() {
               </div>
             )}
             <div className="metric-row">
-              <span>其中通过风控指标</span>
-              <strong>{passTotal}</strong>
+              <span>通过AND风控(risk+holder+degen)</span>
+              <strong>{String(dsh?.summary?.risk_surface_pass_count ?? latestTrench?.passed ?? 0)}</strong>
             </div>
+            {pnlSummary && (
+              <>
+                <div className="metric-row">
+                  <span>实盘总收益 (LIVE)</span>
+                  <strong style={pnlStyle(pnlSummary.live.total_pnl_usd)}>{usd(pnlSummary.live.total_pnl_usd)}</strong>
+                </div>
+                <div className="metric-row">
+                  <span>模拟盘总收益 (SIM)</span>
+                  <strong style={pnlStyle(pnlSummary.sim.total_pnl_usd)}>{usd(pnlSummary.sim.total_pnl_usd)}</strong>
+                </div>
+                <div className="metric-row">
+                  <span>合并总收益 (LIVE+SIM)</span>
+                  <strong style={pnlStyle(pnlSummary.combined.total_pnl_usd)}>{usd(pnlSummary.combined.total_pnl_usd)}</strong>
+                </div>
+                <div className="metric-row">
+                  <span>实盘已实现PnL</span>
+                  <strong style={pnlStyle(pnlSummary.live.realized_pnl_usd)}>{usd(pnlSummary.live.realized_pnl_usd)}</strong>
+                </div>
+                <div className="metric-row">
+                  <span>模拟盘已实现PnL</span>
+                  <strong style={pnlStyle(pnlSummary.sim.realized_pnl_usd)}>{usd(pnlSummary.sim.realized_pnl_usd)}</strong>
+                </div>
+              </>
+            )}
           </>
         ) : (
           <>
@@ -230,7 +264,7 @@ export default function Portfolio() {
                   <td>{usd(row.remaining_value_usd ?? row.remaining)}</td>
                   <td>{pct(row.pnl_pct)}</td>
                   <td>{row.ratio ?? '-'}</td>
-                  <td>{row.updated_at || '-'}</td>
+                  <td>{(row.updated_at || '-').substring(0, 19)}</td>
                 </tr>
               ))}
             </tbody>
@@ -246,7 +280,7 @@ export default function Portfolio() {
                 <th>数量</th>
                 <th>价值(USD)</th>
                 <th>退出原因</th>
-                <th>北京时</th>
+                <th>时间</th>
               </tr>
             </thead>
             <tbody>
