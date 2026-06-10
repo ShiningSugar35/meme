@@ -1527,6 +1527,14 @@ class Repositories:
             self._safe_log("append_trade_event failed", idempotency_key=idempotency_key, error=str(e))
             raise
 
+    async def attach_trade_event_to_position(self, trade_event_id: int, position_id: int):
+        async def _do():
+            await self.db.execute(
+                "UPDATE trade_events SET position_id = ? WHERE id = ?",
+                (position_id, trade_event_id),
+            )
+        await self._write_txn(_do())
+
     async def get_trade_event(self, id: int) -> Optional[Dict[str, Any]]:
         async with self.db.execute("SELECT * FROM trade_events WHERE id = ?", (id,)) as cur:
             row = await cur.fetchone()

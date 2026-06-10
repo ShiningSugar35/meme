@@ -92,7 +92,9 @@ def _utc_to_beijing(iso_str: Optional[str]) -> str:
         return iso_str
 
 
-def _first_present(data: Dict[str, Any], keys: List[str]) -> Any:
+def _first_present(data: Any, keys: List[str]) -> Any:
+    if not isinstance(data, dict):
+        return None
     for k in keys:
         if k in data and data[k] is not None and data[k] != "":
             return data[k]
@@ -681,8 +683,9 @@ async def build_exit_audit_payload(
 
     payload["buy_price_usd"] = buy_price_usd
     bp = _to_float(buy_price_usd, 0.0)
-    if bp is not None and bp > 0:
-        payload["sell_price_multiple"] = round((current_price_usd or 0.0) / bp, 2)
+    if bp is not None and bp > 0 and sell_amount_human > 0:
+        effective_sell_price_usd = abs(gross_value_usd) / sell_amount_human
+        payload["sell_price_multiple"] = round(effective_sell_price_usd / bp, 2)
     else:
         payload["sell_price_multiple"] = None
 

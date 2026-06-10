@@ -246,7 +246,7 @@ async def test_exit_audit_sell_multiple(pipeline_factory):
         status="CONFIRMED", is_live=0, account_type="SIM",
         executed_token_amount=100.0, price_usd=0.0016,
         exit_reason="HARD_TP_160", exit_reason_label="TP",
-        trade_value_usd_net=0.16, gross_value_usd=0.16,
+        trade_value_usd_net=0.15, gross_value_usd=0.15,
     )
 
     position = await repo.get_position(pos_id)
@@ -254,12 +254,14 @@ async def test_exit_audit_sell_multiple(pipeline_factory):
         repo=repo, position=position,
         sell_trade_event=sell_te,
         exit_reason="HARD_TP_160", exit_pct=1.0,
-        sell_amount_human=100.0, gross_value_usd=0.16,
+        sell_amount_human=100.0, gross_value_usd=0.15,
         current_price_usd=0.0016,
     )
 
-    assert exit_audit["sell_price_multiple"] == 1.60, \
-        f"Expected 1.60, got {exit_audit['sell_price_multiple']}"
+    # effective_sell_price_usd = 0.15 / 100.0 = 0.0015
+    # sell_price_multiple = 0.0015 / 0.001 = 1.50  (NOT 1.60 from spot price)
+    assert exit_audit["sell_price_multiple"] == 1.50, \
+        f"Expected 1.50, got {exit_audit['sell_price_multiple']}"
     assert exit_audit["exit_reason_code"] == "HARD_TP_160"
     assert exit_audit["exit_reason_label"] == "硬止盈：价格超过 1.6x，撤仓50%"
 

@@ -599,6 +599,10 @@ class TradingPipeline:
             legacy_config_status="VALID",
         )
 
+        te_id = te.get("id")
+        if te_id is not None:
+            await self.repo.attach_trade_event_to_position(te_id, pos_id)
+
         await self.repo.insert_bandit_observation(
             token_mint,
             strategy.get("id", 0),
@@ -845,6 +849,10 @@ class TradingPipeline:
             account_type="LIVE",
             legacy_config_status="VALID",
         )
+
+        te_confirmed_id = te_confirmed.get("id")
+        if te_confirmed_id is not None:
+            await self.repo.attach_trade_event_to_position(te_confirmed_id, pos_id)
 
         await self.repo.insert_bandit_observation(
             token_mint,
