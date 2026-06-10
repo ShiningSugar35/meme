@@ -6,6 +6,7 @@ independently of the slower risk-scan cycle.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from datetime import datetime, timezone
@@ -18,6 +19,15 @@ from ..providers.credential_router import get_credential_router
 from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from .discovery_runner import acquire_holding_slot
+
+
+EXIT_REASON_LABELS: Dict[str, str] = {
+    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
+    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
+    "HARD_SL_70": "硬止损：价格低于 0.7x，撤仓50%",
+    "HARD_SL_45": "硬止损：价格低于 0.45x，全部撤仓",
+    "COMPLETED": "池子 type 变为 completed，全部撤仓",
+}
 
 
 def _utc_now() -> datetime:
@@ -119,26 +129,21 @@ class ActivePositionPriceRunner:
 
         # ---- Evaluate price rules ----
         reasons: list[tuple[str, float]] = []
-        multiple = current_price / entry_price
 
-        # HARD_TP_250: full exit
-        if multiple >= 2.50 and "HARD_TP_250" not in executed_rules:
-            reasons.append(("HARD_TP_250", 1.0))
+        # HARD_TP_210: full exit
+        if multiple >= 2.10 and "HARD_TP_210" not in executed_rules:
+            reasons.append(("HARD_TP_210", 1.0))
 
-        # HARD_TP_210: 50% exit
-        if multiple >= 2.10 and "HARD_TP_210" not in executed_rules and "HARD_TP_250" not in executed_rules:
-            reasons.append(("HARD_TP_210", 0.5))
-
-        # HARD_TP_160: 50% exit
-        if multiple >= 1.60 and "HARD_TP_160" not in executed_rules and "HARD_TP_250" not in executed_rules:
+        # HARD_TP_160: 50% exit (idempotent)
+        if multiple >= 1.60 and "HARD_TP_160" not in executed_rules:
             reasons.append(("HARD_TP_160", 0.5))
 
-        # HARD_SL_50: full exit
-        if multiple <= 0.50 and "HARD_SL_50" not in executed_rules:
-            reasons.append(("HARD_SL_50", 1.0))
+        # HARD_SL_45: full exit
+        if multiple <= 0.45 and "HARD_SL_45" not in executed_rules:
+            reasons.append(("HARD_SL_45", 1.0))
 
         # HARD_SL_70: 50% exit
-        if multiple <= 0.70 and "HARD_SL_70" not in executed_rules and "HARD_SL_50" not in executed_rules:
+        if multiple <= 0.70 and "HARD_SL_70" not in executed_rules and "HARD_SL_45" not in executed_rules:
             reasons.append(("HARD_SL_70", 0.5))
 
         # Completed type — also try fetching latest token snapshot for up-to-date type
@@ -174,7 +179,7 @@ class ActivePositionPriceRunner:
         attempted: Set[int] = set()
         endpoint = getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
 
-        for attempt in range(3):
+        for attempt in range(4):
             slot = None
             if attempt == 0 and preferred_slot is not None and rl.is_slot_available(preferred_slot):
                 slot = preferred_slot
@@ -199,11 +204,13 @@ class ActivePositionPriceRunner:
                 if price is not None and float(price) > 0:
                     return data
                 await rl.report_failure(slot, endpoint=endpoint, kind="empty")
-                continue
             except Exception:
-                continue
+                pass
 
-        raise RuntimeError(f"Price fetch failed for {token_mint}: all 3 retry attempts exhausted")
+            if attempt < 3:
+                await asyncio.sleep(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS)
+
+        raise RuntimeError(f"Price fetch failed for {token_mint}: all 4 retry attempts exhausted")
 
     async def _fetch_latest_price(self, token: str, account_type: str, position: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         preferred_slot = acquire_holding_slot("price_runner")
@@ -257,7 +264,7 @@ class ActivePositionPriceRunner:
             try:
                 await self.trading_pipeline.emergency_sim_exit(
                     position=position,
-                    reason="PRICE_API_UNAVAILABLE_EXIT",
+                    exit_reason="PRICE_API_UNAVAILABLE_EXIT_PENDING",
                 )
                 return
             except Exception as e:
@@ -328,6 +335,9 @@ class ActivePositionPriceRunner:
             return
 
         # SIM paper exit
+        exit_reason_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
+        trade_value_usd_net = sell_token_amount * current_price_usd
+
         await self.repo.append_trade_event(
             f"SELL_PRICE:{pos_id}:{reason_code}",
             position_id=pos_id,
@@ -342,6 +352,9 @@ class ActivePositionPriceRunner:
             executed_token_amount=sell_token_amount,
             price_usd=current_price_usd,
             exit_reason=reason_code,
+            exit_reason_label=exit_reason_label,
+            trade_value_usd_net=trade_value_usd_net,
+            fee_detail_json=json.dumps({"fallback": True}),
             provider="PRICE_RUNNER",
         )
 

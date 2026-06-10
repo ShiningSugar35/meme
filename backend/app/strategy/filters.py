@@ -59,6 +59,7 @@ class FilterDetail:
     threshold: Any
     reason: str = ""
     missing: bool = False
+    label: str = ""
 
 @dataclass
 class FilterResult:
@@ -149,43 +150,43 @@ def _compute_age_minutes(creation_ts: Optional[float]) -> Optional[float]:
 # Detail helpers
 # ---------------------------------------------------------------------------
 
-def _mk_pass(name: str, value: Any, reason: str, threshold: Any) -> FilterDetail:
-    return FilterDetail(name=name, passed=True, value=value, threshold=threshold, reason=reason)
+def _mk_pass(name: str, value: Any, reason: str, threshold: Any, label: str = "") -> FilterDetail:
+    return FilterDetail(name=name, passed=True, value=value, threshold=threshold, reason=reason, label=label)
 
-def _mk_failed(name: str, value: Any, reason: str, threshold: Any, missing: bool = False) -> FilterDetail:
-    return FilterDetail(name=name, passed=False, value=value, threshold=threshold, reason=reason, missing=missing)
+def _mk_failed(name: str, value: Any, reason: str, threshold: Any, missing: bool = False, label: str = "") -> FilterDetail:
+    return FilterDetail(name=name, passed=False, value=value, threshold=threshold, reason=reason, missing=missing, label=label)
 
-def _check_float(details, snapshot, name, keys, predicate, threshold_desc, required=True):
+def _check_float(details, snapshot, name, keys, predicate, threshold_desc, required=True, label=""):
     raw = _first_present(snapshot, keys)
     value = _to_float(raw)
     if value is None:
         if required:
-            details.append(_mk_failed(name, raw, "missing numeric field", threshold_desc, missing=True))
+            details.append(_mk_failed(name, raw, "missing numeric field", threshold_desc, missing=True, label=label))
         else:
-            details.append(_mk_pass(name, raw, "optional field missing; treated as pass", threshold_desc))
+            details.append(_mk_pass(name, raw, "optional field missing; treated as pass", threshold_desc, label=label))
         return None
     try:
         ok = bool(predicate(value))
     except Exception as e:
-        details.append(_mk_failed(name, value, f"predicate error: {e}", threshold_desc))
+        details.append(_mk_failed(name, value, f"predicate error: {e}", threshold_desc, label=label))
         return value
     details.append(
-        _mk_pass(name, value, f"satisfies {threshold_desc}", threshold_desc)
+        _mk_pass(name, value, f"satisfies {threshold_desc}", threshold_desc, label=label)
         if ok
-        else _mk_failed(name, value, f"violates {threshold_desc}", threshold_desc)
+        else _mk_failed(name, value, f"violates {threshold_desc}", threshold_desc, label=label)
     )
     return value
 
-def _check_bool_zero(details, snapshot, name, keys, required=True):
+def _check_bool_zero(details, snapshot, name, keys, required=True, label=""):
     raw = _first_present(snapshot, keys)
     value = _to_int_bool(raw)
     if value is None:
         if required:
-            details.append(_mk_failed(name, raw, "missing boolean field", 0, missing=True))
+            details.append(_mk_failed(name, raw, "missing boolean field", 0, missing=True, label=label))
         else:
-            details.append(_mk_pass(name, raw, "optional field missing; treated as pass", 0))
+            details.append(_mk_pass(name, raw, "optional field missing; treated as pass", 0, label=label))
         return value
-    details.append(_mk_pass(name, value, "equals 0", 0) if value == 0 else _mk_failed(name, value, "must equal 0", 0))
+    details.append(_mk_pass(name, value, "equals 0", 0, label=label) if value == 0 else _mk_failed(name, value, "must equal 0", 0, label=label))
     return value
 
 # ---------------------------------------------------------------------------
@@ -210,16 +211,16 @@ BURN_VALUES = {"burn", "burned", "burnt", "true", "1", "yes"}
 # Helpers for renounced_* / bool-one checks
 # ---------------------------------------------------------------------------
 
-def _check_bool_one(details, snapshot, name, keys, required=True):
+def _check_bool_one(details, snapshot, name, keys, required=True, label=""):
     raw = _first_present(snapshot, keys)
     value = _to_int_bool(raw)
     if value is None:
         if required:
-            details.append(_mk_failed(name, raw, "missing required boolean=1 field", 1, missing=True))
+            details.append(_mk_failed(name, raw, "missing required boolean=1 field", 1, missing=True, label=label))
         else:
-            details.append(_mk_pass(name, raw, "optional field missing; treated as pass", 1))
+            details.append(_mk_pass(name, raw, "optional field missing; treated as pass", 1, label=label))
         return value
-    details.append(_mk_pass(name, value, "equals 1", 1) if value == 1 else _mk_failed(name, value, "must equal 1", 1))
+    details.append(_mk_pass(name, value, "equals 1", 1, label=label) if value == 1 else _mk_failed(name, value, "must equal 1", 1, label=label))
     return value
 
 
@@ -576,6 +577,8 @@ async def evaluate_smart_degen(
                 "min_holder_usd": min_usd, "min_ok": min_ok,
                 "threshold_max_pct": t.smart_degen_max_pct, "threshold_min_pct": t.smart_degen_min_pct,
                 "threshold_max_usd": t.smart_degen_max_usd, "threshold_min_usd": t.smart_degen_min_usd,
+                "label_max_pct": "持仓最多的聪明钱当前持仓份额 > 0.5% 或 持仓价值 > $50",
+                "label_min_pct": "持仓最少的聪明钱当前持仓份额 > 0.25% 或 持仓价值 > $25",
             }
     elif not smart_degen_holders:
         degen_hold_detail = {"reason": "no smart degen holders available"}
@@ -617,31 +620,40 @@ async def run_holding_risk_filter(
     details: List[FilterDetail] = []
 
     _check_float(details, snapshot, "rug_ratio", ["rug_ratio", "max_rug_ratio", "max_rugged_ratio", "rug"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
+                 lambda v: v < t.holding_rug_ratio, f"< {t.holding_rug_ratio:.6g}", required=False,
+                 label="超Rug比例")
     _check_float(details, snapshot, "entrapment_ratio", ["entrapment_ratio", "max_entrapment_ratio", "entrapment"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
+                 lambda v: v < t.holding_entrapment_ratio, f"< {t.holding_entrapment_ratio:.6g}", required=False,
+                 label="圈套比例")
     _check_float(details, snapshot, "insider_ratio", ["max_insider_ratio", "insider_ratio", "insider_rate"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
+                 lambda v: v < t.holding_insider_ratio, f"< {t.holding_insider_ratio:.6g}", required=False,
+                 label="内部人持仓比例")
     _check_float(details, snapshot, "suspected_insider_hold_rate",
                  ["suspected_insider_hold_rate", "insider_hold_rate", "insider_rate"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False,
+                 label="疑似内部人持仓比例")
     _check_float(details, snapshot, "bundler_trader_amount_rate",
                  ["bundler_trader_amount_rate", "bundler_rate", "max_bundler_rate", "bundler"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
+                 lambda v: v < t.holding_bundler_rate, f"< {t.holding_bundler_rate:.6g}", required=False,
+                 label="打包交易比例")
     _check_float(details, snapshot, "top_10_holder_rate_range",
                  ["top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate",
                   "top_holder_rate", "top10_holder_pct", "top10HolderRate", "top_10_holder_percent",
                   "top10HolderPercent"],
                  lambda v: t.min_top_holder_rate < v < t.max_top_holder_rate,
-                 f"({t.min_top_holder_rate:.6g}, {t.max_top_holder_rate:.6g})", required=False)
+                 f"({t.min_top_holder_rate:.6g}, {t.max_top_holder_rate:.6g})", required=False,
+                 label="Top10持仓比例范围")
     _check_float(details, snapshot, "fresh_wallet_rate", ["fresh_wallet_rate", "fresh_wallets_rate", "fresh_wallet"],
-                 lambda v: v < t.max_fresh_wallet_rate, f"< {t.max_fresh_wallet_rate:.6g}", required=False)
+                 lambda v: v < t.max_fresh_wallet_rate, f"< {t.max_fresh_wallet_rate:.6g}", required=False,
+                 label="新钱包比例")
     _check_float(details, snapshot, "creator_balance_rate",
                  ["creator_balance_rate", "dev_team_hold_rate", "creator_hold_rate", "dev_hold_rate"],
-                 lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}", required=False)
+                 lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}", required=False,
+                 label="创建者持仓比例")
     _check_float(details, snapshot, "holder_count", ["holder_count", "holders", "total_holders", "holder"],
                  lambda v: t.min_holder_count_raw < v < t.max_holder_count_raw,
-                 f"({t.min_holder_count_raw:.6g}, {t.max_holder_count_raw:.6g})", required=False)
+                 f"({t.min_holder_count_raw:.6g}, {t.max_holder_count_raw:.6g})", required=False,
+                 label="持有者数量范围")
 
     liquidity_val = _to_float(_first_present(snapshot, ["liquidity_usd", "liquidity", "pool_liquidity_usd"]))
     holder_count_val = _to_float(_first_present(snapshot, ["holder_count", "holders", "total_holders", "holder"]))
@@ -651,21 +663,27 @@ async def run_holding_risk_filter(
         details.append(_mk_pass(name="liquidity_holder_ratio", value=ratio,
                                 reason=f"{ratio:.2f} > {t.min_liquidity_holder_ratio:.2f}" if ratio_ok
                                 else f"{ratio:.2f} <= {t.min_liquidity_holder_ratio:.2f}",
-                                threshold=t.min_liquidity_holder_ratio)
+                                threshold=t.min_liquidity_holder_ratio,
+                                label="流动性/持有者比")
                        if ratio_ok else
                        _mk_failed(name="liquidity_holder_ratio", value=ratio,
                                   reason=f"{ratio:.2f} <= {t.min_liquidity_holder_ratio:.2f}",
-                                  threshold=t.min_liquidity_holder_ratio))
+                                  threshold=t.min_liquidity_holder_ratio,
+                                  label="流动性/持有者比"))
     else:
         details.append(_mk_pass(name="liquidity_holder_ratio", value=None,
                                 reason="missing liquidity or holder_count; treated as pass",
-                                threshold=t.min_liquidity_holder_ratio))
+                                threshold=t.min_liquidity_holder_ratio,
+                                label="流动性/持有者比"))
 
-    _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"], required=False)
+    _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"], required=False,
+                     label="洗盘交易检测")
     _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate", "rat_trader"],
-                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False)
+                 lambda v: v < t.common_risk, f"< {t.common_risk:.6g}", required=False,
+                 label="老鼠仓比例")
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count", "sniper_cnt"],
-                 lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}", required=False)
+                 lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}", required=False,
+                 label="狙击手数量")
     return FilterResult(all(d.passed for d in details), details, {"x": x})
 
 

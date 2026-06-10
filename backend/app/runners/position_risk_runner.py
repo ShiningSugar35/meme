@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 import json
@@ -14,6 +15,21 @@ from ..strategy.exit_rules import _executed_exit_rules
 from ..providers.credential_router import get_credential_router
 from ..providers.rate_limiter import get_rate_limiter
 from .discovery_runner import acquire_holding_slot
+
+
+EXIT_REASON_LABELS: Dict[str, str] = {
+    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
+    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
+    "HARD_SL_70": "硬止损：价格低于 0.7x，撤仓50%",
+    "HARD_SL_45": "硬止损：价格低于 0.45x，全部撤仓",
+    "COMPLETED": "池子 type 变为 completed，全部撤仓",
+    "SMART_MONEY_SELL": "聪明钱卖出触发",
+    "TOP3_SMART_DEGEN_DUMP": "TOP3聪明钱减仓超过25%",
+    "RISK_RECHECK_FAILED": "持仓风控复查失败",
+    "DUST_FORCE_EXIT": "尘埃仓强制清仓",
+    "PRICE_API_UNAVAILABLE_EXIT_PENDING": "价格接口异常，等待重试撤仓",
+    "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
+}
 
 
 def _utc_now() -> datetime:
@@ -154,18 +170,21 @@ class PositionRiskRunner:
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
 
-    async def _fetch_risk_data_with_retry(self, method_ref, preferred_slot, validate_func, endpoint=""):
+    async def _fetch_risk_data_with_retry(self, method_ref, preferred_slot, validate_func, endpoint="", retry_delay_seconds=0):
         """Call GMGN with retry across different slots.
 
         Returns the result on success.
-        Raises RuntimeError after 3 consecutive failed attempts.
+        Raises RuntimeError after 4 total attempts (1 initial + 3 retries).
         """
         rl = get_rate_limiter()
         feature_pool = settings.get_feature_slots()
         last_exc = None
         attempted: Set[int] = set()
 
-        for attempt in range(3):
+        for attempt in range(4):
+            if attempt > 0 and retry_delay_seconds > 0:
+                await asyncio.sleep(retry_delay_seconds)
+
             slot = None
             if attempt == 0 and preferred_slot is not None and rl.is_slot_available(preferred_slot) and preferred_slot not in attempted:
                 slot = preferred_slot
@@ -189,7 +208,7 @@ class PositionRiskRunner:
             except Exception as e:
                 last_exc = e
 
-        raise RuntimeError("Risk data unavailable after 3 attempts") from last_exc
+        raise RuntimeError("Risk data unavailable after 4 attempts") from last_exc
 
     async def _emergency_risk_exit(self, position, reason="RISK_DATA_UNAVAILABLE_EXIT"):
         token = position["token_mint"]
@@ -244,8 +263,11 @@ class PositionRiskRunner:
         if not _recheck_due(position, now):
             return
 
+        stored_remaining_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
+        prefetch_interval = risk_scan_interval_seconds(stored_remaining_usd)
+
         try:
-            latest = await self._fetch_latest_price(token, account_type)
+            latest = await self._fetch_latest_price(token, account_type, retry_delay_seconds=prefetch_interval)
         except RuntimeError:
             await self._emergency_risk_exit(position)
             return
@@ -275,7 +297,7 @@ class PositionRiskRunner:
             )
 
         try:
-            latest_snapshot = await self._fetch_latest_snapshot(token, account_type)
+            latest_snapshot = await self._fetch_latest_snapshot(token, account_type, retry_delay_seconds=interval)
         except RuntimeError:
             await self._emergency_risk_exit(position)
             return
@@ -338,8 +360,31 @@ class PositionRiskRunner:
             )
             return
 
-        # Dust force exit check (keep in PositionRiskRunner since it's not price-based)
-        if remaining_value_usd is not None and remaining_value_usd < float(getattr(settings, "DUST_FORCE_EXIT_USD", 12.5)):
+        # Dust force exit check
+        remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
+        dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 0.50))
+        if (
+            remaining_value_usd is not None
+            and remaining_value_usd < dust_threshold
+            and price_usd is not None
+            and remaining_token > 0
+        ):
+            if hasattr(self.repo, "insert_position_audit"):
+                await self.repo.insert_position_audit(
+                    position_id=pos_id,
+                    token_mint=token,
+                    account_type=account_type,
+                    strategy_id=position.get("live_strategy_id"),
+                    discovery_event_id=position.get("discovery_event_id"),
+                    audit_type="DECISION",
+                    audit_json=_safe_json_dumps({
+                        "reason": "DUST_FORCE_EXIT",
+                        "remaining_value_usd_before": remaining_value_usd,
+                        "dust_threshold": dust_threshold,
+                        "current_price_usd": price_usd,
+                        "remaining_token_amount_before": remaining_token,
+                    }),
+                )
             await self._request_exit(
                 position=position_for_decision,
                 exit_pct=1.0,
@@ -391,14 +436,14 @@ class PositionRiskRunner:
         # PositionRiskRunner covers only holding risk, smart money sell,
         # TOP3 smart degen dump, completed, and dust force exit.
 
-    async def _fetch_latest_price(self, token: str, account_type: str) -> Dict[str, Any]:
+    async def _fetch_latest_price(self, token: str, account_type: str, retry_delay_seconds: float = 0) -> Dict[str, Any]:
         preferred = acquire_holding_slot("risk_price")
 
         async def _do_fetch(*, credential_slot):
             return await self.gmgn.fetch_latest_price(token, credential_slot=credential_slot)
 
         try:
-            return await self._fetch_risk_data_with_retry(_do_fetch, preferred, None)
+            return await self._fetch_risk_data_with_retry(_do_fetch, preferred, None, retry_delay_seconds=retry_delay_seconds)
         except Exception as e:
             await self.repo.append_system_event(
                 "ERROR",
@@ -414,7 +459,7 @@ class PositionRiskRunner:
             k in result for k in ("type", "price_usd", "liquidity_usd", "market_cap", "holders")
         )
 
-    async def _fetch_latest_snapshot(self, token: str, account_type: str) -> Dict[str, Any]:
+    async def _fetch_latest_snapshot(self, token: str, account_type: str, retry_delay_seconds: float = 0) -> Dict[str, Any]:
         preferred = acquire_holding_slot("risk_snapshot")
         endpoint = getattr(settings, "GMGN_TOKEN_SNAPSHOT_PATH", "/v1/token/security")
 
@@ -423,12 +468,12 @@ class PositionRiskRunner:
             return snap or {}
 
         try:
-            return await self._fetch_risk_data_with_retry(_do_fetch, preferred, self._validate_snapshot, endpoint=endpoint)
+            return await self._fetch_risk_data_with_retry(_do_fetch, preferred, self._validate_snapshot, endpoint=endpoint, retry_delay_seconds=retry_delay_seconds)
         except RuntimeError:
             await self.repo.append_system_event(
                 "ERROR",
                 "RISK",
-                f"GMGN token snapshot failed for {token} (3 retries exhausted)",
+                f"GMGN token snapshot failed for {token} (4 attempts exhausted)",
                 _safe_json_dumps({"error": "RiskDataUnavailableError"}),
                 account_type=account_type,
             )
@@ -564,7 +609,7 @@ class PositionRiskRunner:
         async def _do_fetch(*, credential_slot):
             return await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=credential_slot)
 
-        holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None)
+        holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None, retry_delay_seconds=interval)
 
         if not holders:
             return False
@@ -658,7 +703,9 @@ class PositionRiskRunner:
         async def _do_fetch(*, credential_slot):
             return await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=credential_slot)
 
-        holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None)
+        remaining_value_usd_for_delay = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
+        retry_delay = risk_scan_interval_seconds(remaining_value_usd_for_delay)
+        holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None, retry_delay_seconds=retry_delay)
 
         current_map: Dict[str, Dict[str, float]] = {}
         if holders:
@@ -738,7 +785,8 @@ class PositionRiskRunner:
         dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 0.50))
         if remaining_value_usd < dust_threshold:
             exit_pct = 1.0
-            reason_code = "DUST_FORCE_EXIT"
+            if reason_code != "DUST_FORCE_EXIT":
+                reason_code = "DUST_FORCE_EXIT"
 
         # One-shot rule idempotency. Full emergency exits are allowed to retry if a prior sell failed.
         if exit_pct < 1.0 and hasattr(self.repo, "has_exit_rule_executed"):
@@ -776,6 +824,7 @@ class PositionRiskRunner:
                 return
 
         if is_live:
+            exit_reason_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
             await self.repo.append_trade_event(
                 f"SELL_FAILED_PIPELINE_MISSING:{pos_id}:{reason_code}",
                 position_id=pos_id,
@@ -788,6 +837,8 @@ class PositionRiskRunner:
                 status="FAILED",
                 requested_pct=exit_pct,
                 price_usd=current_price_usd,
+                exit_reason=reason_code,
+                exit_reason_label=exit_reason_label,
                 error_code="TRADING_PIPELINE_MISSING",
                 error_message=(
                     "LIVE exit was requested, but no TradingPipeline.execute_sell was available."
@@ -869,6 +920,9 @@ class PositionRiskRunner:
         new_remaining = max(remaining_token - sell_token_amount, 0.0)
         new_value = new_remaining * (current_price_usd or 0.0)
 
+        exit_reason_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
+        trade_value_usd_net = sell_token_amount * (current_price_usd or 0.0)
+
         await self.repo.append_trade_event(
             f"SELL_SIM:{pos_id}:{reason_code}",
             position_id=pos_id,
@@ -883,6 +937,10 @@ class PositionRiskRunner:
             requested_token_amount=sell_token_amount,
             executed_token_amount=sell_token_amount,
             price_usd=current_price_usd,
+            exit_reason=reason_code,
+            exit_reason_label=exit_reason_label,
+            trade_value_usd_net=trade_value_usd_net,
+            fee_detail_json=json.dumps({"fallback": True}),
             error_message=(f"Risk details: {', '.join(risk_details)}" if risk_details else None),
             provider="POSITION_RISK_SIM",
         )

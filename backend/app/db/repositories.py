@@ -1454,6 +1454,21 @@ class Repositories:
             "error_message",
             "provider",
             "latency_ms",
+            "exit_reason",
+            "exit_reason_label",
+            "trade_value_usd_net",
+            "gross_value_usd",
+            "fee_usd_est",
+            "gas_fee_lamports",
+            "input_amount_raw",
+            "output_amount_raw",
+            "input_mint",
+            "output_mint",
+            "quote_out_amount_raw",
+            "quote_other_amount_threshold_raw",
+            "quote_price_impact_pct",
+            "fee_detail_json",
+            "execution_detail_json",
         ]
 
         cols = [
@@ -1735,3 +1750,83 @@ class Repositories:
                 (latest_amount_pct, latest_usd, reduction_rate, 1 if triggered else 0, now, baseline_id),
             )
         await self._write_txn(_do())
+
+    async def insert_position_audit(self, position_id, token_mint, account_type, strategy_id, discovery_event_id, snapshot_id, audit_type, audit_json):
+        now = utc_now_iso()
+        async def _do():
+            await self.db.execute(
+                "INSERT INTO position_audits (position_id, token_mint, account_type, strategy_id, discovery_event_id, snapshot_id, audit_type, audit_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (position_id, token_mint, account_type, strategy_id, discovery_event_id, snapshot_id, audit_type, json.dumps(audit_json, ensure_ascii=False, default=str), now),
+            )
+        await self._write_txn(_do())
+
+    async def list_trade_events_ledger(self, account_type: str = "ALL", since_session: bool = False, limit: int = 500) -> List[Dict[str, Any]]:
+        conditions = ["status = 'CONFIRMED'"]
+        params: List[Any] = []
+        if account_type != "ALL":
+            conditions.append("account_type = ?")
+            params.append(account_type)
+        if since_session:
+            async with self.db.execute("SELECT value FROM runtime_settings WHERE key = 'session_started_at'") as cur:
+                row = await cur.fetchone()
+            session_val = str(row[0]) if row else ""
+            if session_val:
+                conditions.append("created_at >= ?")
+                params.append(session_val)
+        where_clause = " AND ".join(conditions)
+        params.append(limit)
+        async with self.db.execute(
+            f"SELECT * FROM trade_events WHERE {where_clause} ORDER BY id DESC LIMIT ?",
+            tuple(params),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def compute_position_realized_pnl(self, position_id: int) -> Optional[float]:
+        async with self.db.execute(
+            "SELECT SUM(COALESCE(trade_value_usd_net, 0)) FROM trade_events WHERE position_id = ? AND status = 'CONFIRMED'",
+            (position_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        val = row[0] if row else None
+        return float(val) if val is not None else None
+
+    async def compute_account_pnl_summary(self, account_type: str) -> Dict[str, Any]:
+        async with self.db.execute(
+            "SELECT SUM(COALESCE(trade_value_usd_net, 0)) FROM trade_events WHERE account_type = ? AND status = 'CONFIRMED'",
+            (account_type,),
+        ) as cur:
+            row = await cur.fetchone()
+        realized_pnl_usd = float(row[0]) if row and row[0] is not None else 0.0
+        async with self.db.execute(
+            "SELECT status, COUNT(*) AS cnt FROM positions WHERE account_type = ? GROUP BY status",
+            (account_type,),
+        ) as cur:
+            status_rows = await cur.fetchall()
+        open_count = sum(sr["cnt"] for sr in status_rows if sr["status"] == "OPEN")
+        closed_count = sum(sr["cnt"] for sr in status_rows if sr["status"] == "CLOSED")
+        losing_count = sum(sr["cnt"] for sr in status_rows if sr["status"] in ("CLOSED_LOSS", "EMERGENCY_CLOSED"))
+        winning_count = max(0, closed_count - losing_count)
+        return {
+            "account_type": account_type,
+            "realized_pnl_usd": realized_pnl_usd,
+            "open_positions": open_count,
+            "closed_positions": closed_count,
+            "winning_positions": winning_count,
+            "losing_positions": losing_count,
+        }
+
+    async def get_position_audits(self, position_id: int, audit_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        if audit_type:
+            async with self.db.execute(
+                "SELECT * FROM position_audits WHERE position_id = ? AND audit_type = ? ORDER BY id DESC",
+                (position_id, audit_type),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with self.db.execute(
+                "SELECT * FROM position_audits WHERE position_id = ? ORDER BY id DESC",
+                (position_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]

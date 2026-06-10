@@ -108,6 +108,7 @@ async def _run_migrations(db: aiosqlite.Connection):
         await _migrate_tick_snapshots(db)
         await _migrate_strategy_groups(db)
         await _migrate_smart_money_baselines(db)
+        await _migrate_position_audits(db)
 
         await db.commit()
 
@@ -231,6 +232,26 @@ async def _migrate_trade_events(db: aiosqlite.Connection):
         "latency_ms": "INTEGER",
     }
     for column, definition in additions.items():
+        await _add_column_if_missing(db, "trade_events", column, definition)
+
+    new_fields_2025 = {
+        "exit_reason": "TEXT",
+        "exit_reason_label": "TEXT",
+        "trade_value_usd_net": "REAL",
+        "gross_value_usd": "REAL",
+        "fee_usd_est": "REAL",
+        "gas_fee_lamports": "INTEGER",
+        "input_amount_raw": "TEXT",
+        "output_amount_raw": "TEXT",
+        "input_mint": "TEXT",
+        "output_mint": "TEXT",
+        "quote_out_amount_raw": "TEXT",
+        "quote_other_amount_threshold_raw": "TEXT",
+        "quote_price_impact_pct": "REAL",
+        "fee_detail_json": "TEXT",
+        "execution_detail_json": "TEXT",
+    }
+    for column, definition in new_fields_2025.items():
         await _add_column_if_missing(db, "trade_events", column, definition)
 
     await _add_index_if_missing(db, "uq_trade_idempotency", "trade_events", "idempotency_key", unique=True)
@@ -462,6 +483,24 @@ async def _migrate_smart_money_baselines(db: aiosqlite.Connection):
         )
     """)
     await _add_index_if_missing(db, "idx_position_smart_money", "position_smart_money_baselines", "position_id, wallet_address")
+
+
+async def _migrate_position_audits(db: aiosqlite.Connection):
+    await _ensure_table_exists(db, "position_audits", """
+        CREATE TABLE IF NOT EXISTS position_audits (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER,
+          token_mint TEXT NOT NULL,
+          account_type TEXT NOT NULL DEFAULT 'SIM',
+          strategy_id INTEGER,
+          discovery_event_id INTEGER,
+          snapshot_id INTEGER,
+          audit_type TEXT NOT NULL,
+          audit_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+    """)
+    await _add_index_if_missing(db, "idx_position_audits_pos", "position_audits", "position_id, audit_type")
 
 
 def get_db_sync():

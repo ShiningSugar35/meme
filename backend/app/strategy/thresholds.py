@@ -41,6 +41,11 @@ class StrategyThresholds:
     max_insider_ratio: float
     max_bundler_rate: float
 
+    entry_rug_ratio: float
+    entry_entrapment_ratio: float
+    entry_insider_ratio: float
+    entry_bundler_rate: float
+
     min_liquidity: float
     min_liquidity_holder_ratio: float
     min_top_holder_rate: float
@@ -89,15 +94,36 @@ class StrategyThresholds:
     def min_smart_degen_count(self) -> float:
         return self.min_smart_degen_count_raw
 
+    @property
+    def holding_rug_ratio(self) -> float:
+        return self.max_rug_ratio
+
+    @property
+    def holding_entrapment_ratio(self) -> float:
+        return self.max_entrapment_ratio
+
+    @property
+    def holding_insider_ratio(self) -> float:
+        return self.max_insider_ratio
+
+    @property
+    def holding_bundler_rate(self) -> float:
+        return self.max_bundler_rate
+
     @classmethod
     def compute(cls, x: float) -> StrategyThresholds:
         xf = float(x)
         common_risk = 0.05 + 0.5 * xf
 
-        max_rug_ratio = common_risk
-        max_entrapment_ratio = common_risk
-        max_insider_ratio = common_risk
-        max_bundler_rate = common_risk
+        max_rug_ratio = xf
+        max_entrapment_ratio = xf
+        max_insider_ratio = xf
+        max_bundler_rate = xf
+
+        entry_rug_ratio = common_risk
+        entry_entrapment_ratio = common_risk
+        entry_insider_ratio = common_risk
+        entry_bundler_rate = common_risk
 
         min_liquidity = 5000.0 - 2500.0 * xf
         min_liquidity_holder_ratio = 70.0 - 100.0 * xf
@@ -106,7 +132,7 @@ class StrategyThresholds:
         max_top_holder_rate = 0.225 + 0.25 * xf
 
         max_fresh_wallet_rate = 0.13 + 0.1 * xf
-        max_creator_balance_rate = 0.049 + 0.01 * xf
+        max_creator_balance_rate = 0.054 + 0.01 * xf
 
         min_holder_count_raw = 37.0 - 40.0 * xf
         min_holder_count_api = int(math.floor(min_holder_count_raw)) + 1
@@ -126,7 +152,7 @@ class StrategyThresholds:
         min_volume_24h = max(0.0, 1600.0 - 2000.0 * xf)
 
         sell_tax_max = 0.1 * xf
-        sniper_count_max = 50.0 * xf
+        sniper_count_max = 75.0 * xf
         top1_addr_type0_min = 0.032 - 0.02 * xf
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
@@ -144,6 +170,10 @@ class StrategyThresholds:
             max_entrapment_ratio=max_entrapment_ratio,
             max_insider_ratio=max_insider_ratio,
             max_bundler_rate=max_bundler_rate,
+            entry_rug_ratio=entry_rug_ratio,
+            entry_entrapment_ratio=entry_entrapment_ratio,
+            entry_insider_ratio=entry_insider_ratio,
+            entry_bundler_rate=entry_bundler_rate,
             min_liquidity=min_liquidity,
             min_liquidity_holder_ratio=min_liquidity_holder_ratio,
             min_top_holder_rate=min_top_holder_rate,
@@ -179,10 +209,10 @@ class StrategyThresholds:
         stripped before sending to GMGN.
         """
         filters = {
-            "max_rug_ratio": self.max_rug_ratio,
-            "max_entrapment_ratio": self.max_entrapment_ratio,
-            "max_insider_ratio": self.max_insider_ratio,
-            "max_bundler_rate": self.max_bundler_rate,
+            "max_rug_ratio": self.entry_rug_ratio,
+            "max_entrapment_ratio": self.entry_entrapment_ratio,
+            "max_insider_ratio": self.entry_insider_ratio,
+            "max_bundler_rate": self.entry_bundler_rate,
             "min_liquidity": self.min_liquidity,
             "min_top_holder_rate": self.min_top_holder_rate,
             "max_top_holder_rate": self.max_top_holder_rate,
@@ -202,6 +232,17 @@ class StrategyThresholds:
 
 def compute_thresholds(x: float) -> StrategyThresholds:
     return StrategyThresholds.compute(x)
+
+
+def compute_holding_thresholds(x: float) -> Dict[str, float]:
+    """Return holding-specific threshold values (all = x directly)."""
+    xf = float(x)
+    return {
+        "holding_rug_ratio": xf,
+        "holding_entrapment_ratio": xf,
+        "holding_insider_ratio": xf,
+        "holding_bundler_rate": xf,
+    }
 
 
 def entry_size_usd(liquidity_usd: float, x: float, max_usd: float = 150.0) -> float:
