@@ -1168,6 +1168,8 @@ class TradingPipeline:
             return {"ok": False, "error": quote.get("error")}
 
         out_sol = (self._to_float(quote.get("outAmount"), 0.0) or 0.0) / LAMPORTS_PER_SOL
+        sol_usd = _derive_sol_usd_price({}, latest) or 200.0
+        gross_value_usd = out_sol * sol_usd
         bucket = self._round_timestamp_bucket()
         idem_pending = f"SELL:{pos_id}:{exit_reason}:{bucket}:PENDING"
         te_pending = await self.repo.append_trade_event(

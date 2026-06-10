@@ -169,8 +169,9 @@ def _build_socials(snapshot: Optional[Dict[str, Any]],
 
 
 def _build_entry_data_sources(
-    token_info_called: bool = False,
-    token_security_called: bool = False,
+    fetch_token_snapshot_called: bool = False,
+    token_info_extracted_from_raw_json: bool = False,
+    token_security_extracted_from_raw_json: bool = False,
     holders_called: bool = False,
     smart_degen_holders_called: bool = False,
     kline_called: bool = False,
@@ -178,14 +179,22 @@ def _build_entry_data_sources(
     discovery_event_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     return {
-        "token_info_called": token_info_called,
-        "token_security_called": token_security_called,
+        "fetch_token_snapshot_called": fetch_token_snapshot_called,
+        "token_info_extracted_from_raw_json": token_info_extracted_from_raw_json,
+        "token_security_extracted_from_raw_json": token_security_extracted_from_raw_json,
         "holders_called": holders_called,
         "smart_degen_holders_called": smart_degen_holders_called,
         "kline_called": kline_called,
         "snapshot_source": snapshot_source,
         "discovery_event_id": discovery_event_id,
     }
+
+
+def _is_addr_type0(h: Dict[str, Any]) -> bool:
+    try:
+        return int(h.get("addr_type", -1)) == 0
+    except Exception:
+        return False
 
 
 def _compute_missing_fields(payload: Dict[str, Any], required: List[str]) -> List[str]:
@@ -220,8 +229,9 @@ async def build_entry_audit_payload(
     sol_side_liquidity: Optional[float] = None,
 ) -> Dict[str, Any]:
     data_sources = _build_entry_data_sources(
-        token_info_called=False,
-        token_security_called=False,
+        fetch_token_snapshot_called=False,
+        token_info_extracted_from_raw_json=False,
+        token_security_extracted_from_raw_json=False,
         holders_called=False,
         smart_degen_holders_called=False,
         kline_called=False,
@@ -290,7 +300,8 @@ async def build_entry_audit_payload(
         ti = await gmgn.fetch_token_snapshot(token_mint)
         if isinstance(ti, dict) and ti:
             token_info_data = ti
-            data_sources["token_info_called"] = True
+            data_sources["fetch_token_snapshot_called"] = True
+            data_sources["token_info_extracted_from_raw_json"] = True
     except Exception:
         pass
 
@@ -300,7 +311,7 @@ async def build_entry_audit_payload(
             raw_bundle = json.loads(token_info_data["raw_json"])
             security_raw = raw_bundle.get("security") if isinstance(raw_bundle, dict) else None
             if isinstance(security_raw, dict) and not security_raw.get("error"):
-                data_sources["token_security_called"] = True
+                data_sources["token_security_extracted_from_raw_json"] = True
     except Exception:
         pass
     if token_info_data:
@@ -501,7 +512,7 @@ async def build_entry_audit_payload(
     payload["socials"] = _build_socials(snap_extra, info_data, disc,
                                         token_info_data.get("raw_json") if token_info_data else None)
 
-    addr_type0_holders = [h for h in holders if int(h.get("addr_type", -1)) == 0]
+    addr_type0_holders = [h for h in holders if _is_addr_type0(h)]
     addr_type0_sorted = sorted(addr_type0_holders,
                                key=lambda h: _to_float(h.get("amount_percentage") or h.get("top1_holder_rate") or 0.0, 0.0) or 0.0,
                                reverse=True)

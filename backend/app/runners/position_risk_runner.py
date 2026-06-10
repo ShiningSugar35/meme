@@ -398,11 +398,11 @@ class PositionRiskRunner:
 
         # Smart money sell monitoring (feature-flagged, polling)
         try:
-            smart_dump = await self._check_smart_money_sell(position_for_decision, now)
+            smart_dump_wallet = await self._check_smart_money_sell(position_for_decision, now)
         except RuntimeError:
             await self._emergency_risk_exit(position)
             return
-        if smart_dump:
+        if smart_dump_wallet:
             await self._request_exit(
                 position=position_for_decision,
                 exit_pct=0.5,
@@ -410,6 +410,7 @@ class PositionRiskRunner:
                 emergency=False,
                 latest=latest,
                 current_price_usd=price_usd,
+                triggered_wallet=smart_dump_wallet,
             )
             return
 
@@ -601,19 +602,20 @@ class PositionRiskRunner:
         )
         return False
 
-    async def _check_smart_money_sell(self, position: Dict[str, Any], now: datetime) -> bool:
+    async def _check_smart_money_sell(self, position: Dict[str, Any], now: datetime) -> Optional[str]:
+        """Returns triggered wallet address if smart money sell detected, else None."""
         if not getattr(settings, "SMART_MONEY_SELL_MONITOR_ENABLED", False):
-            return False
+            return None
         pos_id = int(position["id"])
         remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
         interval = settings.get_risk_scan_interval_seconds(remaining_value_usd)
         if interval <= 0:
-            return False
+            return None
 
         last_check = self._last_smart_degen_sell.get(pos_id, {})
         last_time_val = last_check.get("_ts")
         if last_time_val is not None and now.timestamp() < last_time_val + interval:
-            return False
+            return None
 
         token = position["token_mint"]
         account_type = _account_type(position)
@@ -626,10 +628,10 @@ class PositionRiskRunner:
         holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None, retry_delay_seconds=interval)
 
         if not holders:
-            return False
+            return None
 
         sell_trigger = float(getattr(settings, "SMART_MONEY_SELL_THRESHOLD_USD", 50.0))
-        triggered = False
+        triggered_wallet: Optional[str] = None
         for h in holders:
             addr = h.get("address") or ""
             if not addr:
@@ -638,7 +640,7 @@ class PositionRiskRunner:
             prev = last_check.get(addr, 0.0)
             delta = sell_cur - prev
             if delta > sell_trigger:
-                triggered = True
+                triggered_wallet = addr
                 await self.repo.append_system_event(
                     "INFO", "RISK",
                     f"Smart money sell detected: wallet {addr} sold +${delta:.0f}",
@@ -657,7 +659,7 @@ class PositionRiskRunner:
             snapshot[addr] = _to_float(h.get("sell_volume_cur")) or 0.0
         self._last_smart_degen_sell[pos_id] = snapshot
 
-        return triggered
+        return triggered_wallet
 
     async def _check_top3_smart_degen_reduction(self, position: Dict[str, Any], now: datetime) -> Optional[str]:
         """Check if any of the original TOP3 smart degen holders reduced holdings by >25%.
@@ -816,6 +818,15 @@ class PositionRiskRunner:
                 audit_context["risk_failed_rules"] = risk_failed_rules
         if reason_code == "DUST_FORCE_EXIT" and dust_detail:
             audit_context["dust_detail"] = dust_detail
+        if reason_code == "SMART_MONEY_SELL" and triggered_wallet:
+            audit_context["smart_money_trigger_detail"] = {
+                "triggered_wallet": triggered_wallet,
+            }
+        if reason_code == "TOP3_SMART_DEGEN_DUMP" and triggered_wallet:
+            audit_context["top3_smart_degen_trigger_detail"] = {
+                "triggered_wallet": triggered_wallet,
+                "reduction_threshold_pct": 25.0,
+            }
 
         # One-shot rule idempotency. Full emergency exits are allowed to retry if a prior sell failed.
         if exit_pct < 1.0 and hasattr(self.repo, "has_exit_rule_executed"):

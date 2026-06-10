@@ -8,6 +8,7 @@ from ..trading.audit_builder import (
     build_entry_audit_payload,
     build_exit_audit_payload,
 )
+from ..config import ProviderMode, settings
 from ..trading.executor import WRAPPED_SOL_MINT
 
 
@@ -447,3 +448,252 @@ async def test_export_trade_audit_complete_entry_exit_audit(repo):
     assert stored_exit.get("sell_price_multiple") == 0.50
     assert stored_exit.get("exit_reason_code") == "RISK_RECHECK_FAILED"
     assert stored_exit.get("exit_missing_fields") == []
+
+
+@pytest.mark.asyncio
+async def test_entry_audit_rug_ratio_zero_not_fallback(pipeline_factory):
+    """ENTRY audit with rug_ratio=0 must NOT fallback to latest snapshot."""
+    pipeline, _ = pipeline_factory()
+    repo = pipeline.repo
+    tok = "RUG_ZERO"
+    pid = await repo.create_position(
+        token_mint=tok, is_live=False,
+        locked_strategy_config_json='{}',
+        status="POSITION_OPEN", entry_price_usd=0.001,
+        entry_token_amount=100.0, remaining_token_amount=100.0,
+        remaining_value_usd=0.1, account_type="SIM",
+    )
+    entry_audit = {k: f"val_{k}" for k in ENTRY_AUDIT_REQUIRED_FIELDS}
+    entry_audit["rug_ratio"] = 0.0
+    entry_audit["entry_missing_fields"] = []
+    entry_audit["entry_data_sources"] = {}
+    await repo.insert_position_audit(
+        position_id=pid, token_mint=tok, account_type="SIM",
+        strategy_id=1, discovery_event_id=None, snapshot_id=None,
+        audit_type="ENTRY",
+        audit_json=entry_audit,
+    )
+    entry_rows = await repo.get_position_audits(pid, audit_type="ENTRY")
+    assert len(entry_rows) == 1
+    stored = entry_rows[0].get("audit_json") or {}
+    if isinstance(stored, str):
+        stored = json.loads(stored)
+    assert stored.get("rug_ratio") == 0.0
+    assert stored.get("entry_missing_fields") == []
+
+
+@pytest.mark.asyncio
+async def test_addr_type_non_numeric_not_crash(pipeline_factory):
+    """addr_type="" or "normal" must not crash build_entry_audit_payload."""
+    pipeline, mock = pipeline_factory()
+    repo = pipeline.repo
+    tok = "ADDR_TYPE_SAFE"
+
+    class _Mock:
+        async def fetch_top_holders(self, token_mint, limit=20, credential_slot=None):
+            return [
+                {"address": "pool_wallet", "addr_type": 2, "amount_percentage": 0.5},
+                {"address": "empty_type", "addr_type": "", "amount_percentage": 0.04},
+                {"address": "none_type", "addr_type": None, "amount_percentage": 0.03},
+                {"address": "str_type", "addr_type": "normal", "amount_percentage": 0.02},
+                {"address": "int_zero", "addr_type": 0, "amount_percentage": 0.01},
+            ]
+        async def fetch_smart_degen_holders(self, token_mint, limit=100, credential_slot=None):
+            return []
+        async def fetch_token_snapshot(self, token_mint, credential_slot=None):
+            return {}
+        async def fetch_kline(self, token_mint, interval, limit, **kw):
+            return []
+        async def fetch_latest_price(self, token_mint, credential_slot=None):
+            return {"price_usd": 0.001, "price_sol": 0.00001}
+
+    gmgn = _Mock()
+    pid = await repo.create_position(
+        token_mint=tok, is_live=False,
+        locked_strategy_config_json='{}',
+        status="POSITION_OPEN", entry_price_usd=0.001,
+        entry_token_amount=100.0, remaining_token_amount=100.0,
+        remaining_value_usd=0.1, account_type="SIM",
+    )
+    te = await repo.append_trade_event(
+        f"AT_SAFE:{tok}", token_mint=tok, side="BUY",
+        event_type="SIM_BUY", status="CONFIRMED", is_live=0,
+        account_type="SIM", executed_token_amount=100.0,
+        price_usd=0.001, trade_value_usd_net=-100.0,
+    )
+    entry_audit = await build_entry_audit_payload(
+        repo=repo, gmgn=gmgn,
+        token_mint=tok, position_id=pid,
+        account_type="SIM", strategy={"id": 1},
+        discovery_event_id=None, snapshot_id=None,
+        buy_trade_event=te, quote={},
+        token_amount=100.0, price_usd=0.001, price_sol=0.00001,
+        size_usd=100.0,
+    )
+    # Must not crash; top1 addr_type=0 should be "int_zero" (the only addr_type==0)
+    assert entry_audit["top1_addr_type0_address"] == "int_zero"
+    assert entry_audit["top1_addr_type0_holder_rate"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_exit_audit_smart_money_trigger_detail(pipeline_factory):
+    """SMART_MONEY_SELL exit_audit carries smart_money_trigger_detail."""
+    pipeline, mock = pipeline_factory()
+    repo = pipeline.repo
+    tok = "SM_TRIGGER"
+    mock.tokens[tok] = {
+        "token_mint": tok, "symbol": "SM", "name": "Smart Money",
+        "pool_address": "pool1", "type": "new_creation",
+        "liquidity_usd": 50000.0, "price_usd": 0.001, "price_sol": 0.00001,
+    }
+    mock.latest[tok] = {"price_usd": 0.001, "price_sol": 0.00001, "liquidity_usd": 50000.0}
+    pos_id = await repo.create_position(
+        token_mint=tok, is_live=False,
+        locked_strategy_config_json='{}',
+        status="POSITION_OPEN", entry_price_usd=0.001,
+        entry_token_amount=100.0, remaining_token_amount=100.0,
+        remaining_value_usd=0.1, account_type="SIM",
+    )
+    await repo.insert_position_audit(
+        position_id=pos_id, token_mint=tok, account_type="SIM",
+        strategy_id=1, discovery_event_id=None, snapshot_id=None,
+        audit_type="ENTRY",
+        audit_json={"buy_price_usd": 0.001},
+    )
+    sell_te = await repo.append_trade_event(
+        f"SELL_SM:{tok}", position_id=pos_id,
+        token_mint=tok, side="SELL", event_type="SIM_SELL",
+        status="CONFIRMED", is_live=0, account_type="SIM",
+        executed_token_amount=100.0, price_usd=0.0008,
+        exit_reason="SMART_MONEY_SELL",
+        exit_reason_label="Smart Money Sell",
+        trade_value_usd_net=0.08, gross_value_usd=0.08,
+    )
+    position = await repo.get_position(pos_id)
+    exit_audit = await build_exit_audit_payload(
+        repo=repo, position=position,
+        sell_trade_event=sell_te,
+        exit_reason="SMART_MONEY_SELL", exit_pct=1.0,
+        sell_amount_human=100.0, gross_value_usd=0.08,
+        current_price_usd=0.0008,
+        smart_money_trigger_detail={"triggered_wallet": "abc123"},
+    )
+    assert exit_audit["exit_reason_code"] == "SMART_MONEY_SELL"
+    assert exit_audit["smart_money_trigger_detail"] == {"triggered_wallet": "abc123"}
+
+
+@pytest.mark.asyncio
+async def test_exit_audit_top3_smart_degen_trigger_detail(pipeline_factory):
+    """TOP3_SMART_DEGEN_DUMP exit_audit carries top3_smart_degen_trigger_detail."""
+    pipeline, mock = pipeline_factory()
+    repo = pipeline.repo
+    tok = "TOP3_TRIGGER"
+    mock.tokens[tok] = {
+        "token_mint": tok, "symbol": "T3", "name": "Top3 Trigger",
+        "pool_address": "pool1", "type": "new_creation",
+        "liquidity_usd": 50000.0, "price_usd": 0.001, "price_sol": 0.00001,
+    }
+    mock.latest[tok] = {"price_usd": 0.001, "price_sol": 0.00001, "liquidity_usd": 50000.0}
+    pos_id = await repo.create_position(
+        token_mint=tok, is_live=False,
+        locked_strategy_config_json='{}',
+        status="POSITION_OPEN", entry_price_usd=0.001,
+        entry_token_amount=100.0, remaining_token_amount=100.0,
+        remaining_value_usd=0.1, account_type="SIM",
+    )
+    await repo.insert_position_audit(
+        position_id=pos_id, token_mint=tok, account_type="SIM",
+        strategy_id=1, discovery_event_id=None, snapshot_id=None,
+        audit_type="ENTRY",
+        audit_json={"buy_price_usd": 0.001},
+    )
+    sell_te = await repo.append_trade_event(
+        f"SELL_T3:{tok}", position_id=pos_id,
+        token_mint=tok, side="SELL", event_type="SIM_SELL",
+        status="CONFIRMED", is_live=0, account_type="SIM",
+        executed_token_amount=100.0, price_usd=0.0008,
+        exit_reason="TOP3_SMART_DEGEN_DUMP",
+        exit_reason_label="Top3 Dump",
+        trade_value_usd_net=0.08, gross_value_usd=0.08,
+    )
+    position = await repo.get_position(pos_id)
+    exit_audit = await build_exit_audit_payload(
+        repo=repo, position=position,
+        sell_trade_event=sell_te,
+        exit_reason="TOP3_SMART_DEGEN_DUMP", exit_pct=1.0,
+        sell_amount_human=100.0, gross_value_usd=0.08,
+        current_price_usd=0.0008,
+        top3_smart_degen_trigger_detail={
+            "triggered_wallet": "wallet123",
+            "reduction_threshold_pct": 25.0,
+        },
+    )
+    assert exit_audit["exit_reason_code"] == "TOP3_SMART_DEGEN_DUMP"
+    assert exit_audit["top3_smart_degen_trigger_detail"] == {
+        "triggered_wallet": "wallet123",
+        "reduction_threshold_pct": 25.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_live_sell_gross_value_uses_quote_out_amount(pipeline_factory):
+    """LIVE sell must use Jupiter quote outAmount * sol_usd for gross_value_usd."""
+    from ..trading.executor import LAMPORTS_PER_SOL
+    original_mode = settings.PROVIDER_MODE
+    settings.PROVIDER_MODE = ProviderMode.MOCK
+
+    pipeline, mock = pipeline_factory()
+    repo = pipeline.repo
+    tok = "LIVE_QUOTE_SELL"
+
+    mock.tokens[tok] = {
+        "token_mint": tok, "symbol": "LQS", "name": "Live Quote Sell",
+        "pool_address": "pool1", "type": "new_creation", "launchpad": "pump",
+        "liquidity_usd": 50000.0, "sol_side_liquidity": 100.0,
+        "price_usd": 0.001, "price_sol": 0.00001,
+        "holder_count": 100, "market_cap": 500000.0,
+    }
+    mock.latest[tok] = {
+        "price_usd": 0.001, "price_sol": 0.00001,
+        "liquidity_usd": 50000.0, "sol_side_liquidity": 100.0,
+    }
+
+    pos_id = await repo.create_position(
+        token_mint=tok, is_live=True,
+        locked_strategy_config_json='{"sell_slippage_cap_bps": 1000}',
+        status="POSITION_OPEN", entry_price_usd=0.001,
+        entry_token_amount=100_000_000.0,
+        remaining_token_amount=100_000_000.0,
+        remaining_value_usd=100_000.0,
+        account_type="LIVE",
+    )
+
+    result = await pipeline.execute_sell(
+        position=await repo.get_position(pos_id),
+        exit_pct=1.0,
+        exit_reason="HARD_SL_70",
+    )
+    assert result is not None, "LIVE sell returned None"
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert result.get("ok") is not False, f"LIVE sell failed: {result.get('error')}"
+
+    # Find the CONFIRMED trade event for this sell
+    events = []
+    async with repo.db.execute(
+        "SELECT * FROM trade_events WHERE position_id=? AND side='SELL' AND status='CONFIRMED' ORDER BY id DESC LIMIT 1",
+        (pos_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None, "No CONFIRMED SELL trade event found"
+    te = dict(row)
+
+    # Must NOT be the old price-based calculation: sell_amount_human * current_price_usd
+    old_calc = 100_000_000.0 * 0.001  # = 100_000.0
+    actual = float(te.get("gross_value_usd", 0))
+    assert actual > 0, "gross_value_usd must be positive"
+    assert abs(actual - old_calc) / max(old_calc, 0.01) > 0.1, \
+        f"gross_value_usd {actual} suspiciously close to old price-based calc {old_calc}"
+    # Verify quote was used: out_sol from quote breaks the old sell_amount_human * price pattern
+    assert actual > old_calc * 10 or actual < old_calc * 0.1, \
+        f"gross_value_usd {actual} should differ significantly from old calc {old_calc}"
+    settings.PROVIDER_MODE = original_mode

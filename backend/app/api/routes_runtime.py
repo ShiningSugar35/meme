@@ -1622,13 +1622,17 @@ async def export_trade_audit(request: Request):
 
             entry_audit_json = {}
             entry_metrics_source = "entry_audit"
-            try:
-                if entry_audit_rows and len(entry_audit_rows) > 0:
+            if entry_audit_rows and len(entry_audit_rows) > 0:
+                try:
                     raw = entry_audit_rows[0].get("audit_json") or {}
                     if isinstance(raw, str):
                         raw = json.loads(raw)
                     entry_audit_json = raw if isinstance(raw, dict) else {}
-                if not entry_audit_json or not entry_audit_json.get("rug_ratio"):
+                except Exception:
+                    entry_audit_json = {}
+                entry_metrics_source = "entry_audit"
+            else:
+                try:
                     fallback: Dict[str, Any] = {k: None for k in ENTRY_AUDIT_REQUIRED_FIELDS}
                     if latest_snap:
                         fallback.update({
@@ -1646,21 +1650,21 @@ async def export_trade_audit(request: Request):
                             "sell_tax": latest_snap.get("sell_tax"),
                             "burn_status": latest_snap.get("burn_status"),
                             "sniper_count": latest_snap.get("sniper_count"),
-                            "socials": [{"type": "twitter", "value": "unknown", "url": ""}] if latest_snap.get("has_social") else None,
-                            "volume_24h": latest_snap.get("volume_usd"),
-                            "price_change_percent1h": latest_snap.get("price_change_percent_1h"),
-                            "swaps_1h": latest_snap.get("swaps_1h"),
-                            "volume_1h": latest_snap.get("volume_1h"),
-                            "top1_addr_type0_holder_rate": latest_snap.get("top1_holder_rate"),
-                            "creator_balance_rate": latest_snap.get("creator_balance_rate"),
-                            "smart_degen_count": latest_snap.get("smart_degen_count"),
+                            "socials": [{"type": "twitter", "value": "unknown", "url": ""}] if latest_snap and latest_snap.get("has_social") else None,
+                            "volume_24h": latest_snap.get("volume_usd") if latest_snap else None,
+                            "price_change_percent1h": latest_snap.get("price_change_percent_1h") if latest_snap else None,
+                            "swaps_1h": latest_snap.get("swaps_1h") if latest_snap else None,
+                            "volume_1h": latest_snap.get("volume_1h") if latest_snap else None,
+                            "top1_addr_type0_holder_rate": latest_snap.get("top1_holder_rate") if latest_snap else None,
+                            "creator_balance_rate": latest_snap.get("creator_balance_rate") if latest_snap else None,
+                            "smart_degen_count": latest_snap.get("smart_degen_count") if latest_snap else None,
                         })
                     fallback["entry_metrics_source_label"] = "latest_snapshot_fallback"
                     entry_audit_json = fallback
                     entry_metrics_source = "latest_snapshot_fallback"
-            except Exception:
-                entry_audit_json = {}
-                entry_metrics_source = "error_fallback"
+                except Exception:
+                    entry_audit_json = {}
+                    entry_metrics_source = "error_fallback"
 
             exit_audit_list: List[Dict[str, Any]] = []
             for ae in exit_audit_rows:
@@ -1733,6 +1737,7 @@ async def export_trade_audit(request: Request):
                 "closed_at_beijing": _utc_to_beijing(position.get("closed_at")),
                 "entry_metrics_source": entry_metrics_source,
                 "entry_metrics": entry_audit_json,
+                "exit_audits": exit_audit_list,
                 "smart_money": [
                     {
                         "wallet_address": b.get("wallet_address"),
