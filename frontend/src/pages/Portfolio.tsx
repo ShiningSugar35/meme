@@ -43,13 +43,17 @@ function ruleLabel(name: string): string {
 
 function exitReasonLabel(code: string): string {
   const map: Record<string, string> = {
-    HARD_TP_160: '止盈160%',
-    HARD_TP_210: '止盈210%全平',
-    HARD_SL_45: '硬止损45%全平',
-    HARD_SL_70: '硬止损70%一半',
-    PRICE_API_UNAVAILABLE_EXIT_PENDING: '价格接口不可用待平',
+    HARD_TP_160: '硬止盈1.6x撤50%',
+    HARD_TP_210: '硬止盈2.1x全平',
+    HARD_SL_45: '硬止损0.45x全平',
+    HARD_SL_70: '硬止损0.7x撤50%',
+    COMPLETED: '池子completed',
+    SMART_MONEY_SELL: '聪明钱卖出',
+    TOP3_SMART_DEGEN_DUMP: 'TOP3聪明钱减仓',
+    RISK_RECHECK_FAILED: '风控复查失败',
     DUST_FORCE_EXIT: '尘埃仓强制清仓',
-    HOLDER_RISK: '持仓风险',
+    PRICE_API_UNAVAILABLE_EXIT_PENDING: '价格接口异常',
+    RISK_DATA_UNAVAILABLE_EXIT: '风控数据异常',
     MANUAL: '手动平仓',
   };
   return map[code] || code;
@@ -171,12 +175,6 @@ export default function Portfolio() {
               <button className={tab === 'SIM' ? 'primary' : ''} onClick={() => switchTab('SIM')}>SIM 模拟盘策略</button>
             </div>
             <p className="hint">当前系统状态：{status?.user_mode ?? '加载中'}</p>
-            {rawLast > 0 && (
-              <div className="metric-row">
-                <span>上一次 trench 原始拉回</span>
-                <strong>{rawLast}</strong>
-              </div>
-            )}
             <div className="metric-row">
               <span>上一次 trench 拉回池子数</span>
               <strong>{uniqueLast}</strong>
@@ -263,7 +261,7 @@ export default function Portfolio() {
                   <td>{usd(row.price_usd)}</td>
                   <td>{row.token_amount ?? '-'}</td>
                   <td style={pnlStyle(row.trade_value_usd_net)}>{usd(row.trade_value_usd_net)}</td>
-                  <td>{row.exit_reason_label || '-'}</td>
+                  <td>{row.exit_reason_label ? exitReasonLabel(row.exit_reason_label) : '-'}</td>
                   <td style={{ fontSize: 12 }}>{(row.created_at_beijing || row.created_at_utc || '-').substring(0, 19)}</td>
                 </tr>
               ))}

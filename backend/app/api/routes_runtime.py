@@ -1543,9 +1543,10 @@ async def export_trade_audit(request: Request):
         if session_started_at:
             events = await _fetch_all(repo,
                 """SELECT te.*, t.symbol, t.name,
+                          COALESCE(te.executed_token_amount, te.requested_token_amount) AS token_amount,
                           sg.name AS strategy_name
                    FROM trade_events te
-                   LEFT JOIN tokens t ON t.mint_address = te.token_mint
+                   LEFT JOIN tokens t ON t.token_mint = te.token_mint
                    LEFT JOIN strategy_groups sg ON sg.id = te.strategy_id
                    WHERE te.status='CONFIRMED' AND te.side IN ('BUY','SELL')
                      AND te.created_at >= ?
@@ -1554,9 +1555,10 @@ async def export_trade_audit(request: Request):
         else:
             events = await _fetch_all(repo,
                 """SELECT te.*, t.symbol, t.name,
+                          COALESCE(te.executed_token_amount, te.requested_token_amount) AS token_amount,
                           sg.name AS strategy_name
                    FROM trade_events te
-                   LEFT JOIN tokens t ON t.mint_address = te.token_mint
+                   LEFT JOIN tokens t ON t.token_mint = te.token_mint
                    LEFT JOIN strategy_groups sg ON sg.id = te.strategy_id
                    WHERE te.status='CONFIRMED' AND te.side IN ('BUY','SELL')
                    ORDER BY te.position_id, te.created_at ASC
@@ -1703,7 +1705,7 @@ async def export_trade_audit(request: Request):
         return {"ok": True, "export_path": str(out), "path": str(out), "data": payload}
     except Exception as exc:
         logger.exception("export_trade_audit failed")
-        return {"ok": False, "error": str(exc)}
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
     finally:
         if owned:
             await repo.close()
@@ -2105,122 +2107,119 @@ async def export_session_report_get(request: Request):
 async def pnl_summary(request: Request):
     repo, owned = await _get_repo(request)
     try:
-        te_rows: List[Dict[str, Any]] = []
+        # Cash-flow per position: all CONFIRMED BUY/SELL events
+        cf_rows: List[Dict[str, Any]] = []
         if await _table_exists(repo, "trade_events"):
-            te_rows = await _fetch_all(repo,
-                "SELECT account_type, side, trade_value_usd_net FROM trade_events WHERE status='CONFIRMED' AND side IN ('BUY','SELL')")
-
-        sim_realized = 0.0
-        live_realized = 0.0
-        sim_entry_total = 0.0
-        live_entry_total = 0.0
-        for row in te_rows:
-            val = float(row.get("trade_value_usd_net") or 0)
-            side = str(row.get("side") or "")
-            acct = str(row.get("account_type") or "SIM")
-            if side == "BUY":
-                val = -abs(val)
-            else:
-                val = abs(val)
-            if acct == "LIVE":
-                live_realized += val
-            else:
-                sim_realized += val
-
-        sim_unrealized = 0.0
-        live_unrealized = 0.0
-        if await _table_exists(repo, "positions"):
-            open_pos = await _fetch_all(repo,
-                f"SELECT account_type, remaining_value_usd, entry_price_usd, entry_token_amount FROM positions WHERE {_open_status_sql()}",
-                OPEN_POSITION_EXCLUDED_STATUSES)
-            for row in open_pos:
-                remaining = float(row.get("remaining_value_usd") or 0)
-                entry_price = float(row.get("entry_price_usd") or 0)
-                entry_token = float(row.get("entry_token_amount") or 0)
-                entry = entry_price * entry_token
-                unrealized = remaining - entry
-                if str(row.get("account_type") or "SIM") == "LIVE":
-                    live_unrealized += unrealized
-                    live_entry_total += entry
-                else:
-                    sim_unrealized += unrealized
-                    sim_entry_total += entry
-
-            pos_status_rows = await _fetch_all(repo,
-                "SELECT id, account_type, status FROM positions")
-        else:
-            pos_status_rows = []
-
-        # Compute per-position realized PnL from trade_events
-        te_pnl_rows: List[Dict[str, Any]] = []
-        if await _table_exists(repo, "trade_events"):
-            te_pnl_rows = await _fetch_all(repo,
+            cf_rows = await _fetch_all(repo,
                 "SELECT position_id, account_type, side, trade_value_usd_net FROM trade_events WHERE status='CONFIRMED' AND side IN ('BUY','SELL')")
 
-        pos_pnl: Dict[int, float] = {}
-        for row in te_pnl_rows:
+        # cashflow[acct][pid] = net cash flow (BUY=negative, SELL=positive)
+        cf: Dict[str, Dict[int, float]] = {"SIM": {}, "LIVE": {}}
+        buy_cost: Dict[str, Dict[int, float]] = {"SIM": {}, "LIVE": {}}
+        for row in cf_rows:
             pid = row.get("position_id")
             if pid is None:
                 continue
             pid = int(pid)
+            acct = str(row.get("account_type") or "SIM")
+            if acct not in cf:
+                acct = "SIM"
             val = float(row.get("trade_value_usd_net") or 0)
             side = str(row.get("side") or "")
             signed = -abs(val) if side == "BUY" else abs(val)
-            pos_pnl[pid] = pos_pnl.get(pid, 0.0) + signed
+            cf[acct][pid] = cf[acct].get(pid, 0.0) + signed
+            if side == "BUY":
+                buy_cost[acct][pid] = buy_cost[acct].get(pid, 0.0) + abs(val)
 
-        counts: Dict[str, Dict[str, int]] = {"SIM": {"open": 0, "closed": 0, "losing": 0, "winning": 0},
-                                               "LIVE": {"open": 0, "closed": 0, "losing": 0, "winning": 0}}
-        for row in pos_status_rows:
-            acct = str(row.get("account_type") or "SIM")
-            if acct not in counts:
-                acct = "SIM"
-            pid = int(row.get("id", 0))
-            status = str(row.get("status") or "")
-            if status in OPEN_POSITION_EXCLUDED_STATUSES:
-                counts[acct]["closed"] += 1
-                rpnl = pos_pnl.get(pid, 0.0)
-                if rpnl < 0:
-                    counts[acct]["losing"] += 1
+        # Position status (OPEN / CLOSED) per pid
+        pos_info: Dict[str, Dict[int, str]] = {"SIM": {}, "LIVE": {}}
+        pos_remaining: Dict[str, Dict[int, float]] = {"SIM": {}, "LIVE": {}}
+        if await _table_exists(repo, "positions"):
+            all_pos = await _fetch_all(repo,
+                "SELECT id, account_type, status, COALESCE(remaining_value_usd,0) AS rv FROM positions")
+            for p in all_pos:
+                acct = str(p.get("account_type") or "SIM")
+                if acct not in pos_info:
+                    acct = "SIM"
+                pid = int(p["id"])
+                pos_info[acct][pid] = str(p["status"])
+                if str(p["status"]) not in OPEN_POSITION_EXCLUDED_STATUSES:
+                    pos_remaining[acct][pid] = float(p["rv"])
+
+        out: Dict[str, Dict[str, Any]] = {
+            "SIM": {"realized_pnl_usd": 0.0, "current_pnl_usd": 0.0, "total_pnl_usd": 0.0,
+                    "realized_pnl_pct": 0.0, "open_positions": 0, "closed_positions": 0,
+                    "losing_positions": 0, "winning_positions": 0, "closed_cost_basis": 0.0},
+            "LIVE": {"realized_pnl_usd": 0.0, "current_pnl_usd": 0.0, "total_pnl_usd": 0.0,
+                     "realized_pnl_pct": 0.0, "open_positions": 0, "closed_positions": 0,
+                     "losing_positions": 0, "winning_positions": 0, "closed_cost_basis": 0.0},
+        }
+
+        for acct in ("SIM", "LIVE"):
+            info = pos_info[acct]
+            cashflows = cf[acct]
+            cost = buy_cost[acct]
+            pids = set(info.keys()) | set(cashflows.keys())
+            for pid in pids:
+                status = info.get(pid, "CLOSED")
+                cf_val = cashflows.get(pid, 0.0)
+                is_open = status not in OPEN_POSITION_EXCLUDED_STATUSES and status != ""
+                if is_open:
+                    rv = pos_remaining[acct].get(pid, 0.0)
+                    current_pnl = cf_val + rv
+                    out[acct]["current_pnl_usd"] += current_pnl
+                    out[acct]["total_pnl_usd"] += current_pnl
+                    out[acct]["open_positions"] += 1
                 else:
-                    counts[acct]["winning"] += 1
-            else:
-                counts[acct]["open"] += 1
+                    out[acct]["realized_pnl_usd"] += cf_val
+                    out[acct]["total_pnl_usd"] += cf_val
+                    out[acct]["closed_positions"] += 1
+                    out[acct]["closed_cost_basis"] += cost.get(pid, 0.0)
+                    if cf_val < 0:
+                        out[acct]["losing_positions"] += 1
+                    else:
+                        out[acct]["winning_positions"] += 1
 
-        total_sim_entry = max(abs(sim_entry_total), 0.000001)
-        total_live_entry = max(abs(live_entry_total), 0.000001)
-        combined_entry = max(total_sim_entry + total_live_entry, 0.000001)
-        total_realized = sim_realized + live_realized
+            cost_basis = max(out[acct]["closed_cost_basis"], 0.000001)
+            out[acct]["realized_pnl_pct"] = round(out[acct]["realized_pnl_usd"] / cost_basis * 100, 2) if cost_basis > 0 else 0.0
+            out[acct]["realized_pnl_usd"] = round(out[acct]["realized_pnl_usd"], 6)
+            out[acct]["current_pnl_usd"] = round(out[acct]["current_pnl_usd"], 6)
+            out[acct]["total_pnl_usd"] = round(out[acct]["total_pnl_usd"], 6)
+
+        combined_total = out["SIM"]["total_pnl_usd"] + out["LIVE"]["total_pnl_usd"]
+        combined_realized = out["SIM"]["realized_pnl_usd"] + out["LIVE"]["realized_pnl_usd"]
+        combined_cost = max(out["SIM"]["closed_cost_basis"] + out["LIVE"]["closed_cost_basis"], 0.000001)
 
         return {
             "sim": {
-                "realized_pnl_usd": round(sim_realized, 6),
-                "unrealized_pnl_usd": round(sim_unrealized, 6),
-                "total_pnl_usd": round(sim_realized + sim_unrealized, 6),
-                "realized_pnl_pct": round(sim_realized / total_sim_entry * 100, 2) if total_sim_entry > 0 else 0,
-                "open_positions": counts["SIM"]["open"],
-                "closed_positions": counts["SIM"]["closed"],
-                "losing_positions": counts["SIM"]["losing"],
-                "winning_positions": counts["SIM"]["winning"],
+                "realized_pnl_usd": out["SIM"]["realized_pnl_usd"],
+                "unrealized_pnl_usd": out["SIM"]["current_pnl_usd"],
+                "total_pnl_usd": out["SIM"]["total_pnl_usd"],
+                "realized_pnl_pct": out["SIM"]["realized_pnl_pct"],
+                "open_positions": out["SIM"]["open_positions"],
+                "closed_positions": out["SIM"]["closed_positions"],
+                "losing_positions": out["SIM"]["losing_positions"],
+                "winning_positions": out["SIM"]["winning_positions"],
             },
             "live": {
-                "realized_pnl_usd": round(live_realized, 6),
-                "unrealized_pnl_usd": round(live_unrealized, 6),
-                "total_pnl_usd": round(live_realized + live_unrealized, 6),
-                "realized_pnl_pct": round(live_realized / total_live_entry * 100, 2) if total_live_entry > 0 else 0,
-                "open_positions": counts["LIVE"]["open"],
-                "closed_positions": counts["LIVE"]["closed"],
-                "losing_positions": counts["LIVE"]["losing"],
-                "winning_positions": counts["LIVE"]["winning"],
+                "realized_pnl_usd": out["LIVE"]["realized_pnl_usd"],
+                "unrealized_pnl_usd": out["LIVE"]["current_pnl_usd"],
+                "total_pnl_usd": out["LIVE"]["total_pnl_usd"],
+                "realized_pnl_pct": out["LIVE"]["realized_pnl_pct"],
+                "open_positions": out["LIVE"]["open_positions"],
+                "closed_positions": out["LIVE"]["closed_positions"],
+                "losing_positions": out["LIVE"]["losing_positions"],
+                "winning_positions": out["LIVE"]["winning_positions"],
             },
             "combined": {
-                "realized_pnl_usd": round(total_realized, 6),
-                "unrealized_pnl_usd": round(sim_unrealized + live_unrealized, 6),
-                "total_pnl_usd": round(total_realized + sim_unrealized + live_unrealized, 6),
-                "realized_pnl_pct": round(total_realized / combined_entry * 100, 2) if combined_entry > 0 else 0,
-                "open_positions": counts["SIM"]["open"] + counts["LIVE"]["open"],
-                "closed_positions": counts["SIM"]["closed"] + counts["LIVE"]["closed"],
-                "losing_positions": counts["SIM"]["losing"] + counts["LIVE"]["losing"],
-                "winning_positions": counts["SIM"]["winning"] + counts["LIVE"]["winning"],
+                "realized_pnl_usd": round(combined_realized, 6),
+                "unrealized_pnl_usd": round(out["SIM"]["current_pnl_usd"] + out["LIVE"]["current_pnl_usd"], 6),
+                "total_pnl_usd": round(combined_total, 6),
+                "realized_pnl_pct": round(combined_realized / combined_cost * 100, 2) if combined_cost > 0 else 0.0,
+                "open_positions": out["SIM"]["open_positions"] + out["LIVE"]["open_positions"],
+                "closed_positions": out["SIM"]["closed_positions"] + out["LIVE"]["closed_positions"],
+                "losing_positions": out["SIM"]["losing_positions"] + out["LIVE"]["losing_positions"],
+                "winning_positions": out["SIM"]["winning_positions"] + out["LIVE"]["winning_positions"],
             },
         }
     finally:
@@ -2254,9 +2253,10 @@ async def trade_events_ledger(request: Request, account_type: str = "ALL", since
         params.append(int(limit))
 
         rows = await _fetch_all(repo,
-            f"""SELECT te.*, t.symbol, t.name
+            f"""SELECT te.*, t.symbol, t.name,
+                       COALESCE(te.executed_token_amount, te.requested_token_amount) AS token_amount
                 FROM trade_events te
-                LEFT JOIN tokens t ON t.mint_address = te.token_mint
+                LEFT JOIN tokens t ON t.token_mint = te.token_mint
                 WHERE {where_clause}
                 ORDER BY te.created_at DESC LIMIT ?""",
             tuple(params))

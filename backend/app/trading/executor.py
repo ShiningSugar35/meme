@@ -22,6 +22,20 @@ WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL = 1_000_000_000
 DEFAULT_TOKEN_DECIMALS = 9
 
+EXIT_REASON_LABELS: Dict[str, str] = {
+    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
+    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
+    "HARD_SL_70": "硬止损：价格低于 0.7x，撤仓50%",
+    "HARD_SL_45": "硬止损：价格低于 0.45x，全部撤仓",
+    "COMPLETED": "池子 type 变为 completed，全部撤仓",
+    "SMART_MONEY_SELL": "聪明钱卖出触发",
+    "TOP3_SMART_DEGEN_DUMP": "TOP3聪明钱减仓超过25%",
+    "RISK_RECHECK_FAILED": "持仓风控复查失败",
+    "DUST_FORCE_EXIT": "尘埃仓强制清仓",
+    "PRICE_API_UNAVAILABLE_EXIT_PENDING": "价格接口异常，等待重试撤仓",
+    "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
+}
+
 
 
 
@@ -839,6 +853,7 @@ class TradingPipeline:
         remaining_token = self._to_float(position.get("remaining_token_amount"), 0.0) or 0.0
         pct = max(0.0, min(1.0, self._to_float(exit_pct, 1.0) or 1.0))
         sell_amount_human = remaining_token * pct
+        gross_value_usd = sell_amount_human * current_price_usd
 
         try:
             latest = await self.gmgn.fetch_latest_price(token_mint)
@@ -866,8 +881,9 @@ class TradingPipeline:
             executed_token_amount=sell_amount_human,
             price_usd=current_price_usd,
             exit_reason=exit_reason,
-            exit_reason_label=exit_reason,
-            trade_value_usd_net=+abs(sell_amount_human * current_price_usd),
+            exit_reason_label=EXIT_REASON_LABELS.get(exit_reason, exit_reason),
+            gross_value_usd=gross_value_usd,
+            trade_value_usd_net=+abs(gross_value_usd),
             provider="PIPELINE_SIM",
         )
 
@@ -967,6 +983,7 @@ class TradingPipeline:
             exit_reason = "DUST_FORCE_EXIT"
 
         sell_amount_human = remaining_token * pct
+        gross_value_usd = sell_amount_human * current_price_usd
         token_decimals = self._extract_token_decimals(token_mint, latest=latest, strategy=locked_cfg)
         sell_amount_raw = self._human_to_raw_amount(sell_amount_human, token_decimals)
         if sell_amount_raw <= 0:
@@ -1029,7 +1046,7 @@ class TradingPipeline:
             route_plan_json=self._safe_json((quote.get("routePlan") or [])[:3]),
             provider="JUPITER",
             exit_reason=exit_reason,
-            exit_reason_label=exit_reason,
+            exit_reason_label=EXIT_REASON_LABELS.get(exit_reason, exit_reason),
         )
 
         wallet_pubkey = settings.WALLET_PUBLIC_KEY or "MOCK_WALLET"
@@ -1066,8 +1083,9 @@ class TradingPipeline:
             error_message=bundle.get("error_message"),
             provider="JITO",
             exit_reason=exit_reason,
-            exit_reason_label=exit_reason,
-            trade_value_usd_net=+abs(sell_amount_human * current_price_usd),
+            exit_reason_label=EXIT_REASON_LABELS.get(exit_reason, exit_reason),
+            gross_value_usd=gross_value_usd,
+            trade_value_usd_net=+abs(gross_value_usd),
         )
 
         if not bundle.get("ok", True):

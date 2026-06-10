@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting backend", env=settings.APP_ENV)
 
     try:
-        repo = await Repositories.create()
+        repo = await Repositories.create(settings.SQLITE_PATH)
     except Exception as e:
         logger.exception("Failed to create DB repo; backend aborting")
         raise

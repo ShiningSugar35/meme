@@ -33,7 +33,12 @@ class Repositories:
         db = await init_db(db_path)
         inst = cls(db)
         inst._owned_db = True
+        inst._db_path = db_path
         return inst
+
+    @property
+    def db_path(self) -> str | None:
+        return self._db_path
 
     async def close(self):
         if getattr(self, "_closed", False):
