@@ -171,6 +171,17 @@ def _safe_json_loads(value: Any, default: Any = None) -> Any:
         return default
 
 
+def _utc_to_beijing(iso_str: Optional[str]) -> str:
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        bj = dt + timedelta(hours=8)
+        return bj.isoformat()
+    except Exception:
+        return iso_str
+
+
 async def ensure_runtime_defaults(repo: Any) -> None:
     """Ensure the required editable SIM strategy group exists.
 
@@ -1624,6 +1635,23 @@ async def export_trade_audit(request: Request):
                 trade_value_raw = float(e.get("trade_value_usd_net") or 0)
                 trade_value_usd_net = round(-abs(trade_value_raw) if side == "BUY" else abs(trade_value_raw), 6)
 
+                sell_price_multiple = None
+                buy_price_usd = entry_audit_json.get("buy_price_usd") or (buys[0].get("price_usd") if buys else None)
+                if side == "SELL" and buy_price_usd and float(buy_price_usd) > 0:
+                    sell_price = float(e.get("price_usd") or 0)
+                    sell_price_multiple = round(sell_price / float(buy_price_usd), 2) if sell_price > 0 else None
+
+                sell_audit = None
+                if side == "SELL":
+                    for ea in exit_audit_list:
+                        if ea.get("sell_time_utc") and created_at_utc:
+                            try:
+                                if abs((datetime.fromisoformat(ea["sell_time_utc"].replace("Z", "+00:00")) - datetime.fromisoformat(created_at_utc.replace("Z", "+00:00"))).total_seconds()) < 5:
+                                    sell_audit = ea
+                                    break
+                            except Exception:
+                                pass
+
                 trade_events_list.append({
                     "side": side,
                     "created_at_utc": created_at_utc,
@@ -1633,7 +1661,9 @@ async def export_trade_audit(request: Request):
                     "trade_value_usd_net": trade_value_usd_net,
                     "exit_reason_code": e.get("exit_reason"),
                     "exit_reason_label": e.get("exit_reason_label"),
+                    "sell_price_multiple": sell_price_multiple,
                     "quote_summary": _safe_json_loads(e.get("quote_json"), {}),
+                    "exit_audit": sell_audit,
                 })
 
             entry_audit_json = {}
@@ -1674,6 +1704,17 @@ async def export_trade_audit(request: Request):
                 entry_audit_json = {}
                 entry_metrics_source = "error_fallback"
 
+            # Match exit audits to sell trade events
+            exit_audit_list: List[Dict[str, Any]] = []
+            for ae in exit_audit_rows:
+                try:
+                    raw = ae.get("audit_json") or {}
+                    if isinstance(raw, str):
+                        raw = json.loads(raw)
+                    exit_audit_list.append(raw if isinstance(raw, dict) else {})
+                except Exception:
+                    exit_audit_list.append({})
+
             item: Dict[str, Any] = {
                 "position_id": pid,
                 "account_type": account_type,
@@ -1682,33 +1723,12 @@ async def export_trade_audit(request: Request):
                 "name": name,
                 "strategy_id": strategy_id,
                 "strategy_name": strategy_name,
-                "entry_audit": {
-                    "buy_count": len(buys),
-                    "first_buy_at": buys[0].get("created_at") if buys else None,
-                    "last_buy_at": buys[-1].get("created_at") if buys else None,
-                    "total_buy_value_usd": round(total_buy_value, 6),
-                    "entry_avg_price_usd": round(sum(float(e.get("price_usd") or 0) for e in buys) / max(len(buys), 1), 6) if buys else None,
-                    "token_type": entry_audit_json.get("token_type") or (token_info.get("latest_type") if token_info else None),
-                    "launchpad": entry_audit_json.get("launchpad") or (token_info.get("launchpad") if token_info else None),
-                    "pool_address": entry_audit_json.get("pool_address") or (token_info.get("pool_address") if token_info else None),
-                },
-                "exit_audit": {
-                    "sell_count": len(sells),
-                    "first_sell_at": sells[0].get("created_at") if sells else None,
-                    "last_sell_at": sells[-1].get("created_at") if sells else None,
-                    "total_sell_value_usd": round(total_sell_value, 6),
-                    "exit_avg_price_usd": round(sum(float(e.get("price_usd") or 0) for e in sells) / max(len(sells), 1), 6) if sells else None,
-                    "exit_reasons": [
-                        {
-                            "reason_code": e.get("exit_reason"),
-                            "reason_label": e.get("exit_reason_label"),
-                        }
-                        for e in sells if e.get("exit_reason")
-                    ],
-                    "sell_vs_buy_ratio": round(float(sells[-1].get("price_usd") or 0) / float(buys[0].get("price_usd") or 1), 2) if buys and sells else None,
-                },
-                "entry_metrics": entry_audit_json,
+                "opened_at_utc": position.get("opened_at"),
+                "opened_at_beijing": _utc_to_beijing(position.get("opened_at")),
+                "closed_at_utc": position.get("closed_at"),
+                "closed_at_beijing": _utc_to_beijing(position.get("closed_at")),
                 "entry_metrics_source": entry_metrics_source,
+                "entry_metrics": entry_audit_json,
                 "smart_money": [
                     {
                         "wallet_address": b.get("wallet_address"),
@@ -1727,11 +1747,33 @@ async def export_trade_audit(request: Request):
             }
 
             if is_losing:
-                item["buy_time"] = buys[0].get("created_at") if buys else None
-                item["buy_price"] = buys[0].get("price_usd") if buys else None
-                item["all_sell_times"] = [s.get("created_at") for s in sells]
-                item["all_sell_prices"] = [s.get("price_usd") for s in sells]
-                item["closure_reason_chain"] = [s.get("exit_reason_label") for s in sells if s.get("exit_reason_label")]
+                item["loss_debug_summary"] = {
+                    "buy_price_usd": entry_audit_json.get("buy_price_usd") or (buys[0].get("price_usd") if buys else None),
+                    "all_sell_prices": [s.get("price_usd") for s in sells],
+                    "all_sell_multiples": [],
+                    "all_sell_reasons": [s.get("exit_reason_label") for s in sells if s.get("exit_reason_label")],
+                    "risk_failed_rules": [],
+                    "dust_events": [],
+                    "smart_money_events": [],
+                    "top3_smart_degen_events": [],
+                }
+                buy_price_audit = entry_audit_json.get("buy_price_usd")
+                for s in sells:
+                    sp = s.get("price_usd")
+                    if buy_price_audit and sp and float(buy_price_audit) > 0:
+                        item["loss_debug_summary"]["all_sell_multiples"].append(round(float(sp) / float(buy_price_audit), 2))
+                    else:
+                        item["loss_debug_summary"]["all_sell_multiples"].append(None)
+                for ea in exit_audit_list:
+                    er = ea.get("exit_reason_code")
+                    if er == "RISK_RECHECK_FAILED":
+                        item["loss_debug_summary"]["risk_failed_rules"] = ea.get("risk_failed_rules") or []
+                    if er == "DUST_FORCE_EXIT":
+                        item["loss_debug_summary"]["dust_events"].append(ea.get("dust_detail") or {})
+                    if er == "SMART_MONEY_SELL":
+                        item["loss_debug_summary"]["smart_money_events"].append(ea.get("smart_money_trigger_detail") or {})
+                    if er == "TOP3_SMART_DEGEN_DUMP":
+                        item["loss_debug_summary"]["top3_smart_degen_events"].append(ea.get("top3_smart_degen_trigger_detail") or {})
 
             if account_type == "LIVE":
                 live_realized += realized_pnl_usd

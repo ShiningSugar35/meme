@@ -164,6 +164,7 @@ class PositionRiskRunner:
         self._legacy_warned: set[int] = set()
         self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
         self._last_risk_fail_details: Dict[int, List[str]] = {}
+        self._last_risk_fail_structured: Dict[int, List[Dict[str, Any]]] = {}
         self._last_scan: Dict[int, datetime] = {}
         self._consecutive_risk_failures: Dict[int, int] = {}
 
@@ -558,10 +559,23 @@ class PositionRiskRunner:
 
         if res.passed:
             self._last_risk_fail_details.pop(pos_id, None)
+            self._last_risk_fail_structured.pop(pos_id, None)
             return True
 
         fail_summary = _risk_detail_summary(getattr(res, "details", []))
         self._last_risk_fail_details[pos_id] = fail_summary
+        structured_fails = []
+        for d in getattr(res, "details", []):
+            dd = getattr(d, "__dict__", d) if not isinstance(d, dict) else d
+            structured_fails.append({
+                "rule": dd.get("name") or dd.get("rule", "?"),
+                "label": dd.get("label", ""),
+                "value": dd.get("value"),
+                "threshold": dd.get("threshold"),
+                "passed": dd.get("passed", False),
+                "reason": dd.get("reason", ""),
+            })
+        self._last_risk_fail_structured[pos_id] = structured_fails
 
         await self.repo.append_system_event(
             "WARN",
@@ -783,10 +797,25 @@ class PositionRiskRunner:
 
         remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
         dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 12.5))
+        dust_detail = None
         if remaining_value_usd < dust_threshold:
             exit_pct = 1.0
             if reason_code != "DUST_FORCE_EXIT":
                 reason_code = "DUST_FORCE_EXIT"
+            dust_detail = {
+                "remaining_value_usd_before": remaining_value_usd,
+                "dust_threshold": dust_threshold,
+                "current_price_usd": current_price_usd,
+                "remaining_token_amount_before": _to_float(position.get("remaining_token_amount"), 0.0) or 0.0,
+            }
+
+        audit_context: Dict[str, Any] = {}
+        if reason_code == "RISK_RECHECK_FAILED":
+            risk_failed_rules = self._last_risk_fail_structured.get(pos_id, [])
+            if risk_failed_rules:
+                audit_context["risk_failed_rules"] = risk_failed_rules
+        if reason_code == "DUST_FORCE_EXIT" and dust_detail:
+            audit_context["dust_detail"] = dust_detail
 
         # One-shot rule idempotency. Full emergency exits are allowed to retry if a prior sell failed.
         if exit_pct < 1.0 and hasattr(self.repo, "has_exit_rule_executed"):
@@ -800,6 +829,7 @@ class PositionRiskRunner:
                 reason_code=reason_code,
                 emergency=emergency,
                 latest=latest,
+                audit_context=audit_context,
             )
             if ok:
                 if hasattr(self.repo, "mark_exit_rule_executed"):
@@ -862,6 +892,7 @@ class PositionRiskRunner:
             current_price_usd=current_price_usd,
             triggered_wallet=triggered_wallet,
             risk_details=risk_details,
+            audit_context=audit_context,
         )
 
     async def _try_pipeline_execute_sell(
@@ -871,11 +902,12 @@ class PositionRiskRunner:
         reason_code: str,
         emergency: bool,
         latest: Dict[str, Any],
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> bool:
         fn = self.trading_pipeline.execute_sell
 
         try:
-            result = await fn(position=position, exit_pct=exit_pct, exit_reason=reason_code)
+            result = await fn(position=position, exit_pct=exit_pct, exit_reason=reason_code, audit_context=audit_context)
         except TypeError as e:
             # Fallback for older signatures
             try:
@@ -909,7 +941,10 @@ class PositionRiskRunner:
         current_price_usd: Optional[float],
         triggered_wallet: Optional[str] = None,
         risk_details: Optional[List[str]] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
     ):
+        from ..trading.audit_builder import build_exit_audit_payload
+
         pos_id = int(position["id"])
         token = position["token_mint"]
         account_type = _account_type(position)
@@ -923,7 +958,7 @@ class PositionRiskRunner:
         exit_reason_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
         trade_value_usd_net = sell_token_amount * (current_price_usd or 0.0)
 
-        await self.repo.append_trade_event(
+        te = await self.repo.append_trade_event(
             f"SELL_SIM:{pos_id}:{reason_code}",
             position_id=pos_id,
             token_mint=token,
@@ -944,6 +979,30 @@ class PositionRiskRunner:
             error_message=(f"Risk details: {', '.join(risk_details)}" if risk_details else None),
             provider="POSITION_RISK_SIM",
         )
+
+        exit_audit = await build_exit_audit_payload(
+            repo=self.repo,
+            position=position,
+            sell_trade_event=te,
+            exit_reason=reason_code,
+            exit_pct=exit_pct,
+            sell_amount_human=sell_token_amount,
+            gross_value_usd=trade_value_usd_net,
+            current_price_usd=current_price_usd,
+            quote=None,
+            **(audit_context or {}),
+        )
+        if hasattr(self.repo, "insert_position_audit"):
+            await self.repo.insert_position_audit(
+                position_id=pos_id,
+                token_mint=token,
+                account_type=account_type,
+                strategy_id=position.get("live_strategy_id"),
+                discovery_event_id=position.get("discovery_event_id"),
+                snapshot_id=None,
+                audit_type="EXIT",
+                audit_json=exit_audit,
+            )
 
         if exit_pct >= 1.0 or new_remaining <= 0:
             await self.repo.close_position(

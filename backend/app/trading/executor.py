@@ -16,6 +16,7 @@ from ..strategy.slippage import (
 from ..logging_config import logger
 from ..providers.base import SwapProvider, ExecutionProvider, RpcProvider, MarketDataProvider
 from ..config import settings, ProviderMode
+from .audit_builder import build_entry_audit_payload, build_exit_audit_payload
 
 
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -621,14 +622,24 @@ class TradingPipeline:
         if discovery_event_id:
             await self.repo.update_discovery_event_status(discovery_event_id, "SIM_POSITION_OPEN")
 
-        entry_snap = None
-        entry_token_info = None
-        try:
-            entry_snap = await self.repo.get_latest_token_metric_snapshot(token_mint)
-            entry_token_info = await self.repo.get_token(token_mint)
-        except Exception:
-            pass
-
+        entry_audit = await build_entry_audit_payload(
+            repo=self.repo,
+            gmgn=self.gmgn,
+            token_mint=token_mint,
+            position_id=pos_id,
+            account_type="SIM",
+            strategy=strategy,
+            discovery_event_id=discovery_event_id,
+            snapshot_id=snapshot_id,
+            buy_trade_event=te,
+            quote=quote,
+            token_amount=token_amount,
+            price_usd=price_usd,
+            price_sol=price_sol,
+            size_usd=size_usd,
+            liquidity_usd=liquidity_usd,
+            sol_side_liquidity=sol_side_liquidity,
+        )
         await self.repo.insert_position_audit(
             position_id=pos_id,
             token_mint=token_mint,
@@ -637,41 +648,7 @@ class TradingPipeline:
             discovery_event_id=discovery_event_id,
             snapshot_id=snapshot_id,
             audit_type="ENTRY",
-            audit_json={
-                "price_usd": price_usd,
-                "size_usd": size_usd,
-                "token_amount": token_amount,
-                "remaining_value_usd": remaining_value_usd,
-                "jupiter_quote_ok": jupiter_price_impact is not None,
-                "strategy_id": strategy.get("id"),
-                "liquidity_usd": liquidity_usd,
-                "sol_side_liquidity": sol_side_liquidity,
-                "entry_price_sol": price_sol,
-                "token_type": entry_token_info.get("latest_type") if entry_token_info else None,
-                "launchpad": entry_token_info.get("launchpad") if entry_token_info else None,
-                "pool_address": entry_token_info.get("pool_address") if entry_token_info else None,
-                "rug_ratio": entry_snap.get("max_rug_ratio") if entry_snap else None,
-                "entrapment_ratio": entry_snap.get("max_entrapment_ratio") if entry_snap else None,
-                "insider_ratio": entry_snap.get("suspected_insider_hold_rate") if entry_snap else None,
-                "bundler_rate": entry_snap.get("max_bundler_rate") if entry_snap else None,
-                "top_10_holder_rate": entry_snap.get("top_10_holder_rate") if entry_snap else None,
-                "fresh_wallet_rate": entry_snap.get("fresh_wallet_rate") if entry_snap else None,
-                "holder_count": entry_snap.get("holder_count") if entry_snap else None,
-                "market_cap": entry_snap.get("market_cap") if entry_snap else None,
-                "is_wash_trading": entry_snap.get("is_wash_trading") if entry_snap else None,
-                "rat_trader_amount_rate": entry_snap.get("rat_trader_amount_rate") if entry_snap else None,
-                "sell_tax": entry_snap.get("sell_tax") if entry_snap else None,
-                "burn_status": entry_snap.get("burn_status") if entry_snap else None,
-                "sniper_count": entry_snap.get("sniper_count") if entry_snap else None,
-                "has_social": entry_snap.get("has_social") if entry_snap else None,
-                "volume_usd_24h": entry_snap.get("volume_usd") if entry_snap else None,
-                "price_change_1h_pct": entry_snap.get("price_change_percent_1h") if entry_snap else None,
-                "swaps_1h": entry_snap.get("swaps_1h") if entry_snap else None,
-                "volume_1h": entry_snap.get("volume_1h") if entry_snap else None,
-                "top1_holder_rate": entry_snap.get("top1_holder_rate") if entry_snap else None,
-                "creator_balance_rate": entry_snap.get("creator_balance_rate") if entry_snap else None,
-                "smart_degen_count": entry_snap.get("smart_degen_count") if entry_snap else None,
-            },
+            audit_json=entry_audit,
         )
 
         return {"account_type": "SIM", "position_id": pos_id, "trade_event_id": te.get("id")}
@@ -900,14 +877,24 @@ class TradingPipeline:
             account_type="LIVE",
         )
 
-        entry_snap = None
-        entry_token_info = None
-        try:
-            entry_snap = await self.repo.get_latest_token_metric_snapshot(token_mint)
-            entry_token_info = await self.repo.get_token(token_mint)
-        except Exception:
-            pass
-
+        entry_audit = await build_entry_audit_payload(
+            repo=self.repo,
+            gmgn=self.gmgn,
+            token_mint=token_mint,
+            position_id=pos_id,
+            account_type="LIVE",
+            strategy=strategy,
+            discovery_event_id=discovery_event_id,
+            snapshot_id=snapshot_id,
+            buy_trade_event=te_confirmed,
+            quote=quote,
+            token_amount=token_amount,
+            price_usd=price_usd,
+            price_sol=price_sol,
+            size_usd=size_usd,
+            liquidity_usd=liquidity_usd,
+            sol_side_liquidity=sol_side_liquidity,
+        )
         await self.repo.insert_position_audit(
             position_id=pos_id,
             token_mint=token_mint,
@@ -916,42 +903,7 @@ class TradingPipeline:
             discovery_event_id=discovery_event_id,
             snapshot_id=snapshot_id,
             audit_type="ENTRY",
-            audit_json={
-                "price_usd": price_usd,
-                "size_usd": size_usd,
-                "token_amount": token_amount,
-                "remaining_value_usd": remaining_value_usd,
-                "jupiter_quote_ok": True,
-                "strategy_id": sid,
-                "quote_error": quote.get("error"),
-                "liquidity_usd": liquidity_usd,
-                "sol_side_liquidity": sol_side_liquidity,
-                "entry_price_sol": price_sol,
-                "token_type": entry_token_info.get("latest_type") if entry_token_info else None,
-                "launchpad": entry_token_info.get("launchpad") if entry_token_info else None,
-                "pool_address": entry_token_info.get("pool_address") if entry_token_info else None,
-                "rug_ratio": entry_snap.get("max_rug_ratio") if entry_snap else None,
-                "entrapment_ratio": entry_snap.get("max_entrapment_ratio") if entry_snap else None,
-                "insider_ratio": entry_snap.get("suspected_insider_hold_rate") if entry_snap else None,
-                "bundler_rate": entry_snap.get("max_bundler_rate") if entry_snap else None,
-                "top_10_holder_rate": entry_snap.get("top_10_holder_rate") if entry_snap else None,
-                "fresh_wallet_rate": entry_snap.get("fresh_wallet_rate") if entry_snap else None,
-                "holder_count": entry_snap.get("holder_count") if entry_snap else None,
-                "market_cap": entry_snap.get("market_cap") if entry_snap else None,
-                "is_wash_trading": entry_snap.get("is_wash_trading") if entry_snap else None,
-                "rat_trader_amount_rate": entry_snap.get("rat_trader_amount_rate") if entry_snap else None,
-                "sell_tax": entry_snap.get("sell_tax") if entry_snap else None,
-                "burn_status": entry_snap.get("burn_status") if entry_snap else None,
-                "sniper_count": entry_snap.get("sniper_count") if entry_snap else None,
-                "has_social": entry_snap.get("has_social") if entry_snap else None,
-                "volume_usd_24h": entry_snap.get("volume_usd") if entry_snap else None,
-                "price_change_1h_pct": entry_snap.get("price_change_percent_1h") if entry_snap else None,
-                "swaps_1h": entry_snap.get("swaps_1h") if entry_snap else None,
-                "volume_1h": entry_snap.get("volume_1h") if entry_snap else None,
-                "top1_holder_rate": entry_snap.get("top1_holder_rate") if entry_snap else None,
-                "creator_balance_rate": entry_snap.get("creator_balance_rate") if entry_snap else None,
-                "smart_degen_count": entry_snap.get("smart_degen_count") if entry_snap else None,
-            },
+            audit_json=entry_audit,
         )
 
         return {"ok": True, "account_type": "LIVE", "position_id": pos_id, "trade_event_id": te_confirmed.get("id")}
@@ -964,6 +916,7 @@ class TradingPipeline:
         position: Dict[str, Any],
         exit_pct: float,
         exit_reason: str,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Paper-sell a SIM position — try Jupiter quote, no Jito send."""
         pos_id = int(position["id"])
@@ -1053,6 +1006,19 @@ class TradingPipeline:
             fee_detail_json=fee_detail,
         )
 
+        exit_audit = await build_exit_audit_payload(
+            repo=self.repo,
+            position=position,
+            sell_trade_event=te,
+            exit_reason=exit_reason,
+            exit_pct=pct,
+            sell_amount_human=sell_amount_human,
+            gross_value_usd=gross_value_usd,
+            current_price_usd=current_price_usd,
+            current_price_sol=current_price_sol,
+            quote=quote,
+            **(audit_context or {}),
+        )
         await self.repo.insert_position_audit(
             position_id=pos_id,
             token_mint=token_mint,
@@ -1061,14 +1027,7 @@ class TradingPipeline:
             discovery_event_id=position.get("discovery_event_id"),
             snapshot_id=None,
             audit_type="EXIT",
-            audit_json={
-                "reason": exit_reason,
-                "exit_pct": pct,
-                "sell_amount_human": sell_amount_human,
-                "gross_value_usd": gross_value_usd,
-                "current_price_usd": current_price_usd,
-                "jupiter_quote_ok": bool(quote and not quote.get("error")),
-            },
+            audit_json=exit_audit,
         )
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -1108,13 +1067,14 @@ class TradingPipeline:
         position: Dict[str, Any],
         exit_pct: float = 1.0,
         exit_reason: str = "EXIT",
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         # ---- SIM/LIVE hard protection ----
         account_type = position.get("account_type", "LIVE" if position.get("is_live") else "SIM")
         is_live = bool(position.get("is_live"))
 
         if not is_live or account_type != "LIVE":
-            return await self._execute_sim_paper_sell(position, exit_pct, exit_reason)
+            return await self._execute_sim_paper_sell(position, exit_pct, exit_reason, audit_context=audit_context)
 
         # ---- LIVE path: safety gate then real execution ----
         gate = self._safety_gate()
@@ -1283,6 +1243,19 @@ class TradingPipeline:
             )
             return {"ok": False, "error": bundle.get("error_code") or "BUNDLE_FAILED", "trade_event_id": te_confirmed.get("id")}
 
+        exit_audit = await build_exit_audit_payload(
+            repo=self.repo,
+            position=position,
+            sell_trade_event=te_confirmed,
+            exit_reason=exit_reason,
+            exit_pct=pct,
+            sell_amount_human=sell_amount_human,
+            gross_value_usd=gross_value_usd,
+            current_price_usd=current_price_usd,
+            current_price_sol=current_price_sol,
+            quote=quote,
+            **(audit_context or {}),
+        )
         await self.repo.insert_position_audit(
             position_id=pos_id,
             token_mint=token_mint,
@@ -1291,15 +1264,7 @@ class TradingPipeline:
             discovery_event_id=position.get("discovery_event_id"),
             snapshot_id=None,
             audit_type="EXIT",
-            audit_json={
-                "reason": exit_reason,
-                "exit_pct": pct,
-                "sell_amount_human": sell_amount_human,
-                "gross_value_usd": gross_value_usd,
-                "current_price_usd": current_price_usd,
-                "jupiter_quote_error": quote.get("error"),
-                "bundle_ok": True,
-            },
+            audit_json=exit_audit,
         )
 
         now_iso = datetime.now(timezone.utc).isoformat()
