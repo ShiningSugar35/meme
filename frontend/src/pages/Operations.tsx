@@ -61,7 +61,7 @@ export default function Operations() {
         <div className="button-row">
           <button disabled={loading} onClick={() => run(api.backupDb, (r) => `已备份本次启动以来数据：${r.export_path}`)}>备份数据库</button>
           <button disabled={loading} onClick={() => run(api.exportTradeAudit, (r) => `已导出交易审计：${r.export_path}`)}>导出交易审计</button>
-          <button disabled={loading} onClick={() => run(api.exportLogs, (r) => `已导出错误日志与策略统计：${r.export_path}，ERROR去重项 ${r.error_count ?? 0} 个。`)}>导出日志</button>
+           <button disabled={loading} onClick={() => run(api.exportLogs, (r) => `已导出日志：${r.export_path}，WARNING ${r.warning_count ?? 0} 条，ERROR ${r.error_count ?? 0} 条，CRITICAL ${r.critical_count ?? 0} 条，去重问题 ${r.issue_count ?? 0} 类。`)}>导出日志</button>
         </div>
         <p className="hint">亏损交易导出包含初筛、二筛、持仓风控、交易事件、GMGN风控原始快照、K线快照和请求日志；日志导出仅保留重点统计。</p>
         {message && <p className="message">{message}</p>}

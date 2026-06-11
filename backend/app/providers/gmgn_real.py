@@ -61,6 +61,14 @@ class GMGNProvider(MarketDataProvider):
                 raise ValueError("GMGN_API_KEY_N or GMGN_CLIENT_ID_N required for live/online_readonly mode")
             logger.info("GMGN Provider initialized in real mode", api_base=self.api_base_url, credential_count=len(self.credentials))
 
+        client_id_mode = str(getattr(settings, "GMGN_CLIENT_ID_MODE", "nonce") or "nonce").lower()
+        if client_id_mode == "static":
+            logger.warning(
+                "GMGN_CLIENT_ID_MODE=static: client_id will be reused across requests, "
+                "which may trigger AUTH_CLIENT_ID_REPLAYED. "
+                "Set GMGN_CLIENT_ID_MODE=nonce in .env to use per-request unique client_id."
+            )
+
     async def _log_request(
         self,
         endpoint: str,
@@ -125,6 +133,19 @@ class GMGNProvider(MarketDataProvider):
         if not creds or slot < 0 or slot >= len(creds):
             return None
         return creds[slot]
+
+    def _build_gmgn_auth_query(self, cred: dict, slot: int) -> dict:
+        mode = str(getattr(settings, "GMGN_CLIENT_ID_MODE", "nonce") or "nonce").lower()
+        ts_ms = int(time.time() * 1000)
+        if mode == "static":
+            raw_client_id = cred.get("client_id") or cred.get("public_key") or ""
+            client_id = raw_client_id or f"meme-{slot}-{ts_ms}-{uuid.uuid4().hex}"
+        else:
+            client_id = f"meme-{slot}-{ts_ms}-{uuid.uuid4().hex}"
+        return {
+            "timestamp": str(ts_ms),
+            "client_id": client_id,
+        }
 
     @staticmethod
     def _compact_response_summary(data: Any) -> Dict[str, Any]:
@@ -202,17 +223,24 @@ class GMGNProvider(MarketDataProvider):
 
             started = time.perf_counter()
 
-            auth_query = {"timestamp": str(int(time.time())), "client_id": cred.get("client_id") or cred.get("public_key") or str(uuid.uuid4())}
+            auth_query = self._build_gmgn_auth_query(cred, slot)
             headers = {"X-APIKEY": api_key, "x-api-key": api_key, "Content-Type": "application/json"}
             request_params = {**cleaned, **auth_query}
             logged_request = dict(request_params)
+            # Mask sensitive fields before logging
+            for k in ("api_key", "client_id", "x-api-key"):
+                if k in logged_request:
+                    logged_request[k] = "***"
             logged_request["credential_slot"] = slot
             cred_meta = self.rate_limiter.slots.get(slot)
             logged_request["credential_role"] = cred_meta.role if cred_meta else "unknown"
+            logged_request["credential_index"] = slot
             if credential_slot is not None:
                 logged_request["credential_role"] += " (explicit)"
             logged_request["endpoint_weight"] = _endpoint_weight(path)
-            logged_request["api_key"] = "***"
+            mode = str(getattr(settings, "GMGN_CLIENT_ID_MODE", "nonce") or "nonce").lower()
+            logged_request["auth_client_id_mode"] = mode
+            logged_request["client_id_prefix"] = auth_query.get("client_id", "")[:18]
             tag = request_params.get("tag") or (json_body or {}).get("tag") or (cleaned or {}).get("tag")
             if tag:
                 logged_request["feature_stage"] = "smart_degen_filter" if str(tag) == "smart_degen" else str(tag)
@@ -250,12 +278,23 @@ class GMGNProvider(MarketDataProvider):
 
                 last_status = resp.status_code
                 if resp.status_code >= 400:
-                    if resp.status_code == 429 and slot < 999:
+                    gmgn_error = ""
+                    if isinstance(data, dict):
+                        gmgn_error = str(data.get("error") or data.get("code") or "")
+
+                    if resp.status_code in (401, 403) and gmgn_error == "AUTH_CLIENT_ID_REPLAYED":
+                        error_code = "AUTH_CLIENT_ID_REPLAYED"
+                        kind = "auth"
+                        retryable = True
+                        logged_request["gmgn_error"] = gmgn_error
+                    elif resp.status_code == 429 and slot < 999:
                         cooldown_s = await self.rate_limiter.report_429(slot, path, headers=dict(resp.headers), body=data if isinstance(data, dict) else None)
                         logged_request["rate_limit_reset"] = True
                         logged_request["cooldown_until"] = cooldown_s
                         retryable = True
+                        error_code = "HTTP_ERROR"
                     else:
+                        error_code = "HTTP_ERROR"
                         retryable = self._retryable_status(resp.status_code)
                         if resp.status_code in (401, 403):
                             kind = "auth"
@@ -265,8 +304,13 @@ class GMGNProvider(MarketDataProvider):
                             kind = "network"
                         else:
                             kind = "http4xx"
+                        if gmgn_error:
+                            logged_request["gmgn_error"] = gmgn_error
+
+                    if resp.status_code != 429 or slot >= 999:
                         await self.rate_limiter.report_failure(slot, endpoint=path, kind=kind, status_code=resp.status_code)
-                    await self._log_request(path, False, logged_request, self._compact_response_summary(data), resp.status_code, latency, "HTTP_ERROR", str(data)[:500], method)
+
+                    await self._log_request(path, False, logged_request, self._compact_response_summary(data), resp.status_code, latency, error_code, str(data)[:500], method)
                     err = GMGNAPIError(f"GMGN HTTP {resp.status_code}: {str(data)[:500]}", status_code=resp.status_code, path=path, method=method, retryable=retryable)
                     last_exc = err
                     if credential_slot is not None:

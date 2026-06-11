@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
@@ -1866,81 +1867,226 @@ async def export_logs(request: Request):
     repo, owned = await _get_repo(request)
     try:
         LOG_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-        errors = await _fetch_all(
-            repo,
-            """
-            SELECT level, category, message, account_type,
-                   MIN(created_at) AS first_seen_at,
-                   MAX(created_at) AS last_seen_at,
-                   COUNT(*) AS count
-            FROM system_events
-            WHERE level = 'ERROR'
-            GROUP BY level, category, message, account_type
-            ORDER BY last_seen_at DESC
-            LIMIT 500
-            """,
-        )
-        all_strategies = await repo.list_strategy_groups(include_disabled=True) if hasattr(repo, "list_strategy_groups") else []
-        enabled_strategies = [s for s in all_strategies if int(s.get("enabled", 1))]
-        summary = await _positions_summary(repo)
+
         session_started = (await _runtime_settings(repo)).get("session_started_at")
+        beijing_tz = timezone(timedelta(hours=8))
+        exported_beijing = datetime.now(beijing_tz).isoformat()
 
-        # per-strategy screening stats (current session only)
-        screening_summary = await _screening_summary(repo, enabled_strategies, since=session_started)
+        # ── system_events: WARNING/WARN/ERROR/CRITICAL ──
+        dup_issues, warning_count, error_count, critical_count = await _deduped_issues(repo, since=None)
 
-        # raw sample: one risk-passed-price-failed pool per enabled strategy
-        raw_samples = await _raw_samples(repo, enabled_strategies)
+        # ── provider_requests: failed (ok=0) ──
+        provider_failures, provider_summary = await _deduped_provider_failures(repo, since=None)
+        gmgn_auth_replay_count = provider_summary.get("auth_replay_count", 0)
+        gmgn_401_count = provider_summary.get("auth_401_count", 0)
+        gmgn_429_count = provider_summary.get("rate_429_count", 0)
+        provider_failed_total = provider_summary.get("total_failed", 0)
+
+        # ── raw system_events for detail ──
+        raw_events = await _fetch_all(repo,
+            """SELECT level, category, message, context_json, account_type, created_at
+               FROM system_events
+               WHERE level IN ('WARNING','WARN','ERROR','CRITICAL')
+               ORDER BY id DESC LIMIT 200""")
+
+        raw_provider_requests = await _fetch_all(repo,
+            """SELECT provider, endpoint, method, status_code, ok, error_code, error_summary,
+                      request_summary_json, response_summary_json, created_at
+               FROM provider_requests
+               WHERE ok = 0
+               ORDER BY id DESC LIMIT 500""")
 
         payload = {
-            "export_type": "runtime_error_logs",
-            "exported_at": utc_now_iso(),
-            "session_started_at": session_started,
-            "errors_deduped": errors,
-            "positions_summary": summary,
-            "strategy_groups": all_strategies,
-            "screening_summary": screening_summary,
-            "gmgn_raw_samples_by_strategy": raw_samples,
-            "notes": [
-                "screening_summary: per-strategy risk_filter & price_filter pass/fail counts scoped to current session (since session_started_at).",
-                "gmgn_raw_samples_by_strategy: one pool per strategy that passed risk_filter but did not pass price_filter (most recent).",
+            "export_type": "runtime_warning_error_logs",
+            "timezone": "Asia/Shanghai",
+            "session_started_at_utc": session_started,
+            "exported_at_utc": exported_beijing,
+            "summary": {
+                "warning_count": warning_count,
+                "error_count": error_count,
+                "critical_count": critical_count,
+                "deduped_issue_count": len(dup_issues),
+                "provider_failed_request_count": provider_failed_total,
+                "gmgn_auth_replay_count": gmgn_auth_replay_count,
+                "gmgn_401_count": gmgn_401_count,
+                "gmgn_429_count": gmgn_429_count,
+            },
+            "issues_deduped": dup_issues,
+            "provider_failures_deduped": provider_failures,
+            "raw_system_events": [
+                {"level": r.get("level"), "category": r.get("category"), "message": r.get("message"),
+                 "created_at": r.get("created_at"), "context": _safe_json_loads(r.get("context_json"), {})}
+                for r in raw_events
+            ],
+            "raw_provider_failures": [
+                {"provider": r.get("provider"), "endpoint": r.get("endpoint"), "method": r.get("method"),
+                 "status_code": r.get("status_code"), "error_code": r.get("error_code"),
+                 "error_summary": r.get("error_summary"), "created_at": r.get("created_at"),
+                 "request": _safe_json_loads(r.get("request_summary_json"), {}),
+                 "response": _safe_json_loads(r.get("response_summary_json"), {})}
+                for r in raw_provider_requests
             ],
         }
-        out = LOG_EXPORT_DIR / f"runtime_error_logs_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+        out = LOG_EXPORT_DIR / f"runtime_logs_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
         text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         try:
             import asyncio as _asyncio
             await _asyncio.to_thread(out.write_text, text, encoding="utf-8")
         except Exception:
             out.write_text(text, encoding="utf-8")
-        return {"ok": True, "export_path": str(out), "path": str(out), "error_count": len(errors)}
+        return {
+            "ok": True, "export_path": str(out), "path": str(out),
+            "warning_count": warning_count, "error_count": error_count, "critical_count": critical_count,
+            "issue_count": len(dup_issues),
+        }
     except Exception as e:
         logger.exception("export-logs failed")
-        return {"ok": False, "error": str(e), "error_count": 0, "export_path": ""}
+        return {"ok": False, "error": str(e), "error_count": 0, "critical_count": 0, "export_path": ""}
     finally:
         if owned:
             await repo.close()
 
 
-async def _deduped_errors(repo: Repositories, limit: int = 200) -> List[Dict[str, Any]]:
-    if not await _table_exists(repo, "system_events"):
-        return []
-    rows = await _fetch_all(
-        repo,
-        """
-        SELECT level, category, message, context_json, account_type,
-               MIN(created_at) AS first_seen_at,
-               MAX(created_at) AS last_seen_at,
-               COUNT(*) AS count
-        FROM system_events
-        WHERE level = 'ERROR'
-        GROUP BY level, category, message, context_json, account_type
-        ORDER BY last_seen_at DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
+async def _deduped_issues(repo: Repositories, since: Optional[str] = None) -> tuple:
+    """Returns (issues_deduped, warning_count, error_count, critical_count)."""
+    rows = await _fetch_all(repo,
+        """SELECT level, category, message, context_json, account_type,
+                  MIN(created_at) AS first_seen_at,
+                  MAX(created_at) AS last_seen_at,
+                  COUNT(*) AS count
+           FROM system_events
+           WHERE level IN ('WARNING','WARN','ERROR','CRITICAL')
+             AND (? IS NULL OR created_at >= ?)
+           GROUP BY level, category, message, context_json, account_type
+           ORDER BY last_seen_at DESC LIMIT 500""",
+        (since, since) if since else (None, None))
+
+    issues = []
+    warning_count = 0
+    error_count = 0
+    critical_count = 0
+    seen_keys: Dict[str, int] = {}
+
     for row in rows:
-        row["context"] = _safe_json_loads(row.get("context_json"), {})
+        level = str(row.get("level") or "").upper()
+        if level == "WARNING" or level == "WARN":
+            warning_count += int(row.get("count") or 0)
+        elif level == "ERROR":
+            error_count += int(row.get("count") or 0)
+        elif level == "CRITICAL":
+            critical_count += int(row.get("count") or 0)
+
+        ctx = _safe_json_loads(row.get("context_json"), {})
+        msg = str(row.get("message") or "")
+        norm_msg = re.sub(r"slot=\d+", "slot=*", msg)
+        norm_msg = re.sub(r"All \d+ discovery", "All N discovery", norm_msg)
+
+        status_code = ctx.get("status_code")
+        gmgn_error = ctx.get("gmgn_error")
+        trench_type = ctx.get("trench_type") or ctx.get("type")
+        endpoint = ctx.get("endpoint") or ctx.get("path")
+
+        dedupe_key = f"{level}|{row.get('category','')}|{norm_msg}|{status_code}|{gmgn_error}|{trench_type}|{endpoint}"
+        if dedupe_key in seen_keys:
+            idx = seen_keys[dedupe_key]
+            issues[idx]["count"] += int(row.get("count") or 0)
+            continue
+        seen_keys[dedupe_key] = len(issues)
+
+        suggested = _suggest_action(level, msg, status_code, gmgn_error)
+        issues.append({
+            "level": level,
+            "category": row.get("category"),
+            "message": msg[:500],
+            "count": int(row.get("count") or 0),
+            "first_seen_at": row.get("first_seen_at"),
+            "last_seen_at": row.get("last_seen_at"),
+            "status_code": status_code,
+            "gmgn_error": gmgn_error,
+            "trench_type": trench_type,
+            "endpoint": endpoint,
+            "suggested_action": suggested,
+        })
+
+    return issues, warning_count, error_count, critical_count
+
+
+def _suggest_action(level: str, message: str, status_code: Any, gmgn_error: Any) -> str:
+    gmgn_error_str = str(gmgn_error or "").lower()
+    msg_lower = message.lower()
+
+    if "auth_client_id_replayed" in gmgn_error_str or "client_id replayed" in msg_lower:
+        return "client_id 被 GMGN 判定重复。使用每请求唯一 client_id，不要复用 GMGN_CLIENT_ID_N / public_key。"
+    if (status_code in (401, 403, "401", "403")) or (gmgn_error_str and "401" in gmgn_error_str):
+        return "检查 API key、IPv4、GMGN 账号权限。"
+    if status_code in (429, "429") or "rate limit" in msg_lower:
+        return "检查 X-RateLimit-Reset / reset_at，暂停重试至 reset 时间。"
+    if "local rate limiter" in msg_lower or "slot_cooldown" in msg_lower:
+        return "本地 rate limiter 拦截，检查 slot 冷却和 endpoint weight。"
+    if status_code in (500, 502, 503, 504, "500", "502", "503", "504") or "timeout" in msg_lower:
+        return "GMGN 或网络异常，可稍后重试。"
+    return ""
+
+
+async def _deduped_provider_failures(repo: Repositories, since: Optional[str] = None) -> tuple:
+    """Returns (failures_deduped, summary_counts)."""
+    rows = await _fetch_all(repo,
+        """SELECT provider, endpoint, method, status_code, ok, error_code, error_summary,
+                  request_summary_json, response_summary_json, created_at
+           FROM provider_requests
+           WHERE ok = 0 AND (? IS NULL OR created_at >= ?)
+           ORDER BY id DESC LIMIT 1000""",
+        (since, since) if since else (None, None))
+
+    failures = []
+    summary = {"auth_replay_count": 0, "auth_401_count": 0, "rate_429_count": 0, "total_failed": len(rows)}
+    seen_keys: Dict[str, int] = {}
+
+    for row in rows:
+        status_code = row.get("status_code")
+        error_code = str(row.get("error_code") or "")
+        endpoint = str(row.get("endpoint") or "")
+        error_summary_str = str(row.get("error_summary") or "")
+
+        if "AUTH_CLIENT_ID_REPLAYED" in error_code:
+            summary["auth_replay_count"] += 1
+        if status_code in (401, 403):
+            summary["auth_401_count"] += 1
+        if status_code == 429:
+            summary["rate_429_count"] += 1
+
+        gmgn_error = ""
+        if "AUTH_CLIENT_ID_REPLAYED" in error_code or "client_id replayed" in error_summary_str.lower():
+            gmgn_error = "AUTH_CLIENT_ID_REPLAYED"
+
+        req = _safe_json_loads(row.get("request_summary_json"), {})
+        credential_slot = req.get("credential_slot")
+
+        dedupe_key = f"{row.get('provider','')}|{endpoint}|{status_code}|{error_code}|{gmgn_error}|{error_summary_str[:80]}"
+        if dedupe_key in seen_keys:
+            idx = seen_keys[dedupe_key]
+            failures[idx]["count"] += 1
+            creds = failures[idx].get("credential_slots") or []
+            if isinstance(credential_slot, int) and credential_slot not in creds:
+                creds.append(credential_slot)
+                failures[idx]["credential_slots"] = creds
+            continue
+        seen_keys[dedupe_key] = len(failures)
+
+        suggested = _suggest_action("", str(row.get("error_summary") or "") or error_code, status_code, gmgn_error)
+        failures.append({
+            "provider": row.get("provider"),
+            "endpoint": endpoint,
+            "method": row.get("method"),
+            "status_code": status_code,
+            "error_code": error_code,
+            "count": 1,
+            "latest_error": error_summary_str[:300],
+            "credential_slots": [credential_slot] if isinstance(credential_slot, int) else [],
+            "suggested_action": suggested,
+        })
+
+    return failures, summary
     return rows
 
 

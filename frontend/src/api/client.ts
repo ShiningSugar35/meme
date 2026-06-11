@@ -409,6 +409,6 @@ export const api = {
   backupDb: () => apiFetch<{ ok: boolean; export_path: string }>('/api/runtime/emergency/backup-db', { method: 'POST' }),
   exportLosing: () => apiFetch<{ ok: boolean; export_path: string; losing_count: number }>('/api/runtime/emergency/export-losing', { method: 'POST' }),
   exportTradeAudit: () => apiFetch<{ ok: boolean; export_path: string; data: Record<string, unknown> }>('/api/runtime/emergency/export-trade-audit', { method: 'POST' }),
-  exportLogs: () => apiFetch<{ ok: boolean; export_path: string; error_count: number }>('/api/runtime/emergency/export-logs', { method: 'POST' }),
+  exportLogs: () => apiFetch<{ ok: boolean; export_path: string; path?: string; warning_count: number; error_count: number; critical_count: number; issue_count: number }>('/api/runtime/emergency/export-logs', { method: 'POST' }),
   getFilterStats: () => apiFetch<FilterStats>('/api/runtime/filter-stats'),
 };

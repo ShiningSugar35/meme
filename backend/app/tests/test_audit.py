@@ -1,5 +1,7 @@
 import json
+import os
 import pytest
+import tempfile
 from datetime import datetime, timezone
 
 from ..trading.audit_builder import (
@@ -941,5 +943,180 @@ class TestAccountingUnit:
                 summary = data.get("accounting_status_summary", {})
                 assert summary.get("pending_rpc_backfill_count", 0) >= 1, \
                     f"Expected >=1 pending, got {summary}"
+        finally:
+            settings.SQLITE_PATH = original_path
+
+    def test_gmgn_client_id_nonce_unique(self):
+        from ..providers.gmgn_real import GMGNProvider
+        from ..config import ProviderMode
+        import tempfile
+        import os
+
+        db_path = tempfile.mktemp(suffix=".sqlite3")
+        try:
+            p = GMGNProvider.__new__(GMGNProvider)
+            p.repo = None
+            p.mode = ProviderMode.MOCK
+            p.rate_limiter = None
+
+            cred = {"api_key": "test_key", "client_id": "my_static_id", "public_key": "my_pubkey"}
+            ids = set()
+            for _ in range(10):
+                aq = p._build_gmgn_auth_query(cred, 0)
+                client_id = aq["client_id"]
+                ids.add(client_id)
+                assert client_id != "my_static_id", f"client_id should not equal cred client_id, got {client_id}"
+                assert client_id != "my_pubkey", f"client_id should not equal cred public_key, got {client_id}"
+
+            assert len(ids) == 10, f"Expected 10 unique client_ids, got {len(ids)}"
+        finally:
+            try:
+                os.unlink(db_path)
+            except OSError:
+                pass
+
+    def test_gmgn_auth_replay_error_detected(self):
+        from ..providers.gmgn_real import GMGNAPIError
+        err = GMGNAPIError(
+            "GMGN HTTP 401: {'code': 401, 'error': 'AUTH_CLIENT_ID_REPLAYED', 'message': 'client_id replayed'}",
+            status_code=401, path="/v1/trenches", method="POST", retryable=True,
+        )
+        assert err.status_code == 401
+        assert err.retryable is True
+        assert "AUTH_CLIENT_ID_REPLAYED" in str(err)
+
+    @pytest.mark.asyncio
+    async def test_discovery_try_fetch_group_writes_system_event(self, pipeline_factory):
+        from ..providers.gmgn_real import GMGNAPIError
+        from ..runners.discovery_runner import DiscoveryRunner
+        from ..config import ProviderMode
+
+        pipeline, mock = pipeline_factory()
+        repo = pipeline.repo
+        gmgn = pipeline.gmgn
+
+        runner = DiscoveryRunner.__new__(DiscoveryRunner)
+        runner.repo = repo
+        runner.gmgn = gmgn
+        runner.pipeline = pipeline
+        runner._run_lock = type('_Lock', (), {'__aenter__': lambda s: s, '__aexit__': lambda s, *a: None})()
+        runner._feature_slot_cursor = 0
+        runner._last_discovery_error_event_at = {}
+
+        original_fetch = gmgn.fetch_trenches
+        async def _failing_fetch(*args, **kwargs):
+            raise GMGNAPIError(
+                "GMGN HTTP 401: client_id replayed",
+                status_code=401, path="/v1/trenches", retryable=True,
+            )
+
+        try:
+            gmgn.fetch_trenches = _failing_fetch
+            items, gres = await runner._try_fetch_group(
+                "test_group", ["Pump.fun"], 0, "discovery",
+                custom_params={"type": ["new_creation"]},
+            )
+            assert items is None
+            assert not gres["ok"]
+
+            async with repo.db.execute("SELECT * FROM system_events WHERE category = ? AND message LIKE ?", ("DISCOVERY", "%trenches fetch failed%")) as cur:
+                events = [dict(zip([col[0] for col in cur.description], row)) for row in await cur.fetchall()]
+            assert len(events) >= 1, f"Expected system_event for failed trench fetch, got {len(events)}"
+        finally:
+            gmgn.fetch_trenches = original_fetch
+
+    @pytest.mark.asyncio
+    async def test_export_logs_includes_warning_and_critical(self, pipeline_factory):
+        from fastapi.testclient import TestClient
+        from ..main import app
+
+        pipeline, _ = pipeline_factory()
+        repo = pipeline.repo
+
+        await repo.append_system_event("WARNING", "DISCOVERY", "test warning msg", "{}", account_type="SIM")
+        await repo.append_system_event("CRITICAL", "DISCOVERY", "test critical msg", "{}", account_type="SIM")
+        await repo.append_system_event("ERROR", "API", "test error msg", "{}", account_type="SIM")
+
+        original_path = settings.SQLITE_PATH
+        settings.SQLITE_PATH = repo.db_path
+        try:
+            with TestClient(app) as client:
+                r = client.post("/api/runtime/emergency/export-logs")
+                assert r.status_code == 200
+                data = r.json()
+                assert data["ok"] is True
+                assert data.get("warning_count", 0) >= 1, f"Expected >=1 warning, got {data}"
+                assert data.get("critical_count", 0) >= 1, f"Expected >=1 critical, got {data}"
+                assert data.get("error_count", 0) >= 1, f"Expected >=1 error, got {data}"
+                assert data.get("issue_count", 0) >= 3, f"Expected >=3 issues, got {data}"
+        finally:
+            settings.SQLITE_PATH = original_path
+
+    @pytest.mark.asyncio
+    async def test_export_logs_includes_provider_failures(self, pipeline_factory):
+        from fastapi.testclient import TestClient
+        from ..main import app
+
+        pipeline, _ = pipeline_factory()
+        repo = pipeline.repo
+
+        await repo.append_provider_request(
+            "GMGN", "/v1/trenches", "POST", 401, 50, False,
+            "AUTH_CLIENT_ID_REPLAYED", "client_id replayed",
+            json.dumps({"credential_slot": 0}),
+            json.dumps({"code": 401, "error": "AUTH_CLIENT_ID_REPLAYED"}),
+        )
+
+        original_path = settings.SQLITE_PATH
+        settings.SQLITE_PATH = repo.db_path
+        try:
+            with TestClient(app) as client:
+                r = client.post("/api/runtime/emergency/export-logs")
+                assert r.status_code == 200
+                data = r.json()
+                assert data["ok"] is True
+
+                # Read the exported log file to check provider_failures_deduped
+                export_path = data.get("export_path") or data.get("path")
+                assert export_path, "export_path missing"
+                import json as _json
+                raw = _json.loads(open(export_path, "r", encoding="utf-8").read())
+                providers = raw.get("provider_failures_deduped", [])
+                assert len(providers) >= 1, f"Expected provider failures in export file, got {raw}"
+                found = False
+                for pf in providers:
+                    if pf.get("error_code") == "AUTH_CLIENT_ID_REPLAYED":
+                        found = True
+                        assert "client_id" in (pf.get("suggested_action") or "").lower(), \
+                            f"Expected client_id suggestion, got {pf.get('suggested_action')}"
+                assert found, f"Expected AUTH_CLIENT_ID_REPLAYED in provider_failures_deduped, got {providers}"
+        finally:
+            settings.SQLITE_PATH = original_path
+
+    @pytest.mark.asyncio
+    async def test_export_logs_no_longer_returns_zero_for_critical_only(self, pipeline_factory):
+        from fastapi.testclient import TestClient
+        from ..main import app
+
+        pipeline, _ = pipeline_factory()
+        repo = pipeline.repo
+
+        await repo.append_system_event("CRITICAL", "DISCOVERY", "critical only test", "{}", account_type="SIM")
+
+        original_path = settings.SQLITE_PATH
+        settings.SQLITE_PATH = repo.db_path
+        try:
+            with TestClient(app) as client:
+                r = client.post("/api/runtime/emergency/export-logs")
+                assert r.status_code == 200
+                data = r.json()
+                assert data["ok"] is True
+                assert data.get("error_count", 0) == 0, \
+                    f"error_count should be 0 for CRITICAL-only, got {data.get('error_count')}"
+                assert data.get("critical_count", 0) >= 1, \
+                    f"critical_count should be >=1, got {data.get('critical_count')}"
+                assert data.get("issue_count", 0) >= 1, \
+                    f"issue_count should be >=1, got {data.get('issue_count')}"
+                assert data.get("export_path"), "export_path should not be empty"
         finally:
             settings.SQLITE_PATH = original_path

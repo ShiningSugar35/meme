@@ -160,6 +160,7 @@ class DiscoveryRunner:
         self.pipeline = TradingPipeline(repo, gmgn, jupiter, jito, rpc)
         self._run_lock = asyncio.Lock()
         self._feature_slot_cursor = 0
+        self._last_discovery_error_event_at: Dict[tuple, float] = {}
 
     @staticmethod
     def _unique_x_values(strategy_groups: List[dict]) -> List[float]:
@@ -483,6 +484,38 @@ class DiscoveryRunner:
             gres["status_code"] = getattr(e, 'status_code', None)
             gres["latency_ms"] = int((time.perf_counter() - t0) * 1000)
             logger.warning(f"trenches fetch failed for {group_name} slot={request_slot}: {e}")
+
+            event_key = (group_name, request_slot, gres.get("status_code"), str(e)[:50])
+            now = time.time()
+            last_at = self._last_discovery_error_event_at.get(event_key, 0)
+            if now - last_at <= 60:
+                return None, gres
+            self._last_discovery_error_event_at[event_key] = now
+
+            try:
+                gmgn_error = ""
+                err_msg = str(e)
+                if "AUTH_CLIENT_ID_REPLAYED" in err_msg:
+                    gmgn_error = "AUTH_CLIENT_ID_REPLAYED"
+                await self.repo.append_system_event(
+                    "WARNING",
+                    "DISCOVERY",
+                    f"trenches fetch failed for {group_name} slot={request_slot}",
+                    _json_dumps({
+                        "group_name": group_name,
+                        "slot": request_slot,
+                        "role": role,
+                        "status_code": gres.get("status_code"),
+                        "error": str(e)[:500],
+                        "gmgn_error": gmgn_error,
+                        "type": params.get("type") or params.get("types"),
+                        "platforms_count": len(platforms or []),
+                    }),
+                    account_type="SIM",
+                )
+            except Exception:
+                pass
+
             return None, gres
 
     async def _fetch_trenches_by_type(self, custom_params: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
