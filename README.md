@@ -1,17 +1,24 @@
 # Solana Meme Trading Bot
 
-自动化 Solana meme 代币发现、二筛、模拟/实盘执行与持仓风控系统。项目由 FastAPI 后端和 React + Vite 前端组成，当前主链路围绕 GMGN OpenAPI 的 Trenches、Token Info/Security/Pool、K-line、Top Holders 数据构建，并通过 Jupiter/Jito/RPC Provider 承接交易执行与链上状态确认。
+一个面向 Solana meme token 的自动化发现、筛选、模拟/实盘交易、持仓风控和交易审计系统。项目由 FastAPI 后端、SQLite 数据库、GMGN/Jupiter/Jito/RPC Provider、React + Vite 前端组成。
 
-当前实现目标不是“无脑追新币”，而是将新池发现、风控字段校验、K 线二筛、仓位 sizing、分层止盈止损、风险重扫和前端运行态控制打通成一个可观测、可回滚、可逐步实盘化的工程闭环。
+当前主链路以 GMGN OpenAPI 为行情与风控数据源，使用 Jupiter Quote/Swap 进行模拟成交与实盘路由估值，使用 Jito/RPC 承接实盘广播、tip、链上确认与交易回填。
 
-**安全规则：**
+> 重要：数据库存储时间统一使用 UTC；前端展示时间统一格式化为北京时间（Asia/Shanghai）。
 
-- 默认优先使用模拟或只读联调；开启真实广播前必须人工复核 `.env`、钱包、Provider Mode 和前端运行态。
-- 禁止提交 `.env` 到仓库；`.env` 应始终保留在 `.gitignore` 中。
-- 日志、Provider 请求记录和前端展示不得输出完整 API key、private key、raw transaction。
+---
+
+## 安全规则
+
+- 默认优先使用 `online_readonly + SIM` 跑真实行情与模拟交易。
+- 开启真实广播前必须人工复核 `.env`、钱包、Provider Mode、Jito、RPC、安全门和前端运行态。
+- 禁止提交 `.env`、SQLite 数据库、日志导出、API key、私钥、raw transaction。
+- `PROVIDER_MODE=live` 只代表允许使用真实 Provider；是否真实开仓仍需经过后端安全门与前端运行态开关。
 - Jito 不可用时严禁自动 fallback 到普通 RPC 广播。
-- `PROVIDER_MODE=live` 只代表允许使用真实 Provider；是否真实开仓仍需经过后端安全门和前端运行态开关。
-- 建议先跑通“真实行情 + 模拟交易”，确认发现、二筛、建仓、撤仓和风控闭环稳定后，再逐步打开实盘入口。
+- 真实交易的净收益以链上 RPC `getTransaction` 回填的 wallet delta 为最终口径；回填前使用 Jupiter quote 估算口径并标记 `PENDING_RPC_BACKFILL`。
+- 模拟交易使用 Jupiter quote 的保守口径，优先使用 `otherAmountThreshold`，并记录 sell tax、费用上界和 fallback 来源。
+
+---
 
 ## 快速开始
 
@@ -23,95 +30,69 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2. 配置文件
+### 2. 配置 `.env`
 
-参考以下结构：
+示例结构如下。请不要把真实 `.env` 提交到仓库。
 
-```
-# Environment Configuration for Solana Meme Trading Bot
+```env
 APP_ENV=development
 SQLITE_PATH=./data/trading_bot.sqlite3
-PROVIDER_MODE=live
-# CRITICAL SAFETY SETTINGS - Always review before enabling live trading
-# DRY_RUN=true blocks all real transaction broadcasts (default: true)
-DRY_RUN=false
 
+# provider mode: mock | online_readonly | live
+PROVIDER_MODE=online_readonly
+DRY_RUN=true
 SIMULATION_ENABLED=true
 
-# GMGN API Configuration (Market Data Provider)
+# GMGN
 GMGN_API_BASE_URL=https://openapi.gmgn.ai
-
-# trenches
 GMGN_TRENCHES_PATH=/v1/trenches
 GMGN_TRENCHES_METHOD=POST
-GMGN_TRENCHES_TYPES=new_creation
+GMGN_TRENCHES_TYPES=new_creation,near_completion
 GMGN_TRENCHES_PLATFORMS=Pump.fun,Moonshot,moonshot_app,letsbonk,memoo,token_mill,jup_studio,bags,believe,heaven
 
-# token / kline
 GMGN_TOKEN_INFO_PATH=/v1/token/info
 GMGN_TOKEN_SECURITY_PATH=/v1/token/security
 GMGN_TOKEN_POOL_INFO_PATH=/v1/token/pool_info
 GMGN_KLINE_PATH=/v1/market/token_kline
 GMGN_TOKEN_HOLDERS_PATH=/v1/market/token_top_holders
 
-# GMGN 认证：不同 OpenAPI 部署可能要求 api_key 或 client_id。
-# 按顺序用逗号填写。GMGN_CLIENT_ID 可不填；未填时默认使用同位置 GMGN_PUBLIC_KEY 作为 client_id。
-GMGN_API_KEY=key1,key2,key3,key4,key5,key6,key7,key8,key9,key10,key11,key12
-GMGN_PUBLIC_KEY=pub1,pub2,pub3,pub4,pub5,pub6,pub7,pub8,pub9,pub10,pub11,pub12
-GMGN_CLIENT_ID=
-GMGN_PRIVATE_KEY=priv1,priv2,priv3,priv4,priv5,priv6,priv7,priv8,priv9,priv10,priv11,priv12
+# 推荐使用编号 key；系统也兼容 CSV 样式
+GMGN_API_KEY_1=
+GMGN_API_KEY_2=
+GMGN_API_KEY_3=
+GMGN_API_KEY_4=
+GMGN_CLIENT_ID_1=
+GMGN_CLIENT_ID_2=
+GMGN_CLIENT_ID_3=
+GMGN_CLIENT_ID_4=
 
-# API slot 分配：系统按 5:1 动态拆分拉池和持仓轮询 API，且至少保留 1 个 API 给持仓轮询。
-# 例如 12 个 GMGN API 时，slot 1-2 专供模拟盘/实盘持仓价格与风控轮询，slot 3-12 用于 Trenches 拉池。
-# Trenches 年龄窗口由 enumerate(discovery_slots) 的序数决定：
-#   ordinal 0 → 60m-120m, ordinal 1 → 120m-180m, ordinal 2 → 180m-240m, ...
-#
-# 速率限制（GMGN leaky-bucket: rate=20/s, capacity=20）
-# GMGN_RATE_LIMIT_REFILL_WEIGHT_PER_SECOND=20.0
-# GMGN_RATE_LIMIT_BUCKET_CAPACITY=20.0
-# GMGN_RATE_LIMIT_BUCKET_WAIT_MAX_SECONDS=5.0
-# GMGN_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS=300
-#
-# 阶段间冷却与并发控制
-# GMGN_POST_TRENCHES_STAGE_DELAY_SECONDS=2.0
-# GMGN_FEATURE_CALL_DELAY_SECONDS=0.15
-# GMGN_TRENCHES_CONCURRENCY=2
-# GMGN_FEATURE_CONCURRENCY=3
-
-# Jupiter API Configuration (Swap Provider)
+# Jupiter
 JUPITER_API_BASE_URL=https://api.jup.ag/swap/v1
 JUPITER_API_KEY_1=
-JUPITER_API_KEY_2=
-JUPITER_API_KEY_3=
 
-# Ankr RPC Configuration
-ANKR_API_KEY_1=
-ANKR_API_KEY_2=
+# RPC
+SOLANA_RPC_URL=
+SOLANA_RPC_HTTP_URLS=
 
-#Alchemy RPC
-ALCHEMY_API_KEY_1=key1
-ALCHEMY_API_KEY_2=key2
-ALCHEMY_API_KEY_3=key3
-ALCHEMY_API_KEY_4=key4
-
-# Alchemy Solana HTTP endpoints (dynamically constructed from ANKR_API_KEY)
-SOLANA_RPC_URL=https://solana-mainnet.g.alchemy.com/v2/key1
-SOLANA_RPC_HTTP_URLS=https://solana-mainnet.g.alchemy.com/v2/key1,https://solana-mainnet.g.alchemy.com/v2/key2,https://solana-mainnet.g.alchemy.com/v2/key3,https://solana-mainnet.g.alchemy.com/v2/key4
-
-# Jito Configuration (Execution Provider)
+# Jito
 JITO_ENABLED=true
 JITO_BLOCK_ENGINE_URL=https://mainnet.block-engine.jito.wtf
 JITO_TIP_FLOOR_URL=https://bundles.jito.wtf/api/v1/bundles/tip_floor
 JITO_TIP_STREAM_WS=wss://bundles.jito.wtf/api/v1/bundles/tip_stream
 
-# Wallet Configuration (ONLY needed for LIVE_TRADING_ENABLED=true)
-# NEVER commit real private keys to repository
+# Wallet: only needed when live trading is actually enabled
 WALLET_PUBLIC_KEY=
 WALLET_PRIVATE_KEY_BASE58=
 
+# Trading / risk
+POLL_INTERVAL_SECONDS=60
+ACTIVE_POSITION_PRICE_POLL_SECONDS=2
+DUST_FORCE_EXIT_USD=12.5
+ENTRY_MAX_USD=80
+ENTRY_SIZE_LIQUIDITY_PCT=0.01
 ```
 
-GMGN API key 支持 CSV 任意数量动态扫描；旧的 `GMGN_API_KEY_1`、`GMGN_PUBLIC_KEY_1`、`GMGN_PRIVATE_KEY_1` 编号格式仍兼容，但推荐使用上面的 CSV 写法。
+GMGN OpenAPI 对请求频率较敏感。Trenches 路由权重较高；若返回 429 或被临时 ban，应读取响应中的 reset 时间，不要持续重试。
 
 ### 3. 启动后端
 
@@ -119,14 +100,13 @@ GMGN API key 支持 CSV 任意数量动态扫描；旧的 `GMGN_API_KEY_1`、`GM
 python -m uvicorn backend.app.main:app --reload
 ```
 
-默认端口：`8000`。
-
 常用检查：
 
 ```bash
 curl http://localhost:8000/health
 curl http://localhost:8000/api/runtime/status
 curl http://localhost:8000/api/providers/health
+curl http://localhost:8000/api/runtime/filter-stats
 ```
 
 ### 4. 启动前端
@@ -137,346 +117,238 @@ npm install
 npm run dev
 ```
 
-默认端口：`5173`。Vite 开发服务器代理 `/api` 到后端 `8000`，用于控制中心、持仓页和运行日志页联动后端。
+默认端口：`5173`。Vite 代理 `/api` 到后端 `8000`。
 
-### 5. 运行测试与语法检查
+### 5. 测试
 
 ```bash
 python -m pytest -q
 python -m py_compile backend/app/main.py
+cd frontend && npm run build
 ```
 
-对单个修改文件可直接检查：
+---
 
-```bash
-python -m py_compile backend/app/providers/gmgn_real.py
-python -m py_compile backend/app/strategy/filters.py
-python -m py_compile backend/app/strategy/second_filter.py
-python -m py_compile backend/app/runners/position_risk_runner.py
-```
+## 当前核心链路
 
-### 6. 推荐调试顺序
+### 1. Discovery 拉池
 
-1. 后端启动后先访问 `/api/runtime/status`，确认 Provider Mode、RPC、钱包、安全门状态。
-2. 启动前端后先在 Control Center 观察运行态，不要直接开启真实入口。
-3. 观察 `provider_requests`，确认 GMGN Trenches、Token Info/Security/Pool、K-line、Top Holders 返回正常。
-4. 观察 `token_strategy_matches`，确认初筛不再因为字段缺失全失败。
-5. 观察 `positions`，确认模拟仓能够建仓、分批撤仓、dust 全撤。
-6. 最后才考虑配置真实钱包私钥与实盘开关。
+`DiscoveryRunner` 按运行态加载启用策略组，然后拉 GMGN Trenches：
 
-## 项目结构
+- `new_creation`
+- `near_completion`（GMGN 原始返回可能位于 `data.pump`，系统归一为 `near_completion`）
+
+当前 type shard 逻辑会按 slot 计划分别拉两个类型。若所有尝试失败，后端会写入 `system_events`，前端可在【数据源健康诊断】和【API Slot 状态】中查看。
+
+### 2. 严格 AND 筛选链路
+
+当前入场筛选链路是严格 AND，不再允许 `price_filter OR kline_fallback` 这种并集逻辑：
 
 ```text
-meme/
-├── README.md
-├── 思路.md                       # 策略设计文档
-├── requirements.txt
-├── .env                         # 本地配置，严禁提交
-├── .gitignore
-├── backend/
-│   └── app/
-│       ├── main.py              # FastAPI 入口；注册路由；启动/停止后台 runners
-│       ├── config.py            # Pydantic Settings；动态扫描 API keys；Provider/RPC/风控参数
-│       │
-│       ├── api/
-│       │   ├── routes_runtime.py # 运行态、安全门、Provider 状态、前端控制、策略CRUD、数据导出
-│       │   ├── routes_strategies.py
-│       │   ├── routes_tokens.py
-│       │   ├── routes_positions.py
-│       │   ├── routes_trades.py
-│       │   ├── routes_logs.py
-│       │   ├── routes_risk.py
-│       │   ├── routes_providers.py
-│       │   └── routes_mock.py
-│       │
-│       ├── db/
-│       │   ├── schema.sql       # SQLite 表结构
-│       │   ├── database.py      # 连接管理、初始化 schema、轻量兼容迁移
-│       │   └── repositories.py  # 数据访问层
-│       │
-│       ├── providers/
-│       │   ├── base.py          # Provider 抽象接口
-│       │   ├── gmgn_real.py     # GMGN OpenAPI：trenches/token info/security/pool/kline/holders
-│       │   ├── jupiter_real.py  # Jupiter quote/swap API
-│       │   ├── jito_real.py     # Jito bundle/tip/广播确认
-│       │   ├── rpc_real.py      # Solana RPC HTTP 轮询/余额/交易确认
-│       │   ├── jupiter.py / jito.py / rpc.py  # 测试用轻量 mock（仅 test_trading_pipeline 使用）
-│       │   ├── gmgn_subscriber.py # GMGN WebSocket 订阅占位
-│       │   └── mock_data.py     # mock/仿真数据
-│       │
-│       ├── runners/
-│       │   ├── discovery_runner.py      # 每分钟轮询 GMGN Trenches；初筛入库
-│       │   ├── second_filter_runner.py  # 一分钟后复核；K-line 二筛(7条规则)；top1 holder；建仓
-│       │   ├── price_monitor_runner.py  # 活跃持仓价格监控；tick/snapshot 写入；退出规则触发
-│       │   ├── position_risk_runner.py  # 按USD持仓分层扫描风控与 top1 holder；风险全撤
-│       │   ├── kill_switch_runner.py    # Kill switch 监控
-│       │   └── mock_lifecycle_runner.py # mock 生命周期推进
-│       │
-│       ├── services/
-│       │   ├── price_aggregator.py  # 价格聚合与降级
-│       │   ├── provider_factory.py  # 按 Provider Mode 创建 mock/readonly/live Provider
-│       │   ├── worker_manager.py    # Runner 生命周期管理（注册/启停/状态）
-│       │   ├── provider_call.py     # Provider 调用封装
-│       │   └── event_bus.py         # 运行事件/SSE 推送
-│       │
-│       ├── strategy/
-│       │   ├── filters.py       # 初筛风控(20条规则)：liquidity/holder/权限/rug/wash/bundler/sniper/平台/池龄
-│       │   ├── second_filter.py # 二筛(7条规则)：volume_1m/open-close/candle_position/price_5m等
-│       │   ├── sizing.py        # 入场 sizing
-│       │   ├── slippage.py      # 滑点上限与重报价约束
-│       │   └── exit_rules.py    # 止盈止损/动态止损/时间止损/completed/dust 全撤
-│       │
-│       ├── trading/
-│       │   ├── executor.py      # 交易执行管线：模拟/实盘、Jupiter quote、Jito bundle、安全门
-│       │   └── fee_tip.py       # Jito tip/fee 计算
-│       │
-│       └── tests/               # 单元测试、runner 测试、Provider smoke 测试
-│
-├── frontend/
-│   ├── package.json
-│   ├── vite.config.ts
-│   └── src/
-│       ├── api/
-│       │   └── client.ts        # 前端 API 封装
-│       ├── pages/
-│       │   ├── ControlCenter.tsx # 运行态控制、策略组CRUD、交易参数编辑
-│       │   ├── Portfolio.tsx     # 持仓/PnL/USD价值/风险展示
-│       │   └── Operations.tsx    # 紧急操作/数据导出
-│       ├── components/
-│       └── main.tsx
-│
-├── scripts/
-│   ├── test_sim_chain.ps1       # 模拟交易链路测试脚本
-│   ├── start_all.ps1
-│   └── stop_all.ps1
-│
-├── data/                        # SQLite 数据库 & 导出
-└── logs/                        # 日志导出目录
+risk_filter
+→ top_holder_filter
+→ smart_degen_filter
+→ price_filter
+→ kline_fallback
+→ create position
 ```
 
-## 核心运行链路
+任意一环失败，直接跳过后续 API 调用，以节约 GMGN 权重。
 
-### 1. 发现与初筛
+指标口径：
 
-`DiscoveryRunner` 每分钟调用 GMGN Trenches，当前重点扫描 Solana `new_creation` 池子，并按配置的平台白名单过滤。候选池进入 `filters.py` 初筛，核心字段包括：
+- **通过风控筛选** = `risk_filter_passed AND top_holder_filter_passed AND smart_degen_filter_passed`
+- **价格面筛选通过** = `price_filter_passed AND kline_fallback_passed`
+- **就绪可创建** = 五项全部通过
 
-- 流动性：`liquidity_usd`
-- 持仓集中度：`top_10_holder_rate`、`holder_count`（区间：`min_holder_count_raw ~ max_holder_count_raw`，x=0.2 时 29~800）
-- 合约/权限：`renounced_mint`、`renounced_freeze_account`
-- 风险比例：`rug_ratio`、`entrapment_ratio`、`rat_trader_amount_rate`、`suspected_insider_hold_rate`、`bundler_trader_amount_rate`
-- 交易风险：`is_wash_trading`、`sell_tax`、`fresh_wallet_rate`
-- 项目方/发射台：`creator_token_status`、`dev_team_hold_rate`、`burn_status`、`platform`
-- 狙击风险：`sniper_count`
-- 池龄窗口：`created_timestamp` 对应 `t ~ t+60s`
+### 3. 建仓
 
-通过初筛后，系统写入 token、metric snapshot 和 strategy match，并进入二筛等待队列。
+通过完整筛选链后进入 `TradingPipeline`：
 
-### 2. 二筛与 Top Holder 校验
+- SIM：使用 Jupiter quote 估算买入 token 数量，写入模拟 BUY trade event。
+- LIVE：通过 Jupiter quote/swap 与 Jito/RPC 执行真实链上交易；必须通过安全门才允许广播。
 
-`SecondFilterRunner` 对初筛通过的池子等待约一分钟后再次拉取快照，确认仍满足初筛风控。随后调用 GMGN K-line：
+每次 BUY 后写入 `position_audits` 的 `ENTRY` audit，记录买入前完整数据快照。
 
-- 使用最近已完成的 `1m` candle，不使用正在形成中的 candle。
-- 不满 5 分钟时，使用开盘至今所有已完成 candle 聚合 5m 高低区间。
-- `volume_1m` 使用 K-line 的 USD volume。
-- `median_volume_prev_5m` 由最近历史 candle 派生。
-- 价格位置规则使用当前价、`high_5m`、`low_5m` 计算。
+### 4. 持仓监控与撤仓
 
-K-line 条件通过后，最后才调用 Top Holders，校验 `addr_type=0` 的 top1 普通钱包持仓比例，避免对所有候选过早调用高权重接口。
+`ActivePositionPriceRunner` 负责活跃仓位价格监控与价格类退出：
 
-### 3. 仓位计算与建仓
+- 硬止盈：`>1.6x` 撤 50%；`>2.1x` 全撤
+- 硬止损：`<0.7x` 撤 50%；`<0.45x` 全撤
+- type 变为 `completed` 时全撤
+- API 异常/空字段撤仓前应至少重试 3 次
 
-`sizing.py` 使用统一 USD 口径计算入场本金：
+`PositionRiskRunner` 负责持仓期间风控复查、DUST、聪明钱/Top3 触发逻辑。触发撤仓时写入 `EXIT` audit，包含具体退出原因、风控失败项、DUST 明细、聪明钱触发详情等。
 
-```text
-SIM entry_usd  = min(liquidity_usd * ENTRY_SIZE_LIQUIDITY_PCT, ENTRY_MAX_USD)
-LIVE entry_usd = min(liquidity_usd * ENTRY_SIZE_LIQUIDITY_PCT, ENTRY_MAX_USD, wallet_balance_usd)
-若 LIVE entry_usd < 10，则跳过本轮实盘买入。
-```
+### 5. 交易审计
 
-执行层根据 `price_usd / price_sol` 或价格聚合器推导 SOL/USD，将 USD 目标仓位换算为 SOL 数量。模拟模式只记录虚拟成交；实盘模式会先读取钱包 SOL 余额并换算为 USD，确保买入额不超过当前余额。
-
-### 4. 持仓价格监控
-
-`PriceMonitorRunner` 对活跃持仓按配置频率拉取价格，并持续写入 tick/snapshot。价格来源可由 GMGN token info/pool、Jupiter quote 或其他可用 provider 聚合，前端 Portfolio 使用这些数据展示当前价值、PnL、触发规则和风险状态。
-
-### 5. 止盈止损与风险撤仓
-
-`exit_rules.py` 负责价格和时间类退出：
-
-- 硬止盈：达到多级价格倍数时分批撤仓。
-- 硬止损：跌破指定入场价比例时分批或全撤。
-- 动态止损：当前价跌破最近已完成 `1m low` 时撤仓。
-- 时间止损：上次交易后 5 分钟涨幅不足阈值时撤仓。
-- `type=completed` 时全部撤出。
-- 持仓低于 `DUST_FORCE_EXIT_USD` 时，下次撤仓直接全撤。
-
-`PositionRiskRunner` 负责持仓期间风控重扫。扫描频率按当前剩余 USD 价值动态读取 `.env` 配置；核心风控扫描和 Top1 holder 扫描分离，Top1 扫描可设置独立慢频率，降低 API 调用消耗。
-
-## Provider Mode 与安全门
-
-| 模式 | 用途 | 外部 API | 真实广播 |
-|------|------|----------|----------|
-| `mock` | 本地模拟和测试 | 不调用或只调用 mock | 否 |
-| `online_readonly` | 真实行情联调、模拟交易 | 调用真实只读 API | 否 |
-| `live` | 实盘准备或实盘运行 | 调用真实 API | 仅在所有安全门通过后允许 |
-
-安全门主要检查：
-
-- `PROVIDER_MODE`
-- `DRY_RUN`
-- 前端/后端运行态是否允许新开仓
-- `WALLET_PUBLIC_KEY` / `WALLET_PRIVATE_KEY_BASE58`
-- Jupiter/Jito/RPC 是否可用
-- Jito 是否启用且不可 fallback RPC 广播
-- rolling loss / kill switch 状态
-- 滑点、价格冲击、重报价次数
-
-## 数据源与字段映射
-
-### GMGN
-
-当前核心行情和风控字段来自 GMGN OpenAPI：
-
-- `POST /v1/trenches`：新池发现、平台、流动性、风险字段、池龄、launchpad 状态。
-- `GET /v1/token/info`：token 基础信息、当前价格、统计字段。
-- `GET /v1/token/security`：权限、税、holder、creator、sniper、wash trading 等安全字段。
-- `GET /v1/token/pool_info`：池子价格、流动性、open/migrated 状态。
-- `GET /v1/market/token_kline`：1m/5m K-line，二筛和动态止损使用。
-- `GET /v1/market/token_top_holders`：二筛末端与持仓期间低频 top1 holder 风控。
-
-若出现 `AUTH_INVALID: missing api key or client_id`，优先检查 `.env` 中 `GMGN_API_KEY` 是否有值；若 GMGN 控制台提供的是 client id，则填入 `GMGN_CLIENT_ID`，或让系统用同位置 `GMGN_PUBLIC_KEY` 作为 client id。本版本会同时通过 `x-api-key`、`x-route-key`、`Authorization: Bearer`、`x-client-id`、`client-id` 以及 GET query / POST body 的 `api_key/client_id` 传递认证信息，以兼容不同 GMGN OpenAPI 网关。
-
-### Jupiter / Jito / RPC
-
-- Jupiter：quote、可交易性验证、swap 路由。
-- Jito：实盘交易广播、tip、bundle/confirmation。
-- RPC：链上确认、余额、交易状态、必要的兜底查询。
-
-### Mock
-
-`mock_data.py` 提供模拟 token、价格路径、风控字段和成交结果，用于在无真实 API 或不想消耗额度时验证完整状态机。
-
-## 数据库核心表
+核心表：
 
 | 表 | 作用 |
-|----|------|
-| `tokens` | token 主表，记录 mint、symbol、name、status、首次发现时间等 |
-| `token_metric_snapshots` | 每轮 GMGN/Provider 快照，记录风控字段、价格、流动性、raw_json |
-| `token_strategy_matches` | 初筛/二筛规则明细，保存每条规则通过/失败原因 |
-| `positions` | 仓位状态、入场价格、剩余数量、USD/SOL 价值、风险扫描调度 |
-| `trades` | 买入、卖出、部分撤仓、强平等交易记录 |
-| `provider_requests` | 外部 API 请求摘要、状态码、错误信息、响应摘要 |
-| `runtime_state` | 暂停新开仓、kill switch、运行态开关等状态 |
-| `system_logs` | 后端运行日志和前端 Operations 展示数据 |
+|---|---|
+| `tokens` | token 主表，记录 mint、symbol、name、pool、latest snapshot |
+| `token_metric_snapshots` | GMGN 快照与归一化风控字段 |
+| `token_strategy_matches` | 每一阶段筛选的 pass/fail 详情 |
+| `positions` | 仓位状态、剩余数量、剩余价值、入场价、退出原因 |
+| `trade_events` | 每次 BUY/SELL 交易行为流水 |
+| `position_audits` | ENTRY / EXIT / DECISION 审计 JSON |
+| `position_smart_money_baselines` | 聪明钱入场基线与后续比较 |
+| `provider_requests` | 外部 Provider 请求摘要、状态码、错误 |
+| `system_events` | 运行态事件、异常、诊断日志 |
+| `runtime_state` | 运行模式、安全门、session 等 |
 
-## Runner 清单
+`POST /api/runtime/emergency/export-trade-audit` 会导出交易审计 JSON。每个 position 包含：
 
-| Runner | 周期 | 职责 |
-|--------|------|------|
-| `DiscoveryRunner` | `POLL_INTERVAL_SECONDS` | 拉取 Trenches，初筛，写入候选 |
-| `SecondFilterRunner` | 短轮询 | 复核初筛、K-line 二筛、Top1 校验、触发建仓 |
-| `PriceMonitorRunner` | `ACTIVE_POSITION_PRICE_POLL_SECONDS` | 活跃仓位价格监控和退出规则触发 |
-| `PositionRiskRunner` | 动态 USD 分层 | 持仓风控扫描、Top1 慢频扫描、风险全撤、dust 全撤 |
-| `MockLifecycleRunner` | mock 模式 | 推进模拟生命周期、生成演示数据 |
+- `entry_metrics_source`
+- `entry_metrics`
+- `trade_events`
+- `exit_audits`
+- `loss_debug_summary`
+- realized PnL
+
+ENTRY audit 应包含买入时：
+
+- 池子 type / launchpad / platform
+- rug / entrapment / insider / bundler
+- liquidity / holder_count / marketcap / volume
+- top holder / fresh wallet / creator balance
+- wash trading / rat / suspected insider / sell tax
+- socials 明细
+- burn_status / sniper_count
+- TOP1 普通钱包（addr_type=0）持仓
+- 1h swaps / volume / price change
+- 聪明钱最大/最小持仓地址、份额、价值
+- Jupiter quote 与 route 信息
+
+EXIT audit 应包含每次卖出：
+
+- sell_time
+- exit reason code/label
+- sell price / effective price / sell multiple
+- sell value
+- risk_failed_rules
+- dust_detail
+- smart_money_trigger_detail
+- top3_smart_degen_trigger_detail
+
+---
 
 ## 前端页面
 
-| 页面 | 作用 |
-|------|------|
-| `ControlCenter.tsx` | 显示 Provider Mode、安全门、后端运行态、暂停/恢复开仓、实盘入口状态 |
-| `Portfolio.tsx` | 展示持仓、当前价值、PnL、退出进度、风险扫描间隔、Top1 holder 风险 |
-| `Operations.tsx` | 展示 provider requests、运行日志、错误摘要、API 调用排障信息 |
-| 其他页面 | token 列表、交易列表、配置管理、日志流等辅助页面 |
+### Control Center
+
+用于运行态切换、策略组管理、交易参数编辑、安全门检查。
+
+### Portfolio / 交易看板
+
+包含两个模块：
+
+1. 当前持仓
+2. 历史持仓
+
+当前持仓应按 LIVE/SIM 按钮独立请求并展示：
+
+- LIVE 实盘策略：仅展示实盘持仓和实盘 PnL
+- SIM 模拟盘策略：仅展示模拟盘持仓和模拟盘 PnL
+
+推荐当前持仓表列：
+
+```text
+meme地址 | 交易时间 | 状态 | 当前持仓 | 收益率 | 价格变化
+```
+
+历史持仓推荐按交易行为流水展示，而不是按 position 一行展示：
+
+```text
+时间 | 方向 | 池子名 | 地址 | 交易价值 | 交易价格 | 卖出倍数 | 撤仓原因
+```
+
+### Operations / Ops & Emergency
+
+用于导出交易审计、导出日志、备份 DB、紧急停止等。
+
+---
 
 ## API 端点
 
 基础路径：`http://localhost:8000`
 
 | 方法 | 路径 | 说明 |
-|------|------|------|
+|---|---|---|
 | GET | `/health` | 后端健康检查 |
-| GET | `/api/runtime/status` | 当前 Provider Mode、安全门、钱包、RPC、Jito、运行态 |
-| POST | `/api/runtime/mode` | 切换或确认运行模式 |
-| POST | `/api/runtime/pause-new-entries` | 暂停新开仓 |
-| POST | `/api/runtime/resume-new-entries` | 恢复新开仓 |
-| GET | `/api/providers/health` | GMGN/Jupiter/Jito/RPC Provider 健康 |
-| GET | `/api/tokens` | token 列表 |
-| GET | `/api/tokens/{mint}` | token 详情 |
-| GET | `/api/tokens/{mint}/snapshots` | token 指标快照 |
-| GET | `/api/tokens/{mint}/decisions` | 初筛/二筛决策详情 |
-| GET | `/api/positions` | 持仓列表 |
-| GET | `/api/positions/{id}` | 持仓详情 |
-| POST | `/api/positions/{id}/manual-close` | 手动平仓 |
-| GET | `/api/trades` | 交易记录 |
-| GET | `/api/trades/provider-requests` | Provider 请求日志 |
-| GET | `/api/logs/recent` | 近期系统日志 |
-| GET | `/api/logs/stream` | SSE 实时日志流 |
-| GET | `/api/risk/kill-switch` | Kill switch 状态 |
-| POST | `/api/risk/kill-switch/reset` | 重置 kill switch |
-| POST | `/api/mock/run-once` | 手动触发 mock 生命周期 |
+| GET | `/api/runtime/status` | 运行态、安全门、worker 状态 |
+| POST | `/api/runtime/mode` | 切换 IDLE / SIM_TEST / FORMAL_SIM_LIVE |
+| GET | `/api/runtime/portfolio/table?account_type=SIM|LIVE` | 当前持仓表 |
+| GET | `/api/runtime/trade-events-ledger?account_type=SIM|LIVE|ALL` | 交易行为流水 |
+| GET | `/api/runtime/pnl-summary` | SIM/LIVE PnL 汇总 |
+| GET | `/api/runtime/filter-stats` | discovery、AND 筛选、数据源健康诊断 |
+| GET | `/api/runtime/trading-params` | 交易参数 |
+| PUT | `/api/runtime/trading-params` | 更新交易参数 |
+| POST | `/api/runtime/emergency/export-trade-audit` | 导出完整交易审计 |
+| POST | `/api/runtime/emergency/export-logs` | 导出错误日志与筛选摘要 |
+| POST | `/api/runtime/emergency/backup-db` | 备份 SQLite |
+| POST | `/api/runtime/emergency/stop-live` | 停止实盘入口 |
+| POST | `/api/runtime/emergency/resume-live` | 恢复 FORMAL_SIM_LIVE |
+| POST | `/api/runtime/emergency/sell-all-live` | 当前未完整接入批量实盘清仓，返回 501 |
 
-实际可用端点以 `backend/app/api/` 中注册路由为准；前端页面应优先通过 `client.ts` 封装访问。
+---
 
-## 排障建议
 
-### GMGN WebSocket warning
-
-如果看到：
+## 项目结构
 
 ```text
-GMGN WebSocket subscription not yet implemented, using mock subscriber
+backend/app/
+├── main.py
+├── config.py
+├── api/
+│   └── routes_runtime.py
+├── db/
+│   ├── schema.sql
+│   ├── database.py
+│   └── repositories.py
+├── providers/
+│   ├── base.py
+│   ├── gmgn_real.py
+│   ├── jupiter_real.py
+│   ├── jito_real.py
+│   ├── rpc_real.py
+│   └── mock_data.py
+├── runners/
+│   ├── discovery_runner.py
+│   ├── active_position_price_runner.py
+│   ├── position_risk_runner.py
+│   ├── kill_switch_runner.py
+│   └── mock_lifecycle_runner.py
+├── strategy/
+│   ├── filters.py
+│   ├── thresholds.py
+│   ├── sizing.py
+│   └── slippage.py
+└── trading/
+    ├── executor.py
+    ├── audit_builder.py
+    ├── accounting.py
+    └── fee_tip.py
+
+frontend/src/
+├── api/client.ts
+├── pages/ControlCenter.tsx
+├── pages/Portfolio.tsx
+├── pages/Operations.tsx
+└── main.tsx
 ```
 
-这不是发现链路失败原因。当前系统核心依赖 Trenches/K-line/Token/Top Holders 轮询链路，WebSocket subscriber 仍是占位能力。
-
-### 没有任何初筛通过
-
-优先检查：
-
-1. `provider_requests` 中 `/v1/trenches` 是否 `status=200`。
-2. `token_strategy_matches.pass_fail_detail_json` 中失败最多的规则。
-3. `token_metric_snapshots.raw_json` 是否包含 `liquidity_usd`、`top_10_holder_rate`、`burn_status`、`creator_token_status` 等字段。
-4. `created_timestamp` 是否落在当前 `t ~ t+60s` 池龄窗口。
-5. `platform` 是否被白名单覆盖。
-
-### 二筛没有通过
-
-优先检查：
-
-1. K-line 是否返回已完成 candle。
-2. 极新池是否还没有足够 1m candle。
-3. `high == low` 时是否被除零保护拦截。
-4. Top1 holder 接口是否返回 `addr_type=0` 钱包地址。
-5. 二筛规则详情中 volume、price position、top1 三类规则哪一类失败最多。
-
-### 模拟仓没有买入
-
-优先检查：
-
-1. 初筛通过数。
-2. 二筛通过数。
-3. sizing 计算出的 `entry_usd` 是否大于 dust。
-4. runtime 是否暂停新开仓。
-5. executor 安全门是否误把模拟交易当作实盘广播拦截。
-
-### 实盘前检查
-
-- `.env` 中真实钱包和 API key 是否完整。
-- Jito 是否启用。
-- RPC HTTP endpoints 是否可用。
-- `DRY_RUN` 是否符合当前意图。
-- 前端 Control Center 是否显示允许开仓。
-- 先小额验证 quote、swap、confirmation，再扩大规模。
+---
 
 ## 开发约定
 
-- 字段名以内部规范化字段为准，Provider 层负责适配 GMGN 原始字段。
-- 策略层不直接读取 GMGN 原始结构，避免 API 字段变动扩散到全项目。
-- Runner 层只编排流程，不内嵌复杂策略公式。
-- 所有外部请求必须写入 `provider_requests`，便于复盘。
-- 所有策略判定必须写入 rule detail，不能只写 pass/fail。
-- 实盘相关改动必须保留 mock/readonly 路径。
+- Provider 层负责适配外部 API 原始字段，策略层尽量只读内部归一化字段。
+- Runner 层负责编排流程，不应内嵌过多策略公式。
+- 所有外部请求必须写入 `provider_requests`。
+- 所有筛选判断必须写入 `token_strategy_matches.pass_fail_detail_json`。
+- 所有 BUY/SELL 必须写入 `trade_events`。
+- 所有仓位创建和撤仓必须写入 `position_audits`。
+- 实盘相关改动必须保留 mock / online_readonly / live 三条路径。
 - 涉及私钥、API key、raw transaction 的日志必须脱敏。
-- 请你先和我确认开发计划，再进行开发
-- 开发需要同步更新项目代码和模拟交易.py中的逻辑
-- 开发完毕后，请同步更新README.md
+- 每次开发完成必须同步更新 README。
