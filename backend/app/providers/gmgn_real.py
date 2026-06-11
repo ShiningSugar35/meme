@@ -61,14 +61,6 @@ class GMGNProvider(MarketDataProvider):
                 raise ValueError("GMGN_API_KEY_N or GMGN_CLIENT_ID_N required for live/online_readonly mode")
             logger.info("GMGN Provider initialized in real mode", api_base=self.api_base_url, credential_count=len(self.credentials))
 
-        client_id_mode = str(getattr(settings, "GMGN_CLIENT_ID_MODE", "nonce") or "nonce").lower()
-        if client_id_mode == "static":
-            logger.warning(
-                "GMGN_CLIENT_ID_MODE=static: client_id will be reused across requests, "
-                "which may trigger AUTH_CLIENT_ID_REPLAYED. "
-                "Set GMGN_CLIENT_ID_MODE=nonce in .env to use per-request unique client_id."
-            )
-
     async def _log_request(
         self,
         endpoint: str,
@@ -135,16 +127,11 @@ class GMGNProvider(MarketDataProvider):
         return creds[slot]
 
     def _build_gmgn_auth_query(self, cred: dict, slot: int) -> dict:
-        mode = str(getattr(settings, "GMGN_CLIENT_ID_MODE", "nonce") or "nonce").lower()
-        ts_ms = int(time.time() * 1000)
-        if mode == "static":
-            raw_client_id = cred.get("client_id") or cred.get("public_key") or ""
-            client_id = raw_client_id or f"meme-{slot}-{ts_ms}-{uuid.uuid4().hex}"
-        else:
-            client_id = f"meme-{slot}-{ts_ms}-{uuid.uuid4().hex}"
+        # GMGN OpenAPI 要求 Unix 秒级 timestamp，服务端校验窗口约 ±5 秒
+        # client_id 必须每次请求唯一，避免 AUTH_CLIENT_ID_REPLAYED
         return {
-            "timestamp": str(ts_ms),
-            "client_id": client_id,
+            "timestamp": int(time.time()),
+            "client_id": str(uuid.uuid4()),
         }
 
     @staticmethod
@@ -238,8 +225,7 @@ class GMGNProvider(MarketDataProvider):
             if credential_slot is not None:
                 logged_request["credential_role"] += " (explicit)"
             logged_request["endpoint_weight"] = _endpoint_weight(path)
-            mode = str(getattr(settings, "GMGN_CLIENT_ID_MODE", "nonce") or "nonce").lower()
-            logged_request["auth_client_id_mode"] = mode
+            logged_request["auth_client_id_mode"] = "nonce"
             logged_request["client_id_prefix"] = auth_query.get("client_id", "")[:18]
             tag = request_params.get("tag") or (json_body or {}).get("tag") or (cleaned or {}).get("tag")
             if tag:
@@ -287,6 +273,19 @@ class GMGNProvider(MarketDataProvider):
                         kind = "auth"
                         retryable = True
                         logged_request["gmgn_error"] = gmgn_error
+                    elif resp.status_code in (401, 403) and gmgn_error == "AUTH_TIMESTAMP_EXPIRED":
+                        error_code = "AUTH_TIMESTAMP_EXPIRED"
+                        kind = "auth"
+                        retryable = False
+                        logged_request["gmgn_error"] = gmgn_error
+                        await self._log_request(
+                            path, False, logged_request, self._compact_response_summary(data),
+                            resp.status_code, latency, error_code, str(data)[:500], method,
+                        )
+                        raise GMGNAPIError(
+                            "GMGN auth timestamp expired: use Unix seconds timestamp and check server clock/NTP",
+                            status_code=resp.status_code, path=path, method=method, retryable=False,
+                        )
                     elif resp.status_code == 429 and slot < 999:
                         cooldown_s = await self.rate_limiter.report_429(slot, path, headers=dict(resp.headers), body=data if isinstance(data, dict) else None)
                         logged_request["rate_limit_reset"] = True

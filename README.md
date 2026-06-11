@@ -61,10 +61,7 @@ GMGN_API_KEY_1=
 GMGN_API_KEY_2=
 GMGN_API_KEY_3=
 GMGN_API_KEY_4=
-GMGN_CLIENT_ID_1=
-GMGN_CLIENT_ID_2=
-GMGN_CLIENT_ID_3=
-GMGN_CLIENT_ID_4=
+# client_id 不再复用，每次请求自动生成唯一 UUID；保留为空即可
 
 # Jupiter
 JUPITER_API_BASE_URL=https://api.jup.ag/swap/v1
