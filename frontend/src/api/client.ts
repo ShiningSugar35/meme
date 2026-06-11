@@ -265,16 +265,17 @@ export interface CredentialSummaryItem {
 export interface DiscoveryFetchHealthItem {
   group_name: string;
   platforms: string[];
-  slot?: number;
+  slot?: number | null;
   role?: string;
   ok: boolean;
   raw_count: number;
   unique_count?: number;
   duplicate_count?: number;
-  status_code?: number;
+  status_code?: number | null;
   error?: string | null;
   cooldown_until?: string | null;
   latency_ms?: number;
+  empty?: boolean;
   severity: 'ok' | 'warn' | 'critical';
 }
 

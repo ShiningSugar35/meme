@@ -1395,7 +1395,7 @@ async def _build_system_event_warnings(repo: Repositories, lower_bound: str, upp
         return []
     rows = await _fetch_all(repo,
         """SELECT message, context_json, created_at FROM system_events
-           WHERE level IN ('ERROR', 'WARNING') AND category = 'DISCOVERY' AND created_at >= ? AND created_at <= ?
+           WHERE level IN ('ERROR', 'WARNING', 'WARN', 'CRITICAL') AND category = 'DISCOVERY' AND created_at >= ? AND created_at <= ?
            ORDER BY created_at DESC LIMIT 20""",
         (lower_bound, upper_bound))
     results: List[Dict[str, Any]] = []
