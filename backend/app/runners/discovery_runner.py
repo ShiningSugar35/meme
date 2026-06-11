@@ -548,7 +548,6 @@ class DiscoveryRunner:
             for s in feature_pool:
                 if s not in slot_sequence:
                     slot_sequence.append(s)
-                    break
 
             base_params = self._build_trench_params(platforms=platforms)
             if custom_params:
@@ -565,9 +564,13 @@ class DiscoveryRunner:
 
             last_error: Optional[str] = None
             attempts = 0
+            empty_attempts = 0
+            failure_attempts = 0
+
+            max_attempts = min(len(slot_sequence), max(5, len(slot_sequence)))
 
             for idx, slot in enumerate(slot_sequence):
-                if idx >= 3:
+                if idx >= max_attempts:
                     break
                 attempts += 1
 
@@ -640,26 +643,34 @@ class DiscoveryRunner:
                     return items, gres
 
                 if items is not None and len(items) == 0:
+                    empty_attempts += 1
                     last_error = "empty response"
                     continue
 
                 if items is None:
+                    failure_attempts += 1
                     last_error = gres.get("error", "unknown error")
                     continue
 
-            logger.critical(f"all {attempts} discovery attempts failed for {trench_type}")
+            all_empty = empty_attempts > 0 and failure_attempts == 0
+            if all_empty:
+                logger.warning(f"discovery returned empty for {trench_type} after {attempts} attempts")
+            else:
+                logger.critical(f"all {attempts} discovery attempts failed for {trench_type}")
             event_data = {
                 "trench_type": trench_type,
                 "primary_slot": primary_slot,
                 "reserve_slot": reserve_slot,
                 "attempts": attempts,
+                "empty_attempts": empty_attempts,
+                "failure_attempts": failure_attempts,
                 "last_error": last_error,
                 "slots_tried": slot_sequence,
             }
             try:
                 await self.repo.append_system_event(
-                    'CRITICAL', 'DISCOVERY',
-                    f"All {attempts} discovery fetch attempts failed for {trench_type}: {last_error}",
+                    'WARN' if all_empty else 'CRITICAL', 'DISCOVERY',
+                    f"All {attempts} discovery fetch attempts returned empty for {trench_type}" if all_empty else f"All {attempts} discovery fetch attempts failed for {trench_type}: {last_error}",
                     _json_dumps(event_data),
                     account_type='SIM',
                 )

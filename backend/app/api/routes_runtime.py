@@ -2329,10 +2329,6 @@ async def pnl_summary(request: Request):
             out[acct]["current_pnl_usd"] = round(out[acct]["current_pnl_usd"], 6)
             out[acct]["total_pnl_usd"] = round(out[acct]["total_pnl_usd"], 6)
 
-        combined_total = out["SIM"]["total_pnl_usd"] + out["LIVE"]["total_pnl_usd"]
-        combined_realized = out["SIM"]["realized_pnl_usd"] + out["LIVE"]["realized_pnl_usd"]
-        combined_cost = max(out["SIM"]["closed_cost_basis"] + out["LIVE"]["closed_cost_basis"], 0.000001)
-
         pending_rpc_backfill_count = 0
         final_trade_count = 0
         estimated_trade_count = 0
@@ -2372,16 +2368,6 @@ async def pnl_summary(request: Request):
                 "closed_positions": out["LIVE"]["closed_positions"],
                 "losing_positions": out["LIVE"]["losing_positions"],
                 "winning_positions": out["LIVE"]["winning_positions"],
-            },
-            "combined": {
-                "realized_pnl_usd": round(combined_realized, 6),
-                "unrealized_pnl_usd": round(out["SIM"]["current_pnl_usd"] + out["LIVE"]["current_pnl_usd"], 6),
-                "total_pnl_usd": round(combined_total, 6),
-                "realized_pnl_pct": round(combined_realized / combined_cost * 100, 2) if combined_cost > 0 else 0.0,
-                "open_positions": out["SIM"]["open_positions"] + out["LIVE"]["open_positions"],
-                "closed_positions": out["SIM"]["closed_positions"] + out["LIVE"]["closed_positions"],
-                "losing_positions": out["SIM"]["losing_positions"] + out["LIVE"]["losing_positions"],
-                "winning_positions": out["SIM"]["winning_positions"] + out["LIVE"]["winning_positions"],
             },
             "accounting_status_summary": {
                 "pending_rpc_backfill_count": pending_rpc_backfill_count,

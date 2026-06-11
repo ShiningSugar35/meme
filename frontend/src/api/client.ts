@@ -97,6 +97,7 @@ export interface PortfolioRow {
   remaining_value_usd?: number;
   pnl_pct?: number;
   ratio?: number | string;
+  opened_at?: string;
   updated_at?: string;
   [key: string]: unknown;
 }
@@ -339,16 +340,6 @@ export interface PnlSummary {
     winning_positions: number;
   };
   live: {
-    realized_pnl_usd: number;
-    unrealized_pnl_usd: number;
-    total_pnl_usd: number;
-    realized_pnl_pct: number;
-    open_positions: number;
-    closed_positions: number;
-    losing_positions: number;
-    winning_positions: number;
-  };
-  combined: {
     realized_pnl_usd: number;
     unrealized_pnl_usd: number;
     total_pnl_usd: number;

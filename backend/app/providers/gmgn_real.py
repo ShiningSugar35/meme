@@ -202,8 +202,8 @@ class GMGNProvider(MarketDataProvider):
 
             started = time.perf_counter()
 
-            auth_query = {"timestamp": str(int(time.time())), "client_id": str(uuid.uuid4())}
-            headers = {"X-APIKEY": api_key, "Content-Type": "application/json"}
+            auth_query = {"timestamp": str(int(time.time())), "client_id": cred.get("client_id") or cred.get("public_key") or str(uuid.uuid4())}
+            headers = {"X-APIKEY": api_key, "x-api-key": api_key, "Content-Type": "application/json"}
             request_params = {**cleaned, **auth_query}
             logged_request = dict(request_params)
             logged_request["credential_slot"] = slot

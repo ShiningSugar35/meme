@@ -94,7 +94,7 @@ export default function Portfolio() {
   const [fstats, setFstats] = useState<FilterStats | null>(null);
   const [message, setMessage] = useState('');
   const [historyRows, setHistoryRows] = useState<TradeEventsLedgerRow[]>([]);
-  const [historyAccount, setHistoryAccount] = useState<string>('ALL');
+  const [historyAccount, setHistoryAccount] = useState<string>('LIVE');
   const [pnlSummary, setPnlSummary] = useState<PnlSummary | null>(null);
   const tabRef = useRef<AccountTab>('LIVE');
 
@@ -112,7 +112,7 @@ export default function Portfolio() {
 
   const loadHistory = async (account = historyAccount) => {
     try {
-      const data = await getTradeEventsLedger(account === 'ALL' ? 'ALL' : account);
+      const data = await getTradeEventsLedger(account);
       setHistoryRows(data);
     } catch (e) {
       setMessage((e as Error).message);
@@ -159,6 +159,8 @@ export default function Portfolio() {
     } catch (e) {
       setMessage((e as Error).message);
     }
+    setHistoryAccount(next);
+    if (portfolioTab === 'HISTORY') loadHistory(next);
   };
 
   const switchPortfolioTab = (next: PortfolioTab) => {
@@ -208,30 +210,30 @@ export default function Portfolio() {
               </div>
             )}
             <div className="metric-row">
-              <span>通过AND风控(risk+holder+degen)</span>
+              <span>通过风控筛选</span>
               <strong>{String(dsh?.summary?.risk_surface_pass_count ?? latestTrench?.passed ?? 0)}</strong>
             </div>
-            {pnlSummary && (
+            {pnlSummary && tab === 'LIVE' && (
               <>
                 <div className="metric-row">
-                  <span>实盘总收益 (LIVE)</span>
+                  <span>当前实盘持仓</span>
+                  <strong>{String(pnlSummary.live.open_positions ?? 0)}</strong>
+                </div>
+                <div className="metric-row">
+                  <span>实盘PnL</span>
                   <strong style={pnlStyle(pnlSummary.live.total_pnl_usd)}>{usd(pnlSummary.live.total_pnl_usd)}</strong>
                 </div>
+              </>
+            )}
+            {pnlSummary && tab === 'SIM' && (
+              <>
                 <div className="metric-row">
-                  <span>模拟盘总收益 (SIM)</span>
+                  <span>当前模拟盘持仓</span>
+                  <strong>{String(pnlSummary.sim.open_positions ?? 0)}</strong>
+                </div>
+                <div className="metric-row">
+                  <span>模拟盘PnL</span>
                   <strong style={pnlStyle(pnlSummary.sim.total_pnl_usd)}>{usd(pnlSummary.sim.total_pnl_usd)}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>合并总收益 (LIVE+SIM)</span>
-                  <strong style={pnlStyle(pnlSummary.combined.total_pnl_usd)}>{usd(pnlSummary.combined.total_pnl_usd)}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>实盘已实现PnL</span>
-                  <strong style={pnlStyle(pnlSummary.live.realized_pnl_usd)}>{usd(pnlSummary.live.realized_pnl_usd)}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>模拟盘已实现PnL</span>
-                  <strong style={pnlStyle(pnlSummary.sim.realized_pnl_usd)}>{usd(pnlSummary.sim.realized_pnl_usd)}</strong>
                 </div>
               </>
             )}
@@ -239,7 +241,6 @@ export default function Portfolio() {
         ) : (
           <>
             <div className="button-row">
-              <button className={historyAccount === 'ALL' ? 'primary' : ''} onClick={() => switchHistoryAccount('ALL')}>全部</button>
               <button className={historyAccount === 'LIVE' ? 'primary' : ''} onClick={() => switchHistoryAccount('LIVE')}>LIVE</button>
               <button className={historyAccount === 'SIM' ? 'primary' : ''} onClick={() => switchHistoryAccount('SIM')}>SIM</button>
             </div>
@@ -250,33 +251,29 @@ export default function Portfolio() {
 
       <div className="card">
         {portfolioTab === 'CURRENT' ? (
-          <table>
+            <table>
             <thead>
               <tr>
-                <th>仓位ID</th>
-                <th>策略</th>
-                <th>Token</th>
+                <th>meme地址</th>
+                <th>交易时间</th>
                 <th>状态</th>
-                <th>剩余价值</th>
+                <th>当前持仓</th>
                 <th>收益率</th>
-                <th>价格倍数</th>
-                <th>更新时间</th>
+                <th>价格变化</th>
               </tr>
             </thead>
             <tbody>
               {currentRows.length === 0 && (
-                <tr><td colSpan={8} className="empty">当前看板暂无持仓。</td></tr>
+                <tr><td colSpan={6} className="empty">当前看板暂无持仓。</td></tr>
               )}
               {currentRows.map((row) => (
                 <tr key={row.id}>
-                  <td>{row.id}</td>
-                  <td>{row.strategy_name || row.strategy_id || '-'}</td>
                   <td title={row.token_mint}>{row.mint_short || row.token_mint || '-'}</td>
+                  <td style={{ fontSize: 12 }}>{toBeijing(row.opened_at ?? row.updated_at)}</td>
                   <td>{row.status}{row.last_exit_reason ? ` / ${exitReasonLabel(String(row.last_exit_reason))}` : ''}</td>
                   <td>{usd(row.remaining_value_usd ?? row.remaining)}</td>
                   <td>{pct(row.pnl_pct)}</td>
                   <td>{row.ratio ?? '-'}</td>
-                  <td>{toBeijing(row.updated_at)}</td>
                 </tr>
               ))}
             </tbody>
