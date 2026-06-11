@@ -86,6 +86,10 @@ function pnlStyle(value: number | null | undefined): React.CSSProperties {
   return { color: value >= 0 ? '#22c55e' : '#ef4444' };
 }
 
+function copyText(t: string) {
+  navigator.clipboard.writeText(t).catch(() => undefined);
+}
+
 export default function Portfolio() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [portfolioTab, setPortfolioTab] = useState<PortfolioTab>('CURRENT');
@@ -105,9 +109,14 @@ export default function Portfolio() {
     setStatus(runtime);
     const nextTab = preferred ?? (runtime.live_entries_enabled && runtime.live_open_count > 0 ? 'LIVE' : 'SIM');
     setTab(nextTab);
+    setHistoryAccount(nextTab);
 
-    const data = await api.getPortfolio(nextTab);
+    const [data, historyData] = await Promise.all([
+      api.getPortfolio(nextTab),
+      getTradeEventsLedger(nextTab),
+    ]);
     setRows(data);
+    setHistoryRows(historyData);
   };
 
   const loadHistory = async (account = historyAccount) => {
@@ -139,11 +148,10 @@ export default function Portfolio() {
 
   useEffect(() => {
     load().catch((e) => setMessage(e.message));
-    loadHistory();
     loadFilterStats();
     loadPnlSummary();
     const timer = window.setInterval(() => load(tabRef.current).catch(() => undefined), 5000);
-    const historyTimer = window.setInterval(() => loadHistory(), 30000);
+    const historyTimer = window.setInterval(() => loadHistory(tabRef.current), 30000);
     const statsTimer = window.setInterval(loadFilterStats, 60000);
     const pnlTimer = window.setInterval(() => loadPnlSummary().catch(() => undefined), 15000);
     return () => { window.clearInterval(timer); window.clearInterval(historyTimer); window.clearInterval(statsTimer); window.clearInterval(pnlTimer); };
@@ -221,7 +229,7 @@ export default function Portfolio() {
                 </div>
                 <div className="metric-row">
                   <span>实盘PnL</span>
-                  <strong style={pnlStyle(pnlSummary.live.total_pnl_usd)}>{usd(pnlSummary.live.total_pnl_usd)}</strong>
+                  <strong style={pnlStyle(pnlSummary.live.realized_pnl_usd)}>{usd(pnlSummary.live.realized_pnl_usd)}</strong>
                 </div>
               </>
             )}
@@ -233,7 +241,7 @@ export default function Portfolio() {
                 </div>
                 <div className="metric-row">
                   <span>模拟盘PnL</span>
-                  <strong style={pnlStyle(pnlSummary.sim.total_pnl_usd)}>{usd(pnlSummary.sim.total_pnl_usd)}</strong>
+                  <strong style={pnlStyle(pnlSummary.sim.realized_pnl_usd)}>{usd(pnlSummary.sim.realized_pnl_usd)}</strong>
                 </div>
               </>
             )}
@@ -268,7 +276,7 @@ export default function Portfolio() {
               )}
               {currentRows.map((row) => (
                 <tr key={row.id}>
-                  <td title={row.token_mint}>{row.mint_short || row.token_mint || '-'}</td>
+                  <td title={row.token_mint}>{row.mint_short || row.token_mint || '-'} {row.token_mint ? <span onClick={() => copyText(row.token_mint!)} style={{cursor:'pointer',marginLeft:4,fontSize:11,color:'#58a6ff'}} title="复制完整地址">[复制]</span> : null}</td>
                   <td style={{ fontSize: 12 }}>{toBeijing(row.opened_at ?? row.updated_at)}</td>
                   <td>{row.status}{row.last_exit_reason ? ` / ${exitReasonLabel(String(row.last_exit_reason))}` : ''}</td>
                   <td>{usd(row.remaining_value_usd ?? row.remaining)}</td>
@@ -352,9 +360,9 @@ export default function Portfolio() {
                 <table style={{fontSize:12,marginTop:4}}><thead><tr><th>分组</th><th>状态</th><th>原始</th><th>去重</th><th>备注</th></tr></thead><tbody>
                 {dsh.discovery_fetch_health.map((dh, idx) => (
                   <tr key={idx}><td>{dh.group_name}{dh.slot != null ? ` [slot ${dh.slot}]` : ''}</td>
-                    <td>{severityDot(dh.severity)} {dh.ok ? 'OK' : 'FAIL'}</td>
+                    <td>{severityDot(dh.severity)} {dh.empty ? '空返回' : dh.ok ? 'OK' : 'FAIL'}</td>
                     <td>{dh.raw_count}</td><td>{dh.unique_count ?? '-'}</td>
-                    <td style={{fontSize:11,color:'#8892ae'}}>{dh.error ? String(dh.error).substring(0,50) : ''}{dh.raw_count===0&&dh.ok?'返回0条':''}</td>
+                    <td style={{fontSize:11,color:'#8892ae'}}>{dh.empty ? '' : dh.error ? String(dh.error).substring(0,50) : ''}</td>
                   </tr>))}</tbody></table></>)}
             {dsh.credential_health && dsh.credential_health.length > 0 && (
               <>

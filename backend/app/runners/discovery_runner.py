@@ -567,7 +567,7 @@ class DiscoveryRunner:
             empty_attempts = 0
             failure_attempts = 0
 
-            max_attempts = min(len(slot_sequence), max(5, len(slot_sequence)))
+            max_attempts = min(settings.GMGN_DISCOVERY_MAX_ATTEMPTS_PER_TYPE, len(slot_sequence))
 
             for idx, slot in enumerate(slot_sequence):
                 if idx >= max_attempts:
@@ -679,8 +679,9 @@ class DiscoveryRunner:
 
             gres_final = {
                 "group_name": group_name, "platforms": platforms, "slot": None, "role": "type_shard",
-                "ok": False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
+                "ok": True if all_empty else False, "raw_count": 0, "unique_count": 0, "duplicate_count": 0,
                 "status_code": None, "error": last_error, "latency_ms": 0, "type": [trench_type],
+                "empty": all_empty,
             }
             groups_results.append(gres_final)
             return None, gres_final

@@ -147,6 +147,7 @@ class Settings(BaseSettings):
     GMGN_TRENCHES_CONCURRENCY: int = Field(2)
     GMGN_FEATURE_CONCURRENCY: int = Field(3)
     GMGN_TRENCHES_DEBUG_RELAXED_ON_ZERO: bool = Field(False)
+    GMGN_DISCOVERY_MAX_ATTEMPTS_PER_TYPE: int = Field(5)
 
     STRATEGY_DEFAULT_X: float = Field(0.20)
     GMGN_TRENCHES_LIMIT: int = Field(200)

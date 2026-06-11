@@ -837,6 +837,7 @@ async def _build_discovery_fetch_health(trench_history: List[Dict[str, Any]]) ->
                 if isinstance(g, dict):
                     ok = bool(g.get("ok", False))
                     raw_count = g.get("raw_count", 0)
+                    is_empty = bool(g.get("empty", False))
                     items.append({
                         "group_name": g.get("group_name", ""),
                         "platforms": g.get("platforms", []),
@@ -850,7 +851,8 @@ async def _build_discovery_fetch_health(trench_history: List[Dict[str, Any]]) ->
                         "error": g.get("error"),
                         "cooldown_until": g.get("cooldown_until"),
                         "latency_ms": g.get("latency_ms"),
-                        "severity": "critical" if not ok else ("warn" if raw_count == 0 else "ok"),
+                        "empty": is_empty,
+                        "severity": "warn" if is_empty else ("critical" if not ok else ("warn" if raw_count == 0 else "ok")),
                     })
             break
     return items
