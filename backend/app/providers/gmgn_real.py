@@ -47,7 +47,7 @@ class GMGNProvider(MarketDataProvider):
         self.api_base_url = (settings.GMGN_API_BASE_URL or "").rstrip("/")
         self.credentials = settings.get_gmgn_credentials()
         self.api_keys = [c.get("api_key", "") for c in self.credentials if c.get("api_key")]
-        self.client_ids = [c.get("client_id", "") for c in self.credentials if c.get("client_id")]
+        self.client_ids: List[str] = []
         self._key_cursor = 0
         self.mock_data = MockData()
         self.rate_limiter = get_rate_limiter(credential_count=max(len(self.credentials or []), 1))
@@ -57,8 +57,8 @@ class GMGNProvider(MarketDataProvider):
                 raise ImportError("httpx required for live/online_readonly GMGN mode. Install with: pip install httpx")
             if not self.api_base_url:
                 raise ValueError("GMGN_API_BASE_URL required for live/online_readonly mode")
-            if not (self.credentials or self.api_keys or self.client_ids):
-                raise ValueError("GMGN_API_KEY_N or GMGN_CLIENT_ID_N required for live/online_readonly mode")
+            if not (self.credentials or self.api_keys):
+                raise ValueError("GMGN_API_KEY_N required for live/online_readonly mode")
             logger.info("GMGN Provider initialized in real mode", api_base=self.api_base_url, credential_count=len(self.credentials))
 
     async def _log_request(

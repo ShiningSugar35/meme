@@ -406,13 +406,12 @@ class Settings(BaseSettings):
         for idx in sorted(accounts_by_index):
             raw = accounts_by_index[idx]
             api_key = raw.get("api_key", "")
-            public_key = raw.get("public_key", "")
-            client_id = raw.get("client_id", "") or public_key
-            private_key = raw.get("private_key", "")
-            if api_key or client_id or private_key:
+            if api_key:
                 accounts.append({
-                    "index": idx, "api_key": api_key, "client_id": client_id,
-                    "public_key": public_key, "private_key": private_key,
+                    "index": idx,
+                    "api_key": api_key,
+                    "public_key": raw.get("public_key", ""),
+                    "private_key": raw.get("private_key", ""),
                 })
         return accounts
 
@@ -428,7 +427,8 @@ class Settings(BaseSettings):
         return keys[0] if keys else None
 
     def get_gmgn_client_ids(self) -> List[str]:
-        return [a.get("client_id", "") for a in self.get_gmgn_accounts() if a.get("client_id")]
+        # deprecated: client_id is now per-request nonce, not a config credential
+        return []
 
     def get_gmgn_private_keys(self) -> List[str]:
         keys = [a.get("private_key", "") for a in self.get_gmgn_accounts() if a.get("private_key")]
@@ -616,8 +616,8 @@ class Settings(BaseSettings):
             missing: List[str] = []
             if not self.GMGN_API_BASE_URL:
                 missing.append("GMGN_API_BASE_URL")
-            if not (self.get_gmgn_api_keys() or self.get_gmgn_client_ids() or self.get_gmgn_credentials()):
-                missing.append("GMGN_API_KEY or GMGN_CLIENT_ID/GMGN_PUBLIC_KEY")
+            if not (self.get_gmgn_api_keys() or self.get_gmgn_credentials()):
+                missing.append("GMGN_API_KEY")
             if not self.get_jupiter_api_base_url():
                 missing.append("JUPITER_API_BASE_URL")
             if not self.get_jupiter_api_keys():

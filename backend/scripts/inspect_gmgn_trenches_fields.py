@@ -30,8 +30,7 @@ async def probe():
         # Check if GMGN is configured
         creds = settings.get_gmgn_credentials()
         api_keys = settings.get_gmgn_api_keys()
-        client_ids = settings.get_gmgn_client_ids()
-        has_credentials = bool(creds or api_keys or client_ids) and bool(settings.GMGN_API_BASE_URL)
+        has_credentials = bool(creds or api_keys) and bool(settings.GMGN_API_BASE_URL)
 
         if not has_credentials:
             print("GMGN credentials not configured, real API probe skipped.")

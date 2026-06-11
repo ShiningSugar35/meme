@@ -482,6 +482,7 @@ class DiscoveryRunner:
         except Exception as e:
             gres["error"] = str(e)[:300]
             gres["status_code"] = getattr(e, 'status_code', None)
+            gres["retryable"] = getattr(e, 'retryable', None)
             gres["latency_ms"] = int((time.perf_counter() - t0) * 1000)
             logger.warning(f"trenches fetch failed for {group_name} slot={request_slot}: {e}")
 
@@ -497,6 +498,8 @@ class DiscoveryRunner:
                 err_msg = str(e)
                 if "AUTH_CLIENT_ID_REPLAYED" in err_msg:
                     gmgn_error = "AUTH_CLIENT_ID_REPLAYED"
+                elif "AUTH_TIMESTAMP_EXPIRED" in err_msg:
+                    gmgn_error = "AUTH_TIMESTAMP_EXPIRED"
                 await self.repo.append_system_event(
                     "WARNING",
                     "DISCOVERY",
@@ -683,6 +686,8 @@ class DiscoveryRunner:
                 if items is None:
                     failure_attempts += 1
                     last_error = gres.get("error", "unknown error")
+                    if gres.get("retryable") is False:
+                        break
                     continue
 
             all_empty = empty_attempts > 0 and failure_attempts == 0
