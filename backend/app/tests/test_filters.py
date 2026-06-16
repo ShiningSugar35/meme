@@ -695,3 +695,66 @@ def test_entry_risk_liquidity_holder_ratio_fails():
     # 500/80 = 6.25; for x=0.2, min_liquidity_holder_ratio=70-100*0.2=50
     # 6.25 <= 50 => fails
     assert any(d.name == "liquidity_holder_ratio" and not d.passed for d in res.details)
+
+
+# ============================================================================
+# _build_entry_market_context — snapshot columns priority test
+# ============================================================================
+
+def test_build_entry_market_context_snapshot_columns_before_raw_json():
+    """Snapshot standard columns are read before raw_json.
+
+    latest has price_usd; snapshot columns have liquidity_usd, price_sol & sol_side_liquidity.
+    The merged ctx should contain all four without needing raw_json.
+    """
+    from unittest.mock import AsyncMock
+    from ..trading.executor import TradingPipeline
+
+    mock_repo = AsyncMock()
+    mock_repo.get_token_metric_snapshot.return_value = {
+        "liquidity_usd": 5000,
+        "price_sol": 0.0005,
+        "sol_side_liquidity": 5.0,
+    }
+    mock_repo.get_token.return_value = {}
+
+    gmgn = AsyncMock()
+    pipeline = TradingPipeline.__new__(TradingPipeline)
+    pipeline.repo = mock_repo
+    pipeline.gmgn = gmgn
+
+    latest = {"price_usd": 0.5}
+    ctx = asyncio.run(pipeline._build_entry_market_context(
+        "TESTMINT", latest, snapshot_id=1
+    ))
+    assert ctx["price_usd"] == 0.5
+    assert ctx["liquidity_usd"] == 5000
+    assert ctx["price_sol"] == 0.0005
+    assert ctx["sol_side_liquidity"] == 5.0
+
+
+def test_build_entry_market_context_fallback_chain():
+    """When latest is empty, full chain is tried: columns → raw_json → tokens."""
+    from unittest.mock import AsyncMock
+    from ..trading.executor import TradingPipeline
+
+    mock_repo = AsyncMock()
+    mock_repo.get_token_metric_snapshot.return_value = {
+        "liquidity_usd": None,
+        "price_usd": None,
+        "raw_json": '{"liquidity_usd": 3000}',
+    }
+    mock_repo.get_token.return_value = {"latest_price_usd": 0.3}
+
+    gmgn = AsyncMock()
+    pipeline = TradingPipeline.__new__(TradingPipeline)
+    pipeline.repo = mock_repo
+    pipeline.gmgn = gmgn
+
+    ctx = asyncio.run(pipeline._build_entry_market_context(
+        "TESTMINT2", {}, snapshot_id=2
+    ))
+    # liquidity_usd from raw_json (columns were None)
+    assert ctx["liquidity_usd"] == 3000
+    # price_usd from tokens table (latest was empty, columns None, raw_json no price_usd)
+    assert ctx["price_usd"] == 0.3

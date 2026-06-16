@@ -374,3 +374,87 @@ class TestMockLifecycleE2E:
         events = await repo.list_recent_system_events(50)
         assert any('Discovery run complete' in (e.get('message', '')) for e in events), \
             "Should contain discovery completion message"
+
+
+# ============================================================================
+# Snapshot classification tests (P0 — three-way split)
+# ============================================================================
+
+class TestSnapshotClassification:
+    """_classify_snapshot must distinguish complete / partial / unavailable."""
+
+    @pytest.mark.asyncio
+    async def test_complete_snapshot_all_fields(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = PositionRiskRunner(repo, gmgn)
+        snap = {
+            "liquidity_usd": 5000, "holder_count": 80,
+            "top_10_holder_rate": 0.18, "fresh_wallet_rate": 0.1,
+            "dev_team_hold_rate": 0.0, "max_rug_ratio": -0.1,
+            "max_entrapment_ratio": -0.1, "max_insider_ratio": -0.1,
+            "max_bundler_rate": -0.1, "suspected_insider_hold_rate": 0.05,
+            "is_wash_trading": 0, "rat_trader_amount_rate": -0.1,
+            "sniper_count": 1,
+        }
+        assert runner._classify_snapshot(snap) == "complete"
+
+    @pytest.mark.asyncio
+    async def test_partial_snapshot_missing_one_field(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = PositionRiskRunner(repo, gmgn)
+        snap = {
+            "liquidity_usd": 5000, "holder_count": 80,
+            "top_10_holder_rate": 0.18, "fresh_wallet_rate": 0.1,
+            "dev_team_hold_rate": 0.0, "max_rug_ratio": -0.1,
+            "max_entrapment_ratio": -0.1, "max_insider_ratio": -0.1,
+            "max_bundler_rate": -0.1,
+        }
+        assert runner._classify_snapshot(snap) == "partial"
+
+    @pytest.mark.asyncio
+    async def test_partial_snapshot_uses_alias(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = PositionRiskRunner(repo, gmgn)
+        snap = {
+            "liquidity_usd": 5000, "holder_count": 80,
+            "top10_holder_rate": 0.18, "fresh_wallet_rate": 0.1,
+            "dev_team_hold_rate": 0.0, "rug_ratio": -0.1,
+            "entrapment_ratio": -0.1, "insider_ratio": -0.1,
+            "bundler_trader_amount_rate": -0.1, "suspected_insider_hold_rate": 0.05,
+            "is_wash_trading": 0, "rat_trader_amount_rate": -0.1,
+            "sniper_count": 1,
+        }
+        assert runner._classify_snapshot(snap) == "complete"
+
+    @pytest.mark.asyncio
+    async def test_unavailable_snapshot_empty_dict(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = PositionRiskRunner(repo, gmgn)
+        assert runner._classify_snapshot({}) == "unavailable"
+
+    @pytest.mark.asyncio
+    async def test_unavailable_snapshot_error_dict(self, repo):
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = PositionRiskRunner(repo, gmgn)
+        assert runner._classify_snapshot({"error": "timeout"}) == "unavailable"
+
+
+# ============================================================================
+# RateLimiter slot role tests (P1 — feature_holding_pool)
+# ============================================================================
+
+class TestRateLimiterSlotRoles:
+    def test_feature_holding_slots_have_correct_role(self):
+        from ..providers.rate_limiter import RateLimiter
+        limiter = RateLimiter(credential_count=12)
+        feature = set(settings.get_feature_slots())
+        holding = set(settings.get_holding_slots())
+        for sid, slot in limiter.slots.items():
+            if sid in feature and sid in holding:
+                assert slot.role == "feature_holding_pool", f"slot {sid} expected feature_holding_pool got {slot.role}"
+            elif sid in holding:
+                assert slot.role == "holding_poll", f"slot {sid} expected holding_poll got {slot.role}"
+            elif sid in settings.get_discovery_slots():
+                assert slot.role == "discovery"
+            else:
+                assert slot.role == "unassigned"

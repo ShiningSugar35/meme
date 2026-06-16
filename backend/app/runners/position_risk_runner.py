@@ -163,8 +163,8 @@ class PositionRiskRunner:
     This runner now does two separate jobs:
     1. Non-price safety exits: dust, completed, holder/smart-money checks.
     2. Risk recheck: after entry, re-run the initial risk-threshold filter on a dynamic schedule:
-       >=1.5 SOL every 2s; >=1.0 every 4s; >=0.5 every 8s;
-       >=0.25 every 16s; <0.25 every 32s.
+       >=150 USD every 4s; >=100 every 8s; >=50 every 16s;
+       >=25 every 32s; <25 every 64s.
 
     If a TradingPipeline is supplied, all exits are sent through execute_sell().
     Without a pipeline, SIM positions are paper-exited while LIVE positions are never falsely closed.
@@ -313,12 +313,30 @@ class PositionRiskRunner:
         try:
             latest_snapshot = await self._fetch_latest_snapshot(token, account_type, retry_delay_seconds=interval)
         except RuntimeError:
-            await self._emergency_risk_exit(position)
+            await self._emergency_risk_exit(position, reason="RISK_DATA_UNAVAILABLE_EXIT")
+            return
+
+        classification = self._classify_snapshot(latest_snapshot)
+        if classification == "unavailable":
+            await self._emergency_risk_exit(position, reason="RISK_DATA_UNAVAILABLE_EXIT")
             return
 
         token_info = await self.repo.get_token(token)
         if token_info and token_info.get("latest_type") and "type" not in latest_snapshot:
             latest_snapshot["type"] = token_info["latest_type"]
+
+        if classification == "partial":
+            missing_fields = [k for k, aliases in self.RISK_REQUIRED_ALIASES.items()
+                              if not any(a in latest_snapshot for a in aliases)]
+            await self.repo.append_system_event(
+                "WARN",
+                "RISK",
+                f"Holding risk snapshot partial for {token}: missing {missing_fields}",
+                _safe_json_dumps({"position_id": pos_id, "missing_fields": missing_fields}),
+                account_type=account_type,
+            )
+            # Partial snapshot ⇒ skip risk recheck this cycle, do NOT force exit.
+            return
 
         ticks = await self.repo.get_recent_ticks(token, 60)
         prices_60 = [
@@ -469,22 +487,46 @@ class PositionRiskRunner:
             )
             raise
 
-    RISK_REQUIRED_FIELDS = (
-        "liquidity_usd", "holder_count", "top_10_holder_rate",
-        "fresh_wallet_rate", "dev_team_hold_rate", "max_rug_ratio",
-        "max_entrapment_ratio", "max_insider_ratio", "max_bundler_rate",
-        "suspected_insider_hold_rate", "is_wash_trading",
-        "rat_trader_amount_rate", "sniper_count",
-    )
+    RISK_REQUIRED_ALIASES = {
+        "liquidity_usd": ("liquidity_usd", "liquidity", "pool_liquidity_usd"),
+        "holder_count": ("holder_count", "holders", "total_holders", "holder"),
+        "top10_holder_rate": ("top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate"),
+        "fresh_wallet_rate": ("fresh_wallet_rate", "fresh_wallets_rate", "fresh_wallet"),
+        "dev_team_hold_rate": ("dev_team_hold_rate", "creator_balance_rate", "creator_hold_rate", "dev_hold_rate"),
+        "rug_ratio": ("max_rug_ratio", "rug_ratio", "max_rugged_ratio", "rug"),
+        "entrapment_ratio": ("max_entrapment_ratio", "entrapment_ratio", "entrapment"),
+        "insider_ratio": ("max_insider_ratio", "insider_ratio", "insider_rate"),
+        "max_bundler_rate": ("max_bundler_rate", "bundler_trader_amount_rate", "bundler_rate", "bundler"),
+        "suspected_insider_hold_rate": ("suspected_insider_hold_rate", "insider_hold_rate"),
+        "is_wash_trading": ("is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"),
+        "rat_trader_amount_rate": ("rat_trader_amount_rate", "rat_trader_rate", "rat_trader"),
+        "sniper_count": ("sniper_count", "snipers", "sniper_trader_count", "sniper_cnt"),
+    }
+
+    def _classify_snapshot(self, snapshot: Dict[str, Any]) -> str:
+        """Classify snapshot as ``complete``, ``partial``, or ``unavailable``.
+
+        complete  — every risk semantic group (via aliases) has at least one key.
+        partial   — snapshot has data but one or more groups are missing.
+        unavailable — empty / error dict (nothing usable).
+        """
+        if not isinstance(snapshot, dict) or not snapshot:
+            return "unavailable"
+        if "error" in snapshot:
+            return "unavailable"
+        all_present = all(
+            any(k in snapshot for k in aliases)
+            for aliases in self.RISK_REQUIRED_ALIASES.values()
+        )
+        return "complete" if all_present else "partial"
 
     def _validate_snapshot(self, result) -> bool:
-        if not isinstance(result, dict) or not result:
-            return False
-        if "error" in result:
-            return False
-        # Must contain every risk-critical field so run_holding_risk_filter
-        # can evaluate properly (all are now required=True).
-        return all(k in result for k in self.RISK_REQUIRED_FIELDS)
+        """Minimal validation: only check that we got a non-error dict.
+
+        The three-way classification happens after fetch, so retry only
+        triggers on complete API failure, not on partial data.
+        """
+        return isinstance(result, dict) and bool(result) and "error" not in result
 
     async def _fetch_latest_snapshot(self, token: str, account_type: str, retry_delay_seconds: float = 0) -> Dict[str, Any]:
         preferred = acquire_holding_slot("risk_snapshot")

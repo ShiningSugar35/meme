@@ -88,9 +88,12 @@ class RateLimiter:
 
         discovery_slots = set(settings.get_discovery_slots())
         holding_slots = set(settings.get_holding_slots())
+        feature_slots = set(settings.get_feature_slots())
 
         for i in range(credential_count):
-            if i in holding_slots:
+            if i in feature_slots and i in holding_slots:
+                role = "feature_holding_pool"
+            elif i in holding_slots:
                 role = "holding_poll"
             elif i in discovery_slots:
                 role = "discovery"

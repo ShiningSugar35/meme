@@ -296,12 +296,13 @@ class TradingPipeline:
         latest: Dict[str, Any],
         snapshot_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Merge latest + snapshot raw_json + tokens table into one context dict.
+        """Merge latest + snapshot columns + snapshot raw_json + tokens table.
 
-        Fallback is per-field: any missing critical field triggers a read,
-        not just liquidity_usd.  This ensures _usd_to_sol_amount, which
-        reads price_sol/price_usd/liquidity_usd/sol_side_liquidity from
-        the context, always sees the richest possible data.
+        Priority (first positive wins):
+          1. latest (GMGN latest-price result)
+          2. token_metric_snapshot columns (e.g. liquidity_usd, price_usd)
+          3. token_metric_snapshot.raw_json
+          4. tokens table (latest_liquidity_usd, latest_price_usd, …)
         """
         NEEDED_KEYS = ("liquidity_usd", "price_usd", "price_sol", "sol_side_liquidity")
 
@@ -310,29 +311,37 @@ class TradingPipeline:
 
         ctx = dict(latest)
 
-        # Snapshot raw_json fallback — per-field, not liquidity-gated
         if not all(_field_ok(ctx, k) for k in NEEDED_KEYS) and snapshot_id:
             try:
                 snapshot = await self.repo.get_token_metric_snapshot(snapshot_id)
             except Exception:
                 snapshot = None
             if snapshot:
-                raw_json = snapshot.get("raw_json")
-                raw = {}
-                if isinstance(raw_json, str):
-                    try:
-                        raw = json.loads(raw_json) if raw_json.strip() else {}
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        raw = {}
-                elif isinstance(raw_json, dict):
-                    raw = raw_json
+                # 2. Snapshot columns (e.g. liquidity_usd stored directly)
                 for key in NEEDED_KEYS:
                     if not _field_ok(ctx, key):
-                        val = self._to_float(raw.get(key))
+                        val = self._to_float(snapshot.get(key))
                         if val and val > 0:
                             ctx[key] = val
 
-        # Tokens table fallback — same per-field approach
+                # 3. Snapshot raw_json fallback
+                if not all(_field_ok(ctx, k) for k in NEEDED_KEYS):
+                    raw_json = snapshot.get("raw_json")
+                    raw = {}
+                    if isinstance(raw_json, str):
+                        try:
+                            raw = json.loads(raw_json) if raw_json.strip() else {}
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            raw = {}
+                    elif isinstance(raw_json, dict):
+                        raw = raw_json
+                    for key in NEEDED_KEYS:
+                        if not _field_ok(ctx, key):
+                            val = self._to_float(raw.get(key))
+                            if val and val > 0:
+                                ctx[key] = val
+
+        # 4. Tokens table fallback
         if not all(_field_ok(ctx, k) for k in NEEDED_KEYS):
             try:
                 token_row = await self.repo.get_token(token_mint)
