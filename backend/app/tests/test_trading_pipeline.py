@@ -95,3 +95,29 @@ async def test_duplicate_token_no_second_live(repo, pipeline_factory, monkeypatc
     tes2 = await repo.list_trade_events(100)
     second_buy = sum(1 for t in tes2 if t['side'] == 'BUY' and t['token_mint'] == 'PASS1')
     assert second_buy <= first_buy + 0, 'should not create duplicate buy for same token'
+
+
+@pytest.mark.asyncio
+async def test_smart_degen_api_not_called_when_not_required(repo, pipeline_factory, monkeypatch):
+    """When all strategy groups have x>0.15 (smart_degen not required),
+    _fetch_top3_smart_degen_snapshot should NOT be called."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(type(settings), "get_provider_mode", lambda self: ProviderMode.MOCK)
+    pipeline, mock = pipeline_factory()
+    pipeline.jito.send = AsyncMock(return_value={"ok": True, "signature": "mock_sig", "bundle_id": "mock_bundle"})
+
+    # Create strategies with x=0.2 (no smart degen required)
+    await repo.create_strategy_group("sd_skip", 0.2, is_live=True, priority=5, raw_config_json='{}')
+
+    groups = await repo.list_strategy_groups()
+    live = [g for g in groups if g['is_live']]
+
+    # Spy on the internal method
+    original = pipeline._fetch_top3_smart_degen_snapshot
+    pipeline._fetch_top3_smart_degen_snapshot = AsyncMock(return_value=None)
+
+    await pipeline.handle_token_second_filter_result('PASS1', live, None)
+
+    pipeline._fetch_top3_smart_degen_snapshot.assert_not_called()
+    pipeline._fetch_top3_smart_degen_snapshot = original

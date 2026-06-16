@@ -557,3 +557,14 @@ def test_import_discovery_runner():
 def test_import_position_risk_runner():
     from ..runners import position_risk_runner as _p
     assert hasattr(_p, "PositionRiskRunner")
+
+
+def test_requires_smart_degen_for_x_none_safe():
+    """requires_smart_degen_for_x should handle None safely (default x=0.2)."""
+    from ..strategy.thresholds import requires_smart_degen_for_x
+    # x=0.2 > 0.15 → smart degen NOT required
+    assert requires_smart_degen_for_x(0.2) is False
+    assert requires_smart_degen_for_x(0.200001) is False
+    # x <= 0.15 → smart degen IS required
+    assert requires_smart_degen_for_x(0.15) is True
+    assert requires_smart_degen_for_x(0.1) is True

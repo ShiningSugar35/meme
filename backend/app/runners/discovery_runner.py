@@ -1016,9 +1016,13 @@ class DiscoveryRunner:
         self, token_mint: str, token: Dict[str, Any], groups: List[dict],
         snapshot_id: int, discovery_event_ids: Dict[int, int],
     ) -> Tuple[List[dict], Dict[str, Any], Optional[List[Dict[str, Any]]]]:
+        original_count = len(groups)
         # 防御：只对要求聪明钱的策略组执行 smart_degen_filter
         groups = [sg for sg in groups if self._requires_smart_degen(sg)]
-        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "passed": 0, "failed": 0, "skipped_not_required": 0}
+        stage_diag: Dict[str, Any] = {
+            "candidates_in": original_count, "checked": 0, "passed": 0, "failed": 0,
+            "skipped_not_required": original_count - len(groups),
+        }
         passed_groups: List[dict] = []
 
         if not groups:

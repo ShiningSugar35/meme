@@ -16,6 +16,24 @@ from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
 from ..strategy.thresholds import requires_smart_degen_for_x
+
+
+SMART_DEGEN_AUDIT_FIELDS = {
+    "smart_degen_max_holder_address",
+    "smart_degen_max_holder_pct",
+    "smart_degen_max_holder_usd",
+    "smart_degen_min_holder_address",
+    "smart_degen_min_holder_pct",
+    "smart_degen_min_holder_usd",
+}
+
+
+def _requires_smart_degen_for_x_safe(x_value: Any) -> bool:
+    try:
+        x = float(x_value if x_value is not None else settings.STRATEGY_DEFAULT_X)
+    except Exception:
+        x = float(settings.STRATEGY_DEFAULT_X)
+    return requires_smart_degen_for_x(x)
 from ..trading.audit_builder import ENTRY_AUDIT_REQUIRED_FIELDS
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
@@ -748,13 +766,15 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
                FROM token_strategy_matches tsm
                LEFT JOIN strategy_groups sg ON sg.id = tsm.strategy_id
                WHERE tsm.stage='risk_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
+                 AND tsm.discovery_event_id IS NOT NULL AND tsm.strategy_id IS NOT NULL
                  AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)""",
             (lower_bound, upper_bound, lower_bound, upper_bound))
 
         smart_degen_passed_rows = await _fetch_all(repo,
             """SELECT DISTINCT tsm.discovery_event_id AS eid, tsm.strategy_id AS sid
                FROM token_strategy_matches tsm
-               WHERE tsm.stage='smart_degen_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?""",
+               WHERE tsm.stage='smart_degen_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
+                 AND tsm.discovery_event_id IS NOT NULL AND tsm.strategy_id IS NOT NULL""",
             (lower_bound, upper_bound))
         smart_degen_passed = {(int(r["eid"]), int(r["sid"])) for r in smart_degen_passed_rows}
 
@@ -763,7 +783,7 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
         for r in risk_top_rows:
             key = (int(r["eid"]), int(r["sid"]))
             x_val = r.get("x")
-            if not requires_smart_degen_for_x(x_val):
+            if not _requires_smart_degen_for_x_safe(x_val):
                 risk_surface_keys += 1
                 smart_degen_skipped += 1
             elif key in smart_degen_passed:
@@ -790,6 +810,7 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
             """SELECT DISTINCT tsm.discovery_event_id AS eid, tsm.strategy_id AS sid
                FROM token_strategy_matches tsm
                WHERE tsm.stage='price_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
+                 AND tsm.discovery_event_id IS NOT NULL AND tsm.strategy_id IS NOT NULL
                  AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='kline_fallback' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)""",
             (lower_bound, upper_bound, lower_bound, upper_bound))
         price_kline_keys = {(int(r["eid"]), int(r["sid"])) for r in price_kline_rows}
@@ -798,7 +819,7 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
         for r in risk_top_rows:
             key = (int(r["eid"]), int(r["sid"]))
             x_val = r.get("x")
-            if not requires_smart_degen_for_x(x_val):
+            if not _requires_smart_degen_for_x_safe(x_val):
                 risk_top_keys_set.add(key)
             elif key in smart_degen_passed:
                 risk_top_keys_set.add(key)

@@ -16,6 +16,7 @@ from ..strategy.slippage import (
 from ..logging_config import logger
 from ..providers.base import SwapProvider, ExecutionProvider, RpcProvider, MarketDataProvider
 from ..config import settings, ProviderMode
+from ..strategy.thresholds import requires_smart_degen_for_x
 from .audit_builder import build_entry_audit_payload, build_exit_audit_payload
 from .accounting import (
     compute_sim_buy_accounting,
@@ -470,11 +471,19 @@ class TradingPipeline:
 
         # Capture TOP3 smart degen snapshot BEFORE creating positions
         # so it can be embedded in locked_strategy_config_json at creation time.
+        # 仅当至少一个策略要求聪明钱时才调用 smart_degen API
         top3_snapshot = None
-        try:
-            top3_snapshot = await self._fetch_top3_smart_degen_snapshot(token_mint)
-        except Exception:
-            pass
+        requires_any_smart_degen = any(
+            requires_smart_degen_for_x(
+                s.get("x") if s.get("x") is not None else settings.STRATEGY_DEFAULT_X
+            )
+            for s in passed_strategies
+        )
+        if requires_any_smart_degen:
+            try:
+                top3_snapshot = await self._fetch_top3_smart_degen_snapshot(token_mint)
+            except Exception:
+                pass
 
         live_strategies = [s for s in passed_strategies if bool(s.get("is_live"))]
         sim_strategies = [s for s in passed_strategies if not bool(s.get("is_live"))]
@@ -491,6 +500,7 @@ class TradingPipeline:
             pos = await self._create_sim_position(
                 token_mint, strategy, snapshot_id, de_id,
                 top3_smart_degen_snapshot=top3_snapshot,
+                smart_degen_required=requires_any_smart_degen,
             )
             if pos:
                 created.append(pos)
@@ -543,7 +553,11 @@ class TradingPipeline:
                 return {"status": "SKIPPED_EXISTING_LIVE_POSITION", "created": created, "position_id": existing.get("id")}
 
             # Only one live strategy is allowed by Control Center validation.
-            res = await self._execute_buy(token_mint, live_strategies[0], snapshot_id, discovery_event_id, top3_smart_degen_snapshot=top3_snapshot)
+            res = await self._execute_buy(
+                token_mint, live_strategies[0], snapshot_id, discovery_event_id,
+                top3_smart_degen_snapshot=top3_snapshot,
+                smart_degen_required=requires_any_smart_degen,
+            )
             if res:
                 created.append(res)
 
@@ -556,6 +570,7 @@ class TradingPipeline:
         snapshot_id: Optional[int],
         discovery_event_id: Optional[int],
         top3_smart_degen_snapshot: Optional[List[Dict[str, Any]]] = None,
+        smart_degen_required: bool = True,
     ) -> Optional[Dict[str, Any]]:
         # Per-strategy dedup: if an open SIM position already exists for this strategy+token, skip
         try:
@@ -777,6 +792,7 @@ class TradingPipeline:
             size_usd=size_usd,
             liquidity_usd=liquidity_usd,
             sol_side_liquidity=sol_side_liquidity,
+            smart_degen_required=smart_degen_required,
         )
         await self.repo.insert_position_audit(
             position_id=pos_id,
@@ -798,6 +814,7 @@ class TradingPipeline:
         snapshot_id: Optional[int] = None,
         discovery_event_id: Optional[int] = None,
         top3_smart_degen_snapshot: Optional[List[Dict[str, Any]]] = None,
+        smart_degen_required: bool = True,
     ) -> Optional[Dict[str, Any]]:
         gate = self._safety_gate()
         if gate:
@@ -1071,6 +1088,7 @@ class TradingPipeline:
             size_usd=size_usd,
             liquidity_usd=liquidity_usd,
             sol_side_liquidity=sol_side_liquidity,
+            smart_degen_required=smart_degen_required,
         )
         await self.repo.insert_position_audit(
             position_id=pos_id,

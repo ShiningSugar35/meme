@@ -243,6 +243,7 @@ async def build_entry_audit_payload(
     size_usd: float,
     liquidity_usd: Optional[float] = None,
     sol_side_liquidity: Optional[float] = None,
+    smart_degen_required: bool = True,
 ) -> Dict[str, Any]:
     data_sources = _build_entry_data_sources(
         fetch_token_snapshot_called=False,
@@ -345,11 +346,12 @@ async def build_entry_audit_payload(
         pass
 
     smart_degen_holders: List[Dict[str, Any]] = []
-    try:
-        smart_degen_holders = await gmgn.fetch_smart_degen_holders(token_mint, limit=100)
-        data_sources["smart_degen_holders_called"] = True
-    except Exception:
-        pass
+    if smart_degen_required:
+        try:
+            smart_degen_holders = await gmgn.fetch_smart_degen_holders(token_mint, limit=100)
+            data_sources["smart_degen_holders_called"] = True
+        except Exception:
+            pass
 
     klines: List[Dict[str, Any]] = []
     try:
@@ -621,7 +623,17 @@ async def build_entry_audit_payload(
         payload["smart_degen_min_holder_usd"] = _to_float(min_h.get("usd_value"))
 
     payload["entry_data_sources"] = data_sources
-    payload["entry_missing_fields"] = _compute_missing_fields(payload, ENTRY_AUDIT_REQUIRED_FIELDS)
+    if smart_degen_required:
+        required_fields = ENTRY_AUDIT_REQUIRED_FIELDS
+    else:
+        # 聪明钱不要求时，排除 6 个聪明钱审计字段
+        excluded = {
+            "smart_degen_max_holder_address", "smart_degen_max_holder_pct",
+            "smart_degen_max_holder_usd", "smart_degen_min_holder_address",
+            "smart_degen_min_holder_pct", "smart_degen_min_holder_usd",
+        }
+        required_fields = [f for f in ENTRY_AUDIT_REQUIRED_FIELDS if f not in excluded]
+    payload["entry_missing_fields"] = _compute_missing_fields(payload, required_fields)
 
     return payload
 

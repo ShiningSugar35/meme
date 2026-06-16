@@ -798,6 +798,103 @@ async def test_export_trade_audit_endpoint_with_data(pipeline_factory):
         settings.SQLITE_PATH = original_path
 
 
+@pytest.mark.asyncio
+async def test_entry_audit_smart_degen_not_required_skips_api(repo, pipeline_factory):
+    """When smart_degen_required=False, fetch_smart_degen_holders is not called
+    and entry_missing_fields excludes the 6 smart-degen fields."""
+    from unittest.mock import AsyncMock
+
+    pipeline, _ = pipeline_factory()
+    repo = pipeline.repo
+    md = pipeline.gmgn.mock_data
+    tok = "AUDIT_SD_SKIP"
+    md.tokens[tok] = {
+        "token_mint": tok, "symbol": "AS", "name": "Audit SD Skip",
+        "pool_address": "pool1", "pool_created_at": "2025-01-01T00:00:00Z",
+        "type": "new_creation", "launchpad": "pump", "platform": "pump",
+        "liquidity_usd": 50000.0, "sol_side_liquidity": 100.0,
+        "volume_usd": 10000.0, "volume_1h": 500.0,
+        "market_cap": 500000.0, "price_usd": 0.001, "price_sol": 0.00001,
+        "top_10_holder_rate": 0.3, "top1_holder_rate": 0.1,
+        "max_rug_ratio": 0.05, "max_insider_ratio": 0.02,
+        "max_entrapment_ratio": 0.03, "is_wash_trading": 0,
+        "rat_trader_amount_rate": 0.01, "suspected_insider_hold_rate": 0.02,
+        "max_bundler_rate": 0.01, "fresh_wallet_rate": 0.1,
+        "sell_tax": 0.0, "burn_status": "burned", "sniper_count": 2,
+        "has_social": 1, "holder_count": 150,
+        "dev_team_hold_rate": 0.05, "creator_balance_rate": 0.05,
+        "smart_degen_count": 5,
+        "swaps_1h": 100, "price_change_percent1h": 5.0,
+        "twitter": "elonmusk",
+    }
+    md.latest[tok] = {
+        "price_usd": 0.001, "price_sol": 0.00001,
+        "liquidity_usd": 50000.0, "sol_side_liquidity": 100.0,
+    }
+
+    pos_id = await repo.create_position(
+        token_mint=tok,
+        is_live=False,
+        locked_strategy_config_json='{"id": 1}',
+        status="POSITION_OPEN",
+        entry_price_usd=0.001,
+        entry_token_amount=100.0,
+        remaining_token_amount=100.0,
+        remaining_value_usd=0.1,
+        account_type="SIM",
+    )
+    te = await repo.append_trade_event(
+        f"SIM_BUY_TEST:{tok}",
+        token_mint=tok,
+        side="BUY",
+        price_usd=0.001,
+        token_amount=100.0,
+        cost_usd=0.1,
+        is_live=False,
+    )
+    gmgn_spy = pipeline.gmgn
+    original_fetch = gmgn_spy.fetch_smart_degen_holders
+    gmgn_spy.fetch_smart_degen_holders = AsyncMock(return_value=[{"address": "abc"}])
+
+    from ..trading.audit_builder import build_entry_audit_payload
+
+    payload = await build_entry_audit_payload(
+        repo=repo,
+        gmgn=gmgn_spy,
+        token_mint=tok,
+        position_id=pos_id,
+        account_type="SIM",
+        strategy={"id": 1, "x": 0.2},
+        discovery_event_id=None,
+        snapshot_id=None,
+        buy_trade_event=te,
+        quote={"price_usd": 0.001, "price_sol": 0.00001, "liquidity_usd": 50000.0, "sol_side_liquidity": 100.0},
+        token_amount=100.0,
+        price_usd=0.001,
+        price_sol=0.00001,
+        size_usd=0.1,
+        liquidity_usd=50000.0,
+        sol_side_liquidity=100.0,
+        smart_degen_required=False,
+    )
+
+    # API should NOT have been called
+    gmgn_spy.fetch_smart_degen_holders.assert_not_called()
+
+    # entry_missing_fields should NOT contain smart-degen fields
+    missing = payload.get("entry_missing_fields", [])
+    sd_fields = {
+        "smart_degen_max_holder_address", "smart_degen_max_holder_pct",
+        "smart_degen_max_holder_usd", "smart_degen_min_holder_address",
+        "smart_degen_min_holder_pct", "smart_degen_min_holder_usd",
+    }
+    for f in sd_fields:
+        assert f not in missing, f"Field {f} should not be in missing_fields when smart_degen_required=False"
+
+    # Restore
+    gmgn_spy.fetch_smart_degen_holders = original_fetch
+
+
 class TestAccountingUnit:
     def test_jupiter_swap_response_preserves_fee_fields(self):
         from ..providers.jupiter_real import JupiterProvider
