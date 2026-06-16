@@ -17,6 +17,19 @@ from ..providers.rate_limiter import get_rate_limiter
 from .discovery_runner import acquire_holding_slot
 
 
+def _position_strategy_id(position: Dict[str, Any]) -> Optional[int]:
+    if position.get("live_strategy_id"):
+        return int(position["live_strategy_id"])
+    locked = position.get("locked_strategy_config_json")
+    if locked:
+        try:
+            cfg = json.loads(locked)
+            return int(cfg.get("id") or cfg.get("strategy_id") or 0) or None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    return None
+
+
 EXIT_REASON_LABELS: Dict[str, str] = {
     "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
     "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
@@ -375,7 +388,7 @@ class PositionRiskRunner:
                     position_id=pos_id,
                     token_mint=token,
                     account_type=account_type,
-                    strategy_id=position.get("live_strategy_id"),
+                    strategy_id=_position_strategy_id(position),
                     discovery_event_id=position.get("discovery_event_id"),
                     audit_type="DECISION",
                     audit_json=_safe_json_dumps({
@@ -870,7 +883,7 @@ class PositionRiskRunner:
                 f"SELL_FAILED_PIPELINE_MISSING:{pos_id}:{reason_code}",
                 position_id=pos_id,
                 token_mint=token,
-                strategy_id=position.get("live_strategy_id"),
+                strategy_id=_position_strategy_id(position),
                 is_live=1,
                 account_type=account_type,
                 side="SELL",
@@ -973,7 +986,7 @@ class PositionRiskRunner:
             f"SELL_SIM:{pos_id}:{reason_code}",
             position_id=pos_id,
             token_mint=token,
-            strategy_id=position.get("live_strategy_id"),
+            strategy_id=_position_strategy_id(position),
             is_live=0,
             account_type=account_type,
             side="SELL",
@@ -1008,7 +1021,7 @@ class PositionRiskRunner:
                 position_id=pos_id,
                 token_mint=token,
                 account_type=account_type,
-                strategy_id=position.get("live_strategy_id"),
+                strategy_id=_position_strategy_id(position),
                 discovery_event_id=position.get("discovery_event_id"),
                 snapshot_id=None,
                 audit_type="EXIT",

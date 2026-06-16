@@ -609,6 +609,37 @@ class TradingPipeline:
         liquidity_usd = self._get_liquidity_usd(latest)
         price_usd = self._get_price_usd(latest)
         price_sol = self._get_price_sol(latest)
+
+        # 如果 latest price 缺 liquidity，fallback 到 discovery snapshot → tokens 表
+        if liquidity_usd <= 0 and snapshot_id:
+            try:
+                snapshot = await self.repo.get_token_metric_snapshot(snapshot_id)
+            except Exception:
+                snapshot = None
+            if snapshot:
+                raw_json = snapshot.get("raw_json")
+                if isinstance(raw_json, str):
+                    try:
+                        raw = json.loads(raw_json)
+                        if isinstance(raw, dict):
+                            liquidity_usd = self._to_float(raw.get("liquidity_usd")) or liquidity_usd
+                            if price_usd <= 0:
+                                price_usd = self._to_float(raw.get("price_usd")) or price_usd
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        pass
+                elif isinstance(raw_json, dict):
+                    liquidity_usd = self._to_float(raw_json.get("liquidity_usd")) or liquidity_usd
+                    if price_usd <= 0:
+                        price_usd = self._to_float(raw_json.get("price_usd")) or price_usd
+        if liquidity_usd <= 0:
+            try:
+                token_row = await self.repo.get_token(token_mint)
+            except Exception:
+                token_row = None
+            if token_row:
+                liquidity_usd = self._to_float(token_row.get("latest_liquidity_usd")) or liquidity_usd
+                if price_usd <= 0:
+                    price_usd = self._to_float(token_row.get("latest_price_usd")) or price_usd
         size_usd = await compute_entry_size_usd(liquidity_usd)
         size_sol = _usd_to_sol_amount(size_usd, latest, latest)
         if size_usd <= 0 or size_sol <= 0:
@@ -1106,6 +1137,19 @@ class TradingPipeline:
     # ------------------------------------------------------------------
     # Exit execution
     # ------------------------------------------------------------------
+    @staticmethod
+    def _position_strategy_id(position: Dict[str, Any]) -> Optional[int]:
+        if position.get("live_strategy_id"):
+            return int(position["live_strategy_id"])
+        locked = position.get("locked_strategy_config_json")
+        if locked:
+            try:
+                cfg = json.loads(locked)
+                return int(cfg.get("id") or cfg.get("strategy_id") or 0) or None
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        return None
+
     async def _execute_sim_paper_sell(
         self,
         position: Dict[str, Any],
@@ -1218,7 +1262,7 @@ class TradingPipeline:
             f"SIM_SELL:{pos_id}:{exit_reason}",
             position_id=pos_id,
             token_mint=token_mint,
-            strategy_id=position.get("live_strategy_id"),
+            strategy_id=self._position_strategy_id(position),
             side="SELL",
             event_type="SIM_SELL",
             status="CONFIRMED",
@@ -1263,7 +1307,7 @@ class TradingPipeline:
             position_id=pos_id,
             token_mint=token_mint,
             account_type="SIM",
-            strategy_id=position.get("live_strategy_id"),
+            strategy_id=self._position_strategy_id(position),
             discovery_event_id=position.get("discovery_event_id"),
             snapshot_id=None,
             audit_type="EXIT",
@@ -1416,7 +1460,7 @@ class TradingPipeline:
             idem_pending,
             position_id=pos_id,
             token_mint=token_mint,
-            strategy_id=position.get("live_strategy_id"),
+            strategy_id=self._position_strategy_id(position),
             side="SELL",
             event_type="SELL_PENDING",
             status="PENDING",
@@ -1448,7 +1492,7 @@ class TradingPipeline:
             idem_confirmed,
             position_id=pos_id,
             token_mint=token_mint,
-            strategy_id=position.get("live_strategy_id"),
+            strategy_id=self._position_strategy_id(position),
             side="SELL",
             event_type="SELL_CONFIRMED",
             status="CONFIRMED" if bundle.get("ok", True) else "FAILED",
@@ -1538,7 +1582,7 @@ class TradingPipeline:
             position_id=pos_id,
             token_mint=token_mint,
             account_type=account_type,
-            strategy_id=position.get("live_strategy_id"),
+            strategy_id=self._position_strategy_id(position),
             discovery_event_id=position.get("discovery_event_id"),
             snapshot_id=None,
             audit_type="EXIT",

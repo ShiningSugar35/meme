@@ -265,9 +265,9 @@ def compute_holding_thresholds(x: float) -> Dict[str, float]:
     }
 
 
-def entry_size_usd(liquidity_usd: float, x: float, max_usd: float = 150.0) -> float:
-    """SIM and LIVE base sizing (LIVE also caps by wallet balance)."""
-    return min(liquidity_usd * 0.015, max_usd)
+# 思路.md: 模拟盘 min(1% liquidity, $100); 实盘 = min(1% liquidity, $100, wallet_balance)
+def entry_size_usd(liquidity_usd: float, x: float, max_usd: float = 100.0) -> float:
+    return min(liquidity_usd * 0.01, max_usd)
 
 
 def strip_internal_debug_fields(payload: Dict[str, Any]) -> Dict[str, Any]:

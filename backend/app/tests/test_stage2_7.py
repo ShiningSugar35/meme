@@ -47,6 +47,7 @@ class TestTrenchesEnrich:
             "burn_status": "burn",
             "sniper_count": 2.0,
             "liquidity_usd": 5000.0,
+            "holder_count": 80,
             "market_cap": 3000.0,
         }
         token.update(overrides)
@@ -57,7 +58,9 @@ class TestTrenchesEnrich:
         assert "burn_status" in STAGE0_REQUIRED_FIELDS
         assert "sell_tax" in STAGE0_REQUIRED_FIELDS
         assert "sniper_count" in STAGE0_REQUIRED_FIELDS
-        assert len(STAGE0_REQUIRED_FIELDS) == 8
+        assert "liquidity_usd" in STAGE0_REQUIRED_FIELDS
+        assert "holder_count" in STAGE0_REQUIRED_FIELDS
+        assert len(STAGE0_REQUIRED_FIELDS) == 10
 
     def test_stage0_required_aliases_cover_fields(self):
         for field in STAGE0_REQUIRED_FIELDS:

@@ -36,6 +36,7 @@ def make_snapshot(**kwargs):
         "burn_status": "burn",
         "pool_created_at": (datetime.now(timezone.utc) - timedelta(seconds=150)).isoformat(),
         "platform": "Pump.fun",
+        "holder_count": 80,
     }
     base.update(kwargs)
     return base
@@ -324,19 +325,19 @@ def test_holding_risk_passes():
 
 def test_entry_size_liquidity_5250():
     size = entry_size_usd(5250, 0.2)
-    assert math.isclose(size, min(5250 * 0.015, 150), rel_tol=1e-9)
+    assert math.isclose(size, min(5250 * 0.01, 100), rel_tol=1e-9)
 
 
 def test_entry_size_liquidity_10000():
     size = entry_size_usd(10000, 0.2)
-    # 10000 * 0.015 = 150, capped by 150
-    assert math.isclose(size, 150.0, rel_tol=1e-9)
+    # 10000 * 0.01 = 100, capped by 100
+    assert math.isclose(size, 100.0, rel_tol=1e-9)
 
 
 def test_entry_size_liquidity_20000():
     size = entry_size_usd(20000, 0.2)
-    # 20000 * 0.015 = 300, capped by 150
-    assert math.isclose(size, 150.0, rel_tol=1e-9)
+    # 20000 * 0.01 = 200, capped by 100
+    assert math.isclose(size, 100.0, rel_tol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -568,3 +569,67 @@ def test_requires_smart_degen_for_x_none_safe():
     # x <= 0.15 → smart degen IS required
     assert requires_smart_degen_for_x(0.15) is True
     assert requires_smart_degen_for_x(0.1) is True
+
+
+# ============================================================================
+# Price range 24h percentile tests (P0-1)
+# ============================================================================
+
+def test_price_range_percentile_passes_with_klines_x02():
+    """x=0.2: percentile=0.25 in range (0, 0.35) => passed."""
+    from ..strategy.filters import evaluate_price_activity_rules
+    token = {"pool_created_at": "2025-01-01T00:00:00Z"}
+    latest = {"price_usd": 1.5}
+    klines = [
+        {"high": 3.0, "low": 1.0, "open": 1.2, "close": 1.5},
+        {"high": 2.8, "low": 1.1, "open": 1.3, "close": 1.4},
+    ]
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=klines))
+    pct_detail = next(d for d in res.details if d["rule"] == "price_range_24h_percentile")
+    assert pct_detail["passed"] is True
+    assert math.isclose(pct_detail["percentile"], 0.25, rel_tol=1e-9)
+    assert pct_detail["source"] == "kline_24h"
+
+
+def test_price_range_percentile_fails_when_too_high_x02():
+    """x=0.2: percentile=0.5 > 0.35 => failed."""
+    from ..strategy.filters import evaluate_price_activity_rules
+    token = {"pool_created_at": "2025-01-01T00:00:00Z"}
+    latest = {"price_usd": 2.0}
+    klines = [
+        {"high": 3.0, "low": 1.0, "open": 1.2, "close": 2.0},
+    ]
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=klines))
+    pct_detail = next(d for d in res.details if d["rule"] == "price_range_24h_percentile")
+    assert pct_detail["passed"] is False
+    assert math.isclose(pct_detail["percentile"], 0.5, rel_tol=1e-9)
+
+
+def test_price_range_percentile_missing_without_klines():
+    """Without klines, percentile is missing => failed."""
+    from ..strategy.filters import evaluate_price_activity_rules
+    token = {"pool_created_at": "2025-01-01T00:00:00Z"}
+    latest = {"price_usd": 1.5}
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=None))
+    pct_detail = next(d for d in res.details if d["rule"] == "price_range_24h_percentile")
+    assert pct_detail["passed"] is False
+    assert pct_detail["data_unavailable"] is True
+    assert pct_detail["source"] == "missing"
+
+
+# ============================================================================
+# Entry sizing spec tests (P0-3)
+# ============================================================================
+
+def test_sim_entry_size_matches_spec():
+    from ..strategy.sizing import compute_entry_size_usd
+    # min(1% liquidity, $100)
+    assert asyncio.run(compute_entry_size_usd(5000)) == 50.0
+    assert asyncio.run(compute_entry_size_usd(20000)) == 100.0
+
+
+def test_live_entry_size_caps_wallet_balance():
+    from ..strategy.sizing import compute_entry_size_usd
+    # min(1% liquidity, $100, wallet_balance)
+    size = asyncio.run(compute_entry_size_usd(20000, is_live=True, wallet_balance_usd=30))
+    assert size == 30.0

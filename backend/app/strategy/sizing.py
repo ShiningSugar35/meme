@@ -15,8 +15,9 @@ from typing import Optional
 
 from ..config import settings
 
-ENTRY_LIQUIDITY_PCT = 0.015
-ENTRY_MAX_USD = 200.0
+# 思路.md: 实盘 min(1% liquidity, $100); 模拟盘 min(1% liquidity, $100)
+ENTRY_LIQUIDITY_PCT = 0.01
+ENTRY_MAX_USD = 100.0
 LIVE_MIN_ENTRY_USD = 10.0
 
 

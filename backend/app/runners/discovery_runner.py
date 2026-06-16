@@ -30,6 +30,8 @@ STAGE0_REQUIRED_FIELDS = [
     "sell_tax",
     "burn_status",
     "sniper_count",
+    "liquidity_usd",
+    "holder_count",
 ]
 
 STAGE0_REQUIRED_ALIASES = {
@@ -41,6 +43,8 @@ STAGE0_REQUIRED_ALIASES = {
     "sell_tax": ["sell_tax", "sell_tax_rate"],
     "burn_status": ["burn_status", "lp_burn_status", "burnt_status"],
     "sniper_count": ["sniper_count", "snipers", "sniper_trader_count"],
+    "liquidity_usd": ["liquidity_usd", "liquidity", "pool_liquidity_usd"],
+    "holder_count": ["holder_count", "holders", "total_holders", "holder"],
 }
 
 SNAPSHOT_COLUMNS = [
@@ -1074,6 +1078,7 @@ class DiscoveryRunner:
         if not groups:
             return passed_groups, stage_diag
 
+        # 先拉最新价格
         try:
             latest, slot = await self._call_gmgn_with_token_slot(token, "price_info", "fetch_latest_price", token_mint)
         except Exception as e:
@@ -1089,14 +1094,32 @@ class DiscoveryRunner:
             return passed_groups, stage_diag
 
         stage_diag["credential_slot"] = slot
-        token["_latest_price_for_kline_fallback"] = latest
+
+        # 拉 24h K 线供 price_range_24h_percentile 计算
+        klines = None
+        creation_ts, _, _ = _parse_creation_ts(token)
+        try:
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
+            klines, kline_slot = await self._call_gmgn_with_token_slot(
+                token, "kline", "fetch_kline",
+                token_mint, "1m", 1440,
+                from_ts=from_ts, to_ts=now_ts,
+            )
+        except Exception as e:
+            logger.warning(f"kline fetch failed during price_filter for {token_mint}: {e}")
+            klines = None
+
+        # 缓存以便 Stage 4 复用
+        token["_stage3_latest_price"] = latest
+        token["_stage3_klines_24h"] = klines
 
         for sg in groups:
             sg_id = int(sg.get('id') or 0)
             config_version = int(sg.get('config_version') or 1)
             discovery_id = discovery_event_ids.get(sg_id)
 
-            res = await evaluate_price_activity_rules(token, sg, latest, klines=None)
+            res = await evaluate_price_activity_rules(token, sg, latest, klines=klines)
             stage_diag["checked"] += 1
 
             await self.repo.insert_strategy_match(
@@ -1118,27 +1141,33 @@ class DiscoveryRunner:
         self, token_mint: str, token: Dict[str, Any], groups: List[dict],
         snapshot_id: int, discovery_event_ids: Dict[int, int],
     ) -> Tuple[List[dict], Dict[str, Any]]:
-        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "kline_used": 0, "passed": 0, "failed": 0}
+        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "kline_used": 0, "kline_cached": 0, "passed": 0, "failed": 0}
         passed_groups: List[dict] = []
 
         if not groups:
             return passed_groups, stage_diag
 
-        creation_ts, _, _age_missing = _parse_creation_ts(token)
-        try:
-            now_ts = int(datetime.now(timezone.utc).timestamp())
-            from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
-            klines, slot = await self._call_gmgn_with_token_slot(
-                token,
-                "kline",
-                "fetch_kline",
-                token_mint, "1m", 1440,
-                from_ts=from_ts,
-                to_ts=now_ts,
-            )
-        except Exception as e:
-            logger.warning(f"kline fetch failed for {token_mint}: {e}")
-            klines, slot = None, None
+        # 优先复用 Stage 3 已缓存的 K 线，避免重复消耗 API
+        klines = token.get("_stage3_klines_24h")
+        if klines:
+            stage_diag["kline_cached"] = 1
+        else:
+            creation_ts, _, _age_missing = _parse_creation_ts(token)
+            try:
+                now_ts = int(datetime.now(timezone.utc).timestamp())
+                from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
+                klines, slot = await self._call_gmgn_with_token_slot(
+                    token,
+                    "kline",
+                    "fetch_kline",
+                    token_mint, "1m", 1440,
+                    from_ts=from_ts,
+                    to_ts=now_ts,
+                )
+                stage_diag["credential_slot"] = slot
+            except Exception as e:
+                logger.warning(f"kline fetch failed for {token_mint}: {e}")
+                klines, slot = None, None
 
         if not klines:
             for sg in groups:

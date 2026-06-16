@@ -290,9 +290,9 @@ class Settings(BaseSettings):
     PRICE_IMPACT_HARD_CAP_PCT: float = Field(10.0)
     LIVE_ROLLING_10_LOSS_LIMIT: float = Field(-0.20)
     MAX_REQUOTE_RETRY: int = Field(2)
-    ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.015)
-    ENTRY_MAX_USD: float = Field(150.0)
+    ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.01)
 
+    ENTRY_MAX_USD: float = Field(100.0)
     RISK_FEATURE_SCAN_TIER_1_USD: float = Field(150.0)
     RISK_FEATURE_SCAN_TIER_1_SECONDS: int = Field(4)
     RISK_FEATURE_SCAN_TIER_2_USD: float = Field(100.0)

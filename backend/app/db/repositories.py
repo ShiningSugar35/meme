@@ -1024,7 +1024,8 @@ class Repositories:
     async def list_open_positions(self, account_type: Optional[str] = None) -> List[Dict[str, Any]]:
         base = (
             "SELECT * FROM positions "
-            "WHERE status NOT IN ('CLOSED', 'LEGACY_INVALID_CONFIG', 'MIGRATION_NEEDED')"
+            "WHERE status IN ('POSITION_OPEN', 'SIM_OPEN', 'PARTIAL_EXIT')"
+            "  AND remaining_token_amount > 0"
         )
         params: List[Any] = []
 
@@ -1047,7 +1048,8 @@ class Repositories:
         sql = """
             SELECT *
             FROM positions
-            WHERE status NOT IN ('CLOSED', 'LEGACY_INVALID_CONFIG', 'MIGRATION_NEEDED')
+            WHERE status IN ('POSITION_OPEN', 'SIM_OPEN', 'PARTIAL_EXIT')
+              AND remaining_token_amount > 0
               AND (
                 next_risk_check_at IS NULL
                 OR next_risk_check_at <= ?
@@ -1292,7 +1294,7 @@ class Repositories:
         now = utc_now_iso()
         async def _do():
             await self.db.execute(
-                "UPDATE positions SET last_exit_reason = ?, updated_at = ? WHERE id = ?",
+                "UPDATE positions SET last_exit_reason = ?, status = 'EXIT_PENDING', updated_at = ? WHERE id = ?",
                 (reason, now, position_id),
             )
         try:
