@@ -36,7 +36,8 @@ class TestThresholds:
         assert math.isclose(t.min_top_holder_rate, 0.145, rel_tol=1e-9)
         assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
         assert math.isclose(t.max_fresh_wallet_rate, 0.15, rel_tol=1e-9)
-        assert math.isclose(t.max_creator_balance_rate, 0.056, rel_tol=1e-9)
+        assert math.isclose(t.max_creator_balance_rate, 0.056, rel_tol=1e-9)     # 持仓风控
+        assert math.isclose(t.entry_max_creator_balance_rate, 0.051, rel_tol=1e-9)  # 买入筛选
         assert t.min_holder_count_api == 30
         assert t.max_holder_count_api == 799
         assert math.isclose(t.min_holder_count_raw, 29.0, rel_tol=1e-9)
@@ -52,6 +53,8 @@ class TestThresholds:
         assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
         assert math.isclose(t.price_range_24h_percentile_min, 0.0, rel_tol=1e-9)
         assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
+        assert math.isclose(t.sniper_count_max, 15.0, rel_tol=1e-9)           # 持仓风控 75*0.2
+        assert math.isclose(t.entry_sniper_count_max, 10.0, rel_tol=1e-9)      # 买入条件 50*0.2
 
     def test_x_05_formulas(self):
         t = compute_thresholds(0.5)

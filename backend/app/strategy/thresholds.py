@@ -52,6 +52,7 @@ class StrategyThresholds:
     max_top_holder_rate: float
     max_fresh_wallet_rate: float
     max_creator_balance_rate: float
+    entry_max_creator_balance_rate: float
 
     min_holder_count_raw: float
     min_holder_count_api: int
@@ -67,6 +68,7 @@ class StrategyThresholds:
 
     sell_tax_max: float
     sniper_count_max: float
+    entry_sniper_count_max: float
     top1_addr_type0_min: float
     top1_addr_type0_max: float
 
@@ -132,7 +134,10 @@ class StrategyThresholds:
         max_top_holder_rate = 0.225 + 0.25 * xf
 
         max_fresh_wallet_rate = 0.13 + 0.1 * xf
-        max_creator_balance_rate = 0.054 + 0.01 * xf
+
+        # 买入筛选（GMGN trenches）与 持仓风控 使用不同公式
+        max_creator_balance_rate = 0.054 + 0.01 * xf      # 持仓风控：creator_balance_rate < 0.054+0.01x
+        entry_max_creator_balance_rate = 0.049 + 0.01 * xf  # 买入筛选：max_creator_balance_rate < 0.049+0.01x
 
         min_holder_count_raw = 37.0 - 40.0 * xf
         min_holder_count_api = int(math.floor(min_holder_count_raw)) + 1
@@ -152,7 +157,9 @@ class StrategyThresholds:
         min_volume_24h = max(0.0, 1600.0 - 2000.0 * xf)
 
         sell_tax_max = 0.1 * xf
-        sniper_count_max = 75.0 * xf
+        # 买入条件 < 50x，持仓风控 < 75x
+        entry_sniper_count_max = 50.0 * xf     # 买入本地风控：sniper_count < 50x
+        sniper_count_max = 75.0 * xf            # 持仓风控轮询：sniper_count < 75x
         top1_addr_type0_min = 0.032 - 0.02 * xf
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
@@ -180,6 +187,7 @@ class StrategyThresholds:
             max_top_holder_rate=max_top_holder_rate,
             max_fresh_wallet_rate=max_fresh_wallet_rate,
             max_creator_balance_rate=max_creator_balance_rate,
+            entry_max_creator_balance_rate=entry_max_creator_balance_rate,
             min_holder_count_raw=min_holder_count_raw,
             min_holder_count_api=min_holder_count_api,
             max_holder_count_raw=max_holder_count_raw,
@@ -191,6 +199,7 @@ class StrategyThresholds:
             min_volume_24h=min_volume_24h,
             sell_tax_max=sell_tax_max,
             sniper_count_max=sniper_count_max,
+            entry_sniper_count_max=entry_sniper_count_max,
             top1_addr_type0_min=top1_addr_type0_min,
             top1_addr_type0_max=top1_addr_type0_max,
             price_change_1h_min_pct=price_change_1h_min_pct,
@@ -217,7 +226,8 @@ class StrategyThresholds:
             "min_top_holder_rate": self.min_top_holder_rate,
             "max_top_holder_rate": self.max_top_holder_rate,
             "max_fresh_wallet_rate": self.max_fresh_wallet_rate,
-            "max_creator_balance_rate": self.max_creator_balance_rate,
+            # 买入筛选用 entry_* 值（比持仓风控更严格）
+            "max_creator_balance_rate": self.entry_max_creator_balance_rate,
             "min_holder_count": self.min_holder_count_api,
             "max_holder_count": self.max_holder_count_api,
             "min_marketcap": self.min_marketcap_api,

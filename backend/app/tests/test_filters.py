@@ -57,7 +57,8 @@ def test_thresholds_x_02():
     assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_max_pct, 50.0, rel_tol=1e-9)
     assert math.isclose(t.sell_tax_max, 0.02, rel_tol=1e-9)
-    assert math.isclose(t.sniper_count_max, 15.0, rel_tol=1e-9)
+    assert math.isclose(t.sniper_count_max, 15.0, rel_tol=1e-9)          # 持仓风控 75*0.2
+    assert math.isclose(t.entry_sniper_count_max, 10.0, rel_tol=1e-9)     # 买入条件 50*0.2
     assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
     assert math.isclose(t.top1_addr_type0_min, 0.028, rel_tol=1e-9)
     assert math.isclose(t.min_liquidity_holder_ratio, 50.0, rel_tol=1e-9)

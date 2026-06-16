@@ -285,8 +285,9 @@ async def run_entry_local_risk_filter(
         else _mk_failed("burn_status", burn_status, "must be burn", "burn", missing=(burn_status == ""))
     )
 
+    # 买入条件：sniper_count < 50x（持仓风控为 < 75x，见 run_holding_risk_filter）
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count"],
-                 lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}")
+                 lambda v: v < t.entry_sniper_count_max, f"< {t.entry_sniper_count_max:.6g}")
 
     fv = {"x": x}
     return FilterResult(all(d.passed for d in details), details, fv)
