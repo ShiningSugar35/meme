@@ -469,10 +469,22 @@ class PositionRiskRunner:
             )
             raise
 
+    RISK_REQUIRED_FIELDS = (
+        "liquidity_usd", "holder_count", "top_10_holder_rate",
+        "fresh_wallet_rate", "dev_team_hold_rate", "max_rug_ratio",
+        "max_entrapment_ratio", "max_insider_ratio", "max_bundler_rate",
+        "suspected_insider_hold_rate", "is_wash_trading",
+        "rat_trader_amount_rate", "sniper_count",
+    )
+
     def _validate_snapshot(self, result) -> bool:
-        return isinstance(result, dict) and bool(result) and "error" not in result and any(
-            k in result for k in ("type", "price_usd", "liquidity_usd", "market_cap", "holders")
-        )
+        if not isinstance(result, dict) or not result:
+            return False
+        if "error" in result:
+            return False
+        # Must contain every risk-critical field so run_holding_risk_filter
+        # can evaluate properly (all are now required=True).
+        return all(k in result for k in self.RISK_REQUIRED_FIELDS)
 
     async def _fetch_latest_snapshot(self, token: str, account_type: str, retry_delay_seconds: float = 0) -> Dict[str, Any]:
         preferred = acquire_holding_slot("risk_snapshot")

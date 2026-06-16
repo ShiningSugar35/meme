@@ -666,39 +666,39 @@ async def run_holding_risk_filter(
     details: List[FilterDetail] = []
 
     _check_float(details, snapshot, "rug_ratio", ["rug_ratio", "max_rug_ratio", "max_rugged_ratio", "rug"],
-                 lambda v: v < t.holding_rug_ratio, f"< {t.holding_rug_ratio:.6g}", required=False,
+                 lambda v: v < t.holding_rug_ratio, f"< {t.holding_rug_ratio:.6g}", required=True,
                  label="超Rug比例")
     _check_float(details, snapshot, "entrapment_ratio", ["entrapment_ratio", "max_entrapment_ratio", "entrapment"],
-                 lambda v: v < t.holding_entrapment_ratio, f"< {t.holding_entrapment_ratio:.6g}", required=False,
+                 lambda v: v < t.holding_entrapment_ratio, f"< {t.holding_entrapment_ratio:.6g}", required=True,
                  label="圈套比例")
     _check_float(details, snapshot, "insider_ratio", ["max_insider_ratio", "insider_ratio", "insider_rate"],
-                 lambda v: v < t.holding_insider_ratio, f"< {t.holding_insider_ratio:.6g}", required=False,
+                 lambda v: v < t.holding_insider_ratio, f"< {t.holding_insider_ratio:.6g}", required=True,
                  label="内部人持仓比例")
     _check_float(details, snapshot, "suspected_insider_hold_rate",
                  ["suspected_insider_hold_rate", "insider_hold_rate", "insider_rate"],
-                 lambda v: v < x, f"< {x:.6g}", required=False,
+                 lambda v: v < x, f"< {x:.6g}", required=True,
                  label="疑似内部人持仓比例")
     _check_float(details, snapshot, "bundler_trader_amount_rate",
                  ["bundler_trader_amount_rate", "bundler_rate", "max_bundler_rate", "bundler"],
-                 lambda v: v < t.holding_bundler_rate, f"< {t.holding_bundler_rate:.6g}", required=False,
+                 lambda v: v < t.holding_bundler_rate, f"< {t.holding_bundler_rate:.6g}", required=True,
                  label="打包交易比例")
     _check_float(details, snapshot, "top_10_holder_rate_range",
                  ["top_10_holder_rate", "top10_holder_rate", "top10_holder_percent", "top_10_rate",
                   "top_holder_rate", "top10_holder_pct", "top10HolderRate", "top_10_holder_percent",
                   "top10HolderPercent"],
                  lambda v: t.min_top_holder_rate < v < t.max_top_holder_rate,
-                 f"({t.min_top_holder_rate:.6g}, {t.max_top_holder_rate:.6g})", required=False,
+                 f"({t.min_top_holder_rate:.6g}, {t.max_top_holder_rate:.6g})", required=True,
                  label="Top10持仓比例范围")
     _check_float(details, snapshot, "fresh_wallet_rate", ["fresh_wallet_rate", "fresh_wallets_rate", "fresh_wallet"],
-                 lambda v: v < t.max_fresh_wallet_rate, f"< {t.max_fresh_wallet_rate:.6g}", required=False,
+                 lambda v: v < t.max_fresh_wallet_rate, f"< {t.max_fresh_wallet_rate:.6g}", required=True,
                  label="新钱包比例")
     _check_float(details, snapshot, "creator_balance_rate",
                  ["creator_balance_rate", "dev_team_hold_rate", "creator_hold_rate", "dev_hold_rate"],
-                 lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}", required=False,
+                 lambda v: v < t.max_creator_balance_rate, f"< {t.max_creator_balance_rate:.6g}", required=True,
                  label="创建者持仓比例")
     _check_float(details, snapshot, "holder_count", ["holder_count", "holders", "total_holders", "holder"],
                  lambda v: t.min_holder_count_raw < v < t.max_holder_count_raw,
-                 f"({t.min_holder_count_raw:.6g}, {t.max_holder_count_raw:.6g})", required=False,
+                 f"({t.min_holder_count_raw:.6g}, {t.max_holder_count_raw:.6g})", required=True,
                  label="持有者数量范围")
 
     liquidity_val = _to_float(_first_present(snapshot, ["liquidity_usd", "liquidity", "pool_liquidity_usd"]))
@@ -717,18 +717,18 @@ async def run_holding_risk_filter(
                                   threshold=t.min_liquidity_holder_ratio,
                                   label="流动性/持有者比"))
     else:
-        details.append(_mk_pass(name="liquidity_holder_ratio", value=None,
-                                reason="missing liquidity or holder_count; treated as pass",
-                                threshold=t.min_liquidity_holder_ratio,
-                                label="流动性/持有者比"))
+        details.append(_mk_failed(name="liquidity_holder_ratio", value=None,
+                                  reason="missing liquidity or holder_count",
+                                  threshold=t.min_liquidity_holder_ratio,
+                                  label="流动性/持有者比", missing=True))
 
-    _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"], required=False,
+    _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"], required=True,
                      label="洗盘交易检测")
     _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate", "rat_trader"],
-                 lambda v: v < x, f"< {x:.6g}", required=False,
+                 lambda v: v < x, f"< {x:.6g}", required=True,
                  label="老鼠仓比例")
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count", "sniper_cnt"],
-                 lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}", required=False,
+                 lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}", required=True,
                  label="狙击手数量")
     return FilterResult(all(d.passed for d in details), details, {"x": x})
 

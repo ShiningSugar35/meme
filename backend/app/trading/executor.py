@@ -298,14 +298,20 @@ class TradingPipeline:
     ) -> Dict[str, Any]:
         """Merge latest + snapshot raw_json + tokens table into one context dict.
 
-        This ensures _usd_to_sol_amount (which reads from two separate dict
-        params) always sees the richest possible data, whether or not the
-        GMGN latest-price endpoint returned liquidity/price fields.
+        Fallback is per-field: any missing critical field triggers a read,
+        not just liquidity_usd.  This ensures _usd_to_sol_amount, which
+        reads price_sol/price_usd/liquidity_usd/sol_side_liquidity from
+        the context, always sees the richest possible data.
         """
+        NEEDED_KEYS = ("liquidity_usd", "price_usd", "price_sol", "sol_side_liquidity")
+
+        def _field_ok(ctx, key):
+            return (self._to_float(ctx.get(key)) or 0) > 0
+
         ctx = dict(latest)
 
-        # Snapshot raw_json fallback
-        if not (self._get_liquidity_usd(ctx) > 0) and snapshot_id:
+        # Snapshot raw_json fallback — per-field, not liquidity-gated
+        if not all(_field_ok(ctx, k) for k in NEEDED_KEYS) and snapshot_id:
             try:
                 snapshot = await self.repo.get_token_metric_snapshot(snapshot_id)
             except Exception:
@@ -320,14 +326,14 @@ class TradingPipeline:
                         raw = {}
                 elif isinstance(raw_json, dict):
                     raw = raw_json
-                for key in ("liquidity_usd", "price_usd", "price_sol", "sol_side_liquidity"):
-                    if not (self._to_float(ctx.get(key)) or 0) > 0:
+                for key in NEEDED_KEYS:
+                    if not _field_ok(ctx, key):
                         val = self._to_float(raw.get(key))
                         if val and val > 0:
                             ctx[key] = val
 
-        # Tokens table fallback
-        if not (self._get_liquidity_usd(ctx) > 0):
+        # Tokens table fallback — same per-field approach
+        if not all(_field_ok(ctx, k) for k in NEEDED_KEYS):
             try:
                 token_row = await self.repo.get_token(token_mint)
             except Exception:
@@ -336,7 +342,7 @@ class TradingPipeline:
                 for key, col in (("liquidity_usd", "latest_liquidity_usd"),
                                  ("price_usd", "latest_price_usd"),
                                  ("price_sol", "latest_price_sol")):
-                    if not (self._to_float(ctx.get(key)) or 0) > 0:
+                    if not _field_ok(ctx, key):
                         val = self._to_float(token_row.get(col))
                         if val and val > 0:
                             ctx[key] = val
@@ -716,7 +722,7 @@ class TradingPipeline:
         )
 
         fee_upper_bound_usd = float(getattr(settings, "SIM_BUY_FEE_UPPER_BOUND_USD", 0.0))
-        sol_usd = _derive_sol_usd_price({}, latest) or 200.0
+        sol_usd = _derive_sol_usd_price(ctx, ctx) or 200.0
         if isinstance(quote, dict) and not quote.get("error") and quote.get("inAmount"):
             acct = compute_sim_buy_accounting(
                 quote=quote,
@@ -988,7 +994,7 @@ class TradingPipeline:
         instructions = await self.jupiter.build_swap_instructions(quote, wallet_pubkey, extra={})
         bundle = await self.jito.send(instructions)
 
-        sol_usd = _derive_sol_usd_price({}, latest) or 200.0
+        sol_usd = _derive_sol_usd_price(ctx, ctx) or 200.0
         priority_fee = instructions.get("prioritizationFeeLamports")
         te_confirmed = await self.repo.append_trade_event(
             idem + ":CONFIRMED",
