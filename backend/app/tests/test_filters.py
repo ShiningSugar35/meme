@@ -417,6 +417,12 @@ def test_holding_risk_insider_fails():
     assert any(d.name == "suspected_insider_hold_rate" and not d.passed for d in res.details)
 
 
+def test_holding_risk_rat_trader_fails():
+    s = make_snapshot(rat_trader_amount_rate=0.3)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "rat_trader_amount_rate" and not d.passed for d in res.details)
+
+
 def test_holding_risk_bundler_fails():
     s = make_snapshot(max_bundler_rate=0.5)
     s.pop("top_10_holder_rate", None)
@@ -633,3 +639,59 @@ def test_live_entry_size_caps_wallet_balance():
     # min(1% liquidity, $100, wallet_balance)
     size = asyncio.run(compute_entry_size_usd(20000, is_live=True, wallet_balance_usd=30))
     assert size == 30.0
+
+
+# ============================================================================
+# Merged-context regression tests (P0 — _usd_to_sol_amount with merged ctx)
+# ============================================================================
+
+def test_derive_sol_usd_price_from_price_fields():
+    from ..trading.executor import _derive_sol_usd_price
+    ctx = {"price_usd": 0.5, "price_sol": 0.0005}
+    sol_usd = _derive_sol_usd_price(ctx, ctx)
+    assert sol_usd == 1000.0
+
+
+def test_derive_sol_usd_price_from_liquidity_fallback():
+    from ..trading.executor import _derive_sol_usd_price
+    ctx = {"liquidity_usd": 5000, "sol_side_liquidity": 5.0}
+    sol_usd = _derive_sol_usd_price(ctx, ctx)
+    assert sol_usd == 1000.0
+
+
+def test_derive_sol_usd_price_missing_fields():
+    from ..trading.executor import _derive_sol_usd_price
+    ctx = {}
+    sol_usd = _derive_sol_usd_price(ctx, ctx)
+    assert sol_usd is None
+
+
+def test_usd_to_sol_amount_with_merged_context():
+    """When both params get the same merged ctx, price_sol/price_usd are found."""
+    from ..trading.executor import _usd_to_sol_amount
+    ctx = {"price_usd": 0.5, "price_sol": 0.0005}
+    size_sol = _usd_to_sol_amount(50.0, ctx, ctx)
+    # 50 USD / (0.5/0.0005 = 1000) = 0.05 SOL
+    assert size_sol == 0.05
+
+
+def test_usd_to_sol_amount_fallback_uses_liquidity():
+    """When price fields are missing, merged liquidity fields are used."""
+    from ..trading.executor import _usd_to_sol_amount
+    ctx = {"liquidity_usd": 5000, "sol_side_liquidity": 5.0}
+    size_sol = _usd_to_sol_amount(50.0, ctx, ctx)
+    # 50 USD / (5000/5.0 = 1000) = 0.05 SOL
+    assert size_sol == 0.05
+
+
+# ============================================================================
+# Entry risk liquidity/holder_count regression test
+# ============================================================================
+
+def test_entry_risk_liquidity_holder_ratio_fails():
+    from ..strategy.filters import run_entry_local_risk_filter
+    s = make_snapshot(liquidity_usd=500, holder_count=80)
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    # 500/80 = 6.25; for x=0.2, min_liquidity_holder_ratio=70-100*0.2=50
+    # 6.25 <= 50 => fails
+    assert any(d.name == "liquidity_holder_ratio" and not d.passed for d in res.details)

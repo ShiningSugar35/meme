@@ -290,6 +290,59 @@ class TradingPipeline:
                 return v
         return 0.0
 
+    async def _build_entry_market_context(
+        self,
+        token_mint: str,
+        latest: Dict[str, Any],
+        snapshot_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Merge latest + snapshot raw_json + tokens table into one context dict.
+
+        This ensures _usd_to_sol_amount (which reads from two separate dict
+        params) always sees the richest possible data, whether or not the
+        GMGN latest-price endpoint returned liquidity/price fields.
+        """
+        ctx = dict(latest)
+
+        # Snapshot raw_json fallback
+        if not (self._get_liquidity_usd(ctx) > 0) and snapshot_id:
+            try:
+                snapshot = await self.repo.get_token_metric_snapshot(snapshot_id)
+            except Exception:
+                snapshot = None
+            if snapshot:
+                raw_json = snapshot.get("raw_json")
+                raw = {}
+                if isinstance(raw_json, str):
+                    try:
+                        raw = json.loads(raw_json) if raw_json.strip() else {}
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        raw = {}
+                elif isinstance(raw_json, dict):
+                    raw = raw_json
+                for key in ("liquidity_usd", "price_usd", "price_sol", "sol_side_liquidity"):
+                    if not (self._to_float(ctx.get(key)) or 0) > 0:
+                        val = self._to_float(raw.get(key))
+                        if val and val > 0:
+                            ctx[key] = val
+
+        # Tokens table fallback
+        if not (self._get_liquidity_usd(ctx) > 0):
+            try:
+                token_row = await self.repo.get_token(token_mint)
+            except Exception:
+                token_row = None
+            if token_row:
+                for key, col in (("liquidity_usd", "latest_liquidity_usd"),
+                                 ("price_usd", "latest_price_usd"),
+                                 ("price_sol", "latest_price_sol")):
+                    if not (self._to_float(ctx.get(key)) or 0) > 0:
+                        val = self._to_float(token_row.get(col))
+                        if val and val > 0:
+                            ctx[key] = val
+
+        return ctx
+
     def _extract_token_decimals(
         self,
         token_mint: str,
@@ -605,43 +658,13 @@ class TradingPipeline:
         except Exception:
             latest = {}
 
-        sol_side_liquidity = self._get_sol_side_liquidity(latest)
-        liquidity_usd = self._get_liquidity_usd(latest)
-        price_usd = self._get_price_usd(latest)
-        price_sol = self._get_price_sol(latest)
-
-        # 如果 latest price 缺 liquidity，fallback 到 discovery snapshot → tokens 表
-        if liquidity_usd <= 0 and snapshot_id:
-            try:
-                snapshot = await self.repo.get_token_metric_snapshot(snapshot_id)
-            except Exception:
-                snapshot = None
-            if snapshot:
-                raw_json = snapshot.get("raw_json")
-                if isinstance(raw_json, str):
-                    try:
-                        raw = json.loads(raw_json)
-                        if isinstance(raw, dict):
-                            liquidity_usd = self._to_float(raw.get("liquidity_usd")) or liquidity_usd
-                            if price_usd <= 0:
-                                price_usd = self._to_float(raw.get("price_usd")) or price_usd
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        pass
-                elif isinstance(raw_json, dict):
-                    liquidity_usd = self._to_float(raw_json.get("liquidity_usd")) or liquidity_usd
-                    if price_usd <= 0:
-                        price_usd = self._to_float(raw_json.get("price_usd")) or price_usd
-        if liquidity_usd <= 0:
-            try:
-                token_row = await self.repo.get_token(token_mint)
-            except Exception:
-                token_row = None
-            if token_row:
-                liquidity_usd = self._to_float(token_row.get("latest_liquidity_usd")) or liquidity_usd
-                if price_usd <= 0:
-                    price_usd = self._to_float(token_row.get("latest_price_usd")) or price_usd
+        ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id)
+        sol_side_liquidity = self._get_sol_side_liquidity(ctx)
+        liquidity_usd = self._get_liquidity_usd(ctx)
+        price_usd = self._get_price_usd(ctx)
+        price_sol = self._get_price_sol(ctx)
         size_usd = await compute_entry_size_usd(liquidity_usd)
-        size_sol = _usd_to_sol_amount(size_usd, latest, latest)
+        size_sol = _usd_to_sol_amount(size_usd, ctx, ctx)
         if size_usd <= 0 or size_sol <= 0:
             await self.repo.append_system_event(
                 "WARN",
@@ -870,17 +893,18 @@ class TradingPipeline:
             )
             return {"ok": False, "error": "LATEST_PRICE_FAILED"}
 
-        sol_side_liquidity = self._get_sol_side_liquidity(latest)
-        liquidity_usd = self._get_liquidity_usd(latest)
-        price_usd = self._get_price_usd(latest)
-        price_sol = self._get_price_sol(latest)
-        wallet_balance_usd = await self._get_wallet_balance_usd(latest, latest)
+        ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id)
+        sol_side_liquidity = self._get_sol_side_liquidity(ctx)
+        liquidity_usd = self._get_liquidity_usd(ctx)
+        price_usd = self._get_price_usd(ctx)
+        price_sol = self._get_price_sol(ctx)
+        wallet_balance_usd = await self._get_wallet_balance_usd(ctx, ctx)
         size_usd = await compute_entry_size_usd(
             liquidity_usd,
             wallet_balance_usd=wallet_balance_usd,
             is_live=True,
         )
-        size_sol = _usd_to_sol_amount(size_usd, latest, latest)
+        size_sol = _usd_to_sol_amount(size_usd, ctx, ctx)
         if size_usd <= 0 or size_sol <= 0:
             await self.repo.append_system_event(
                 "WARN",

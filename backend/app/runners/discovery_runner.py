@@ -1097,6 +1097,7 @@ class DiscoveryRunner:
 
         # 拉 24h K 线供 price_range_24h_percentile 计算
         klines = None
+        kline_slot = None
         creation_ts, _, _ = _parse_creation_ts(token)
         try:
             now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -1113,6 +1114,7 @@ class DiscoveryRunner:
         # 缓存以便 Stage 4 复用
         token["_stage3_latest_price"] = latest
         token["_stage3_klines_24h"] = klines
+        token["_stage3_kline_slot"] = kline_slot if klines else None
 
         for sg in groups:
             sg_id = int(sg.get('id') or 0)
@@ -1148,26 +1150,48 @@ class DiscoveryRunner:
             return passed_groups, stage_diag
 
         # 优先复用 Stage 3 已缓存的 K 线，避免重复消耗 API
+        slot = token.get("_stage3_kline_slot")
         klines = token.get("_stage3_klines_24h")
         if klines:
             stage_diag["kline_cached"] = 1
-        else:
-            creation_ts, _, _age_missing = _parse_creation_ts(token)
-            try:
-                now_ts = int(datetime.now(timezone.utc).timestamp())
-                from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
-                klines, slot = await self._call_gmgn_with_token_slot(
-                    token,
-                    "kline",
-                    "fetch_kline",
-                    token_mint, "1m", 1440,
-                    from_ts=from_ts,
-                    to_ts=now_ts,
+            stage_diag["kline_used"] = 1
+            stage_diag["credential_slot"] = slot
+            # Stage 4 不重复完整价格过滤（Stage 3 已经用 klines 评估过了）
+            # 只写入一条 kline 确认记录
+            for sg in groups:
+                sg_id = int(sg.get('id') or 0)
+                config_version = int(sg.get('config_version') or 1)
+                discovery_id = discovery_event_ids.get(sg_id)
+                details = [{"rule": "kline_24h_available", "passed": True,
+                            "kline_count": len(klines),
+                            "source": "stage3_cached_klines",
+                            "stage": "kline_fallback"}]
+                fv = {"kline_source": "stage3_cached", "kline_count": len(klines)}
+                await self.repo.insert_strategy_match(
+                    token_mint, sg_id, config_version, snapshot_id,
+                    'kline_fallback', True,
+                    _json_dumps(details), _json_dumps(fv),
+                    discovery_event_id=discovery_id,
                 )
-                stage_diag["credential_slot"] = slot
-            except Exception as e:
-                logger.warning(f"kline fetch failed for {token_mint}: {e}")
-                klines, slot = None, None
+                stage_diag["checked"] += 1
+                stage_diag["passed"] += 1
+                passed_groups.append(sg)
+            return passed_groups, stage_diag
+
+        # 无缓存时，尝试拉 K 线
+        creation_ts, _, _age_missing = _parse_creation_ts(token)
+        try:
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
+            klines, slot = await self._call_gmgn_with_token_slot(
+                token, "kline", "fetch_kline",
+                token_mint, "1m", 1440,
+                from_ts=from_ts, to_ts=now_ts,
+            )
+            stage_diag["credential_slot"] = slot
+        except Exception as e:
+            logger.warning(f"kline fetch failed for {token_mint}: {e}")
+            klines, slot = None, None
 
         if not klines:
             for sg in groups:
@@ -1187,11 +1211,9 @@ class DiscoveryRunner:
             return passed_groups, stage_diag
 
         stage_diag["kline_used"] = 1
-        stage_diag["credential_slot"] = slot
 
-        latest = token.get("_latest_price_for_kline_fallback")
-        latest = latest if isinstance(latest, dict) else {}
-
+        # 兜底切：用 Stage 3 缓存的 latest（如果有）+ klines 评估
+        latest = token.get("_stage3_latest_price") or token.get("_latest_price_for_kline_fallback") or {}
         for sg in groups:
             sg_id = int(sg.get('id') or 0)
             config_version = int(sg.get('config_version') or 1)

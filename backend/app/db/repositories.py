@@ -1100,6 +1100,8 @@ class Repositories:
               executed_exit_rules_json
             FROM positions
             WHERE account_type = ?
+              AND status IN ('POSITION_OPEN','SIM_OPEN','PARTIAL_EXIT')
+              AND remaining_token_amount > 0
             ORDER BY opened_at DESC
             LIMIT ?
             """,
@@ -1110,13 +1112,13 @@ class Repositories:
 
     async def get_positions_summary(self) -> Dict[str, Any]:
         async with self.db.execute(
-            "SELECT COUNT(*) as c FROM positions WHERE account_type = 'LIVE' AND status NOT IN ('CLOSED', 'LEGACY_INVALID_CONFIG', 'MIGRATION_NEEDED')"
+            "SELECT COUNT(*) as c FROM positions WHERE account_type = 'LIVE' AND status IN ('POSITION_OPEN','SIM_OPEN','PARTIAL_EXIT') AND remaining_token_amount > 0"
         ) as cur:
             row = await cur.fetchone()
         live_open = row[0] if row else 0
 
         async with self.db.execute(
-            "SELECT COUNT(*) as c FROM positions WHERE account_type = 'SIM' AND status NOT IN ('CLOSED', 'LEGACY_INVALID_CONFIG', 'MIGRATION_NEEDED')"
+            "SELECT COUNT(*) as c FROM positions WHERE account_type = 'SIM' AND status IN ('POSITION_OPEN','SIM_OPEN','PARTIAL_EXIT') AND remaining_token_amount > 0"
         ) as cur:
             row = await cur.fetchone()
         sim_open = row[0] if row else 0
