@@ -97,6 +97,11 @@ class StrategyThresholds:
         return self.min_smart_degen_count_raw
 
     @property
+    def requires_smart_degen_entry(self) -> bool:
+        """True 表示买入筛选需要聪明钱条件（x <= 0.15）；False 表示跳过。"""
+        return self.min_smart_degen_count_api is not None
+
+    @property
     def holding_rug_ratio(self) -> float:
         return self.max_rug_ratio
 
@@ -242,6 +247,11 @@ class StrategyThresholds:
 
 def compute_thresholds(x: float) -> StrategyThresholds:
     return StrategyThresholds.compute(x)
+
+
+def requires_smart_degen_for_x(x: float) -> bool:
+    """快捷判断：给定 x 值，买入阶段是否需要聪明钱条件。"""
+    return compute_thresholds(x).requires_smart_degen_entry
 
 
 def compute_holding_thresholds(x: float) -> Dict[str, float]:

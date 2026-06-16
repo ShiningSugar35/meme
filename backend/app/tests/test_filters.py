@@ -256,6 +256,31 @@ def test_smart_degen_passes_with_new_thresholds():
 
 
 # ---------------------------------------------------------------------------
+# Smart degen not-required tests (x > 0.15)
+# ---------------------------------------------------------------------------
+
+def test_evaluate_smart_degen_not_required_x_02_passes_with_empty_holders():
+    sg = {"id": 1, "x": 0.2}
+    res = asyncio.run(evaluate_smart_degen(sg, []))
+    assert res.passed is True
+    assert res.feature_vector["smart_degen_required"] is False
+    assert res.details[0]["rule"] == "smart_degen_not_required"
+
+
+def test_evaluate_smart_degen_required_x_015_fails_with_empty_holders():
+    sg = {"id": 1, "x": 0.15}
+    res = asyncio.run(evaluate_smart_degen(sg, []))
+    assert res.passed is False
+
+
+def test_evaluate_smart_degen_required_x_01_passes_with_valid_holder():
+    sg = {"id": 1, "x": 0.1}
+    holders = [{"amount_percentage": 0.005, "usd_value": 50}]
+    res = asyncio.run(evaluate_smart_degen(sg, holders))
+    assert res.passed is True
+
+
+# ---------------------------------------------------------------------------
 # Creation time parsing tests
 # ---------------------------------------------------------------------------
 
@@ -470,7 +495,7 @@ def test_normalize_pct_none():
 
 
 def test_smart_degen_015_pct_format():
-    sg = {"x": 0.2}
+    sg = {"x": 0.1}  # x <= 0.15 才走完整评估路径
     holders = [{"amount_percentage": 0.03, "usd_value": 300}, {"amount_percentage": 0.02, "usd_value": 200}]
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     assert res.passed is True
@@ -481,7 +506,7 @@ def test_smart_degen_015_pct_format():
 
 
 def test_smart_degen_15_pct_format():
-    sg = {"x": 0.2}
+    sg = {"x": 0.1}  # x <= 0.15 才走完整评估路径
     holders = [{"amount_percentage": 1.6, "usd_value": 300}, {"amount_percentage": 1.2, "usd_value": 200}]
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     assert res.passed is True

@@ -144,7 +144,7 @@ cd frontend && npm run build
 ```text
 risk_filter
 → top_holder_filter
-→ smart_degen_filter
+→ smart_degen_filter（仅当 x <= 0.15 / min_smart_degen_count_api 不为空时启用）
 → price_filter
 → kline_fallback
 → create position
@@ -152,11 +152,13 @@ risk_filter
 
 任意一环失败，直接跳过后续 API 调用，以节约 GMGN 权重。
 
+当 x > 0.15 时，聪明钱条件为 not required，不调用聪明钱 holder API，也不因聪明钱为空淘汰池子。
+
 指标口径：
 
-- **通过风控筛选** = `risk_filter_passed AND top_holder_filter_passed AND smart_degen_filter_passed`
+- **通过风控筛选** = `risk_filter_passed AND top_holder_filter_passed AND (smart_degen 不要求 OR smart_degen_filter_passed)`
 - **价格面筛选通过** = `price_filter_passed AND kline_fallback_passed`
-- **就绪可创建** = 五项全部通过
+- **就绪可创建** = 风控通过 AND 价格面通过
 
 ### 3. 建仓
 

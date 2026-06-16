@@ -18,7 +18,7 @@ from ..providers.rpc_real import RpcRealProvider
 from ..trading.executor import TradingPipeline
 from ..strategy.thresholds import (
     compute_thresholds, StrategyThresholds, build_trench_filters_for_x,
-    strip_internal_debug_fields, entry_size_usd,
+    strip_internal_debug_fields, entry_size_usd, requires_smart_degen_for_x,
 )
 from ..strategy.filters import evaluate_smart_degen, run_entry_local_risk_filter
 from ..runners.active_position_price_runner import ActivePositionPriceRunner
@@ -89,6 +89,31 @@ class TestThresholds:
     def test_default_x_when_no_strategy(self):
         assert math.isclose(settings.STRATEGY_DEFAULT_X, 0.20, rel_tol=1e-9)
 
+    def test_smart_degen_requirement_boundary(self):
+        # x=0.2（默认值）> 0.15，不应要求聪明钱
+        t = compute_thresholds(0.2)
+        assert t.min_smart_degen_count_api is None
+        assert t.requires_smart_degen_entry is False
+        assert requires_smart_degen_for_x(0.2) is False
+
+        # x=0.150001 > 0.15，不应要求聪明钱
+        t = compute_thresholds(0.150001)
+        assert t.min_smart_degen_count_api is None
+        assert t.requires_smart_degen_entry is False
+        assert requires_smart_degen_for_x(0.150001) is False
+
+        # x=0.15，raw = 1.5 - 1.5 = 0，需要至少 1 个聪明钱
+        t = compute_thresholds(0.15)
+        assert t.min_smart_degen_count_api == 1
+        assert t.requires_smart_degen_entry is True
+        assert requires_smart_degen_for_x(0.15) is True
+
+        # x=0.1 < 0.15，需要聪明钱
+        t = compute_thresholds(0.1)
+        assert t.min_smart_degen_count_api == 1
+        assert t.requires_smart_degen_entry is True
+        assert requires_smart_degen_for_x(0.1) is True
+
 
 # ============================================================================
 # 2. Smart degen required_count bounds (P1)
@@ -110,7 +135,9 @@ class TestSmartDegenBounds:
         ]
         res = asyncio.run(evaluate_smart_degen({"x": 0.3}, holders))
         assert "required_count" in res.feature_vector
-        assert res.feature_vector["degen_hold_ok"] in (True, False)
+        # x=0.3 > 0.15, smart degen not required
+        assert res.feature_vector["smart_degen_required"] is False
+        assert res.passed is True
 
     def test_smart_degen_x_05_no_crash(self):
         holders = [
@@ -118,10 +145,19 @@ class TestSmartDegenBounds:
         ]
         res = asyncio.run(evaluate_smart_degen({"x": 0.5}, holders))
         assert "required_count" in res.feature_vector
+        # x=0.5 > 0.15, smart degen not required
+        assert res.feature_vector["smart_degen_required"] is False
+        assert res.passed is True
 
     def test_smart_degen_empty_holders_fails(self):
-        res = asyncio.run(evaluate_smart_degen({"x": 0.2}, []))
+        # x=0.15 仍要求聪明钱，空 holder 应失败
+        res = asyncio.run(evaluate_smart_degen({"x": 0.15}, []))
         assert not res.passed
+
+    def test_smart_degen_empty_holders_passes_when_not_required(self):
+        # x=0.2 > 0.15，不要求聪明钱，空 holder 应通过
+        res = asyncio.run(evaluate_smart_degen({"x": 0.2}, []))
+        assert res.passed
 
 
 # ============================================================================

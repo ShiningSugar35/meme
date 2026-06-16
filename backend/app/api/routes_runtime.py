@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from ..config import ProviderMode, settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
+from ..strategy.thresholds import requires_smart_degen_for_x
 from ..trading.audit_builder import ENTRY_AUDIT_REQUIRED_FIELDS
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
@@ -48,6 +49,7 @@ RULE_META: Dict[str, Dict[str, str]] = {
     "price_range_24h_percentile": {"label": "24h价格区间分位", "stage": "price_filter", "section": "价格面及其他指标"},
     "price_change_1h": {"label": "1h价格涨幅不足", "stage": "price_filter", "section": "价格面及其他指标"},
     "smart_degen": {"label": "聪明钱指标不满足", "stage": "smart_degen_filter", "section": "价格面及其他指标"},
+    "smart_degen_not_required": {"label": "聪明钱条件未启用(x>0.15)", "stage": "smart_degen_filter", "section": "observed_only"},
     "top1_holder_rate_observed": {"label": "TOP1持有率观测", "stage": "risk_filter", "section": "observed_only"},
     "data_unavailable": {"label": "数据不可用", "stage": "api_error", "section": "data_unavailable"},
 }
@@ -736,10 +738,38 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
             """SELECT COUNT(DISTINCT tsm.discovery_event_id || '|' || tsm.strategy_id) AS c
                FROM token_strategy_matches tsm
                WHERE tsm.stage='risk_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm3 WHERE tsm3.discovery_event_id=tsm.discovery_event_id AND tsm3.strategy_id=tsm.strategy_id AND tsm3.stage='smart_degen_filter' AND tsm3.passed=1 AND tsm3.created_at>=? AND tsm3.created_at<=?)""",
-            (lower_bound, upper_bound, lower_bound, upper_bound, lower_bound, upper_bound))
-        summary["risk_surface_pass_count"] = int((risk_surface_pass_row or {}).get("c", 0))
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)""",
+            (lower_bound, upper_bound, lower_bound, upper_bound))
+        risk_top_count = int((risk_surface_pass_row or {}).get("c", 0))
+
+        # 对 risk+top 通过的每条记录，检查是否需要 smart_degen，分组合成 risk_surface_pass_count
+        risk_top_rows = await _fetch_all(repo,
+            """SELECT DISTINCT tsm.discovery_event_id AS eid, tsm.strategy_id AS sid, sg.x AS x
+               FROM token_strategy_matches tsm
+               LEFT JOIN strategy_groups sg ON sg.id = tsm.strategy_id
+               WHERE tsm.stage='risk_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)""",
+            (lower_bound, upper_bound, lower_bound, upper_bound))
+
+        smart_degen_passed_rows = await _fetch_all(repo,
+            """SELECT DISTINCT tsm.discovery_event_id AS eid, tsm.strategy_id AS sid
+               FROM token_strategy_matches tsm
+               WHERE tsm.stage='smart_degen_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?""",
+            (lower_bound, upper_bound))
+        smart_degen_passed = {(int(r["eid"]), int(r["sid"])) for r in smart_degen_passed_rows}
+
+        risk_surface_keys = 0
+        smart_degen_skipped = 0
+        for r in risk_top_rows:
+            key = (int(r["eid"]), int(r["sid"]))
+            x_val = r.get("x")
+            if not requires_smart_degen_for_x(x_val):
+                risk_surface_keys += 1
+                smart_degen_skipped += 1
+            elif key in smart_degen_passed:
+                risk_surface_keys += 1
+        summary["risk_surface_pass_count"] = risk_surface_keys
+        summary["smart_degen_skipped_not_required_count"] = smart_degen_skipped
 
         price_surface_checked_row = await _fetch_one(repo,
             "SELECT COUNT(DISTINCT discovery_event_id || '|' || strategy_id) AS c FROM token_strategy_matches WHERE stage='price_filter' AND created_at>=? AND created_at<=?",
@@ -755,16 +785,25 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
             (lower_bound, upper_bound, lower_bound, upper_bound))
         summary["price_surface_pass_count"] = int((price_surface_pass_row or {}).get("c", 0))
 
-        entry_ready_row = await _fetch_one(repo,
-            """SELECT COUNT(DISTINCT tsm.discovery_event_id || '|' || tsm.strategy_id) AS c
+        # entry_ready = risk_surface_keys(已含 smart_degen 条件) + price_filter + kline_fallback
+        price_kline_rows = await _fetch_all(repo,
+            """SELECT DISTINCT tsm.discovery_event_id AS eid, tsm.strategy_id AS sid
                FROM token_strategy_matches tsm
-               WHERE tsm.stage='risk_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='top_holder_filter' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm3 WHERE tsm3.discovery_event_id=tsm.discovery_event_id AND tsm3.strategy_id=tsm.strategy_id AND tsm3.stage='smart_degen_filter' AND tsm3.passed=1 AND tsm3.created_at>=? AND tsm3.created_at<=?)
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm4 WHERE tsm4.discovery_event_id=tsm.discovery_event_id AND tsm4.strategy_id=tsm.strategy_id AND tsm4.stage='price_filter' AND tsm4.passed=1 AND tsm4.created_at>=? AND tsm4.created_at<=?)
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm5 WHERE tsm5.discovery_event_id=tsm.discovery_event_id AND tsm5.strategy_id=tsm.strategy_id AND tsm5.stage='kline_fallback' AND tsm5.passed=1 AND tsm5.created_at>=? AND tsm5.created_at<=?)""",
-            (lower_bound, upper_bound, lower_bound, upper_bound, lower_bound, upper_bound, lower_bound, upper_bound, lower_bound, upper_bound))
-        entry_ready_count = int((entry_ready_row or {}).get("c", 0))
+               WHERE tsm.stage='price_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
+                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='kline_fallback' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)""",
+            (lower_bound, upper_bound, lower_bound, upper_bound))
+        price_kline_keys = {(int(r["eid"]), int(r["sid"])) for r in price_kline_rows}
+
+        risk_top_keys_set = set()
+        for r in risk_top_rows:
+            key = (int(r["eid"]), int(r["sid"]))
+            x_val = r.get("x")
+            if not requires_smart_degen_for_x(x_val):
+                risk_top_keys_set.add(key)
+            elif key in smart_degen_passed:
+                risk_top_keys_set.add(key)
+
+        entry_ready_count = len(risk_top_keys_set & price_kline_keys)
         summary["entry_ready_count"] = entry_ready_count
 
         pos_rows = await _fetch_all(repo,
@@ -796,6 +835,7 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
         summary["price_surface_checked_count"] = 0
         summary["price_surface_pass_count"] = 0
         summary["entry_ready_count"] = 0
+        summary["smart_degen_skipped_not_required_count"] = 0
         summary["positions_created_count"] = 0
         summary["sim_positions_created_count"] = 0
         summary["live_positions_created_count"] = 0

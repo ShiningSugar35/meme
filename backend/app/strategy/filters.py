@@ -542,9 +542,31 @@ async def evaluate_smart_degen(
     x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
     t = compute_thresholds(x)
 
+    # x > 0.15 时聪明钱条件不启用，直接返回通过
+    if not t.requires_smart_degen_entry:
+        return PriceFilterResult(
+            True,
+            [{
+                "rule": "smart_degen_not_required",
+                "passed": True,
+                "x": x,
+                "raw_required": t.min_smart_degen_count_raw,
+                "required_count": 0,
+                "reason": "x > 0.15, smart degen entry condition disabled",
+            }],
+            {
+                "x": x,
+                "smart_degen_required": False,
+                "degen_count": len(smart_degen_holders or []),
+                "required_count": 0,
+                "stage": "smart_degen_filter",
+            },
+        )
+
+    smart_degen_holders = smart_degen_holders or []
     # min_smart_degen_count = max(0, 1.5 - 10*x). x > 0.15 removes the condition.
     raw_required = t.min_smart_degen_count_raw
-    required_count_for_count_rule = max(0, int(math.floor(raw_required)) + 1)
+    required_count_for_count_rule = int(t.min_smart_degen_count_api or 0)
     required_count_for_holding_eval = max(1, required_count_for_count_rule)
     degen_count = len(smart_degen_holders)
     cond_degen = degen_count >= required_count_for_count_rule

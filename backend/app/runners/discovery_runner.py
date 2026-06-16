@@ -419,6 +419,20 @@ class DiscoveryRunner:
             grouped[key].append(sg)
         return sorted(grouped.items(), key=lambda item: item[0])
 
+    @staticmethod
+    def _strategy_x(strategy_group: dict) -> float:
+        return float(
+            strategy_group.get("x")
+            if strategy_group.get("x") is not None
+            else settings.STRATEGY_DEFAULT_X
+        )
+
+    @classmethod
+    def _requires_smart_degen(cls, strategy_group: dict) -> bool:
+        from ..strategy.thresholds import requires_smart_degen_for_x
+        x = cls._strategy_x(strategy_group)
+        return requires_smart_degen_for_x(x)
+
     async def _store_snapshot_and_token(self, token: Dict[str, Any], now: datetime) -> Tuple[str, str, Any, int]:
         token_mint = token['token_mint']
         pool_address = token.get('pool_address') or ''
@@ -1002,7 +1016,9 @@ class DiscoveryRunner:
         self, token_mint: str, token: Dict[str, Any], groups: List[dict],
         snapshot_id: int, discovery_event_ids: Dict[int, int],
     ) -> Tuple[List[dict], Dict[str, Any], Optional[List[Dict[str, Any]]]]:
-        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "passed": 0, "failed": 0}
+        # 防御：只对要求聪明钱的策略组执行 smart_degen_filter
+        groups = [sg for sg in groups if self._requires_smart_degen(sg)]
+        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "passed": 0, "failed": 0, "skipped_not_required": 0}
         passed_groups: List[dict] = []
 
         if not groups:
@@ -1314,14 +1330,27 @@ class DiscoveryRunner:
                     if not top_holder_passed:
                         continue
 
-                    # ---- Stage 2: smart_degen_filter ----
-                    degen_passed, degen_diag, degen_holders = await self._run_stage2_smart_degen(
-                        token_mint, enriched_token, top_holder_passed, snapshot_id, discovery_event_ids,
-                    )
-                    stage_diags.setdefault("stage2_degen", {"checked": 0, "passed": 0, "failed": 0})
-                    stage_diags["stage2_degen"]["checked"] += degen_diag["checked"]
-                    stage_diags["stage2_degen"]["passed"] += degen_diag["passed"]
-                    stage_diags["stage2_degen"]["failed"] += degen_diag["failed"]
+                    # ---- Stage 2: smart_degen_filter (conditional) ----
+                    degen_required = [sg for sg in top_holder_passed if self._requires_smart_degen(sg)]
+                    degen_not_required = [sg for sg in top_holder_passed if not self._requires_smart_degen(sg)]
+
+                    degen_passed = list(degen_not_required)  # 不要求聪明钱的直接通过
+                    degen_holders = None
+
+                    stage_diags.setdefault("stage2_degen", {"checked": 0, "passed": 0, "failed": 0, "skipped_not_required": 0})
+                    stage_diags["stage2_degen"]["skipped_not_required"] += len(degen_not_required)
+
+                    if degen_required:
+                        required_passed, degen_diag, fetched_holders = await self._run_stage2_smart_degen(
+                            token_mint, enriched_token, degen_required, snapshot_id, discovery_event_ids,
+                        )
+                        stage_diags["stage2_degen"]["checked"] += degen_diag["checked"]
+                        stage_diags["stage2_degen"]["passed"] += degen_diag["passed"]
+                        stage_diags["stage2_degen"]["failed"] += degen_diag["failed"]
+
+                        degen_passed.extend(required_passed)
+                        if fetched_holders:
+                            degen_holders = fetched_holders
 
                     if not degen_passed:
                         continue
