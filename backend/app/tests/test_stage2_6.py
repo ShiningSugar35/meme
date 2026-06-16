@@ -55,7 +55,7 @@ class TestTrenchesPushdown:
         assert payload["min_holder_count"] == 30
         assert math.isclose(payload["min_marketcap"], 4950.0, rel_tol=1e-9)
         assert math.isclose(payload["min_volume_24h"], 1200.0, rel_tol=1e-9)
-        assert payload.get("min_smart_degen_count") == 1
+        assert payload.get("min_smart_degen_count") is None
 
     def test_no_internal_fields_in_stripped_payload(self):
         """build_trench_filters_for_x must strip _x, _computed_from_x, _strategy_group_ids."""
@@ -77,6 +77,8 @@ class TestTrenchesPushdown:
         """KNOWN_TRENCH_FILTER_KEYS covers all GMGN-sendable constants."""
         payload = build_trench_filters_for_x(0.2)
         for k in KNOWN_TRENCH_FILTER_KEYS:
+            if k == "min_smart_degen_count" and k not in payload:
+                continue
             assert k in payload, f"KNOWN_TRENCH_FILTER_KEYS missing key {k}"
 
     @pytest.mark.asyncio

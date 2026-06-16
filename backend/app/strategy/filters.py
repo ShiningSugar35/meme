@@ -541,7 +541,7 @@ async def evaluate_smart_degen(
     x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
     t = compute_thresholds(x)
 
-    # min_smart_degen_count = max(0, 2 - 10*x). Strictly greater: required > that value.
+    # min_smart_degen_count = max(0, 1.5 - 10*x). x > 0.15 removes the condition.
     raw_required = t.min_smart_degen_count_raw
     required_count_for_count_rule = max(0, int(math.floor(raw_required)) + 1)
     required_count_for_holding_eval = max(1, required_count_for_count_rule)
@@ -577,8 +577,8 @@ async def evaluate_smart_degen(
                 "min_holder_usd": min_usd, "min_ok": min_ok,
                 "threshold_max_pct": t.smart_degen_max_pct, "threshold_min_pct": t.smart_degen_min_pct,
                 "threshold_max_usd": t.smart_degen_max_usd, "threshold_min_usd": t.smart_degen_min_usd,
-                "label_max_pct": "持仓最多的聪明钱当前持仓份额 > 0.5% 或 持仓价值 > $50",
-                "label_min_pct": "持仓最少的聪明钱当前持仓份额 > 0.25% 或 持仓价值 > $25",
+                "label_max_pct": "持仓最多的聪明钱当前持仓份额 > 0.4% 或 持仓价值 > $40",
+                "label_min_pct": "持仓最少的聪明钱当前持仓份额 > 0.2% 或 持仓价值 > $20",
             }
     elif not smart_degen_holders:
         degen_hold_detail = {"reason": "no smart degen holders available"}

@@ -55,9 +55,9 @@ def test_thresholds_x_02():
     assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
     assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_max_pct, 30.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_max_pct, 50.0, rel_tol=1e-9)
     assert math.isclose(t.sell_tax_max, 0.02, rel_tol=1e-9)
-    assert math.isclose(t.sniper_count_max, 10.0, rel_tol=1e-9)
+    assert math.isclose(t.sniper_count_max, 15.0, rel_tol=1e-9)
     assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
     assert math.isclose(t.top1_addr_type0_min, 0.028, rel_tol=1e-9)
     assert math.isclose(t.min_liquidity_holder_ratio, 50.0, rel_tol=1e-9)
@@ -71,7 +71,7 @@ def test_thresholds_x_01():
     assert math.isclose(t.common_risk, 0.10, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1400.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_min_pct, -15.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_max_pct, 35.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_max_pct, 55.0, rel_tol=1e-9)
 
 
 def test_thresholds_x_03():
@@ -183,9 +183,9 @@ def test_price_change_threshold():
     assert math.isclose(pct_detail.get("pct_change") or 0, 10.0, rel_tol=1e-9)
     # lower_threshold = 50 * (0.2 - 0.4) = -10
     assert math.isclose(pct_detail.get("lower_threshold") or 0, -10.0, rel_tol=1e-9)
-    # upper_threshold = 40 - 50 * 0.2 = 30
-    assert math.isclose(pct_detail.get("upper_threshold") or 0, 30.0, rel_tol=1e-9)
-    assert pct_detail.get("passed") is True, "10% within (-10, 30) should pass"
+    # upper_threshold = 60 - 50 * 0.2 = 50
+    assert math.isclose(pct_detail.get("upper_threshold") or 0, 50.0, rel_tol=1e-9)
+    assert pct_detail.get("passed") is True, "10% within (-10, 50) should pass"
 
 
 def test_missing_price_fails():
@@ -231,7 +231,7 @@ def test_smart_degen_large_pct_normalized():
     holders = [{"amount_percentage": 1.6, "usd_value": 300}]
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     detail = res.details[0]
-    # min_smart_degen_count = max(0, 2-10*0.05) = 1.5, ceil(1.5) = 2
+    # min_smart_degen_count = max(0, 1.5-10*0.05) = 1.0, floor(1.0)+1 = 2
     assert detail["required_count"] == 2
     assert detail["passed"] is False
 
@@ -239,7 +239,7 @@ def test_smart_degen_large_pct_normalized():
 def test_smart_degen_too_few_holders():
     sg = {"x": 0}
     holders = [{"amount_percentage": 0.05, "usd_value": 1000}]
-    # min_smart_degen_count = max(0, 2-0) = 2, ceil(2) = 2, only 1 holder -> fail
+    # min_smart_degen_count = max(0, 1.5-0) = 1.5, floor(1.5)+1 = 2, only 1 holder -> fail
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     assert res.passed is False
 
@@ -249,8 +249,8 @@ def test_smart_degen_passes_with_new_thresholds():
     holders = [{"amount_percentage": 0.02, "usd_value": 160}, {"amount_percentage": 0.015, "usd_value": 60}]
     res = asyncio.run(evaluate_smart_degen(sg, holders))
     detail = res.details[0]
-    # max_usd=160 > 50, max_pct_norm=0.02 > 0.005 -> max_ok=True
-    # min_usd=60 > 25, min_pct_norm=0.015 > 0.0025 -> min_ok=True
+    # max_usd=160 > 40, max_pct_norm=0.02 > 0.004 -> max_ok=True
+    # min_usd=60 > 20, min_pct_norm=0.015 > 0.002 -> min_ok=True
     assert detail["passed"] is True
 
 

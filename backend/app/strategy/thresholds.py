@@ -77,10 +77,10 @@ class StrategyThresholds:
     price_range_24h_percentile_min: float
     price_range_24h_percentile_max: float
 
-    smart_degen_max_pct: float = 0.005
-    smart_degen_min_pct: float = 0.0025
-    smart_degen_max_usd: float = 50.0
-    smart_degen_min_usd: float = 25.0
+    smart_degen_max_pct: float = 0.004
+    smart_degen_min_pct: float = 0.002
+    smart_degen_max_usd: float = 40.0
+    smart_degen_min_usd: float = 20.0
 
     @property
     def min_holder_count(self) -> float:
@@ -142,7 +142,7 @@ class StrategyThresholds:
         min_marketcap_raw = min_liquidity * (1.3 - xf)
         min_marketcap_api = min_liquidity * (1.3 - xf)
 
-        min_smart_degen_count_raw = 2.0 - 10.0 * xf
+        min_smart_degen_count_raw = 1.5 - 10.0 * xf
         min_smart_degen_count_api = (
             int(math.floor(min_smart_degen_count_raw)) + 1
             if min_smart_degen_count_raw >= 0
@@ -157,7 +157,7 @@ class StrategyThresholds:
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
         price_change_1h_min_pct = 50.0 * (xf - 0.4)
-        price_change_1h_max_pct = 40.0 - 50.0 * xf
+        price_change_1h_max_pct = 60.0 - 50.0 * xf
         swaps_1h_min = 7.0 + 20.0 * xf
         volume_per_swap_1h_min = 23.0 + 20.0 * xf
         price_range_24h_percentile_min = 0.0

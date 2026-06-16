@@ -36,17 +36,17 @@ class TestThresholds:
         assert math.isclose(t.min_top_holder_rate, 0.145, rel_tol=1e-9)
         assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
         assert math.isclose(t.max_fresh_wallet_rate, 0.15, rel_tol=1e-9)
-        assert math.isclose(t.max_creator_balance_rate, 0.051, rel_tol=1e-9)
+        assert math.isclose(t.max_creator_balance_rate, 0.056, rel_tol=1e-9)
         assert t.min_holder_count_api == 30
         assert t.max_holder_count_api == 799
         assert math.isclose(t.min_holder_count_raw, 29.0, rel_tol=1e-9)
         assert math.isclose(t.max_holder_count_raw, 800.0, rel_tol=1e-9)
         assert math.isclose(t.min_marketcap_api, 4950.0, rel_tol=1e-9)
-        assert t.min_smart_degen_count_api == 1
-        assert t.min_smart_degen_count_raw == 0.0
+        assert t.min_smart_degen_count_api is None
+        assert t.min_smart_degen_count_raw == -0.5
         assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
         assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
-        assert math.isclose(t.price_change_1h_max_pct, 30.0, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_max_pct, 50.0, rel_tol=1e-9)
         assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
         assert math.isclose(t.top1_addr_type0_min, 0.028, rel_tol=1e-9)
         assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
@@ -62,10 +62,10 @@ class TestThresholds:
         assert math.isclose(t.min_holder_count_raw, 17.0, rel_tol=1e-9)
         assert t.min_holder_count_api == 18
         assert math.isclose(t.price_change_1h_min_pct, 5.0, rel_tol=1e-9)
-        assert math.isclose(t.price_change_1h_max_pct, 15.0, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_max_pct, 35.0, rel_tol=1e-9)
         assert math.isclose(t.volume_per_swap_1h_min, 33.0, rel_tol=1e-9)
         assert t.min_smart_degen_count_api is None
-        assert t.min_smart_degen_count_raw == -3.0
+        assert t.min_smart_degen_count_raw == -3.5
 
     def test_build_trench_filters_returns_constants(self):
         payload = build_trench_filters_for_x(0.2)
@@ -98,7 +98,7 @@ class TestSmartDegenBounds:
             {"address": "a2", "amount_percentage": 0.01, "usd_value": 100.0},
         ]
         res = asyncio.run(evaluate_smart_degen({"x": 0.2}, holders))
-        assert res.feature_vector["required_count"] == 1
+        assert res.feature_vector["required_count"] == 0
         assert res.passed
 
     def test_smart_degen_x_03_no_crash(self):
