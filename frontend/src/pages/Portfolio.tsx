@@ -4,9 +4,16 @@ import { api, FilterStats, PnlSummary, PortfolioRow, RuntimeStatus, RuleFailItem
 type AccountTab = 'LIVE' | 'SIM';
 type PortfolioTab = 'CURRENT' | 'HISTORY';
 
-function usd(value: unknown) {
-  const n = Number(value || 0);
-  return Number.isFinite(n) ? `$${n.toFixed(2)}` : '$0.00';
+function usdNullable(value: unknown) {
+  if (value === null || value === undefined || value === '') return '-';
+  const n = Number(value);
+  return Number.isFinite(n) ? `$${n.toFixed(8)}` : '-';
+}
+
+function usd2(value: unknown) {
+  if (value === null || value === undefined || value === '') return '-';
+  const n = Number(value);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : '-';
 }
 
 function pct(value: unknown) {
@@ -229,7 +236,7 @@ export default function Portfolio() {
                 </div>
                 <div className="metric-row">
                   <span>实盘PnL</span>
-                  <strong style={pnlStyle(pnlSummary.live.realized_pnl_usd)}>{usd(pnlSummary.live.realized_pnl_usd)}</strong>
+                  <strong style={pnlStyle(pnlSummary.live.realized_pnl_usd)}>{usd2(pnlSummary.live.realized_pnl_usd)}</strong>
                 </div>
               </>
             )}
@@ -241,7 +248,7 @@ export default function Portfolio() {
                 </div>
                 <div className="metric-row">
                   <span>模拟盘PnL</span>
-                  <strong style={pnlStyle(pnlSummary.sim.realized_pnl_usd)}>{usd(pnlSummary.sim.realized_pnl_usd)}</strong>
+                  <strong style={pnlStyle(pnlSummary.sim.realized_pnl_usd)}>{usd2(pnlSummary.sim.realized_pnl_usd)}</strong>
                 </div>
               </>
             )}
@@ -279,7 +286,7 @@ export default function Portfolio() {
                   <td title={row.token_mint}>{row.mint_short || row.token_mint || '-'} {row.token_mint ? <span onClick={() => copyText(row.token_mint!)} style={{cursor:'pointer',marginLeft:4,fontSize:11,color:'#58a6ff'}} title="复制完整地址">[复制]</span> : null}</td>
                   <td style={{ fontSize: 12 }}>{toBeijing(row.opened_at ?? row.updated_at)}</td>
                   <td>{row.status}{row.last_exit_reason ? ` / ${exitReasonLabel(String(row.last_exit_reason))}` : ''}</td>
-                  <td>{usd(row.remaining_value_usd ?? row.remaining)}</td>
+                  <td>{usd2(row.remaining_value_usd ?? row.remaining)}</td>
                   <td>{pct(row.pnl_pct)}</td>
                   <td>{row.ratio ?? '-'}</td>
                 </tr>
@@ -309,9 +316,9 @@ export default function Portfolio() {
                   <td><span className={row.side === 'BUY' ? 'tag sim' : 'tag live'}>{row.side}</span></td>
                   <td title={row.token_mint}>{row.mint_short || '-'}</td>
                   <td>{row.symbol || '-'}</td>
-                  <td>{usd(row.price_usd)}</td>
+                  <td>{usdNullable(row.price_usd)}</td>
                   <td>{row.token_amount ?? '-'}</td>
-                  <td style={pnlStyle(row.trade_value_usd_net)}>{usd(row.trade_value_usd_net)}</td>
+                  <td style={pnlStyle(row.trade_value_usd_net)}>{usd2(row.trade_value_usd_net)}</td>
                   <td>{row.exit_reason_label ? exitReasonLabel(row.exit_reason_label) : '-'}</td>
                   <td style={{ fontSize: 12 }}>{toBeijing(row.created_at_utc)}</td>
                 </tr>

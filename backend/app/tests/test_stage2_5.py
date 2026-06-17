@@ -33,25 +33,25 @@ class TestThresholds:
         t = compute_thresholds(0.2)
         assert math.isclose(t.common_risk, 0.15, rel_tol=1e-9)
         assert math.isclose(t.min_liquidity, 4500.0, rel_tol=1e-9)
-        assert math.isclose(t.min_top_holder_rate, 0.145, rel_tol=1e-9)
+        assert math.isclose(t.min_top_holder_rate, 0.055, rel_tol=1e-9)
         assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
         assert math.isclose(t.max_fresh_wallet_rate, 0.15, rel_tol=1e-9)
         assert math.isclose(t.max_creator_balance_rate, 0.056, rel_tol=1e-9)     # 持仓风控
         assert math.isclose(t.entry_max_creator_balance_rate, 0.051, rel_tol=1e-9)  # 买入筛选
-        assert t.min_holder_count_api == 30
+        assert t.min_holder_count_api == 25
         assert t.max_holder_count_api == 799
-        assert math.isclose(t.min_holder_count_raw, 29.0, rel_tol=1e-9)
+        assert math.isclose(t.min_holder_count_raw, 24.0, rel_tol=1e-9)
         assert math.isclose(t.max_holder_count_raw, 800.0, rel_tol=1e-9)
         assert math.isclose(t.min_marketcap_api, 4950.0, rel_tol=1e-9)
         assert t.min_smart_degen_count_api is None
         assert t.min_smart_degen_count_raw == -0.5
         assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
-        assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
+        assert math.isclose(t.price_change_1h_min_pct, -5.0, rel_tol=1e-9)
         assert math.isclose(t.price_change_1h_max_pct, 50.0, rel_tol=1e-9)
         assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
-        assert math.isclose(t.top1_addr_type0_min, 0.028, rel_tol=1e-9)
+        assert math.isclose(t.top1_addr_type0_min, 0.018, rel_tol=1e-9)
         assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
-        assert math.isclose(t.price_range_24h_percentile_min, 0.0, rel_tol=1e-9)
+        assert math.isclose(t.price_range_24h_percentile_min, 0.05, rel_tol=1e-9)
         assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
         assert math.isclose(t.sniper_count_max, 15.0, rel_tol=1e-9)           # 持仓风控 75*0.2
         assert math.isclose(t.entry_sniper_count_max, 10.0, rel_tol=1e-9)      # 买入条件 50*0.2
@@ -60,11 +60,11 @@ class TestThresholds:
         t = compute_thresholds(0.5)
         assert math.isclose(t.common_risk, 0.30, rel_tol=1e-9)
         assert math.isclose(t.min_liquidity, 3750.0, rel_tol=1e-9)
-        assert math.isclose(t.min_top_holder_rate, 0.13, rel_tol=1e-9)
+        assert math.isclose(t.min_top_holder_rate, -0.095, rel_tol=1e-9)
         assert math.isclose(t.max_top_holder_rate, 0.35, rel_tol=1e-9)
-        assert math.isclose(t.min_holder_count_raw, 17.0, rel_tol=1e-9)
-        assert t.min_holder_count_api == 18
-        assert math.isclose(t.price_change_1h_min_pct, 5.0, rel_tol=1e-9)
+        assert math.isclose(t.min_holder_count_raw, 12.0, rel_tol=1e-9)
+        assert t.min_holder_count_api == 13
+        assert math.isclose(t.price_change_1h_min_pct, 10.0, rel_tol=1e-9)
         assert math.isclose(t.price_change_1h_max_pct, 35.0, rel_tol=1e-9)
         assert math.isclose(t.volume_per_swap_1h_min, 33.0, rel_tol=1e-9)
         assert t.min_smart_degen_count_api is None
@@ -77,7 +77,7 @@ class TestThresholds:
         assert isinstance(payload["min_liquidity"], float)
         assert isinstance(payload["min_holder_count"], int)
         assert payload["min_liquidity"] == 4500.0
-        assert payload["min_holder_count"] == 30
+        assert payload["min_holder_count"] == 25
         assert payload["max_holder_count"] == 799
 
     def test_build_trench_filters_x_05(self):

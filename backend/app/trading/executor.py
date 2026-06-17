@@ -47,7 +47,83 @@ EXIT_REASON_LABELS: Dict[str, str] = {
     "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
 }
 
+def validate_and_select_sim_token_amount(
+    *,
+    size_usd: float,
+    gmgn_price_usd: float,
+    quote: dict | None,
+    token_decimals: int | None,
+    max_ratio: float = 1.1,
+    min_ratio: float = 0.9,
+) -> tuple[float, dict]:
+    """
+    Returns: (token_amount, diagnostics)
 
+    Rules:
+    1. GMGN price must be > 0, otherwise block buy (return 0.0).
+    2. fallback_amount = size_usd / gmgn_price_usd.
+    3. If Jupiter quote does not exist, use fallback_amount.
+    4. If quote exists:
+       - outAmount must be positive integer;
+       - token_decimals must have a clear source (not None, > 0);
+       - quote_amount = outAmount / 10^token_decimals;
+       - implied_price = size_usd / quote_amount;
+       - ratio = implied_price / gmgn_price_usd;
+       - Only allow quote_amount if ratio in [0.9, 1.1];
+       - Otherwise use fallback_amount and write diagnostics.
+    """
+    diag = {
+        "token_amount_source": None,
+        "quote_implied_price_usd": None,
+        "quote_vs_gmgn_price_ratio": None,
+        "token_decimals": token_decimals,
+        "token_decimals_source": None,
+        "quantity_validation_status": None,
+    }
+
+    if not gmgn_price_usd or gmgn_price_usd <= 0:
+        diag["quantity_validation_status"] = "BLOCKED_NO_GMGN_PRICE"
+        return 0.0, diag
+
+    fallback_amount = size_usd / gmgn_price_usd
+
+    if not quote or not isinstance(quote, dict) or quote.get("error"):
+        diag["token_amount_source"] = "no_quote"
+        diag["quantity_validation_status"] = "FALLBACK_NO_QUOTE"
+        return fallback_amount, diag
+
+    out_amount_raw = quote.get("outAmount")
+    try:
+        out_raw = float(out_amount_raw)
+    except (TypeError, ValueError):
+        out_raw = 0.0
+
+    if out_raw is None or out_raw <= 0:
+        diag["token_amount_source"] = "gmgn_spot_fallback"
+        diag["quantity_validation_status"] = "FALLBACK_ZERO_OUT_AMOUNT"
+        return fallback_amount, diag
+
+    if token_decimals is None or token_decimals <= 0:
+        diag["token_decimals_source"] = "missing"
+        diag["token_amount_source"] = "jupiter_quote_missing_decimals"
+        diag["quantity_validation_status"] = "FALLBACK_MISSING_DECIMALS"
+        return fallback_amount, diag
+
+    quote_amount = out_raw / (10 ** token_decimals)
+    implied_price = size_usd / quote_amount if quote_amount > 0 else 0.0
+    ratio = implied_price / gmgn_price_usd if gmgn_price_usd > 0 else float('inf')
+
+    diag["quote_implied_price_usd"] = implied_price
+    diag["quote_vs_gmgn_price_ratio"] = ratio
+
+    if min_ratio <= ratio <= max_ratio:
+        diag["token_amount_source"] = "jupiter_quote_validated"
+        diag["quantity_validation_status"] = "VALIDATED"
+        return quote_amount, diag
+    else:
+        diag["token_amount_source"] = "jupiter_quote_rejected_ratio"
+        diag["quantity_validation_status"] = "FALLBACK_RATIO_OUT_OF_RANGE"
+        return fallback_amount, diag
 
 
 def _finite_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -696,6 +772,7 @@ class TradingPipeline:
         token_amount = 0.0
         jupiter_price_impact = None
         quote: Dict[str, Any] = {}
+        quantity_diag: Dict[str, Any] = {}
         try:
             amount_lamports = int(size_sol * LAMPORTS_PER_SOL)
             quote = await self._get_quote(
@@ -709,15 +786,16 @@ class TradingPipeline:
             )
             if quote and not quote.get("error"):
                 token_decimals = self._extract_token_decimals(token_mint, quote=quote, latest=latest, strategy=strategy)
-                out_raw = self._to_float(quote.get("outAmount"), 0.0) or 0.0
-                token_amount = self._raw_to_human_amount(out_raw, token_decimals)
                 jupiter_price_impact = self._price_impact_fraction(quote)
         except Exception:
             quote = {}
-            token_amount = (size_usd / price_usd) if price_usd and price_usd > 0 else (size_sol / price_sol if price_sol and price_sol > 0 else 0.0)
 
-        if token_amount <= 0:
-            token_amount = (size_usd / price_usd) if price_usd and price_usd > 0 else (size_sol / price_sol if price_sol and price_sol > 0 else 0.0)
+        token_amount, quantity_diag = validate_and_select_sim_token_amount(
+            size_usd=size_usd,
+            gmgn_price_usd=price_usd,
+            quote=quote if quote and not quote.get("error") else None,
+            token_decimals=token_decimals if token_decimals else None,
+        )
 
         remaining_value_usd = token_amount * price_usd if token_amount > 0 and price_usd and price_usd > 0 else size_usd
 
@@ -788,6 +866,7 @@ class TradingPipeline:
             quote_price_impact_pct=quote.get("priceImpactPct") if isinstance(quote, dict) else None,
             input_mint=WRAPPED_SOL_MINT,
             output_mint=token_mint,
+            execution_detail_json=self._safe_json(quantity_diag),
         )
 
         locked_json = self._locked_strategy_for_position(
@@ -863,6 +942,8 @@ class TradingPipeline:
             sol_side_liquidity=sol_side_liquidity,
             smart_degen_required=smart_degen_required,
         )
+        entry_audit["quantity_diag"] = quantity_diag
+        entry_audit["quantity_validation_status"] = quantity_diag.get("quantity_validation_status")
         await self.repo.insert_position_audit(
             position_id=pos_id,
             token_mint=token_mint,

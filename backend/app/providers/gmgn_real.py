@@ -428,13 +428,40 @@ class GMGNProvider(MarketDataProvider):
             "max_bundler_rate": cls._to_float(cls._first_present(raw, ["max_bundler_rate", "bundler_rate", "bundler_trader_amount_rate"])),
             "fresh_wallet_rate": cls._to_float(cls._first_present(raw, ["fresh_wallet_rate", "fresh_wallets_rate"])),
             "sell_tax": cls._to_float(cls._first_present(raw, ["sell_tax", "sell_tax_rate"])),
-            "has_social": cls._first_present(raw, ["has_social", "has_at_least_one_social", "has_twitter_or_telegram"]),
+            "has_social": cls._first_present(raw, [
+                "has_social", "has_at_least_one_social", "has_twitter_or_telegram",
+            ]) or int(bool(raw.get("socials") or raw.get("links"))),
+            "socials": raw.get("socials") or raw.get("links") or [],
+            "link": raw.get("link") or raw.get("website") or raw.get("twitter") or "",
             "creator_token_status": cls._first_present(raw, ["creator_token_status", "creator_status"]),
             "dev_team_hold_rate": cls._to_float(cls._first_present(raw, ["dev_team_hold_rate", "dev_hold_rate", "creator_hold_rate"])),
             "dev_token_burn_ratio": cls._to_float(cls._first_present(raw, ["dev_token_burn_ratio", "burn_ratio", "lp_burn_ratio"])),
             "burn_status": cls._first_present(raw, ["burn_status", "lp_burn_status", "burnt_status"]),
             "sniper_count": cls._to_float(cls._first_present(raw, ["sniper_count", "snipers", "sniper_trader_count"])),
             "holder_count": cls._to_float(cls._first_present(raw, ["holder_count", "holders", "total_holders", "holder"])),
+            "creator_balance_rate": cls._to_float(cls._first_present(raw, [
+                "creator_balance_rate", "creator_hold_rate", "dev_team_hold_rate",
+                "dev_hold_rate", "creator_token_balance_rate",
+            ])),
+            "creator_token_balance": cls._to_float(cls._first_present(raw, [
+                "creator_token_balance", "creator_balance", "dev_token_balance",
+            ])),
+            "total_supply": cls._to_float(cls._first_present(raw, [
+                "total_supply", "supply", "total_supply",
+            ])),
+            "swaps_1h": cls._to_float(cls._first_present(raw, [
+                "swaps_1h", "swaps1h", "trade_1h", "trades_1h",
+            ])),
+            "price_change_percent1h": cls._to_float(cls._first_present(raw, [
+                "price_change_percent1h", "price_change_1h", "price_change_percent_1h",
+                "change_1h",
+            ])),
+            "socials": raw.get("socials") or raw.get("links") or [],
+            "link": raw.get("link") or raw.get("website") or raw.get("twitter") or "",
+            "wallet_tags_stat": raw.get("wallet_tags_stat") or {},
+            "stat": raw.get("stat") or {},
+            "price_payload": raw.get("price") or {},
+            "pool_payload": raw.get("pool") or {},
         }
         # Keep explicit falsy values; drop only None/empty for DB columns except raw_json.
         out = {k: v for k, v in out.items() if v is not None and v != ""}
