@@ -108,7 +108,7 @@ def validate_and_select_sim_token_amount(
         diag["quantity_validation_status"] = "fallback_zero_out_amount"
         return fallback_amount, diag
 
-    if token_decimals is None or token_decimals <= 0:
+    if token_decimals is None:
         diag["token_decimals_source"] = "missing"
         diag["token_amount_source"] = "jupiter_quote_missing_decimals"
         diag["quantity_validation_status"] = "fallback_missing_decimals"
@@ -502,7 +502,7 @@ class TradingPipeline:
 
         for val, src in candidates:
             d = self._to_int(val)
-            if d is not None and 0 < d <= 18:
+            if d is not None and 0 <= d <= 18:
                 return d, src
         return None, "missing"
 
@@ -559,8 +559,10 @@ class TradingPipeline:
 
         for c in candidates:
             d = self._to_int(c)
-            if d is not None and 0 < d <= 18:
+            if d is not None and 0 <= d <= 18:
                 return d
+        if latest and isinstance(latest.get("type"), str) and "pump" in latest["type"].lower():
+            return 6
         return DEFAULT_TOKEN_DECIMALS
 
     def _human_to_raw_amount(self, amount: float, decimals: int) -> int:

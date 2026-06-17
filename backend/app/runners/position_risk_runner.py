@@ -285,8 +285,20 @@ class PositionRiskRunner:
         try:
             latest = await self._fetch_latest_price(token, account_type, retry_delay_seconds=prefetch_interval)
         except RuntimeError:
-            await self._emergency_risk_exit(position)
+            count = self._risk_unavailable_counts.get(pos_id, 0) + 1
+            self._risk_unavailable_counts[pos_id] = count
+            threshold = getattr(settings, "RISK_DATA_UNAVAILABLE_THRESHOLD", 3)
+            await self.repo.append_system_event(
+                "WARN",
+                "RISK",
+                f"Latest price fetch failed for {token} ({count}/{threshold})",
+                _safe_json_dumps({"position_id": pos_id, "count": count, "threshold": threshold}),
+                account_type=account_type,
+            )
+            if count >= threshold:
+                await self._emergency_risk_exit(position)
             return
+        self._risk_unavailable_counts.pop(pos_id, None)
         price_usd = _extract_price_usd(latest)
         remaining_value_usd = _remaining_value_usd(position, price_usd)
 

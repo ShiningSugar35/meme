@@ -423,10 +423,6 @@ class GMGNProvider(MarketDataProvider):
                 "max_rug_ratio", "rug_ratio", "max_rugged_ratio",
                 "top_rug_percentage",
             ])),
-            "max_insider_ratio": cls._to_float(cls._first_present(raw, [
-                "max_insider_ratio", "insider_ratio", "insider_rate",
-                "top_insider_percentage",
-            ])),
             "max_entrapment_ratio": cls._to_float(cls._first_present(raw, [
                 "max_entrapment_ratio", "entrapment_ratio",
                 "top_entrapment_trader_percentage",
