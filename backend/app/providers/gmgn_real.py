@@ -460,8 +460,6 @@ class GMGNProvider(MarketDataProvider):
             "has_social": cls._first_present(raw, [
                 "has_social", "has_at_least_one_social", "has_twitter_or_telegram",
             ]) or int(bool(raw.get("socials") or raw.get("links"))),
-            "socials": raw.get("socials") or raw.get("links") or [],
-            "link": raw.get("link") or raw.get("website") or raw.get("twitter") or "",
             "creator_token_status": cls._first_present(raw, [
                 "creator_token_status", "creator_status",
             ]),

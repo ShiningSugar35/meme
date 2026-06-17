@@ -502,7 +502,7 @@ class TradingPipeline:
 
         for val, src in candidates:
             d = self._to_int(val)
-            if d is not None and 0 <= d <= 18:
+            if d is not None and 0 < d <= 18:
                 return d, src
         return None, "missing"
 
@@ -559,7 +559,7 @@ class TradingPipeline:
 
         for c in candidates:
             d = self._to_int(c)
-            if d is not None and 0 <= d <= 18:
+            if d is not None and 0 < d <= 18:
                 return d
         return DEFAULT_TOKEN_DECIMALS
 
@@ -834,6 +834,13 @@ class TradingPipeline:
                     token_mint=token_mint,
                     missing=gate_report.missing_fields,
                     abnormal=gate_report.abnormal_fields,
+                )
+                await self.repo.append_system_event(
+                    "WARN", "TRADE",
+                    "SIM entry blocked by entry data gate",
+                    self._safe_json({"token": token_mint, "missing": gate_report.missing_fields,
+                                     "abnormal": gate_report.abnormal_fields}),
+                    account_type="SIM",
                 )
                 if strategy:
                     await self.repo.insert_token_strategy_match(

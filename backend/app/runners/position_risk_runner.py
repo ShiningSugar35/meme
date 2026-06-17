@@ -180,6 +180,7 @@ class PositionRiskRunner:
         self._last_risk_fail_structured: Dict[int, List[Dict[str, Any]]] = {}
         self._last_scan: Dict[int, datetime] = {}
         self._consecutive_risk_failures: Dict[int, int] = {}
+        self._risk_unavailable_counts: Dict[int, int] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -187,20 +188,21 @@ class PositionRiskRunner:
     async def _fetch_risk_data_with_retry(self, method_ref, preferred_slot, validate_func, endpoint="", retry_delay_seconds=0):
         """Call GMGN with retry across different slots.
 
-        Returns the result on success.
-        Raises RuntimeError after 4 total attempts (1 initial + 3 retries).
+        2+3 pattern: 2 attempts on preferred slot, then 3 fallback-slots.
+        Raises RuntimeError after 5 total attempts.
         """
         rl = get_rate_limiter()
         feature_pool = settings.get_feature_slots()
         last_exc = None
         attempted: Set[int] = set()
 
-        for attempt in range(4):
+        for attempt in range(5):
             if attempt > 0 and retry_delay_seconds > 0:
                 await asyncio.sleep(retry_delay_seconds)
 
             slot = None
-            if attempt == 0 and preferred_slot is not None and rl.is_slot_available(preferred_slot) and preferred_slot not in attempted:
+            # First 2 attempts prefer the preferred_slot
+            if attempt < 2 and preferred_slot is not None and rl.is_slot_available(preferred_slot) and preferred_slot not in attempted:
                 slot = preferred_slot
             else:
                 for s in feature_pool or ():
@@ -222,7 +224,7 @@ class PositionRiskRunner:
             except Exception as e:
                 last_exc = e
 
-        raise RuntimeError("Risk data unavailable after 4 attempts") from last_exc
+        raise RuntimeError("Risk data unavailable after 5 attempts") from last_exc
 
     async def _emergency_risk_exit(self, position, reason="RISK_DATA_UNAVAILABLE_EXIT"):
         token = position["token_mint"]
@@ -313,12 +315,34 @@ class PositionRiskRunner:
         try:
             latest_snapshot = await self._fetch_latest_snapshot(token, account_type, retry_delay_seconds=interval)
         except RuntimeError:
-            await self._emergency_risk_exit(position, reason="RISK_DATA_UNAVAILABLE_EXIT")
+            count = self._risk_unavailable_counts.get(pos_id, 0) + 1
+            self._risk_unavailable_counts[pos_id] = count
+            threshold = getattr(settings, "RISK_DATA_UNAVAILABLE_THRESHOLD", 3)
+            await self.repo.append_system_event(
+                "WARN",
+                "RISK",
+                f"Risk snapshot fetch failed for {token} ({count}/{threshold})",
+                _safe_json_dumps({"position_id": pos_id, "count": count, "threshold": threshold}),
+                account_type=account_type,
+            )
+            if count >= threshold:
+                await self._emergency_risk_exit(position, reason="RISK_DATA_UNAVAILABLE_EXIT")
             return
 
         classification = self._classify_snapshot(latest_snapshot)
         if classification == "unavailable":
-            await self._emergency_risk_exit(position, reason="RISK_DATA_UNAVAILABLE_EXIT")
+            count = self._risk_unavailable_counts.get(pos_id, 0) + 1
+            self._risk_unavailable_counts[pos_id] = count
+            threshold = getattr(settings, "RISK_DATA_UNAVAILABLE_THRESHOLD", 3)
+            await self.repo.append_system_event(
+                "WARN",
+                "RISK",
+                f"Risk snapshot unavailable for {token} ({count}/{threshold})",
+                _safe_json_dumps({"position_id": pos_id, "count": count, "threshold": threshold}),
+                account_type=account_type,
+            )
+            if count >= threshold:
+                await self._emergency_risk_exit(position, reason="RISK_DATA_UNAVAILABLE_EXIT")
             return
 
         token_info = await self.repo.get_token(token)
@@ -337,6 +361,9 @@ class PositionRiskRunner:
             )
             # Partial snapshot ⇒ skip risk recheck this cycle, do NOT force exit.
             return
+
+        # Snapshot is complete: reset consecutive unavailable counter
+        self._risk_unavailable_counts.pop(pos_id, None)
 
         ticks = await self.repo.get_recent_ticks(token, 60)
         prices_60 = [
