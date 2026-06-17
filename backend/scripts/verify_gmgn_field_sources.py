@@ -256,18 +256,7 @@ async def main():
         if not sources:
             classification = "API_NULL_OR_PLAN_UNAVAILABLE"
         elif "token_info" in endpoints_hit:
-            # Check if it's in data.price or data.pool
-            price_paths = [s["json_path"] for s in sources if "price." in s["json_path"] and s["endpoint"] == "token_info"]
-            pool_paths = [s["json_path"] for s in sources if "pool." in s["json_path"] and s["endpoint"] == "token_info"]
-            top_paths = [s["json_path"] for s in sources if s["endpoint"] == "token_info" and "price." not in s["json_path"] and "pool." not in s["json_path"]]
-            if price_paths:
-                classification = "DIRECT_FOUND"
-            elif pool_paths:
-                classification = "DIRECT_FOUND"
-            elif top_paths:
-                classification = "DIRECT_FOUND"
-            else:
-                classification = "DIRECT_FOUND"
+            classification = "DIRECT_FOUND"
         elif "trenches" in endpoints_hit and not endpoints_hit - {"trenches"}:
             classification = "TRENCH_ONLY"
         elif "security" in endpoints_hit:
@@ -279,18 +268,25 @@ async def main():
         else:
             classification = "DIRECT_FOUND"
 
-        # Check if computed from other fields
+        # Check if computed from other fields using field_source_map, not endpoints_hit
         computed_from: list = []
-        if field_name == "volume_1h" and "buy_volume_1h" in endpoints_hit and "sell_volume_1h" in endpoints_hit:
-            computed_from = ["buy_volume_1h", "sell_volume_1h"]
-        if field_name == "price_change_percent1h" and "price" in str(sources) and "price_1h" in str(sources):
-            # Check if direct field exists
-            direct = [s for s in sources if "percent" in s["json_path"].lower() or "change" in s["json_path"].lower()]
-            if not direct:
+        if field_name == "volume_1h":
+            # COMPUTED if we have buy_volume_1h + sell_volume_1h but no direct volume_1h hit
+            buy_hit = field_source_map.get("buy_volume_1h", {}).get("sources", [])
+            sell_hit = field_source_map.get("sell_volume_1h", {}).get("sources", [])
+            vol_direct = [s for s in sources if s.get("json_path", "").rstrip(".") == "volume_1h"
+                          or s.get("json_path", "").endswith(".volume_1h")]
+            if buy_hit and sell_hit and not vol_direct:
+                computed_from = ["buy_volume_1h", "sell_volume_1h"]
+        elif field_name == "price_change_percent1h":
+            direct = [s for s in sources if "percent" in s["json_path"].lower() or "change_1h" in s["json_path"].lower()]
+            price_1h_hit = field_source_map.get("price_1h", {}).get("sources", [])
+            if price_1h_hit and not direct:
                 computed_from = ["price", "price_1h"]
-        if field_name == "creator_balance_rate":
-            cb = [s for s in sources if "balance_rate" in s["json_path"] or "hold_rate" in s["json_path"] or "creator_balance_rate" == s["json_path"]]
-            if not cb:
+        elif field_name == "creator_balance_rate":
+            cb = [s for s in sources if "balance_rate" in s["json_path"] or "hold_rate" in s["json_path"] or s["json_path"].endswith("creator_balance_rate")]
+            creator_token_hit = field_source_map.get("creator_token_balance", {}).get("sources", [])
+            if creator_token_hit and not cb:
                 computed_from = ["creator_token_balance", "total_supply"]
 
         if computed_from:
@@ -305,6 +301,15 @@ async def main():
             "computed_from": computed_from,
             "sample_sources": sources[:5],
         }
+
+    # 4) Build output dict BEFORE insider probe adds to it
+    output = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        "api_base": settings.GMGN_API_BASE_URL,
+        "tokens_sampled": len(token_mints),
+        "endpoint_summaries": [],
+        "field_classifications": field_classifications,
+    }
 
     # 5) Insider-specific request body probe on /v1/trenches
     print(f"\n{'='*70}")
@@ -332,8 +337,9 @@ async def main():
                 result["status"] = "OK"
                 result["code"] = data.get("code")
                 result["message"] = str(data.get("message", ""))[:120]
-                inner = data.get("data", data) if isinstance(data, dict) else {}
-                tokens = provider._extract_v2_trench_items(inner)
+                # Pass full data (not data["data"]) so _extract_v2_trench_items
+                # can find nested items itself.
+                tokens = provider._extract_v2_trench_items(data)
                 result["token_count"] = len(tokens)
                 result["token_addresses"] = [t.get("address") or t.get("token_mint", "?")[:12] for t in tokens[:10]]
                 # Recursively search for insider aliases in response
@@ -353,19 +359,17 @@ async def main():
 
     # Baseline: no insider filter
     print(f"\n  [probe 0] Baseline (no filters)...")
-    baseline_probe = await probe_request_body(
-        {"chain": "sol", "type": ["new_creation"], "limit": args.sample_size},
-        "baseline",
-    )
+    baseline_body = {"version": "v2", "new_creation": {"limit": args.sample_size}}
+    baseline_probe = await probe_request_body(baseline_body, "baseline")
     print(f"    tokens={baseline_probe.get('token_count')}")
 
-    # Probe variations
+    # Probe variations — using v2 format
     probe_bodies = [
-        ("max_insider_ratio: 0.3", {"max_insider_ratio": 0.3}),
-        ("filters.max_insider_ratio: 0.3", {"filters": {"max_insider_ratio": 0.3}}),
-        ("max-insider-ratio: 0.3", {"max-insider-ratio": 0.3}),
-        ("max_insider_rate: 0.3", {"max_insider_rate": 0.3}),
-        ("insider_ratio_max: 0.3", {"insider_ratio_max": 0.3}),
+        ("max_insider_ratio: 0.3 (v2 top-level)", {"version": "v2", "new_creation": {"limit": args.sample_size, "max_insider_ratio": 0.3}}),
+        ("filters.max_insider_ratio: 0.3 (v2)", {"version": "v2", "new_creation": {"limit": args.sample_size, "filters": {"max_insider_ratio": 0.3}}}),
+        ("max-insider-ratio: 0.3 (v2)", {"version": "v2", "new_creation": {"limit": args.sample_size, "max-insider-ratio": 0.3}}),
+        ("max_insider_rate: 0.3 (v2)", {"version": "v2", "new_creation": {"limit": args.sample_size, "max_insider_rate": 0.3}}),
+        ("insider_ratio_max: 0.3 (v2)", {"version": "v2", "new_creation": {"limit": args.sample_size, "insider_ratio_max": 0.3}}),
     ]
 
     request_body_probe_results: List[dict] = []
@@ -454,14 +458,7 @@ async def main():
                 ins["classification"] = "UNRESOLVED_REQUIRED_FIELD"
                 ins["note"] = "Not found in any endpoint, but required by entry gate. Cannot mark API_NULL."
 
-    # 4) Output
-    output = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-        "api_base": settings.GMGN_API_BASE_URL,
-        "tokens_sampled": len(token_mints),
-        "endpoint_summaries": [],
-        "field_classifications": field_classifications,
-    }
+    # ---- Build final output sections ----------------------------------------
 
     # Endpoint summaries
     unique_endpoints: dict = {}

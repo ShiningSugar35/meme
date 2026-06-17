@@ -83,7 +83,7 @@ def validate_and_select_sim_token_amount(
     }
 
     if not gmgn_price_usd or gmgn_price_usd <= 0:
-        diag["quantity_validation_status"] = "BLOCKED_NO_GMGN_PRICE"
+        diag["quantity_validation_status"] = "blocked_invalid_gmgn_price"
         diag["token_amount_source"] = "blocked_invalid_gmgn_price"
         diag["buy_allowed"] = False
         return 0.0, diag
@@ -92,7 +92,7 @@ def validate_and_select_sim_token_amount(
 
     if not quote or not isinstance(quote, dict) or quote.get("error"):
         diag["token_amount_source"] = "no_quote"
-        diag["quantity_validation_status"] = "FALLBACK_NO_QUOTE"
+        diag["quantity_validation_status"] = "fallback_no_quote"
         return fallback_amount, diag
 
     out_amount_raw = quote.get("outAmount")
@@ -105,13 +105,13 @@ def validate_and_select_sim_token_amount(
 
     if out_raw is None or out_raw <= 0:
         diag["token_amount_source"] = "gmgn_spot_fallback"
-        diag["quantity_validation_status"] = "FALLBACK_ZERO_OUT_AMOUNT"
+        diag["quantity_validation_status"] = "fallback_zero_out_amount"
         return fallback_amount, diag
 
     if token_decimals is None or token_decimals <= 0:
         diag["token_decimals_source"] = "missing"
         diag["token_amount_source"] = "jupiter_quote_missing_decimals"
-        diag["quantity_validation_status"] = "FALLBACK_MISSING_DECIMALS"
+        diag["quantity_validation_status"] = "fallback_missing_decimals"
         return fallback_amount, diag
 
     quote_amount = out_raw / (10 ** token_decimals)
@@ -123,11 +123,11 @@ def validate_and_select_sim_token_amount(
 
     if min_ratio <= ratio <= max_ratio:
         diag["token_amount_source"] = "jupiter_quote_validated"
-        diag["quantity_validation_status"] = "VALIDATED"
+        diag["quantity_validation_status"] = "quote_validated"
         return quote_amount, diag
     else:
         diag["token_amount_source"] = "jupiter_quote_rejected_ratio"
-        diag["quantity_validation_status"] = "FALLBACK_RATIO_OUT_OF_RANGE"
+        diag["quantity_validation_status"] = "fallback_quote_ratio_rejected"
         return fallback_amount, diag
 
 
@@ -376,14 +376,16 @@ class TradingPipeline:
         token_mint: str,
         latest: Dict[str, Any],
         snapshot_id: Optional[int] = None,
+        extra_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Merge latest + snapshot columns + snapshot raw_json + tokens table.
 
         Priority (first positive wins):
-          1. latest (GMGN latest-price result)
-          2. token_metric_snapshot columns (e.g. liquidity_usd, price_usd)
-          3. token_metric_snapshot.raw_json
-          4. tokens table (latest_liquidity_usd, latest_price_usd, …)
+          1. extra_snapshot (complete snapshot from entry gate, richest)
+          2. latest (GMGN latest-price result)
+          3. token_metric_snapshot columns (e.g. liquidity_usd, price_usd)
+          4. token_metric_snapshot.raw_json
+          5. tokens table (latest_liquidity_usd, latest_price_usd, …)
         """
         NEEDED_KEYS = ("liquidity_usd", "price_usd", "price_sol", "sol_side_liquidity")
 
@@ -391,6 +393,16 @@ class TradingPipeline:
             return (self._to_float(ctx.get(key)) or 0) > 0
 
         ctx = dict(latest)
+
+        if extra_snapshot:
+            for key in NEEDED_KEYS:
+                val = self._to_float(extra_snapshot.get(key))
+                if val and val > 0:
+                    ctx[key] = val
+            # Also carry over non-numeric fields the entry gate needs
+            for k, v in extra_snapshot.items():
+                if k not in ("price", "price_sol", "pool_address") and k not in ctx:
+                    ctx[k] = v
 
         if not all(_field_ok(ctx, k) for k in NEEDED_KEYS) and snapshot_id:
             try:
@@ -810,6 +822,35 @@ class TradingPipeline:
             latest = {}
 
         ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id)
+
+        # ---- Entry data gate: block buy if required fields missing ----
+        # Gate runs BEFORE quote/validation/accounting so we don't waste API calls.
+        gmgn_mode = getattr(self.gmgn, "mode", None)
+        if gmgn_mode != ProviderMode.MOCK:
+            complete_snap, gate_report = await retry_fetch_complete_snapshot(self.gmgn, token_mint)
+            if gate_report.blocked:
+                logger.warning(
+                    "entry_data_gate_blocked",
+                    token_mint=token_mint,
+                    missing=gate_report.missing_fields,
+                    abnormal=gate_report.abnormal_fields,
+                )
+                if strategy:
+                    await self.repo.insert_token_strategy_match(
+                        token_mint=token_mint,
+                        strategy_group_id=strategy.get("group_id", 0),
+                        stage="entry_data_gate",
+                        x_value=(strategy.get("x") or 0.2),
+                        passed=0,
+                        pass_fail_detail_json=self._safe_json(gate_report.__dict__),
+                        strategy_config_json=self._safe_json(strategy),
+                        event_id=strategy.get("discovery_event_id") or strategy.get("event_id"),
+                    )
+                return None
+            if complete_snap:
+                # Rebuild ctx with complete snapshot fields merged over latest
+                ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id, extra_snapshot=complete_snap)
+
         sol_side_liquidity = self._get_sol_side_liquidity(ctx)
         liquidity_usd = self._get_liquidity_usd(ctx)
         price_usd = self._get_price_usd(ctx)
@@ -918,37 +959,6 @@ class TradingPipeline:
             trade_value_usd_net=acct["trade_value_usd_net"],
             token_amount=token_amount,
         )
-
-        # ---- Entry data gate: block buy if required fields missing ----
-        gmgn_mode = getattr(self.gmgn, "mode", None)
-        if gmgn_mode != ProviderMode.MOCK:
-            complete_snap, gate_report = await retry_fetch_complete_snapshot(self.gmgn, token_mint)
-            if gate_report.blocked:
-                logger.warning(
-                    "entry_data_gate_blocked",
-                    token_mint=token_mint,
-                    missing=gate_report.missing_fields,
-                    abnormal=gate_report.abnormal_fields,
-                )
-                if strategy:
-                    await self.repo.insert_token_strategy_match(
-                        token_mint=token_mint,
-                        strategy_group_id=strategy.get("group_id", 0),
-                        stage="entry_data_gate",
-                        x_value=(strategy.get("x") or 0.2),
-                        passed=0,
-                        pass_fail_detail_json=self._safe_json(gate_report.__dict__),
-                        strategy_config_json=self._safe_json(strategy),
-                        event_id=strategy.get("discovery_event_id") or strategy.get("event_id"),
-                    )
-                return None
-            # Merge complete snapshot fields into ctx (snapshot overrides ctx)
-            if complete_snap:
-                ctx = {**ctx, **complete_snap}
-                # Recompute values from enriched ctx
-                price_usd = self._get_price_usd(ctx)
-                price_sol = self._get_price_sol(ctx)
-                sol_side_liquidity = self._get_sol_side_liquidity(ctx)
 
         te = await self.repo.append_trade_event(
             idempotency_key,
@@ -1113,6 +1123,30 @@ class TradingPipeline:
             return {"ok": False, "error": "LATEST_PRICE_FAILED"}
 
         ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id)
+
+        # ---- Entry data gate: block live buy if required fields missing ----
+        # Gate runs BEFORE sizing/quote/Jito so we don't waste API calls.
+        gmgn_mode = getattr(self.gmgn, "mode", None)
+        if gmgn_mode != ProviderMode.MOCK:
+            complete_snap, gate_report = await retry_fetch_complete_snapshot(self.gmgn, token_mint)
+            if gate_report.blocked:
+                logger.warning(
+                    "live_entry_data_gate_blocked",
+                    token_mint=token_mint,
+                    missing=gate_report.missing_fields,
+                    abnormal=gate_report.abnormal_fields,
+                )
+                await self.repo.append_system_event(
+                    "WARN", "TRADE",
+                    "Live buy blocked by entry data gate",
+                    self._safe_json({"token": token_mint, "missing": gate_report.missing_fields,
+                                     "abnormal": gate_report.abnormal_fields}),
+                    account_type="LIVE",
+                )
+                return {"ok": False, "error": "ENTRY_DATA_GATE_BLOCKED"}
+            if complete_snap:
+                ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id, extra_snapshot=complete_snap)
+
         sol_side_liquidity = self._get_sol_side_liquidity(ctx)
         liquidity_usd = self._get_liquidity_usd(ctx)
         price_usd = self._get_price_usd(ctx)
@@ -1140,30 +1174,6 @@ class TradingPipeline:
                 account_type="LIVE",
             )
             return {"ok": False, "error": "INVALID_ENTRY_SIZE_OR_BELOW_MIN"}
-
-        # ---- Entry data gate: block live buy if required fields missing ----
-        gmgn_mode = getattr(self.gmgn, "mode", None)
-        if gmgn_mode != ProviderMode.MOCK:
-            complete_snap, gate_report = await retry_fetch_complete_snapshot(self.gmgn, token_mint)
-            if gate_report.blocked:
-                logger.warning(
-                    "live_entry_data_gate_blocked",
-                    token_mint=token_mint,
-                    missing=gate_report.missing_fields,
-                    abnormal=gate_report.abnormal_fields,
-                )
-                await self.repo.append_system_event(
-                    "WARN", "TRADE",
-                    "Live buy blocked by entry data gate",
-                    self._safe_json({"token": token_mint, "missing": gate_report.missing_fields,
-                                     "abnormal": gate_report.abnormal_fields}),
-                    account_type="LIVE",
-                )
-                return {"ok": False, "error": "ENTRY_DATA_GATE_BLOCKED"}
-            if complete_snap:
-                ctx = {**ctx, **complete_snap}
-                price_usd = self._get_price_usd(ctx)
-                price_sol = self._get_price_sol(ctx)
 
         buy_cap = int(strategy.get("buy_slippage_cap_bps", getattr(settings, "BUY_SLIPPAGE_CAP_BPS", BUY_SLIPPAGE_CAP_BPS)))
         slippage_bps = await compute_slippage_bps(

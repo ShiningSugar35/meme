@@ -212,3 +212,10 @@ class TestFullMergeSimulation:
         assert out["sell_tax"] == 0
         assert math.isclose(out["top_10_holder_rate"], 0.12)
         assert len(out.get("socials", [])) > 0
+
+
+    def test_socials_from_link_string(self):
+        """link as a plain string should become socials = [link]."""
+        out = _norm({"link": "https://x.com/token", "price": "0.00005"})
+        assert len(out.get("socials", [])) == 1
+        assert out["socials"][0] == "https://x.com/token"

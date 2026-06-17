@@ -170,3 +170,10 @@ class TestEntryDataGate:
         assert len(POSITIVE_REQUIRED) == 6
         for f in ("price_usd", "liquidity_usd", "holder_count", "market_cap", "swaps_1h", "volume_1h"):
             assert f in POSITIVE_REQUIRED
+
+    def test_socials_from_link_string_passes(self):
+        """A snapshot with socials=[link_string] should not be blocked on socials."""
+        snap = _snap(socials=["https://x.com/token"])
+        report = check_entry_data_completeness(snap)
+        assert "socials" not in report.missing_fields
+        assert not report.blocked

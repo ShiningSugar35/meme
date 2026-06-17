@@ -536,16 +536,18 @@ class GMGNProvider(MarketDataProvider):
             if cbal is not None and ts is not None and ts > 0:
                 out["creator_balance_rate"] = cls._to_float(cbal / ts)
 
-        # socials from link dict
-        if not out.get("socials") and out.get("link") and isinstance(out.get("link"), dict):
-            # link is a dict like {"website": "...", "twitter": "...", "telegram": "..."}
-            link_dict = out["link"]
-            social_urls = []
-            for sk in ("website", "twitter", "telegram", "discord", "x"):
-                if link_dict.get(sk):
-                    social_urls.append(link_dict[sk])
-            if social_urls:
-                out["socials"] = social_urls
+        # socials from link dict or link string
+        if not out.get("socials"):
+            raw_link = raw.get("link")
+            if isinstance(raw_link, dict):
+                social_urls = []
+                for sk in ("website", "twitter", "telegram", "discord", "x"):
+                    if raw_link.get(sk):
+                        social_urls.append(raw_link[sk])
+                if social_urls:
+                    out["socials"] = social_urls
+            elif isinstance(raw_link, str) and raw_link.strip():
+                out["socials"] = [raw_link.strip()]
 
         # ---- Filter None/empty for DB columns ----------------------------------
         out = {k: v for k, v in out.items() if v is not None and v != ""}

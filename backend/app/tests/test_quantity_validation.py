@@ -10,7 +10,7 @@ class TestQuantityValidation:
         )
         assert amount == 0.0
         assert diag["buy_allowed"] is False
-        assert diag["quantity_validation_status"] == "BLOCKED_NO_GMGN_PRICE"
+        assert diag["quantity_validation_status"] == "blocked_invalid_gmgn_price"
 
     def test_gmgn_price_negative_blocks_buy(self):
         amount, diag = validate_and_select_sim_token_amount(
@@ -25,7 +25,7 @@ class TestQuantityValidation:
         )
         assert amount == 1_000_000.0
         assert diag["token_amount_source"] == "no_quote"
-        assert diag["quantity_validation_status"] == "FALLBACK_NO_QUOTE"
+        assert diag["quantity_validation_status"] == "fallback_no_quote"
 
     def test_quote_extreme_ratio_rejected(self):
         """Jupiter returns absurd quantity: ratio ~5781 -> rejected."""
@@ -37,7 +37,7 @@ class TestQuantityValidation:
         # implied_price = 67.16 / 2369.007562198 = 0.02835
         # ratio = 0.02835 / 4.9035995e-6 = 5781
         assert diag["token_amount_source"] == "jupiter_quote_rejected_ratio"
-        assert diag["quantity_validation_status"] == "FALLBACK_RATIO_OUT_OF_RANGE"
+        assert diag["quantity_validation_status"] == "fallback_quote_ratio_rejected"
         assert diag["quote_vs_gmgn_price_ratio"] > 1.1
         # Should fall back to size_usd/gmgn_price
         expected_fallback = 67.16 / 4.9035995e-06
@@ -49,7 +49,7 @@ class TestQuantityValidation:
             quote={"outAmount": "1000000"}, token_decimals=None,
         )
         assert diag["token_amount_source"] == "jupiter_quote_missing_decimals"
-        assert diag["quantity_validation_status"] == "FALLBACK_MISSING_DECIMALS"
+        assert diag["quantity_validation_status"] == "fallback_missing_decimals"
         expected = 50.0 / 0.00005
         assert amount == expected
 
@@ -60,7 +60,7 @@ class TestQuantityValidation:
             quote={"outAmount": "1000000000000"}, token_decimals=6,
         )
         assert diag["token_amount_source"] == "jupiter_quote_validated"
-        assert diag["quantity_validation_status"] == "VALIDATED"
+        assert diag["quantity_validation_status"] == "quote_validated"
         assert math.isclose(amount, 1000000.0)
 
     def test_quote_zero_out_amount_falls_back(self):
@@ -68,7 +68,7 @@ class TestQuantityValidation:
             size_usd=50.0, gmgn_price_usd=0.00005,
             quote={"outAmount": "0"}, token_decimals=6,
         )
-        assert diag["quantity_validation_status"] == "FALLBACK_ZERO_OUT_AMOUNT"
+        assert diag["quantity_validation_status"] == "fallback_zero_out_amount"
         assert amount == 50.0 / 0.00005
 
     def test_quote_bad_out_amount_falls_back(self):
@@ -76,7 +76,7 @@ class TestQuantityValidation:
             size_usd=50.0, gmgn_price_usd=0.00005,
             quote={"outAmount": "not_a_number"}, token_decimals=6,
         )
-        assert diag["quantity_validation_status"] == "FALLBACK_ZERO_OUT_AMOUNT"
+        assert diag["quantity_validation_status"] == "fallback_zero_out_amount"
         assert amount == 50.0 / 0.00005
 
     def test_quote_ratio_in_range_lower_bound(self):

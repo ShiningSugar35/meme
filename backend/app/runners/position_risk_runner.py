@@ -608,21 +608,21 @@ class PositionRiskRunner:
             snapshot.setdefault("pool_address", token_info.get("pool_address"))
             snapshot.setdefault("launchpad", token_info.get("launchpad"))
 
-        # Inject top1_addr_type0_rate from token_top_holders
+        # Inject top1_addr_type0_rate from token_top_holders (best-effort, don't fail on error)
         try:
             holders = await self.gmgn.fetch_top_holders(token, limit=5)
             if holders:
-                top1 = None
+                top1_rate = None
                 for h in holders:
                     at = h.get("addr_type", 0)
                     if at is not None and int(at) == 0:
                         rate = _to_float(h.get("top1_holder_rate") or h.get("rate") or h.get("amount_percentage"))
-                        if rate is not None and (top1 is None or rate > top1):
-                            top1 = rate
-                if top1 is not None:
-                    snapshot["top1_addr_type0_rate"] = top1
-        except Exception:
-            pass
+                        if rate is not None and (top1_rate is None or rate > top1_rate):
+                            top1_rate = rate
+                if top1_rate is not None:
+                    snapshot["top1_addr_type0_rate"] = top1_rate
+        except Exception as exc:
+            logger.warning(f"top1_holders unavailable for {token}: {exc}")
 
         res = await run_holding_risk_filter(snapshot, cfg, now)
 
