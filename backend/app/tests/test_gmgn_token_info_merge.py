@@ -82,9 +82,10 @@ class TestTokenInfoMerge:
         assert out["launchpad"] == "Pump.fun"
         assert out["pool_created_at"] == 1781682000
 
-    def test_token_mint_not_polluted_by_pool_address(self):
+    def test_token_mint_and_pool_address_from_subobjects(self):
+        """pool.address → pool_address, price.address → token_mint."""
         out = _norm({
-            "address": "TOKEN_MINT",
+            "token_mint": "TOKEN_MINT",
             "pool_address": "POOL_ADDR",
             "price": "0.00005",
         })
@@ -120,6 +121,44 @@ class TestTokenInfoMerge:
         out = _norm({"price": "0.05", "total_supply": 1000000000,
                       "market_cap": 9999.0})
         assert math.isclose(out["market_cap"], 9999.0)
+
+    # --- Insider alias tests ---
+    def test_insider_ratio_alias(self):
+        out = _norm({"insider_ratio": 0.03, "price": "0.00005"})
+        assert math.isclose(out["max_insider_ratio"], 0.03)
+
+    def test_insider_rate_alias(self):
+        out = _norm({"insider_rate": 0.04, "price": "0.00005"})
+        assert math.isclose(out["max_insider_ratio"], 0.04)
+
+    def test_max_insider_rate_alias(self):
+        out = _norm({"max_insider_rate": 0.05, "price": "0.00005"})
+        assert math.isclose(out["max_insider_ratio"], 0.05)
+
+    def test_top_insider_percentage_alias(self):
+        out = _norm({"top_insider_percentage": 0.02, "price": "0.00005"})
+        assert math.isclose(out["max_insider_ratio"], 0.02)
+
+    def test_insider_trader_amount_rate_alias(self):
+        out = _norm({"insider_trader_amount_rate": 0.015, "price": "0.00005"})
+        assert math.isclose(out["max_insider_ratio"], 0.015)
+
+    def test_insider_amount_rate_alias(self):
+        out = _norm({"insider_amount_rate": 0.025, "price": "0.00005"})
+        assert math.isclose(out["max_insider_ratio"], 0.025)
+
+    # --- payload tests ---
+    def test_price_payload_nonempty(self):
+        out = _norm({"price_payload": {"price": "0.00005", "swaps_1h": 10},
+                      "price": "0.00005"})
+        assert isinstance(out.get("price_payload"), dict)
+        assert out["price_payload"].get("price") == "0.00005"
+
+    def test_pool_payload_nonempty(self):
+        out = _norm({"pool_payload": {"address": "POOL", "liquidity": 5000},
+                      "pool": {"address": "POOL"}})
+        assert isinstance(out.get("pool_payload"), dict)
+        assert out["pool_payload"].get("liquidity") == 5000
 
 
 class TestFullMergeSimulation:

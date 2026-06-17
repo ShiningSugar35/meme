@@ -18,7 +18,7 @@ from ..providers.base import SwapProvider, ExecutionProvider, RpcProvider, Marke
 from ..config import settings, ProviderMode
 from ..strategy.thresholds import requires_smart_degen_for_x
 from .audit_builder import build_entry_audit_payload, build_exit_audit_payload
-from .entry_data_gate import check_entry_data_completeness
+from .entry_data_gate import check_entry_data_completeness, retry_fetch_complete_snapshot
 from .accounting import (
     compute_sim_buy_accounting,
     compute_sim_sell_accounting,
@@ -439,6 +439,61 @@ class TradingPipeline:
 
         return ctx
 
+    def _extract_token_decimals_with_source(
+        self,
+        token_mint: str,
+        quote: Optional[Dict[str, Any]] = None,
+        latest: Optional[Dict[str, Any]] = None,
+        strategy: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Optional[int], str]:
+        """Extract decimals with a source label.  Returns (decimals, source).
+
+        Returns (None, "missing") when no reliable decimal source is found.
+        Unlike _extract_token_decimals, this does NOT fall back to DEFAULT_TOKEN_DECIMALS.
+        """
+        candidates: List[tuple[Any, str]] = []
+        if strategy:
+            candidates.extend([
+                (strategy.get("token_decimals"), "strategy_config"),
+                (strategy.get("output_decimals"), "strategy_config"),
+                (strategy.get("decimals"), "strategy_config"),
+            ])
+        if latest:
+            candidates.extend([
+                (latest.get("token_decimals"), "gmgn_latest"),
+                (latest.get("decimals"), "gmgn_latest"),
+                (latest.get("base_decimals"), "gmgn_latest"),
+                (latest.get("baseTokenDecimals"), "gmgn_latest"),
+            ])
+        if quote:
+            candidates.extend([
+                (quote.get("outputDecimals"), "jupiter_quote"),
+                (quote.get("outputTokenDecimals"), "jupiter_quote"),
+                (quote.get("outDecimals"), "jupiter_quote"),
+                (quote.get("inputDecimals"), "jupiter_quote"),
+                (quote.get("inputTokenDecimals"), "jupiter_quote"),
+                (quote.get("decimals"), "jupiter_quote"),
+            ])
+            output_mint = quote.get("outputMint")
+            input_mint = quote.get("inputMint")
+            for container_key in ("outputToken", "outToken", "outputMintInfo", "outMintInfo"):
+                info = quote.get(container_key)
+                if isinstance(info, dict):
+                    candidates.append((info.get("decimals"), "jupiter_quote"))
+            for container_key in ("tokens", "mintInfos", "tokenInfos"):
+                info = quote.get(container_key)
+                if isinstance(info, dict):
+                    for mint in (output_mint, input_mint, token_mint):
+                        sub = info.get(mint)
+                        if isinstance(sub, dict):
+                            candidates.append((sub.get("decimals"), "jupiter_quote"))
+
+        for val, src in candidates:
+            d = self._to_int(val)
+            if d is not None and 0 <= d <= 18:
+                return d, src
+        return None, "missing"
+
     def _extract_token_decimals(
         self,
         token_mint: str,
@@ -771,7 +826,9 @@ class TradingPipeline:
             )
             return None
 
-        token_decimals = self._extract_token_decimals(token_mint, latest=latest, strategy=strategy)
+        token_decimals, token_decimals_source = self._extract_token_decimals_with_source(
+            token_mint, latest=latest, strategy=strategy,
+        )
 
         # Try Jupiter quote for better token-amount estimation
         token_amount = 0.0
@@ -790,7 +847,9 @@ class TradingPipeline:
                 context_id=discovery_event_id,
             )
             if quote and not quote.get("error"):
-                token_decimals = self._extract_token_decimals(token_mint, quote=quote, latest=latest, strategy=strategy)
+                token_decimals, token_decimals_source = self._extract_token_decimals_with_source(
+                    token_mint, quote=quote, latest=latest, strategy=strategy,
+                )
                 jupiter_price_impact = self._price_impact_fraction(quote)
         except Exception:
             quote = {}
@@ -801,6 +860,7 @@ class TradingPipeline:
             quote=quote if quote and not quote.get("error") else None,
             token_decimals=token_decimals if token_decimals else None,
         )
+        quantity_diag["token_decimals_source"] = token_decimals_source
 
         if quantity_diag.get("buy_allowed") is False:
             logger.warning(
@@ -862,7 +922,7 @@ class TradingPipeline:
         # ---- Entry data gate: block buy if required fields missing ----
         gmgn_mode = getattr(self.gmgn, "mode", None)
         if gmgn_mode != ProviderMode.MOCK:
-            gate_report = check_entry_data_completeness({**ctx, **quantity_diag})
+            complete_snap, gate_report = await retry_fetch_complete_snapshot(self.gmgn, token_mint)
             if gate_report.blocked:
                 logger.warning(
                     "entry_data_gate_blocked",
@@ -882,6 +942,13 @@ class TradingPipeline:
                         event_id=strategy.get("discovery_event_id") or strategy.get("event_id"),
                     )
                 return None
+            # Merge complete snapshot fields into ctx (snapshot overrides ctx)
+            if complete_snap:
+                ctx = {**ctx, **complete_snap}
+                # Recompute values from enriched ctx
+                price_usd = self._get_price_usd(ctx)
+                price_sol = self._get_price_sol(ctx)
+                sol_side_liquidity = self._get_sol_side_liquidity(ctx)
 
         te = await self.repo.append_trade_event(
             idempotency_key,
@@ -1073,6 +1140,30 @@ class TradingPipeline:
                 account_type="LIVE",
             )
             return {"ok": False, "error": "INVALID_ENTRY_SIZE_OR_BELOW_MIN"}
+
+        # ---- Entry data gate: block live buy if required fields missing ----
+        gmgn_mode = getattr(self.gmgn, "mode", None)
+        if gmgn_mode != ProviderMode.MOCK:
+            complete_snap, gate_report = await retry_fetch_complete_snapshot(self.gmgn, token_mint)
+            if gate_report.blocked:
+                logger.warning(
+                    "live_entry_data_gate_blocked",
+                    token_mint=token_mint,
+                    missing=gate_report.missing_fields,
+                    abnormal=gate_report.abnormal_fields,
+                )
+                await self.repo.append_system_event(
+                    "WARN", "TRADE",
+                    "Live buy blocked by entry data gate",
+                    self._safe_json({"token": token_mint, "missing": gate_report.missing_fields,
+                                     "abnormal": gate_report.abnormal_fields}),
+                    account_type="LIVE",
+                )
+                return {"ok": False, "error": "ENTRY_DATA_GATE_BLOCKED"}
+            if complete_snap:
+                ctx = {**ctx, **complete_snap}
+                price_usd = self._get_price_usd(ctx)
+                price_sol = self._get_price_sol(ctx)
 
         buy_cap = int(strategy.get("buy_slippage_cap_bps", getattr(settings, "BUY_SLIPPAGE_CAP_BPS", BUY_SLIPPAGE_CAP_BPS)))
         slippage_bps = await compute_slippage_bps(

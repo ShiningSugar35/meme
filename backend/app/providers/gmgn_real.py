@@ -443,6 +443,12 @@ class GMGNProvider(MarketDataProvider):
                 "suspected_insider_hold_rate", "insider_hold_rate",
                 "suspected_insider_rate",
             ])),
+            "max_insider_ratio": cls._to_float(cls._first_present(raw, [
+                "max_insider_ratio", "max-insider-ratio", "insider_ratio",
+                "insider_ratio_max", "max_insider_rate", "insider_rate",
+                "top_insider_percentage", "top_insider_trader_percentage",
+                "insider_trader_amount_rate", "insider_amount_rate",
+            ])),
             "max_bundler_rate": cls._to_float(cls._first_present(raw, [
                 "max_bundler_rate", "bundler_rate", "bundler_trader_amount_rate",
                 "top_bundler_trader_percentage",
@@ -494,8 +500,8 @@ class GMGNProvider(MarketDataProvider):
             "link": raw.get("link") or raw.get("website") or raw.get("twitter") or "",
             "wallet_tags_stat": raw.get("wallet_tags_stat") or {},
             "stat": raw.get("stat") or {},
-            "price_payload": raw.get("price") or {},
-            "pool_payload": raw.get("pool") or {},
+            "price_payload": raw.get("price_payload") or raw.get("price") or {},
+            "pool_payload": raw.get("pool_payload") or raw.get("pool") or {},
         }
 
         # ---- Computed fields when direct field is missing -------------------
@@ -712,13 +718,20 @@ class GMGNProvider(MarketDataProvider):
         if isinstance(pool_obj, dict):
             merged["pool_payload"] = pool_obj
             for k, v in pool_obj.items():
+                if k == "address":
+                    merged.setdefault("pool_address", v)
+                    continue
                 if not isinstance(v, (dict, list)):
                     merged.setdefault(k, v)
 
-        # 3) Price sub-object — the richest market-data source (38 fields)
+        # 3) Price sub-object — the richest market-data source (38 fields).
+        #    Its "address" IS the token_mint, not pool_address.
         if isinstance(price_obj, dict):
             merged["price_payload"] = price_obj
             for k, v in price_obj.items():
+                if k == "address":
+                    merged["token_mint"] = v
+                    continue
                 if not isinstance(v, (dict, list)):
                     merged.setdefault(k, v)
 
@@ -764,7 +777,7 @@ class GMGNProvider(MarketDataProvider):
                 raw_bundle[label] = {"error": str(exc)}
 
         snapshot = self._normalize_token_data(merged)
-        snapshot.setdefault("token_mint", token_mint)
+        snapshot["token_mint"] = token_mint
         snapshot["source_mode"] = "REAL"
         snapshot["raw_json"] = json.dumps(raw_bundle, ensure_ascii=False, default=str)
         return snapshot

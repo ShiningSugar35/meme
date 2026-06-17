@@ -759,6 +759,13 @@ async def run_holding_risk_filter(
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count", "sniper_cnt"],
                  lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}", required=True,
                  label="狙击手数量")
+
+    # top1_addr_type0_rate — fetched from token_top_holders, injected by position_risk_runner
+    _check_float(details, snapshot, "top1_addr_type0_rate",
+                 ["top1_addr_type0_rate", "top1_holder_rate", "top1_addr0_rate"],
+                 lambda v: t.top1_addr_type0_min < v < t.top1_addr_type0_max,
+                 f"({t.top1_addr_type0_min:.6g}, {t.top1_addr_type0_max:.6g})", required=True,
+                 label="Top1持仓比例(addr_type=0)")
     return FilterResult(all(d.passed for d in details), details, {"x": x})
 
 

@@ -21,6 +21,7 @@ ENTRY_HARD_REQUIRED_FIELDS: Set[str] = {
     "fresh_wallet_rate",
     "max_rug_ratio",
     "max_entrapment_ratio",
+    "max_insider_ratio",
     "max_bundler_rate",
     "suspected_insider_hold_rate",
     "is_wash_trading",

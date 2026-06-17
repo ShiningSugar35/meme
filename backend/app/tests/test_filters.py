@@ -319,6 +319,27 @@ def test_holding_risk_passes():
     assert res.passed is True
 
 
+def test_holding_risk_fails_top1_out_of_range():
+    s = make_snapshot(top1_addr_type0_rate=0.10, top_10_holder_rate=0.2, holder_count=30)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "top1_addr_type0_rate" and not d.passed for d in res.details)
+
+
+def test_holding_risk_passes_top1_in_range():
+    s = make_snapshot(top1_addr_type0_rate=0.03, top_10_holder_rate=0.2, holder_count=30)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "top1_addr_type0_rate" and d.passed for d in res.details)
+
+
+def test_holding_risk_top1_missing_fails():
+    """Make sure top1 is not in snapshot through any alias."""
+    s = make_snapshot(top_10_holder_rate=0.2, holder_count=30)
+    for k in ("top1_addr_type0_rate", "top1_holder_rate", "top1_addr0_rate"):
+        s.pop(k, None)
+    res = asyncio.run(run_holding_risk_filter(s, {"x": 0.2}))
+    assert any(d.name == "top1_addr_type0_rate" and not d.passed and d.missing for d in res.details)
+
+
 # ---------------------------------------------------------------------------
 # Entry sizing tests ($150)
 # ---------------------------------------------------------------------------

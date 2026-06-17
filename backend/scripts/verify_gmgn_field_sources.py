@@ -40,7 +40,7 @@ FIELD_ALIASES: Dict[str, List[str]] = {
     "fresh_wallet_rate":       ["fresh_wallet_rate", "fresh_wallets_rate", "fresh_wallet", "fresh_rate"],
     "max_rug_ratio":           ["max_rug_ratio", "rug_ratio", "max_rugged_ratio", "rug"],
     "max_entrapment_ratio":    ["max_entrapment_ratio", "entrapment_ratio", "entrapment"],
-    "max_insider_ratio":       ["max_insider_ratio", "insider_ratio", "insider_rate", "max_insider_rate"],
+    "max_insider_ratio":       ["max_insider_ratio", "max-insider-ratio", "insider_ratio", "insider_ratio_max", "insider-rate", "insider_rate", "max_insider_rate", "max-insider-rate", "top_insider_percentage", "top-insider-percentage", "top_insider_trader_percentage", "top-insider-trader-percentage", "insider_trader_amount_rate", "insider-trader-amount-rate", "insider_amount_rate", "insider-amount-rate", "insider_hold_rate", "insider-hold-rate", "suspected_insider_rate", "suspected-insider-rate", "suspected_insider_hold_rate", "suspected-insider-hold-rate"],
     "max_bundler_rate":        ["max_bundler_rate", "bundler_rate", "bundler_trader_amount_rate", "bundler"],
     "is_wash_trading":         ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"],
     "rat_trader_amount_rate":  ["rat_trader_amount_rate", "rat_trader_rate", "rat_trader"],
@@ -305,6 +305,154 @@ async def main():
             "computed_from": computed_from,
             "sample_sources": sources[:5],
         }
+
+    # 5) Insider-specific request body probe on /v1/trenches
+    print(f"\n{'='*70}")
+    print(f"  INSIDER RATIO FIELD PROBE")
+    print(f"{'='*70}")
+
+    INSIDER_ALIASES: List[str] = [
+        "max_insider_ratio", "insider_ratio", "insider_rate", "max_insider_rate",
+        "top_insider_percentage", "top_insider_trader_percentage",
+        "insider_trader_amount_rate", "insider_amount_rate", "insider_hold_rate",
+        "suspected_insider_rate", "suspected_insider_hold_rate",
+    ]
+
+    async def probe_request_body(body: dict, label: str) -> dict:
+        """Send a request body probe to /v1/trenches, return diagnostic dict."""
+        result: dict = {"label": label, "body": body}
+        try:
+            data = await provider._make_request(
+                settings.GMGN_TRENCHES_PATH or "/v1/trenches",
+                {"chain": "sol"},
+                method="POST",
+                json_body=body,
+            )
+            if isinstance(data, dict):
+                result["status"] = "OK"
+                result["code"] = data.get("code")
+                result["message"] = str(data.get("message", ""))[:120]
+                inner = data.get("data", data) if isinstance(data, dict) else {}
+                tokens = provider._extract_v2_trench_items(inner)
+                result["token_count"] = len(tokens)
+                result["token_addresses"] = [t.get("address") or t.get("token_mint", "?")[:12] for t in tokens[:10]]
+                # Recursively search for insider aliases in response
+                insider_hits = recursive_find_paths(data, INSIDER_ALIASES)
+                result["insider_hits"] = [
+                    {"json_path": h["json_path"], "value": str(h["value"])[:60]}
+                    for h in insider_hits[:10]
+                ]
+                # Compare token set with baseline
+                result["baseline_addresses"] = [t.get("address") or t.get("token_mint", "?") for t in tokens[:10]]
+            else:
+                result["status"] = "NOT_DICT"
+        except Exception as e:
+            result["status"] = "ERROR"
+            result["error"] = str(e)[:200]
+        return result
+
+    # Baseline: no insider filter
+    print(f"\n  [probe 0] Baseline (no filters)...")
+    baseline_probe = await probe_request_body(
+        {"chain": "sol", "type": ["new_creation"], "limit": args.sample_size},
+        "baseline",
+    )
+    print(f"    tokens={baseline_probe.get('token_count')}")
+
+    # Probe variations
+    probe_bodies = [
+        ("max_insider_ratio: 0.3", {"max_insider_ratio": 0.3}),
+        ("filters.max_insider_ratio: 0.3", {"filters": {"max_insider_ratio": 0.3}}),
+        ("max-insider-ratio: 0.3", {"max-insider-ratio": 0.3}),
+        ("max_insider_rate: 0.3", {"max_insider_rate": 0.3}),
+        ("insider_ratio_max: 0.3", {"insider_ratio_max": 0.3}),
+    ]
+
+    request_body_probe_results: List[dict] = []
+    for probe_label, extra_body in probe_bodies:
+        full_body = {"chain": "sol", "type": ["new_creation"], "limit": args.sample_size, **extra_body}
+        print(f"  [probe] {probe_label}...")
+        pr = await probe_request_body(full_body, probe_label)
+        request_body_probe_results.append(pr)
+        print(f"    status={pr.get('status')} tokens={pr.get('token_count')} "
+              f"insider_hits={len(pr.get('insider_hits', []))}")
+
+    # 6) CLI probe
+    import shutil
+    cli_path = shutil.which("gmgn-cli")
+    cli_probe_result: dict = {"cli_available": cli_path is not None}
+    if cli_path:
+        print(f"\n  [CLI] gmgn-cli found at {cli_path}")
+        # Attempt to run CLI
+        import subprocess
+        try:
+            cli_result = subprocess.run(
+                [cli_path, "market", "trenches",
+                 "--chain", "sol", "--type", "new_creation",
+                 "--max-insider-ratio", "0.3", "--limit", str(args.sample_size), "--raw"],
+                capture_output=True, text=True, timeout=30,
+            )
+            cli_probe_result["returncode"] = cli_result.returncode
+            cli_probe_result["stdout_preview"] = cli_result.stdout[:500]
+            cli_probe_result["stderr"] = cli_result.stderr[:200]
+            if cli_result.returncode == 0 and cli_result.stdout:
+                try:
+                    cli_data = json.loads(cli_result.stdout)
+                    cli_hits = recursive_find_paths(cli_data, INSIDER_ALIASES)
+                    cli_probe_result["insider_hits"] = [
+                        {"json_path": h["json_path"], "value": str(h["value"])[:60]}
+                        for h in cli_hits[:10]
+                    ]
+                    cli_probe_result["has_insider_data"] = len(cli_hits) > 0
+                except json.JSONDecodeError:
+                    cli_probe_result["parse_error"] = "stdout not JSON"
+        except Exception as e:
+            cli_probe_result["exec_error"] = str(e)[:200]
+    else:
+        print(f"\n  [CLI] gmgn-cli NOT_INSTALLED, skipping CLI probe.")
+
+    # 7) Insider-specific recursive search in stored endpoint responses
+    print(f"\n  [recursive] Searching all stored endpoint responses for insider aliases...")
+    insider_in_endpoints: List[dict] = []
+    for token_mint_s, ep_data in [(r.get("token_mint", "?"), r) for r in all_endpoint_results]:
+        raw = ep_data.get("raw", {})
+        if isinstance(raw, dict):
+            hits = recursive_find_paths(raw, INSIDER_ALIASES)
+            for h in hits:
+                val_str = str(h["value"])[:60]
+                insider_in_endpoints.append({
+                    "token_mint": token_mint_s,
+                    "endpoint": ep_data.get("endpoint_name", "?"),
+                    "json_path": h["json_path"],
+                    "sample_value": val_str,
+                })
+    print(f"    Found {len(insider_in_endpoints)} insider hits across all endpoints")
+    for hit in insider_in_endpoints[:15]:
+        print(f"      {hit['endpoint']:>12s} | {hit['json_path']:<50s} | {hit['sample_value'][:40]}")
+
+    # Add insider probe results to output
+    output["insider_probe"] = {
+        "aliases_searched": INSIDER_ALIASES,
+        "baseline_probe": {
+            "token_count": baseline_probe.get("token_count"),
+            "token_addresses": baseline_probe.get("token_addresses", []),
+        },
+        "request_body_probe_results": request_body_probe_results,
+        "cli_probe": cli_probe_result,
+        "recursive_endpoint_hits": insider_in_endpoints,
+    }
+
+    # Override max_insider_ratio classification — do NOT mark API_NULL
+    if "max_insider_ratio" in field_classifications:
+        ins = field_classifications["max_insider_ratio"]
+        if ins["classification"] == "API_NULL_OR_PLAN_UNAVAILABLE":
+            # Check if any insider hit was found in recursive search
+            if insider_in_endpoints:
+                ins["classification"] = "DIRECT_FOUND"
+                ins["insider_hits"] = insider_in_endpoints[:5]
+            else:
+                ins["classification"] = "UNRESOLVED_REQUIRED_FIELD"
+                ins["note"] = "Not found in any endpoint, but required by entry gate. Cannot mark API_NULL."
 
     # 4) Output
     output = {

@@ -11,7 +11,9 @@ def _snap(**overrides) -> dict:
     base = {
         "price_usd": 0.00005, "liquidity_usd": 10000.0, "market_cap": 50000.0,
         "holder_count": 100, "top_10_holder_rate": 0.12, "fresh_wallet_rate": 0.05,
-        "max_rug_ratio": 0.01, "max_entrapment_ratio": 0.01, "max_bundler_rate": 0.01,
+        "max_rug_ratio": 0.01, "max_entrapment_ratio": 0.01,
+        "max_insider_ratio": 0.01,
+        "max_bundler_rate": 0.01,
         "suspected_insider_hold_rate": 0.01, "is_wash_trading": False,
         "rat_trader_amount_rate": 0.01, "sell_tax": 0.0, "burn_status": "burn",
         "sniper_count": 0, "creator_balance_rate": 0.03, "swaps_1h": 12,
@@ -146,9 +148,23 @@ class TestEntryDataGate:
         report = check_entry_data_completeness(snap)
         assert "socials" in report.missing_fields
 
-    def test_max_insider_ratio_not_required(self):
-        """max_insider_ratio is API_NULL, should NOT be in hard-required."""
-        assert "max_insider_ratio" not in ENTRY_HARD_REQUIRED_FIELDS
+    def test_max_insider_ratio_missing_blocks(self):
+        snap = _snap()
+        del snap["max_insider_ratio"]
+        report = check_entry_data_completeness(snap)
+        assert "max_insider_ratio" in report.missing_fields
+        assert report.blocked
+
+    def test_max_insider_ratio_zero_is_valid(self):
+        """max_insider_ratio=0 is a valid value, NOT missing."""
+        snap = _snap(max_insider_ratio=0)
+        report = check_entry_data_completeness(snap)
+        assert "max_insider_ratio" not in report.missing_fields
+        # 0 is not in POSITIVE_REQUIRED, so not abnormal either
+        assert "max_insider_ratio" not in report.abnormal_fields
+
+    def test_max_insider_ratio_required_in_set(self):
+        assert "max_insider_ratio" in ENTRY_HARD_REQUIRED_FIELDS
 
     def test_positive_required_count(self):
         assert len(POSITIVE_REQUIRED) == 6
