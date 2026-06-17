@@ -18,7 +18,6 @@ from ..providers.base import SwapProvider, ExecutionProvider, RpcProvider, Marke
 from ..config import settings, ProviderMode
 from ..strategy.thresholds import requires_smart_degen_for_x
 from .audit_builder import build_entry_audit_payload, build_exit_audit_payload
-from .entry_data_gate import check_entry_data_completeness, retry_fetch_complete_snapshot
 from .accounting import (
     compute_sim_buy_accounting,
     compute_sim_sell_accounting,
@@ -825,41 +824,6 @@ class TradingPipeline:
 
         ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id)
 
-        # ---- Entry data gate: block buy if required fields missing ----
-        # Gate runs BEFORE quote/validation/accounting so we don't waste API calls.
-        gmgn_mode = getattr(self.gmgn, "mode", None)
-        if gmgn_mode != ProviderMode.MOCK:
-            complete_snap, gate_report = await retry_fetch_complete_snapshot(self.gmgn, token_mint)
-            if gate_report.blocked:
-                logger.warning(
-                    "entry_data_gate_blocked",
-                    token_mint=token_mint,
-                    missing=gate_report.missing_fields,
-                    abnormal=gate_report.abnormal_fields,
-                )
-                await self.repo.append_system_event(
-                    "WARN", "TRADE",
-                    "SIM entry blocked by entry data gate",
-                    self._safe_json({"token": token_mint, "missing": gate_report.missing_fields,
-                                     "abnormal": gate_report.abnormal_fields}),
-                    account_type="SIM",
-                )
-                if strategy:
-                    await self.repo.insert_token_strategy_match(
-                        token_mint=token_mint,
-                        strategy_group_id=strategy.get("group_id", 0),
-                        stage="entry_data_gate",
-                        x_value=(strategy.get("x") or 0.2),
-                        passed=0,
-                        pass_fail_detail_json=self._safe_json(gate_report.__dict__),
-                        strategy_config_json=self._safe_json(strategy),
-                        event_id=strategy.get("discovery_event_id") or strategy.get("event_id"),
-                    )
-                return None
-            if complete_snap:
-                # Rebuild ctx with complete snapshot fields merged over latest
-                ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id, extra_snapshot=complete_snap)
-
         sol_side_liquidity = self._get_sol_side_liquidity(ctx)
         liquidity_usd = self._get_liquidity_usd(ctx)
         price_usd = self._get_price_usd(ctx)
@@ -1132,29 +1096,6 @@ class TradingPipeline:
             return {"ok": False, "error": "LATEST_PRICE_FAILED"}
 
         ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id)
-
-        # ---- Entry data gate: block live buy if required fields missing ----
-        # Gate runs BEFORE sizing/quote/Jito so we don't waste API calls.
-        gmgn_mode = getattr(self.gmgn, "mode", None)
-        if gmgn_mode != ProviderMode.MOCK:
-            complete_snap, gate_report = await retry_fetch_complete_snapshot(self.gmgn, token_mint)
-            if gate_report.blocked:
-                logger.warning(
-                    "live_entry_data_gate_blocked",
-                    token_mint=token_mint,
-                    missing=gate_report.missing_fields,
-                    abnormal=gate_report.abnormal_fields,
-                )
-                await self.repo.append_system_event(
-                    "WARN", "TRADE",
-                    "Live buy blocked by entry data gate",
-                    self._safe_json({"token": token_mint, "missing": gate_report.missing_fields,
-                                     "abnormal": gate_report.abnormal_fields}),
-                    account_type="LIVE",
-                )
-                return {"ok": False, "error": "ENTRY_DATA_GATE_BLOCKED"}
-            if complete_snap:
-                ctx = await self._build_entry_market_context(token_mint, latest, snapshot_id, extra_snapshot=complete_snap)
 
         sol_side_liquidity = self._get_sol_side_liquidity(ctx)
         liquidity_usd = self._get_liquidity_usd(ctx)
