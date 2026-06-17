@@ -103,19 +103,27 @@ class StrategyThresholds:
 
     @property
     def holding_rug_ratio(self) -> float:
-        return self.max_rug_ratio
+        return 0.1 + 0.5 * self.x
 
     @property
     def holding_entrapment_ratio(self) -> float:
-        return self.max_entrapment_ratio
+        return 0.1 + 0.5 * self.x
 
     @property
     def holding_insider_ratio(self) -> float:
-        return self.max_insider_ratio
+        return 0.1 + 0.5 * self.x
 
     @property
     def holding_bundler_rate(self) -> float:
-        return self.max_bundler_rate
+        return 0.1 + 0.5 * self.x
+
+    @property
+    def holding_rat_trader_rate(self) -> float:
+        return 0.1 + 0.5 * self.x
+
+    @property
+    def holding_suspected_insider_rate(self) -> float:
+        return 0.1 + 0.5 * self.x
 
     @classmethod
     def compute(cls, x: float) -> StrategyThresholds:
@@ -133,9 +141,9 @@ class StrategyThresholds:
         entry_bundler_rate = common_risk
 
         min_liquidity = 5000.0 - 2500.0 * xf
-        min_liquidity_holder_ratio = 70.0 - 100.0 * xf
+        min_liquidity_holder_ratio = 60.0 - 100.0 * xf
 
-        min_top_holder_rate = 0.155 - 0.05 * xf
+        min_top_holder_rate = 0.155 - 0.5 * xf
         max_top_holder_rate = 0.225 + 0.25 * xf
 
         max_fresh_wallet_rate = 0.13 + 0.1 * xf
@@ -144,7 +152,7 @@ class StrategyThresholds:
         max_creator_balance_rate = 0.054 + 0.01 * xf      # 持仓风控：creator_balance_rate < 0.054+0.01x
         entry_max_creator_balance_rate = 0.049 + 0.01 * xf  # 买入筛选：max_creator_balance_rate < 0.049+0.01x
 
-        min_holder_count_raw = 37.0 - 40.0 * xf
+        min_holder_count_raw = 32.0 - 40.0 * xf
         min_holder_count_api = int(math.floor(min_holder_count_raw)) + 1
         max_holder_count_raw = 400.0 + 2000.0 * xf
         max_holder_count_api = int(math.ceil(max_holder_count_raw)) - 1
@@ -165,14 +173,14 @@ class StrategyThresholds:
         # 买入条件 < 50x，持仓风控 < 75x
         entry_sniper_count_max = 50.0 * xf     # 买入本地风控：sniper_count < 50x
         sniper_count_max = 75.0 * xf            # 持仓风控轮询：sniper_count < 75x
-        top1_addr_type0_min = 0.032 - 0.02 * xf
+        top1_addr_type0_min = 0.022 - 0.02 * xf
         top1_addr_type0_max = 0.049 + 0.01 * xf
 
-        price_change_1h_min_pct = 50.0 * (xf - 0.4)
+        price_change_1h_min_pct = 50.0 * (xf - 0.3)
         price_change_1h_max_pct = 60.0 - 50.0 * xf
         swaps_1h_min = 7.0 + 20.0 * xf
         volume_per_swap_1h_min = 23.0 + 20.0 * xf
-        price_range_24h_percentile_min = 0.0
+        price_range_24h_percentile_min = 0.13 - 0.4 * xf
         price_range_24h_percentile_max = 0.45 - 0.5 * xf
 
         return cls(
@@ -255,18 +263,21 @@ def requires_smart_degen_for_x(x: float) -> bool:
 
 
 def compute_holding_thresholds(x: float) -> Dict[str, float]:
-    """Return holding-specific threshold values (all = x directly)."""
+    """Return holding-specific threshold values."""
     xf = float(x)
+    h = 0.1 + 0.5 * xf
     return {
-        "holding_rug_ratio": xf,
-        "holding_entrapment_ratio": xf,
-        "holding_insider_ratio": xf,
-        "holding_bundler_rate": xf,
+        "holding_rug_ratio": h,
+        "holding_entrapment_ratio": h,
+        "holding_insider_ratio": h,
+        "holding_bundler_rate": h,
+        "holding_rat_trader_rate": h,
+        "holding_suspected_insider_rate": h,
     }
 
 
-# 思路.md: 模拟盘 min(1% liquidity, $100); 实盘 = min(1% liquidity, $100, wallet_balance)
-def entry_size_usd(liquidity_usd: float, x: float, max_usd: float = 100.0) -> float:
+# 思路.md: 模拟盘 min(1% liquidity, $50); 实盘 = min(1% liquidity, $50, wallet_balance)
+def entry_size_usd(liquidity_usd: float, x: float, max_usd: float = 50.0) -> float:
     return min(liquidity_usd * 0.01, max_usd)
 
 

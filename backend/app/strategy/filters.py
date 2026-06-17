@@ -676,7 +676,7 @@ async def run_holding_risk_filter(
                  label="内部人持仓比例")
     _check_float(details, snapshot, "suspected_insider_hold_rate",
                  ["suspected_insider_hold_rate", "insider_hold_rate", "insider_rate"],
-                 lambda v: v < x, f"< {x:.6g}", required=True,
+                 lambda v: v < t.holding_suspected_insider_rate, f"< {t.holding_suspected_insider_rate:.6g}", required=True,
                  label="疑似内部人持仓比例")
     _check_float(details, snapshot, "bundler_trader_amount_rate",
                  ["bundler_trader_amount_rate", "bundler_rate", "max_bundler_rate", "bundler"],
@@ -725,7 +725,7 @@ async def run_holding_risk_filter(
     _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash"], required=True,
                      label="洗盘交易检测")
     _check_float(details, snapshot, "rat_trader_amount_rate", ["rat_trader_amount_rate", "rat_trader_rate", "rat_trader"],
-                 lambda v: v < x, f"< {x:.6g}", required=True,
+                 lambda v: v < t.holding_rat_trader_rate, f"< {t.holding_rat_trader_rate:.6g}", required=True,
                  label="老鼠仓比例")
     _check_float(details, snapshot, "sniper_count", ["sniper_count", "snipers", "sniper_trader_count", "sniper_cnt"],
                  lambda v: v < t.sniper_count_max, f"< {t.sniper_count_max:.6g}", required=True,

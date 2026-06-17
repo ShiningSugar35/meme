@@ -292,7 +292,7 @@ class Settings(BaseSettings):
     MAX_REQUOTE_RETRY: int = Field(2)
     ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.01)
 
-    ENTRY_MAX_USD: float = Field(100.0)
+    ENTRY_MAX_USD: float = Field(50.0)
     RISK_FEATURE_SCAN_TIER_1_USD: float = Field(150.0)
     RISK_FEATURE_SCAN_TIER_1_SECONDS: int = Field(4)
     RISK_FEATURE_SCAN_TIER_2_USD: float = Field(100.0)
@@ -313,7 +313,7 @@ class Settings(BaseSettings):
     TOP1_HOLDER_SCAN_TIER_4_SECONDS: int = Field(120)
     TOP1_HOLDER_SCAN_TIER_5_SECONDS: int = Field(0)
 
-    DUST_FORCE_EXIT_USD: float = Field(12.5)
+    DUST_FORCE_EXIT_USD: float = Field(10.0)
     DUST_FORCE_EXIT_SOL: float = Field(0.125)
 
     WALLET_PUBLIC_KEY: Optional[str] = None

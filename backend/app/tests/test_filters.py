@@ -51,20 +51,20 @@ def test_thresholds_x_02():
     assert math.isclose(t.common_risk, 0.15, rel_tol=1e-9)
     assert math.isclose(t.min_liquidity, 4500.0, rel_tol=1e-9)
     assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
-    assert math.isclose(t.min_holder_count, 29.0, rel_tol=1e-9)
+    assert math.isclose(t.min_holder_count, 24.0, rel_tol=1e-9)
     assert math.isclose(t.min_marketcap, 4950.0, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
     assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_min_pct, -5.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_max_pct, 50.0, rel_tol=1e-9)
     assert math.isclose(t.sell_tax_max, 0.02, rel_tol=1e-9)
     assert math.isclose(t.sniper_count_max, 15.0, rel_tol=1e-9)          # 持仓风控 75*0.2
     assert math.isclose(t.entry_sniper_count_max, 10.0, rel_tol=1e-9)     # 买入条件 50*0.2
     assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
-    assert math.isclose(t.top1_addr_type0_min, 0.028, rel_tol=1e-9)
-    assert math.isclose(t.min_liquidity_holder_ratio, 50.0, rel_tol=1e-9)
+    assert math.isclose(t.top1_addr_type0_min, 0.018, rel_tol=1e-9)
+    assert math.isclose(t.min_liquidity_holder_ratio, 40.0, rel_tol=1e-9)
     assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
-    assert math.isclose(t.price_range_24h_percentile_min, 0.0, rel_tol=1e-9)
+    assert math.isclose(t.price_range_24h_percentile_min, 0.05, rel_tol=1e-9)
     assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
 
 
@@ -72,7 +72,7 @@ def test_thresholds_x_01():
     t = compute_thresholds(0.1)
     assert math.isclose(t.common_risk, 0.10, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1400.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_min_pct, -15.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_max_pct, 55.0, rel_tol=1e-9)
 
 
@@ -183,8 +183,8 @@ def test_price_change_threshold():
     assert pct_detail is not None
     # (0.0011 - 0.001) / 0.001 * 100 = 10%
     assert math.isclose(pct_detail.get("pct_change") or 0, 10.0, rel_tol=1e-9)
-    # lower_threshold = 50 * (0.2 - 0.4) = -10
-    assert math.isclose(pct_detail.get("lower_threshold") or 0, -10.0, rel_tol=1e-9)
+    # lower_threshold = 50 * (0.2 - 0.3) = -5
+    assert math.isclose(pct_detail.get("lower_threshold") or 0, -5.0, rel_tol=1e-9)
     # upper_threshold = 60 - 50 * 0.2 = 50
     assert math.isclose(pct_detail.get("upper_threshold") or 0, 50.0, rel_tol=1e-9)
     assert pct_detail.get("passed") is True, "10% within (-10, 50) should pass"
@@ -325,19 +325,19 @@ def test_holding_risk_passes():
 
 def test_entry_size_liquidity_5250():
     size = entry_size_usd(5250, 0.2)
-    assert math.isclose(size, min(5250 * 0.01, 100), rel_tol=1e-9)
+    assert math.isclose(size, min(5250 * 0.01, 50), rel_tol=1e-9)
 
 
 def test_entry_size_liquidity_10000():
     size = entry_size_usd(10000, 0.2)
-    # 10000 * 0.01 = 100, capped by 100
-    assert math.isclose(size, 100.0, rel_tol=1e-9)
+    # 10000 * 0.01 = 100, capped by 50
+    assert math.isclose(size, 50.0, rel_tol=1e-9)
 
 
 def test_entry_size_liquidity_20000():
     size = entry_size_usd(20000, 0.2)
-    # 20000 * 0.01 = 200, capped by 100
-    assert math.isclose(size, 100.0, rel_tol=1e-9)
+    # 20000 * 0.01 = 200, capped by 50
+    assert math.isclose(size, 50.0, rel_tol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +532,7 @@ def test_trench_filters_x_02():
     filters = t.to_trench_filters()
     assert math.isclose(filters["min_liquidity"], 4500.0, rel_tol=1e-9)
     assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
-    assert math.isclose(filters["min_top_holder_rate"], 0.145, rel_tol=1e-9)
+    assert math.isclose(filters["min_top_holder_rate"], 0.055, rel_tol=1e-9)
     assert math.isclose(filters["max_top_holder_rate"], 0.275, rel_tol=1e-9)
 
 
@@ -629,9 +629,9 @@ def test_price_range_percentile_missing_without_klines():
 
 def test_sim_entry_size_matches_spec():
     from ..strategy.sizing import compute_entry_size_usd
-    # min(1% liquidity, $100)
+    # min(1% liquidity, $50)
     assert asyncio.run(compute_entry_size_usd(5000)) == 50.0
-    assert asyncio.run(compute_entry_size_usd(20000)) == 100.0
+    assert asyncio.run(compute_entry_size_usd(20000)) == 50.0
 
 
 def test_live_entry_size_caps_wallet_balance():

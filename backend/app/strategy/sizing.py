@@ -15,9 +15,9 @@ from typing import Optional
 
 from ..config import settings
 
-# 思路.md: 实盘 min(1% liquidity, $100); 模拟盘 min(1% liquidity, $100)
+# 思路.md: 实盘 min(1% liquidity, $50, wallet_balance); 模拟盘 min(1% liquidity, $50)
 ENTRY_LIQUIDITY_PCT = 0.01
-ENTRY_MAX_USD = 100.0
+ENTRY_MAX_USD = 50.0
 LIVE_MIN_ENTRY_USD = 10.0
 
 
