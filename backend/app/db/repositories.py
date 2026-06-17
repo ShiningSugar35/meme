@@ -1486,6 +1486,14 @@ class Repositories:
             "accounting_source",
             "accounting_status",
             "platform_fee_amount",
+            "token_amount_source",
+            "quote_implied_price_usd",
+            "quote_vs_gmgn_price_ratio",
+            "token_decimals",
+            "token_decimals_source",
+            "quantity_validation_status",
+            "price_source",
+            "price_missing_reason",
         ]
 
         cols = [

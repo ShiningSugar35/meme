@@ -18,6 +18,7 @@ from ..providers.base import SwapProvider, ExecutionProvider, RpcProvider, Marke
 from ..config import settings, ProviderMode
 from ..strategy.thresholds import requires_smart_degen_for_x
 from .audit_builder import build_entry_audit_payload, build_exit_audit_payload
+from .entry_data_gate import check_entry_data_completeness
 from .accounting import (
     compute_sim_buy_accounting,
     compute_sim_sell_accounting,
@@ -83,6 +84,8 @@ def validate_and_select_sim_token_amount(
 
     if not gmgn_price_usd or gmgn_price_usd <= 0:
         diag["quantity_validation_status"] = "BLOCKED_NO_GMGN_PRICE"
+        diag["token_amount_source"] = "blocked_invalid_gmgn_price"
+        diag["buy_allowed"] = False
         return 0.0, diag
 
     fallback_amount = size_usd / gmgn_price_usd
@@ -93,10 +96,12 @@ def validate_and_select_sim_token_amount(
         return fallback_amount, diag
 
     out_amount_raw = quote.get("outAmount")
-    try:
-        out_raw = float(out_amount_raw)
-    except (TypeError, ValueError):
-        out_raw = 0.0
+    out_raw: int | None = None
+    if out_amount_raw is not None:
+        try:
+            out_raw = int(str(out_amount_raw))
+        except (TypeError, ValueError):
+            out_raw = None
 
     if out_raw is None or out_raw <= 0:
         diag["token_amount_source"] = "gmgn_spot_fallback"
@@ -797,6 +802,27 @@ class TradingPipeline:
             token_decimals=token_decimals if token_decimals else None,
         )
 
+        if quantity_diag.get("buy_allowed") is False:
+            logger.warning(
+                "sim_buy_blocked_invalid_gmgn_price",
+                token_mint=token_mint,
+                gmgn_price_usd=price_usd,
+                details=quantity_diag,
+            )
+            if strategy:
+                discovery_event_id = strategy.get("discovery_event_id") or strategy.get("event_id")
+                await self.repo.insert_token_strategy_match(
+                    token_mint=token_mint,
+                    strategy_group_id=strategy.get("group_id", 0),
+                    stage="quantity_validation",
+                    x_value=(strategy.get("x") or 0.2),
+                    passed=0,
+                    pass_fail_detail_json=self._safe_json(quantity_diag),
+                    strategy_config_json=self._safe_json(strategy),
+                    event_id=discovery_event_id,
+                )
+            return None
+
         remaining_value_usd = token_amount * price_usd if token_amount > 0 and price_usd and price_usd > 0 else size_usd
 
         opened_at = datetime.now(timezone.utc).isoformat()
@@ -833,6 +859,30 @@ class TradingPipeline:
             token_amount=token_amount,
         )
 
+        # ---- Entry data gate: block buy if required fields missing ----
+        gmgn_mode = getattr(self.gmgn, "mode", None)
+        if gmgn_mode != ProviderMode.MOCK:
+            gate_report = check_entry_data_completeness({**ctx, **quantity_diag})
+            if gate_report.blocked:
+                logger.warning(
+                    "entry_data_gate_blocked",
+                    token_mint=token_mint,
+                    missing=gate_report.missing_fields,
+                    abnormal=gate_report.abnormal_fields,
+                )
+                if strategy:
+                    await self.repo.insert_token_strategy_match(
+                        token_mint=token_mint,
+                        strategy_group_id=strategy.get("group_id", 0),
+                        stage="entry_data_gate",
+                        x_value=(strategy.get("x") or 0.2),
+                        passed=0,
+                        pass_fail_detail_json=self._safe_json(gate_report.__dict__),
+                        strategy_config_json=self._safe_json(strategy),
+                        event_id=strategy.get("discovery_event_id") or strategy.get("event_id"),
+                    )
+                return None
+
         te = await self.repo.append_trade_event(
             idempotency_key,
             token_mint=token_mint,
@@ -867,6 +917,12 @@ class TradingPipeline:
             input_mint=WRAPPED_SOL_MINT,
             output_mint=token_mint,
             execution_detail_json=self._safe_json(quantity_diag),
+            token_amount_source=quantity_diag.get("token_amount_source"),
+            quote_implied_price_usd=quantity_diag.get("quote_implied_price_usd"),
+            quote_vs_gmgn_price_ratio=quantity_diag.get("quote_vs_gmgn_price_ratio"),
+            token_decimals=token_decimals,
+            token_decimals_source=quantity_diag.get("token_decimals_source"),
+            quantity_validation_status=quantity_diag.get("quantity_validation_status"),
         )
 
         locked_json = self._locked_strategy_for_position(

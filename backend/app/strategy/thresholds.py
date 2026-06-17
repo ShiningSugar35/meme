@@ -174,7 +174,7 @@ class StrategyThresholds:
         entry_sniper_count_max = 50.0 * xf     # 买入本地风控：sniper_count < 50x
         sniper_count_max = 75.0 * xf            # 持仓风控轮询：sniper_count < 75x
         top1_addr_type0_min = 0.022 - 0.02 * xf
-        top1_addr_type0_max = 0.049 + 0.01 * xf
+        top1_addr_type0_max = 0.054 + 0.01 * xf
 
         price_change_1h_min_pct = 50.0 * (xf - 0.3)
         price_change_1h_max_pct = 60.0 - 50.0 * xf
@@ -273,6 +273,8 @@ def compute_holding_thresholds(x: float) -> Dict[str, float]:
         "holding_bundler_rate": h,
         "holding_rat_trader_rate": h,
         "holding_suspected_insider_rate": h,
+        "holding_top1_addr_type0_min": 0.022 - 0.02 * xf,
+        "holding_top1_addr_type0_max": 0.054 + 0.01 * xf,
     }
 
 

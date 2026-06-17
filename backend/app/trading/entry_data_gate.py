@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from ..logging_config import logger
+from ..config import settings
 
 ENTRY_HARD_REQUIRED_FIELDS: Set[str] = {
     "price_usd",
@@ -20,7 +21,6 @@ ENTRY_HARD_REQUIRED_FIELDS: Set[str] = {
     "fresh_wallet_rate",
     "max_rug_ratio",
     "max_entrapment_ratio",
-    "max_insider_ratio",
     "max_bundler_rate",
     "suspected_insider_hold_rate",
     "is_wash_trading",

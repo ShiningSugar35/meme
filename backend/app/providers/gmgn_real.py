@@ -402,7 +402,7 @@ class GMGNProvider(MarketDataProvider):
         out: Dict[str, Any] = {
             "token_mint": cls._first_present(raw, ["token_mint", "token_address", "address", "mint", "base_address"]),
             "pool_address": cls._first_present(raw, ["pool_address", "pair_address", "pool", "pair", "address_pair"]),
-            "pool_created_at": cls._first_present(raw, ["pool_created_at", "creation_time", "created_at", "open_time", "launch_time", "created_timestamp"]),
+            "pool_created_at": cls._first_present(raw, ["pool_created_at", "creation_time", "created_at", "open_time", "launch_time", "created_timestamp", "creation_timestamp"]),
             "type": cls._first_present(raw, ["type", "trench_type", "category"]),
             "launchpad": cls._first_present(raw, ["launchpad_platform", "launchpad", "platform", "source_platform", "pool_platform"]),
             "platform": cls._first_present(raw, ["launchpad_platform", "platform", "launchpad", "source_platform", "pool_platform"]),
@@ -419,26 +419,60 @@ class GMGNProvider(MarketDataProvider):
             "top1_holder_rate": cls._to_float(cls._first_present(raw, ["top1_holder_rate", "top_1_holder_rate", "top_holder_rate"])),
             "renounced_mint": cls._first_present(raw, ["renounced_mint", "mint_renounced", "is_mint_renounced"]),
             "renounced_freeze_account": cls._first_present(raw, ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced", "freeze_authority_renounced"]),
-            "max_rug_ratio": cls._to_float(cls._first_present(raw, ["max_rug_ratio", "rug_ratio", "max_rugged_ratio"])),
-            "max_insider_ratio": cls._to_float(cls._first_present(raw, ["max_insider_ratio", "insider_ratio"])),
-            "max_entrapment_ratio": cls._to_float(cls._first_present(raw, ["max_entrapment_ratio", "entrapment_ratio"])),
-            "is_wash_trading": cls._first_present(raw, ["is_wash_trading", "wash_trading", "wash_trading_detected"]),
-            "rat_trader_amount_rate": cls._to_float(cls._first_present(raw, ["rat_trader_amount_rate", "rat_trader_rate"])),
-            "suspected_insider_hold_rate": cls._to_float(cls._first_present(raw, ["suspected_insider_hold_rate", "insider_hold_rate"])),
-            "max_bundler_rate": cls._to_float(cls._first_present(raw, ["max_bundler_rate", "bundler_rate", "bundler_trader_amount_rate"])),
-            "fresh_wallet_rate": cls._to_float(cls._first_present(raw, ["fresh_wallet_rate", "fresh_wallets_rate"])),
+            "max_rug_ratio": cls._to_float(cls._first_present(raw, [
+                "max_rug_ratio", "rug_ratio", "max_rugged_ratio",
+                "top_rug_percentage",
+            ])),
+            "max_insider_ratio": cls._to_float(cls._first_present(raw, [
+                "max_insider_ratio", "insider_ratio", "insider_rate",
+                "top_insider_percentage",
+            ])),
+            "max_entrapment_ratio": cls._to_float(cls._first_present(raw, [
+                "max_entrapment_ratio", "entrapment_ratio",
+                "top_entrapment_trader_percentage",
+            ])),
+            "is_wash_trading": cls._first_present(raw, [
+                "is_wash_trading", "wash_trading", "wash_trading_detected",
+                "is_wash",
+            ]),
+            "rat_trader_amount_rate": cls._to_float(cls._first_present(raw, [
+                "rat_trader_amount_rate", "rat_trader_rate",
+                "top_rat_trader_percentage",
+            ])),
+            "suspected_insider_hold_rate": cls._to_float(cls._first_present(raw, [
+                "suspected_insider_hold_rate", "insider_hold_rate",
+                "suspected_insider_rate",
+            ])),
+            "max_bundler_rate": cls._to_float(cls._first_present(raw, [
+                "max_bundler_rate", "bundler_rate", "bundler_trader_amount_rate",
+                "top_bundler_trader_percentage",
+            ])),
+            "fresh_wallet_rate": cls._to_float(cls._first_present(raw, [
+                "fresh_wallet_rate", "fresh_wallets_rate", "fresh_wallet", "fresh_rate",
+            ])),
             "sell_tax": cls._to_float(cls._first_present(raw, ["sell_tax", "sell_tax_rate"])),
             "has_social": cls._first_present(raw, [
                 "has_social", "has_at_least_one_social", "has_twitter_or_telegram",
             ]) or int(bool(raw.get("socials") or raw.get("links"))),
             "socials": raw.get("socials") or raw.get("links") or [],
             "link": raw.get("link") or raw.get("website") or raw.get("twitter") or "",
-            "creator_token_status": cls._first_present(raw, ["creator_token_status", "creator_status"]),
-            "dev_team_hold_rate": cls._to_float(cls._first_present(raw, ["dev_team_hold_rate", "dev_hold_rate", "creator_hold_rate"])),
-            "dev_token_burn_ratio": cls._to_float(cls._first_present(raw, ["dev_token_burn_ratio", "burn_ratio", "lp_burn_ratio"])),
+            "creator_token_status": cls._first_present(raw, [
+                "creator_token_status", "creator_status",
+            ]),
+            "dev_team_hold_rate": cls._to_float(cls._first_present(raw, [
+                "dev_team_hold_rate", "dev_hold_rate", "creator_hold_rate",
+            ])),
+            "dev_token_burn_ratio": cls._to_float(cls._first_present(raw, [
+                "dev_token_burn_ratio", "burn_ratio", "lp_burn_ratio",
+            ])),
             "burn_status": cls._first_present(raw, ["burn_status", "lp_burn_status", "burnt_status"]),
-            "sniper_count": cls._to_float(cls._first_present(raw, ["sniper_count", "snipers", "sniper_trader_count"])),
-            "holder_count": cls._to_float(cls._first_present(raw, ["holder_count", "holders", "total_holders", "holder"])),
+            "sniper_count": cls._to_float(cls._first_present(raw, [
+                "sniper_count", "snipers", "sniper_trader_count",
+                "top70_sniper_hold_rate",
+            ])),
+            "holder_count": cls._to_float(cls._first_present(raw, [
+                "holder_count", "holders", "total_holders", "holder",
+            ])),
             "creator_balance_rate": cls._to_float(cls._first_present(raw, [
                 "creator_balance_rate", "creator_hold_rate", "dev_team_hold_rate",
                 "dev_hold_rate", "creator_token_balance_rate",
@@ -447,7 +481,7 @@ class GMGNProvider(MarketDataProvider):
                 "creator_token_balance", "creator_balance", "dev_token_balance",
             ])),
             "total_supply": cls._to_float(cls._first_present(raw, [
-                "total_supply", "supply", "total_supply",
+                "total_supply", "supply", "token_total_supply",
             ])),
             "swaps_1h": cls._to_float(cls._first_present(raw, [
                 "swaps_1h", "swaps1h", "trade_1h", "trades_1h",
@@ -463,7 +497,51 @@ class GMGNProvider(MarketDataProvider):
             "price_payload": raw.get("price") or {},
             "pool_payload": raw.get("pool") or {},
         }
-        # Keep explicit falsy values; drop only None/empty for DB columns except raw_json.
+
+        # ---- Computed fields when direct field is missing -------------------
+
+        # price_change_percent1h from price + price_1h
+        if out.get("price_change_percent1h") is None or out.get("price_change_percent1h") == "":
+            price = cls._to_float(out.get("price")) or cls._to_float(out.get("price_usd"))
+            price_1h = cls._to_float(raw.get("price_1h"))
+            if price is not None and price_1h is not None and price_1h > 0:
+                pct = (price / price_1h - 1.0) * 100.0
+                out["price_change_percent1h"] = cls._to_float(pct)
+                out["price_change_source"] = "computed_from_price_1h"
+
+        # market_cap from price * total_supply if not available directly
+        if out.get("market_cap") is None or out.get("market_cap") == "":
+            price = cls._to_float(out.get("price_usd")) or cls._to_float(out.get("price"))
+            supply = cls._to_float(out.get("total_supply"))
+            if price is not None and supply is not None and supply > 0 and price > 0:
+                out["market_cap"] = cls._to_float(price * supply)
+
+        # volume_1h from buy_volume_1h + sell_volume_1h
+        if out.get("volume_1h") is None or out.get("volume_1h") == "":
+            buy = cls._to_float(raw.get("buy_volume_1h"))
+            sell = cls._to_float(raw.get("sell_volume_1h"))
+            if buy is not None and sell is not None:
+                out["volume_1h"] = cls._to_float(buy + sell)
+
+        # creator_balance_rate from creator_token_balance / total_supply
+        if out.get("creator_balance_rate") is None or out.get("creator_balance_rate") == "":
+            cbal = cls._to_float(raw.get("creator_token_balance"))
+            ts = cls._to_float(raw.get("total_supply"))
+            if cbal is not None and ts is not None and ts > 0:
+                out["creator_balance_rate"] = cls._to_float(cbal / ts)
+
+        # socials from link dict
+        if not out.get("socials") and out.get("link") and isinstance(out.get("link"), dict):
+            # link is a dict like {"website": "...", "twitter": "...", "telegram": "..."}
+            link_dict = out["link"]
+            social_urls = []
+            for sk in ("website", "twitter", "telegram", "discord", "x"):
+                if link_dict.get(sk):
+                    social_urls.append(link_dict[sk])
+            if social_urls:
+                out["socials"] = social_urls
+
+        # ---- Filter None/empty for DB columns ----------------------------------
         out = {k: v for k, v in out.items() if v is not None and v != ""}
         out["raw_json"] = json.dumps(raw, ensure_ascii=False, default=str)
         return out
@@ -607,10 +685,66 @@ class GMGNProvider(MarketDataProvider):
         info_path = getattr(settings, "GMGN_TOKEN_INFO_PATH", None) or settings.GMGN_TOKEN_PRICE_PATH
         info = await self._make_request(info_path, params, method="GET", credential_slot=credential_slot)
         raw_bundle["token_info"] = info
-        merged: Dict[str, Any] = {}
-        if isinstance(self._unwrap_data(info), dict):
-            merged.update(self._unwrap_data(info))
 
+        # Extract the three sub-objects from /v1/token/info response.
+        # The response has: data.price (market data), data.stat (holder/risk stats),
+        # data.dev (creator info), data.pool (pool metadata), plus top-level scalars.
+        # _unwrap_data() would return data.pool and discard all others, so we
+        # explicitly extract each layer here.
+        info_root = info.get("data", info) if isinstance(info, dict) else {}
+        info_root = info_root if isinstance(info_root, dict) else {}
+        price_obj = info_root.get("price") if isinstance(info_root, dict) else None
+        pool_obj = info_root.get("pool") if isinstance(info_root, dict) else None
+        stat_obj = info_root.get("stat") if isinstance(info_root, dict) else None
+        dev_obj = info_root.get("dev") if isinstance(info_root, dict) else None
+        link_obj = info_root.get("link") if isinstance(info_root, dict) else None
+
+        merged: Dict[str, Any] = {}
+
+        # 1) Top-level scalars from token_info root (symbol, name, holder_count, etc.)
+        for k, v in info_root.items():
+            if k in ("price", "pool", "stat", "dev", "security", "link"):
+                continue
+            if not isinstance(v, (dict, list)):
+                merged.setdefault(k, v)
+
+        # 2) Pool sub-object — provides liquidity, pool_address, quote_reserve, etc.
+        if isinstance(pool_obj, dict):
+            merged["pool_payload"] = pool_obj
+            for k, v in pool_obj.items():
+                if not isinstance(v, (dict, list)):
+                    merged.setdefault(k, v)
+
+        # 3) Price sub-object — the richest market-data source (38 fields)
+        if isinstance(price_obj, dict):
+            merged["price_payload"] = price_obj
+            for k, v in price_obj.items():
+                if not isinstance(v, (dict, list)):
+                    merged.setdefault(k, v)
+
+        # 4) Stat sub-object — holder count, fresh_wallet_rate, creator_hold_rate,
+        #    rat_trader, bundler, entrapment, sniper percentages.
+        if isinstance(stat_obj, dict):
+            merged["stat"] = stat_obj
+            for k, v in stat_obj.items():
+                if not isinstance(v, (dict, list)):
+                    merged.setdefault(k, v)
+
+        # 5) Dev sub-object — creator_token_balance, creator_token_status
+        if isinstance(dev_obj, dict):
+            for k, v in dev_obj.items():
+                if k == "ath_token_info":
+                    continue
+                if not isinstance(v, (dict, list)):
+                    merged.setdefault(k, v)
+
+        # 6) Link sub-object — social links (website, twitter, telegram, etc.)
+        if isinstance(link_obj, dict):
+            merged["link"] = link_obj
+        elif isinstance(link_obj, str) and link_obj:
+            merged["link"] = link_obj
+
+        # 7) Security + pool_info endpoints as supplements
         for label, path in (
             ("security", getattr(settings, "GMGN_TOKEN_SECURITY_PATH", "")),
             ("pool_info", getattr(settings, "GMGN_TOKEN_POOL_INFO_PATH", "")),
@@ -622,7 +756,8 @@ class GMGNProvider(MarketDataProvider):
                 raw_bundle[label] = data
                 val = self._unwrap_data(data)
                 if isinstance(val, dict):
-                    merged.update(val)
+                    for k, v in val.items():
+                        merged.setdefault(k, v)
             except GMGNAPIError as exc:
                 raw_bundle[label] = {"error": str(exc), "status_code": exc.status_code, "path": exc.path}
             except Exception as exc:

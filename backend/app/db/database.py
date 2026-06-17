@@ -264,7 +264,19 @@ async def _migrate_trade_events(db: aiosqlite.Connection):
         "accounting_status": "TEXT",
         "platform_fee_amount": "TEXT",
     }
+    new_fields_2026Q2 = {
+        "token_amount_source": "TEXT",
+        "quote_implied_price_usd": "REAL",
+        "quote_vs_gmgn_price_ratio": "REAL",
+        "token_decimals": "INTEGER",
+        "token_decimals_source": "TEXT",
+        "quantity_validation_status": "TEXT",
+        "price_source": "TEXT",
+        "price_missing_reason": "TEXT",
+    }
     for column, definition in new_fields_2026.items():
+        await _add_column_if_missing(db, "trade_events", column, definition)
+    for column, definition in new_fields_2026Q2.items():
         await _add_column_if_missing(db, "trade_events", column, definition)
 
     await _add_index_if_missing(db, "uq_trade_idempotency", "trade_events", "idempotency_key", unique=True)

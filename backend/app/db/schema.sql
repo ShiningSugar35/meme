@@ -70,6 +70,16 @@ CREATE TABLE IF NOT EXISTS trade_events (
   fee_detail_json TEXT,
   execution_detail_json TEXT,
 
+  -- quantity validation audit fields (P1)
+  token_amount_source TEXT,
+  quote_implied_price_usd REAL,
+  quote_vs_gmgn_price_ratio REAL,
+  token_decimals INTEGER,
+  token_decimals_source TEXT,
+  quantity_validation_status TEXT,
+  price_source TEXT,
+  price_missing_reason TEXT,
+
   error_code TEXT,
   error_message TEXT,
   provider TEXT,

@@ -519,16 +519,16 @@ class TestNormalizeRateFraction:
 
 class TestTop1HolderNormalization:
     def test_x02_top1_passes_at_005(self):
-        """x=0.2, top1 rate=5% (0.05) should pass (threshold=0.051)."""
+        """x=0.2, top1 rate=5% (0.05) should pass (holding threshold=0.056)."""
         t = compute_thresholds(0.2)
-        assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
+        assert math.isclose(t.top1_addr_type0_max, 0.056, rel_tol=1e-9)
         holder = {"addr_type": 0, "amount_percentage": 5.0}
         res = evaluate_top1_holder(holder, 0.2)
         assert res.passed is True
         assert math.isclose(res.feature_vector["top1_holder_rate"], 0.05, rel_tol=1e-9)
 
     def test_x02_top1_fails_at_006(self):
-        """x=0.2, top1 rate=6% should fail (threshold=0.051)."""
+        """x=0.2, top1 rate=6% should fail (holding threshold=0.056)."""
         holder = {"addr_type": 0, "amount_percentage": 6.0}
         res = evaluate_top1_holder(holder, 0.2)
         assert res.passed is False
