@@ -527,6 +527,27 @@ async def evaluate_price_activity_rules(
 
     passed = all(d.get("passed") for d in details)
 
+    # Kline health metrics — allows the dashboard to distinguish
+    # "price filter passed via direct API" vs "price filter passed + kline validated"
+    kline_api_called = klines is not None
+    kline_rows_count = len(klines) if klines else 0
+    kline_empty = klines is not None and len(klines) == 0
+    kline_valid_ohlcv_count = 0
+    kline_time_min = None
+    kline_time_max = None
+    if klines:
+        sorted_klines = sort_klines(klines)
+        for k in klines:
+            if _kline_open(k) is not None and _kline_high(k) is not None and \
+               _kline_low(k) is not None and _kline_close(k) is not None and \
+               _kline_open(k) > 0 and _kline_high(k) > 0 and _kline_low(k) > 0 and _kline_close(k) > 0:
+                kline_valid_ohlcv_count += 1
+        if sorted_klines:
+            kline_time_min = _kline_time(sorted_klines[0])
+            kline_time_max = _kline_time(sorted_klines[-1])
+    kline_api_ok = kline_api_called and not kline_empty and kline_valid_ohlcv_count > 0
+    kline_validation_pass = kline_api_ok and high_24h is not None and low_24h is not None and high_24h > low_24h
+
     fv = {
         "x": x, "current_price": current_price,
         "swaps_1h": swaps_1h, "volume_1h": volume_1h, "volume_per_swap_1h": vps,
@@ -538,6 +559,14 @@ async def evaluate_price_activity_rules(
         "price_range_24h_percentile_source": percentile_source,
         "price_range_24h_high": high_24h,
         "price_range_24h_low": low_24h,
+        "kline_api_called": kline_api_called,
+        "kline_api_ok": kline_api_ok,
+        "kline_rows_count": kline_rows_count,
+        "kline_valid_ohlcv_count": kline_valid_ohlcv_count,
+        "kline_empty": kline_empty,
+        "kline_validation_pass": kline_validation_pass,
+        "kline_time_min": kline_time_min,
+        "kline_time_max": kline_time_max,
     }
     return PriceFilterResult(passed, details, fv)
 
