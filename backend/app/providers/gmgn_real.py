@@ -399,6 +399,23 @@ class GMGNProvider(MarketDataProvider):
     def _normalize_token_data(cls, raw: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(raw, dict):
             return {}
+        # Gather raw values for semantic + compat field names
+        rug_ratio = cls._to_float(cls._first_present(raw, [
+            "rug_ratio", "max_rug_ratio", "max_rugged_ratio", "top_rug_percentage",
+        ]))
+        entrapment_ratio = cls._to_float(cls._first_present(raw, [
+            "entrapment_ratio", "max_entrapment_ratio", "top_entrapment_trader_percentage",
+        ]))
+        bundler_rate = cls._to_float(cls._first_present(raw, [
+            "bundler_rate", "bundler_trader_amount_rate", "max_bundler_rate", "top_bundler_trader_percentage",
+        ]))
+        suspected_insider_hold_rate = cls._to_float(cls._first_present(raw, [
+            "suspected_insider_hold_rate", "insider_hold_rate", "suspected_insider_rate",
+        ]))
+        is_wash_trading = cls._first_present(raw, [
+            "is_wash_trading", "wash_trading", "wash_trading_detected", "is_wash",
+        ])
+
         out: Dict[str, Any] = {
             "token_mint": cls._first_present(raw, ["token_mint", "token_address", "address", "mint", "base_address"]),
             "pool_address": cls._first_present(raw, ["pool_address", "pair_address", "pool", "pair", "address_pair"]),
@@ -419,35 +436,26 @@ class GMGNProvider(MarketDataProvider):
             "top1_holder_rate": cls._to_float(cls._first_present(raw, ["top1_holder_rate", "top_1_holder_rate", "top_holder_rate"])),
             "renounced_mint": cls._first_present(raw, ["renounced_mint", "mint_renounced", "is_mint_renounced"]),
             "renounced_freeze_account": cls._first_present(raw, ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced", "freeze_authority_renounced"]),
-            "max_rug_ratio": cls._to_float(cls._first_present(raw, [
-                "max_rug_ratio", "rug_ratio", "max_rugged_ratio",
-                "top_rug_percentage",
-            ])),
-            "max_entrapment_ratio": cls._to_float(cls._first_present(raw, [
-                "max_entrapment_ratio", "entrapment_ratio",
-                "top_entrapment_trader_percentage",
-            ])),
-            "is_wash_trading": cls._first_present(raw, [
-                "is_wash_trading", "wash_trading", "wash_trading_detected",
-                "is_wash",
-            ]),
+            # GMGN / 思路.md 语义字段
+            "rug_ratio": rug_ratio,
+            "entrapment_ratio": entrapment_ratio,
+            "bundler_rate": bundler_rate,
+            "bundler_trader_amount_rate": bundler_rate,
+            "suspected_insider_hold_rate": suspected_insider_hold_rate,
+            "is_wash_trading": is_wash_trading,
+            # Compatibility with old DB / thresholds fields
+            "max_rug_ratio": rug_ratio,
+            "max_entrapment_ratio": entrapment_ratio,
+            "max_bundler_rate": bundler_rate,
             "rat_trader_amount_rate": cls._to_float(cls._first_present(raw, [
                 "rat_trader_amount_rate", "rat_trader_rate",
                 "top_rat_trader_percentage",
-            ])),
-            "suspected_insider_hold_rate": cls._to_float(cls._first_present(raw, [
-                "suspected_insider_hold_rate", "insider_hold_rate",
-                "suspected_insider_rate",
             ])),
             "max_insider_ratio": cls._to_float(cls._first_present(raw, [
                 "max_insider_ratio", "max-insider-ratio", "insider_ratio",
                 "insider_ratio_max", "max_insider_rate", "insider_rate",
                 "top_insider_percentage", "top_insider_trader_percentage",
                 "insider_trader_amount_rate", "insider_amount_rate",
-            ])),
-            "max_bundler_rate": cls._to_float(cls._first_present(raw, [
-                "max_bundler_rate", "bundler_rate", "bundler_trader_amount_rate",
-                "top_bundler_trader_percentage",
             ])),
             "fresh_wallet_rate": cls._to_float(cls._first_present(raw, [
                 "fresh_wallet_rate", "fresh_wallets_rate", "fresh_wallet", "fresh_rate",

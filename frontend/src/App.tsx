@@ -34,9 +34,9 @@ function App() {
       </header>
 
       <main>
-        {activeTab === 'control' && <ControlCenter />}
-        {activeTab === 'portfolio' && <Portfolio />}
-        {activeTab === 'ops' && <Operations />}
+        <div hidden={activeTab !== 'control'}><ControlCenter /></div>
+        <div hidden={activeTab !== 'portfolio'}><Portfolio active={activeTab === 'portfolio'} /></div>
+        <div hidden={activeTab !== 'ops'}><Operations active={activeTab === 'ops'} /></div>
       </main>
     </div>
   );

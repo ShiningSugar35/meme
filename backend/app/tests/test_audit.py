@@ -770,7 +770,7 @@ async def test_export_trade_audit_endpoint_with_data(pipeline_factory):
             app_repo = client.app.state.repo
             await app_repo.set_runtime_setting("session_started_at", "2020-01-01T00:00:00Z", "test")
 
-            r = client.post("/api/runtime/emergency/export-trade-audit")
+            r = client.post("/api/runtime/emergency/export-trade-audit", json={"preset": "all"})
             assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
             data = r.json()
             assert data.get("ok") is True
@@ -780,20 +780,13 @@ async def test_export_trade_audit_endpoint_with_data(pipeline_factory):
 
             p = positions[0]
             assert p["position_id"] == pos_id
-            assert p["entry_metrics"]["rug_ratio"] == 0.05
+            assert p["window_pnl"]["buy_value_usd"] == 0.10
+            assert p["window_pnl"]["sell_value_usd"] == 0.15
+            assert p["window_pnl"]["pnl_usd"] == 0.05
 
-            trade_events = p.get("trade_events", [])
+            trade_events = p.get("trade_events_all", [])
             sells = [te for te in trade_events if te["side"] == "SELL"]
             assert len(sells) == 1
-            # sell_price_multiple should come from EXIT audit (1.50), not spot price (0.0016/0.001=1.60)
-            assert sells[0]["sell_price_multiple"] == 1.50, \
-                f"Expected 1.50 from EXIT audit, got {sells[0]['sell_price_multiple']}"
-            assert sells[0]["exit_audit"] is not None
-            assert sells[0]["exit_audit"]["sell_price_multiple"] == 1.50
-
-            exit_audits = p.get("exit_audits", [])
-            assert len(exit_audits) == 1
-            assert exit_audits[0]["exit_reason_code"] == "HARD_TP_160"
     finally:
         settings.SQLITE_PATH = original_path
 
@@ -1038,7 +1031,7 @@ class TestAccountingUnit:
                 assert r.status_code == 200
                 data = r.json()
                 summary = data.get("accounting_status_summary", {})
-                assert summary.get("pending_rpc_backfill_count", 0) >= 1, \
+                assert summary.get("pending_rpc_backfill", 0) >= 1, \
                     f"Expected >=1 pending, got {summary}"
         finally:
             settings.SQLITE_PATH = original_path

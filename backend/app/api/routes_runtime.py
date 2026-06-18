@@ -18,6 +18,90 @@ from ..logging_config import logger
 from ..strategy.thresholds import requires_smart_degen_for_x
 
 
+BJ_TZ = timezone(timedelta(hours=8))
+
+def now_beijing() -> datetime:
+    return datetime.now(BJ_TZ)
+
+def parse_beijing_time(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    s = str(value).strip()
+    s = s.replace(" ", "T")
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        raise ValueError(f"Invalid Beijing datetime: {value}")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=BJ_TZ)
+    else:
+        dt = dt.astimezone(BJ_TZ)
+    return dt
+
+def to_utc_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=BJ_TZ)
+    return dt.astimezone(timezone.utc).isoformat()
+
+def to_beijing_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(BJ_TZ).isoformat()
+
+def resolve_beijing_window(
+    payload: Dict[str, Any],
+    *,
+    default_hours: int,
+    allow_all: bool = False,
+) -> Dict[str, Any]:
+    preset = str(payload.get("preset") or f"{default_hours}h").lower()
+    if allow_all and preset == "all":
+        return {
+            "preset": "all",
+            "is_all": True,
+            "start_bj": None,
+            "end_bj": None,
+            "start_utc": None,
+            "end_utc": None,
+            "timezone": "Asia/Shanghai",
+        }
+    end_bj = parse_beijing_time(payload.get("end_at_beijing")) or now_beijing()
+    start_bj = parse_beijing_time(payload.get("start_at_beijing"))
+    if start_bj is None:
+        if preset in ("12h", "12"):
+            start_bj = end_bj - timedelta(hours=12)
+        elif preset in ("24h", "24"):
+            start_bj = end_bj - timedelta(hours=24)
+        elif preset in ("48h", "48"):
+            start_bj = end_bj - timedelta(hours=48)
+        elif preset in ("7d", "7day", "7days"):
+            start_bj = end_bj - timedelta(days=7)
+        else:
+            start_bj = end_bj - timedelta(hours=default_hours)
+    if start_bj >= end_bj:
+        raise ValueError("start_at_beijing must be earlier than end_at_beijing")
+    return {
+        "preset": preset,
+        "is_all": False,
+        "start_bj": start_bj,
+        "end_bj": end_bj,
+        "start_utc": to_utc_iso(start_bj),
+        "end_utc": to_utc_iso(end_bj),
+        "timezone": "Asia/Shanghai",
+    }
+
+NOISE_LOG_PATTERNS = (
+    "Duplicate tokens detected across type shards",
+)
+
+def _is_noise_log(message: Any, category: Any = None) -> bool:
+    msg = str(message or "")
+    cat = str(category or "")
+    if cat == "DISCOVERY" and "Duplicate tokens detected across type shards" in msg:
+        return True
+    return any(p in msg for p in NOISE_LOG_PATTERNS)
+
+
 SMART_DEGEN_AUDIT_FIELDS = {
     "smart_degen_max_holder_address",
     "smart_degen_max_holder_pct",
@@ -40,6 +124,7 @@ router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
 LOG_EXPORT_DIR = Path("./logs")
 OPEN_POSITION_EXCLUDED_STATUSES = ("CLOSED", "LEGACY_INVALID_CONFIG", "MIGRATION_NEEDED")
+FINAL_TRADE_STATUSES = ("CONFIRMED", "EXECUTED", "FILLED", "SUCCESS", "SIMULATED")
 
 RULE_META: Dict[str, Dict[str, str]] = {
     "type_new_creation": {"label": "type≠new_creation", "stage": "risk_filter", "section": "prefilter"},
@@ -726,15 +811,22 @@ async def _count_all_time_unique_trench_pools(repo: Repositories) -> int:
     return int((row or {}).get("c", 0))
 
 
-async def _count_stage_unique_pools(repo: Repositories, stage: str, passed: Optional[bool] = None) -> int:
+async def _count_stage_unique_pools(repo: Repositories, stage: str, passed: Optional[bool] = None, since: Optional[str] = None, until: Optional[str] = None) -> int:
     extra = ""
+    params: List[Any] = [stage]
     if passed is True:
         extra = " AND tsm.passed=1"
     elif passed is False:
         extra = " AND tsm.passed=0"
+    if since:
+        extra += " AND tsm.created_at >= ?"
+        params.append(since)
+    if until:
+        extra += " AND tsm.created_at < ?"
+        params.append(until)
     row = await _fetch_one(repo,
         f"SELECT COUNT(DISTINCT tsm.token_mint || '|' || COALESCE(NULLIF(de.pool_address,''), NULLIF(snap.pool_address,''), '')) AS c FROM token_strategy_matches tsm LEFT JOIN token_metric_snapshots snap ON snap.id=tsm.snapshot_id LEFT JOIN discovery_events de ON de.id=tsm.discovery_event_id WHERE tsm.stage=?{extra}",
-        (stage,))
+        tuple(params))
     return int((row or {}).get("c", 0))
 
 
@@ -978,13 +1070,14 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
     for s in stages:
         stage = s["stage"]
         if stage == "risk_filter":
-            total = all_time_trench
-            passed = await _count_stage_unique_pools(repo, stage, passed=True)
-            failed = total - passed
+            total = summary.get("risk_surface_checked_count") or await _count_stage_unique_pools(
+                repo, stage, passed=None, since=lower_bound, until=upper_bound
+            )
+            passed = await _count_stage_unique_pools(repo, stage, passed=True, since=lower_bound, until=upper_bound)
         else:
-            total = await _count_stage_unique_pools(repo, stage, passed=None)
-            passed = await _count_stage_unique_pools(repo, stage, passed=True)
-            failed = total - passed
+            total = await _count_stage_unique_pools(repo, stage, passed=None, since=lower_bound, until=upper_bound)
+            passed = await _count_stage_unique_pools(repo, stage, passed=True, since=lower_bound, until=upper_bound)
+        failed = total - passed
         api_calls = 0
         ok_rate_val = None
         rate_limited = 0
@@ -1015,13 +1108,27 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
             severity = "warn"
         else:
             severity = "ok"
-        result.append({
+
+        item: Dict[str, Any] = {
             "stage": stage, "label": s["label"], "endpoint": s["endpoint_filter"].replace('%',''), "weight": s["weight"],
             "candidates_in": total, "checked_count": total, "passed_count": passed,
             "failed_count": failed, "skipped_count": 0,
             "api_calls": api_calls, "ok_rate": ok_rate_val, "rate_limited_count": rate_limited,
             "avg_latency_ms": 0, "severity": severity,
-        })
+        }
+
+        if stage == "kline_fallback" and has_window:
+            invalid_row = await _fetch_one(repo, """
+                SELECT COUNT(*) AS c FROM token_strategy_matches
+                WHERE stage='kline_fallback' AND passed=0
+                  AND created_at>=? AND created_at<?
+                  AND (pass_fail_detail_json LIKE '%kline_data_quality%'
+                       OR pass_fail_detail_json LIKE '%kline_validation_pass%'
+                       OR pass_fail_detail_json LIKE '%data_unavailable%')
+            """, (lower_bound, upper_bound))
+            item["kline_invalid_or_missing_count"] = int((invalid_row or {}).get("c", 0))
+
+        result.append(item)
     return result
 
 
@@ -1608,308 +1715,287 @@ async def backup_db(request: Request):
 
 
 @router.post("/emergency/export-trade-audit")
-async def export_trade_audit(request: Request):
+async def export_trade_audit(request: Request, payload: Dict[str, Any] = Body(default={})):
     repo, owned = await _get_repo(request)
     try:
-        runtime = await _runtime_settings(repo)
-        session_started_at = runtime.get("session_started_at")
+        payload = payload or {}
+        acct = str(payload.get("account_type") or "ALL").upper()
+        if acct not in {"ALL", "SIM", "LIVE"}:
+            return JSONResponse({"ok": False, "error": "account_type must be ALL, SIM, or LIVE"}, status_code=400)
+
+        window = resolve_beijing_window(payload, default_hours=24, allow_all=True)
+        is_all = bool(window["is_all"])
 
         LOG_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        status_placeholders = ",".join(["?"] * len(FINAL_TRADE_STATUSES))
 
-        if session_started_at:
-            events = await _fetch_all(repo,
-                """SELECT te.*, t.symbol, t.name,
-                          COALESCE(te.executed_token_amount, te.requested_token_amount) AS token_amount,
-                          sg.name AS strategy_name
-                   FROM trade_events te
-                   LEFT JOIN tokens t ON t.token_mint = te.token_mint
-                   LEFT JOIN strategy_groups sg ON sg.id = te.strategy_id
-                   WHERE te.status='CONFIRMED' AND te.side IN ('BUY','SELL')
-                     AND te.created_at >= ?
-                   ORDER BY te.position_id, te.created_at ASC""",
-                (session_started_at,))
+        # Find positions in window or all positions
+        if is_all:
+            if acct == "ALL":
+                positions = await _fetch_all(repo, """
+                    SELECT p.*, t.symbol, t.name, sg.name AS strategy_name
+                    FROM positions p
+                    LEFT JOIN tokens t ON t.token_mint=p.token_mint
+                    LEFT JOIN strategy_groups sg ON sg.id=p.live_strategy_id
+                    ORDER BY COALESCE(p.opened_at, p.updated_at) DESC, p.id DESC
+                """)
+            else:
+                positions = await _fetch_all(repo, """
+                    SELECT p.*, t.symbol, t.name, sg.name AS strategy_name
+                    FROM positions p
+                    LEFT JOIN tokens t ON t.token_mint=p.token_mint
+                    LEFT JOIN strategy_groups sg ON sg.id=p.live_strategy_id
+                    WHERE p.account_type=?
+                    ORDER BY COALESCE(p.opened_at, p.updated_at) DESC, p.id DESC
+                """, (acct,))
         else:
-            events = await _fetch_all(repo,
-                """SELECT te.*, t.symbol, t.name,
-                          COALESCE(te.executed_token_amount, te.requested_token_amount) AS token_amount,
-                          sg.name AS strategy_name
-                   FROM trade_events te
-                   LEFT JOIN tokens t ON t.token_mint = te.token_mint
-                   LEFT JOIN strategy_groups sg ON sg.id = te.strategy_id
-                   WHERE te.status='CONFIRMED' AND te.side IN ('BUY','SELL')
-                   ORDER BY te.position_id, te.created_at ASC
-                   LIMIT 5000""")
+            start_utc = window["start_utc"]
+            end_utc = window["end_utc"]
+            params: List[Any] = list(FINAL_TRADE_STATUSES)
+            if acct != "ALL":
+                params.append(acct)
+            params.extend([start_utc, end_utc])
+            params.extend([start_utc, end_utc])
+            params.extend([start_utc, end_utc])
 
-        pos_events: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-        for ev in events:
-            pid = ev.get("position_id")
-            if pid is not None:
-                pos_events[int(pid)].append(ev)
+            account_clause = "AND p.account_type=?" if acct != "ALL" else ""
+            positions = await _fetch_all(repo, f"""
+                SELECT DISTINCT p.*, t.symbol, t.name, sg.name AS strategy_name
+                FROM positions p
+                LEFT JOIN tokens t ON t.token_mint=p.token_mint
+                LEFT JOIN strategy_groups sg ON sg.id=p.live_strategy_id
+                WHERE 1=1
+                  {account_clause}
+                  AND (
+                    (p.opened_at IS NOT NULL AND p.opened_at >= ? AND p.opened_at < ?)
+                    OR
+                    (p.closed_at IS NOT NULL AND p.closed_at >= ? AND p.closed_at < ?)
+                    OR
+                    EXISTS (
+                      SELECT 1 FROM trade_events te
+                      WHERE te.position_id=p.id
+                        AND te.status IN ({status_placeholders})
+                        AND te.side IN ('BUY','SELL')
+                        AND te.created_at >= ?
+                        AND te.created_at < ?
+                    )
+                  )
+                ORDER BY COALESCE(p.opened_at, p.updated_at) DESC, p.id DESC
+            """, tuple(params))
+
+        def event_in_window(ev: dict) -> bool:
+            if is_all:
+                return True
+            ts = str(ev.get("created_at") or "")
+            if not ts:
+                return False
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts_utc = dt.astimezone(timezone.utc).isoformat()
+                return window["start_utc"] <= ts_utc < window["end_utc"]
+            except Exception:
+                return False
 
         position_items: List[Dict[str, Any]] = []
-        sim_realized = 0.0
-        live_realized = 0.0
-        sim_losing = 0
-        sim_winning = 0
-        live_losing = 0
-        live_winning = 0
+        sim_window_pnl = 0.0
+        live_window_pnl = 0.0
+        sim_lifecycle_pnl = 0.0
+        live_lifecycle_pnl = 0.0
+        total_window_events = 0
+        total_all_events = 0
 
-        for pid, evs in pos_events.items():
-            first = evs[0]
-            account_type = str(first.get("account_type") or "SIM")
-            symbol = str(first.get("symbol") or "")
-            token_mint = str(first.get("token_mint") or "")
-            name = str(first.get("name") or "")
-            strategy_name = str(first.get("strategy_name") or "")
-            strategy_id = first.get("strategy_id")
+        for position in positions:
+            pid = int(position["id"])
+            account_type = str(position.get("account_type") or "SIM")
+            token_mint = str(position.get("token_mint") or "")
 
-            buys = [e for e in evs if str(e.get("side") or "") == "BUY"]
-            sells = [e for e in evs if str(e.get("side") or "") == "SELL"]
+            all_events_raw = await _fetch_all(repo, f"""
+                SELECT te.*, t.symbol, t.name,
+                       COALESCE(te.executed_token_amount, te.requested_token_amount) AS token_amount
+                FROM trade_events te
+                LEFT JOIN tokens t ON t.token_mint=te.token_mint
+                WHERE te.position_id=?
+                  AND te.status IN ({status_placeholders})
+                  AND te.side IN ('BUY','SELL')
+                ORDER BY te.created_at ASC, te.id ASC
+            """, tuple([pid] + list(FINAL_TRADE_STATUSES)))
 
-            entry_audit_rows = []
-            exit_audit_rows = []
-            try:
-                entry_audit_rows = await repo.get_position_audits(pid, audit_type="ENTRY")
-                exit_audit_rows = await repo.get_position_audits(pid, audit_type="EXIT")
-            except Exception:
-                pass
-            token_info = await repo.get_token(token_mint)
-            latest_snap = await repo.get_latest_token_metric_snapshot(token_mint)
-            smart_money = await repo.get_position_smart_money_baselines(pid)
-            position = await repo.get_position(pid) or {}
+            window_events_raw = [e for e in all_events_raw if event_in_window(e)]
 
-            total_buy_value = sum(abs(float(e.get("trade_value_usd_net") or 0)) for e in buys)
-            total_sell_value = sum(abs(float(e.get("trade_value_usd_net") or 0)) for e in sells)
-            realized_pnl_usd = round(total_sell_value - total_buy_value, 6)
-            total_cost = total_buy_value if total_buy_value > 0 else (total_sell_value / 2 if total_sell_value > 0 else 1)
-            realized_pnl_pct = round(realized_pnl_usd / max(total_cost, 0.000001) * 100, 2)
-            is_losing = realized_pnl_usd < 0
+            def serialize_events(evs: list) -> list:
+                out = []
+                for e in evs:
+                    created_at_utc = str(e.get("created_at") or "")
+                    created_at_beijing = _utc_to_beijing(created_at_utc)
+                    side = str(e.get("side") or "")
+                    trade_value_raw = float(e.get("trade_value_usd_net") or 0)
+                    trade_value_usd_net = round(-abs(trade_value_raw) if side == "BUY" else abs(trade_value_raw), 6)
+                    out.append({
+                        "side": side,
+                        "created_at_utc": created_at_utc,
+                        "created_at_beijing": created_at_beijing,
+                        "price_usd": e.get("price_usd"),
+                        "token_amount": e.get("token_amount"),
+                        "trade_value_usd_net": trade_value_usd_net,
+                        "exit_reason_code": e.get("exit_reason"),
+                        "exit_reason_label": e.get("exit_reason_label"),
+                    })
+                return out
 
-            entry_audit_json = {}
-            entry_metrics_source = "entry_audit"
-            if entry_audit_rows and len(entry_audit_rows) > 0:
-                try:
-                    raw = entry_audit_rows[0].get("audit_json") or {}
-                    if isinstance(raw, str):
-                        raw = json.loads(raw)
-                    entry_audit_json = raw if isinstance(raw, dict) else {}
-                except Exception:
-                    entry_audit_json = {}
-                entry_metrics_source = "entry_audit"
+            def calc_pnl(evs: list) -> dict:
+                buys = sum(abs(float(e.get("trade_value_usd_net") or 0)) for e in evs if str(e.get("side") or "") == "BUY")
+                sells = sum(abs(float(e.get("trade_value_usd_net") or 0)) for e in evs if str(e.get("side") or "") == "SELL")
+                return {
+                    "buy_value_usd": round(buys, 6),
+                    "sell_value_usd": round(sells, 6),
+                    "pnl_usd": round(sells - buys, 6),
+                    "buy_count": len([e for e in evs if str(e.get("side") or "") == "BUY"]),
+                    "sell_count": len([e for e in evs if str(e.get("side") or "") == "SELL"]),
+                }
+
+            window_pnl = calc_pnl(window_events_raw)
+            lifecycle_pnl = calc_pnl(all_events_raw)
+
+            if account_type == "LIVE":
+                live_window_pnl += window_pnl["pnl_usd"]
+                live_lifecycle_pnl += lifecycle_pnl["pnl_usd"]
             else:
-                try:
-                    fallback: Dict[str, Any] = {k: None for k in ENTRY_AUDIT_REQUIRED_FIELDS}
-                    if latest_snap:
-                        fallback.update({
-                            "rug_ratio": latest_snap.get("max_rug_ratio"),
-                            "entrapment_ratio": latest_snap.get("max_entrapment_ratio"),
-                            "bundler_rate": latest_snap.get("max_bundler_rate"),
-                            "liquidity": latest_snap.get("liquidity_usd"),
-                            "top_holder_rate": latest_snap.get("top_10_holder_rate"),
-                            "fresh_wallet_rate": latest_snap.get("fresh_wallet_rate"),
-                            "holder_count": latest_snap.get("holder_count"),
-                            "marketcap": latest_snap.get("market_cap"),
-                            "is_wash_trading": latest_snap.get("is_wash_trading"),
-                            "rat_trader_amount_rate": latest_snap.get("rat_trader_amount_rate"),
-                            "suspected_insider_hold_rate": latest_snap.get("suspected_insider_hold_rate"),
-                            "sell_tax": latest_snap.get("sell_tax"),
-                            "burn_status": latest_snap.get("burn_status"),
-                            "sniper_count": latest_snap.get("sniper_count"),
-                            "socials": [{"type": "twitter", "value": "unknown", "url": ""}] if latest_snap and latest_snap.get("has_social") else None,
-                            "volume_24h": latest_snap.get("volume_usd") if latest_snap else None,
-                            "price_change_percent1h": latest_snap.get("price_change_percent_1h") if latest_snap else None,
-                            "swaps_1h": latest_snap.get("swaps_1h") if latest_snap else None,
-                            "volume_1h": latest_snap.get("volume_1h") if latest_snap else None,
-                            "top1_addr_type0_holder_rate": latest_snap.get("top1_holder_rate") if latest_snap else None,
-                            "creator_balance_rate": latest_snap.get("creator_balance_rate") if latest_snap else None,
-                            "smart_degen_count": latest_snap.get("smart_degen_count") if latest_snap else None,
-                        })
-                    fallback["entry_metrics_source_label"] = "latest_snapshot_fallback"
-                    entry_audit_json = fallback
-                    entry_metrics_source = "latest_snapshot_fallback"
-                except Exception:
-                    entry_audit_json = {}
-                    entry_metrics_source = "error_fallback"
+                sim_window_pnl += window_pnl["pnl_usd"]
+                sim_lifecycle_pnl += lifecycle_pnl["pnl_usd"]
 
-            exit_audit_list: List[Dict[str, Any]] = []
-            for ae in exit_audit_rows:
-                try:
-                    raw = ae.get("audit_json") or {}
-                    if isinstance(raw, str):
-                        raw = json.loads(raw)
-                    exit_audit_list.append(raw if isinstance(raw, dict) else {})
-                except Exception:
-                    exit_audit_list.append({})
+            total_window_events += len(window_events_raw)
+            total_all_events += len(all_events_raw)
 
-            trade_events_list: List[Dict[str, Any]] = []
-            for e in evs:
-                created_at_utc = str(e.get("created_at") or "")
-                created_at_beijing = ""
-                if created_at_utc:
-                    try:
-                        dt = datetime.fromisoformat(created_at_utc.replace("Z", "+00:00"))
-                        dt_bj = dt + timedelta(hours=8)
-                        created_at_beijing = dt_bj.isoformat()
-                    except Exception:
-                        created_at_beijing = created_at_utc
-
-                side = str(e.get("side") or "")
-                trade_value_raw = float(e.get("trade_value_usd_net") or 0)
-                trade_value_usd_net = round(-abs(trade_value_raw) if side == "BUY" else abs(trade_value_raw), 6)
-
-                sell_price_multiple = None
-                buy_price_usd = entry_audit_json.get("buy_price_usd") or (buys[0].get("price_usd") if buys else None)
-
-                sell_audit = None
-                if side == "SELL":
-                    for ea in exit_audit_list:
-                        if ea.get("sell_time_utc") and created_at_utc:
-                            try:
-                                if abs((datetime.fromisoformat(ea["sell_time_utc"].replace("Z", "+00:00")) - datetime.fromisoformat(created_at_utc.replace("Z", "+00:00"))).total_seconds()) < 5:
-                                    sell_audit = ea
-                                    break
-                            except Exception:
-                                pass
-                    if sell_audit and sell_audit.get("sell_price_multiple") is not None:
-                        sell_price_multiple = sell_audit["sell_price_multiple"]
-                    elif buy_price_usd and float(buy_price_usd) > 0:
-                        sell_price = float(e.get("price_usd") or 0)
-                        sell_price_multiple = round(sell_price / float(buy_price_usd), 2) if sell_price > 0 else None
-
-                trade_events_list.append({
-                    "side": side,
-                    "created_at_utc": created_at_utc,
-                    "created_at_beijing": created_at_beijing,
-                    "price_usd": e.get("price_usd"),
-                    "token_amount": e.get("token_amount"),
-                    "trade_value_usd_net": trade_value_usd_net,
-                    "trade_value_usd_expected": e.get("trade_value_usd_expected"),
-                    "trade_value_usd_conservative": e.get("trade_value_usd_conservative"),
-                    "trade_value_usd_actual": e.get("trade_value_usd_actual"),
-                    "exit_reason_code": e.get("exit_reason"),
-                    "exit_reason_label": e.get("exit_reason_label"),
-                    "sell_price_multiple": sell_price_multiple,
-                    "sell_price_usd_effective": e.get("sell_price_usd_effective"),
-                    "buy_price_usd_effective": e.get("buy_price_usd_effective"),
-                    "fee_usd_est": e.get("fee_usd_est"),
-                    "gas_fee_lamports": e.get("gas_fee_lamports"),
-                    "priority_fee_lamports": e.get("priority_fee_lamports"),
-                    "jito_tip_lamports": e.get("jito_tip_lamports"),
-                    "platform_fee_amount": e.get("platform_fee_amount"),
-                    "fee_detail_json": _safe_json_loads(e.get("fee_detail_json"), None),
-                    "accounting_source": e.get("accounting_source"),
-                    "accounting_status": e.get("accounting_status"),
-                    "quote_summary": _safe_json_loads(e.get("quote_json"), {}),
-                    "exit_audit": sell_audit,
-                })
-
-            item: Dict[str, Any] = {
+            item = {
                 "position_id": pid,
                 "account_type": account_type,
-                "symbol": symbol,
+                "symbol": position.get("symbol") or "",
                 "token_mint": token_mint,
-                "name": name,
-                "strategy_id": strategy_id,
-                "strategy_name": strategy_name,
+                "strategy_name": position.get("strategy_name") or "",
                 "opened_at_utc": position.get("opened_at"),
                 "opened_at_beijing": _utc_to_beijing(position.get("opened_at")),
                 "closed_at_utc": position.get("closed_at"),
                 "closed_at_beijing": _utc_to_beijing(position.get("closed_at")),
-                "entry_metrics_source": entry_metrics_source,
-                "entry_metrics": entry_audit_json,
-                "exit_audits": exit_audit_list,
-                "smart_money": [
-                    {
-                        "wallet_address": b.get("wallet_address"),
-                        "rank_at_entry": b.get("rank_at_entry"),
-                        "baseline_amount_percentage": b.get("baseline_amount_percentage"),
-                        "baseline_usd_value": b.get("baseline_usd_value"),
-                        "latest_amount_percentage": b.get("latest_amount_percentage"),
-                        "latest_usd_value": b.get("latest_usd_value"),
-                    }
-                    for b in smart_money
-                ] if smart_money else [],
-                "realized_pnl_usd": realized_pnl_usd,
-                "realized_pnl_pct": realized_pnl_pct,
-                "is_losing": is_losing,
-                "trade_events": trade_events_list,
+                "window_pnl": window_pnl,
+                "lifecycle_pnl": lifecycle_pnl,
+                "trade_events_in_window": serialize_events(window_events_raw),
+                "trade_events_all": serialize_events(all_events_raw),
             }
-
-            if is_losing:
-                item["loss_debug_summary"] = {
-                    "buy_price_usd": entry_audit_json.get("buy_price_usd") or (buys[0].get("price_usd") if buys else None),
-                    "all_sell_prices": [s.get("price_usd") for s in sells],
-                    "all_sell_effective_prices": [s.get("sell_price_usd_effective") for s in sells],
-                    "all_sell_multiples": [],
-                    "all_sell_reasons": [s.get("exit_reason_label") for s in sells if s.get("exit_reason_label")],
-                    "all_sell_accounting_sources": [s.get("accounting_source") for s in sells],
-                    "all_fee_details": [s.get("fee_detail_json") for s in sells],
-                    "risk_failed_rules": [],
-                    "dust_events": [],
-                    "smart_money_events": [],
-                    "top3_smart_degen_events": [],
-                }
-                buy_price_audit = entry_audit_json.get("buy_price_usd")
-                for s in sells:
-                    sp = s.get("price_usd")
-                    if buy_price_audit and sp and float(buy_price_audit) > 0:
-                        item["loss_debug_summary"]["all_sell_multiples"].append(round(float(sp) / float(buy_price_audit), 2))
-                    else:
-                        item["loss_debug_summary"]["all_sell_multiples"].append(None)
-                for ea in exit_audit_list:
-                    er = ea.get("exit_reason_code")
-                    if er == "RISK_RECHECK_FAILED":
-                        item["loss_debug_summary"]["risk_failed_rules"] = ea.get("risk_failed_rules") or []
-                    if er == "DUST_FORCE_EXIT":
-                        item["loss_debug_summary"]["dust_events"].append(ea.get("dust_detail") or {})
-                    if er == "SMART_MONEY_SELL":
-                        item["loss_debug_summary"]["smart_money_events"].append(ea.get("smart_money_trigger_detail") or {})
-                    if er == "TOP3_SMART_DEGEN_DUMP":
-                        item["loss_debug_summary"]["top3_smart_degen_events"].append(ea.get("top3_smart_degen_trigger_detail") or {})
-
-            if account_type == "LIVE":
-                live_realized += realized_pnl_usd
-                if is_losing:
-                    live_losing += 1
-                else:
-                    live_winning += 1
-            else:
-                sim_realized += realized_pnl_usd
-                if is_losing:
-                    sim_losing += 1
-                else:
-                    sim_winning += 1
-
             position_items.append(item)
 
-        payload = {
-            "timezone": "Asia/Shanghai",
-            "session_started_at": session_started_at,
-            "exported_at": utc_now_iso(),
+        # Orphan trade events
+        orphan_events = []
+        if payload.get("include_orphan_trade_events", True):
+            orphan_params: List[Any] = list(FINAL_TRADE_STATUSES)
+            orphan_sql = f"""
+                SELECT te.*, t.symbol, t.name,
+                       COALESCE(te.executed_token_amount, te.requested_token_amount) AS token_amount
+                FROM trade_events te
+                LEFT JOIN tokens t ON t.token_mint=te.token_mint
+                WHERE te.position_id IS NULL
+                  AND te.status IN ({status_placeholders})
+                  AND te.side IN ('BUY','SELL')
+            """
+            if acct != "ALL":
+                orphan_sql += " AND te.account_type=?"
+                orphan_params.append(acct)
+            if not is_all:
+                orphan_sql += " AND te.created_at >= ? AND te.created_at < ?"
+                orphan_params.append(window["start_utc"])
+                orphan_params.append(window["end_utc"])
+            orphan_sql += " ORDER BY te.created_at ASC"
+            orphan_rows = await _fetch_all(repo, orphan_sql, tuple(orphan_params))
+            for e in orphan_rows:
+                created_at_utc = str(e.get("created_at") or "")
+                orphan_events.append({
+                    "id": e.get("id"),
+                    "side": e.get("side"),
+                    "account_type": e.get("account_type"),
+                    "token_mint": e.get("token_mint"),
+                    "symbol": e.get("symbol"),
+                    "price_usd": e.get("price_usd"),
+                    "token_amount": e.get("token_amount"),
+                    "trade_value_usd_net": e.get("trade_value_usd_net"),
+                    "created_at_utc": created_at_utc,
+                    "created_at_beijing": _utc_to_beijing(created_at_utc),
+                    "status": e.get("status"),
+                    "exit_reason": e.get("exit_reason"),
+                })
+
+        # Diagnostics
+        try:
+            diag_status_rows = await _fetch_all(repo, f"""
+                SELECT account_type, side, status, COUNT(*) AS cnt
+                FROM trade_events
+                WHERE side IN ('BUY','SELL')
+                  AND status IN ({status_placeholders})
+                GROUP BY account_type, side, status
+            """, tuple(FINAL_TRADE_STATUSES))
+            trade_events_by_status = {}
+            for r in diag_status_rows:
+                key = f"{r.get('account_type')}|{r.get('side')}|{r.get('status')}"
+                trade_events_by_status[key] = r.get("cnt")
+
+            null_pos_buy_sell = await _fetch_one(repo, f"""
+                SELECT COUNT(*) AS c FROM trade_events
+                WHERE side IN ('BUY','SELL')
+                  AND status IN ({status_placeholders})
+                  AND position_id IS NULL
+            """, tuple(FINAL_TRADE_STATUSES))
+
+            pos_without_te = await _fetch_one(repo, """
+                SELECT COUNT(*) AS c FROM positions p
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM trade_events te WHERE te.position_id=p.id AND te.side IN ('BUY','SELL')
+                )
+            """)
+        except Exception:
+            trade_events_by_status = {}
+            null_pos_buy_sell = {"c": 0}
+            pos_without_te = {"c": 0}
+
+        payload_out = {
             "export_type": "trade_audit",
+            "timezone": "Asia/Shanghai",
+            "window": {
+                "preset": window["preset"],
+                "is_all": is_all,
+                "start_at_beijing": window["start_bj"].isoformat() if window["start_bj"] else None,
+                "end_at_beijing": window["end_bj"].isoformat() if window["end_bj"] else None,
+                "start_at_utc": window["start_utc"],
+                "end_at_utc": window["end_utc"],
+            },
+            "exported_at_beijing": now_beijing().isoformat(),
+            "exported_at_utc": utc_now_iso(),
             "summary": {
-                "sim_realized_pnl_usd": round(sim_realized, 6),
-                "live_realized_pnl_usd": round(live_realized, 6),
-                "sim_losing_positions": sim_losing,
-                "live_losing_positions": live_losing,
-                "sim_winning_positions": sim_winning,
-                "live_winning_positions": live_winning,
-                "total_positions": len(position_items),
-                "total_losing": sim_losing + live_losing,
-                "total_winning": sim_winning + live_winning,
+                "window_sim_pnl_usd": round(sim_window_pnl, 6),
+                "window_live_pnl_usd": round(live_window_pnl, 6),
+                "lifecycle_sim_pnl_usd": round(sim_lifecycle_pnl, 6),
+                "lifecycle_live_pnl_usd": round(live_lifecycle_pnl, 6),
+                "positions_exported": len(position_items),
+                "window_trade_events_count": total_window_events,
+                "all_trade_events_count": total_all_events,
             },
             "positions": position_items,
+            "orphan_trade_events": orphan_events,
+            "diagnostics": {
+                "trade_events_by_status": trade_events_by_status,
+                "null_position_id_buy_sell_events": int((null_pos_buy_sell or {}).get("c", 0)),
+                "positions_without_trade_events": int((pos_without_te or {}).get("c", 0)),
+            },
         }
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         out = LOG_EXPORT_DIR / f"trade_audit_{ts}.json"
-        text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        text = json.dumps(payload_out, ensure_ascii=False, indent=2, default=str)
         try:
             import asyncio as _asyncio
             await _asyncio.to_thread(out.write_text, text, encoding="utf-8")
         except Exception:
             out.write_text(text, encoding="utf-8")
-        return {"ok": True, "export_path": str(out), "path": str(out), "data": payload}
+        return {"ok": True, "export_path": str(out), "path": str(out), "data": payload_out}
     except Exception as exc:
         logger.exception("export_trade_audit failed")
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
@@ -1929,48 +2015,67 @@ async def export_logs(request: Request):
     try:
         LOG_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
+        window = resolve_beijing_window({}, default_hours=12, allow_all=False)
+        start_utc = window["start_utc"]
+        end_utc = window["end_utc"]
+
         session_started = (await _runtime_settings(repo)).get("session_started_at")
-        beijing_tz = timezone(timedelta(hours=8))
-        exported_beijing = datetime.now(beijing_tz).isoformat()
 
-        # ── system_events: WARNING/WARN/ERROR/CRITICAL ──
-        dup_issues, warning_count, error_count, critical_count = await _deduped_issues(repo, since=None)
+        dup_issues, warning_count, error_count, critical_count = await _deduped_issues(
+            repo, since=start_utc, until=end_utc
+        )
 
-        # ── provider_requests: failed (ok=0) ──
-        provider_failures, provider_summary = await _deduped_provider_failures(repo, since=None)
-        gmgn_auth_replay_count = provider_summary.get("auth_replay_count", 0)
-        gmgn_401_count = provider_summary.get("auth_401_count", 0)
-        gmgn_429_count = provider_summary.get("rate_429_count", 0)
-        provider_failed_total = provider_summary.get("total_failed", 0)
+        provider_failures, provider_summary = await _deduped_provider_failures(
+            repo, since=start_utc, until=end_utc
+        )
 
-        # ── raw system_events for detail ──
         raw_events = await _fetch_all(repo,
             """SELECT level, category, message, context_json, account_type, created_at
                FROM system_events
                WHERE level IN ('WARNING','WARN','ERROR','CRITICAL')
-               ORDER BY id DESC LIMIT 200""")
+                 AND created_at >= ?
+                 AND created_at < ?
+               ORDER BY id DESC LIMIT 200""",
+            (start_utc, end_utc))
+
+        raw_events = [
+            r for r in raw_events
+            if not _is_noise_log(r.get("message"), r.get("category"))
+        ]
 
         raw_provider_requests = await _fetch_all(repo,
             """SELECT provider, endpoint, method, status_code, ok, error_code, error_summary,
                       request_summary_json, response_summary_json, created_at
                FROM provider_requests
                WHERE ok = 0
-               ORDER BY id DESC LIMIT 500""")
+                 AND created_at >= ?
+                 AND created_at < ?
+               ORDER BY id DESC LIMIT 500""",
+            (start_utc, end_utc))
 
         payload = {
             "export_type": "runtime_warning_error_logs",
             "timezone": "Asia/Shanghai",
+            "window": {
+                "fixed": True,
+                "hours": 12,
+                "start_at_beijing": window["start_bj"].isoformat(),
+                "end_at_beijing": window["end_bj"].isoformat(),
+                "start_at_utc": start_utc,
+                "end_at_utc": end_utc,
+            },
             "session_started_at_utc": session_started,
-            "exported_at_utc": exported_beijing,
+            "exported_at_beijing": now_beijing().isoformat(),
+            "exported_at_utc": utc_now_iso(),
             "summary": {
                 "warning_count": warning_count,
                 "error_count": error_count,
                 "critical_count": critical_count,
                 "deduped_issue_count": len(dup_issues),
-                "provider_failed_request_count": provider_failed_total,
-                "gmgn_auth_replay_count": gmgn_auth_replay_count,
-                "gmgn_401_count": gmgn_401_count,
-                "gmgn_429_count": gmgn_429_count,
+                "provider_failed_request_count": provider_summary.get("total_failed", 0),
+                "gmgn_auth_replay_count": provider_summary.get("auth_replay_count", 0),
+                "gmgn_401_count": provider_summary.get("auth_401_count", 0),
+                "gmgn_429_count": provider_summary.get("rate_429_count", 0),
             },
             "issues_deduped": dup_issues,
             "provider_failures_deduped": provider_failures,
@@ -1988,7 +2093,7 @@ async def export_logs(request: Request):
                 for r in raw_provider_requests
             ],
         }
-        out = LOG_EXPORT_DIR / f"runtime_logs_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+        out = LOG_EXPORT_DIR / f"runtime_logs_last12h_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
         text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         try:
             import asyncio as _asyncio
@@ -2008,7 +2113,7 @@ async def export_logs(request: Request):
             await repo.close()
 
 
-async def _deduped_issues(repo: Repositories, since: Optional[str] = None) -> tuple:
+async def _deduped_issues(repo: Repositories, since: Optional[str] = None, until: Optional[str] = None) -> tuple:
     """Returns (issues_deduped, warning_count, error_count, critical_count)."""
     rows = await _fetch_all(repo,
         """SELECT level, category, message, context_json, account_type,
@@ -2016,11 +2121,12 @@ async def _deduped_issues(repo: Repositories, since: Optional[str] = None) -> tu
                   MAX(created_at) AS last_seen_at,
                   COUNT(*) AS count
            FROM system_events
-           WHERE level IN ('WARNING','WARN','ERROR','CRITICAL')
-             AND (? IS NULL OR created_at >= ?)
-           GROUP BY level, category, message, context_json, account_type
-           ORDER BY last_seen_at DESC LIMIT 500""",
-        (since, since) if since else (None, None))
+            WHERE level IN ('WARNING','WARN','ERROR','CRITICAL')
+              AND (? IS NULL OR created_at >= ?)
+              AND (? IS NULL OR created_at < ?)
+            GROUP BY level, category, message, context_json, account_type
+            ORDER BY last_seen_at DESC LIMIT 500""",
+        (since, since, until, until))
 
     issues = []
     warning_count = 0
@@ -2089,15 +2195,15 @@ def _suggest_action(level: str, message: str, status_code: Any, gmgn_error: Any)
     return ""
 
 
-async def _deduped_provider_failures(repo: Repositories, since: Optional[str] = None) -> tuple:
+async def _deduped_provider_failures(repo: Repositories, since: Optional[str] = None, until: Optional[str] = None) -> tuple:
     """Returns (failures_deduped, summary_counts)."""
     rows = await _fetch_all(repo,
         """SELECT provider, endpoint, method, status_code, ok, error_code, error_summary,
                   request_summary_json, response_summary_json, created_at
            FROM provider_requests
-           WHERE ok = 0 AND (? IS NULL OR created_at >= ?)
-           ORDER BY id DESC LIMIT 1000""",
-        (since, since) if since else (None, None))
+            WHERE ok = 0 AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+            ORDER BY id DESC LIMIT 1000""",
+        (since, since, until, until))
 
     failures = []
     summary = {"auth_replay_count": 0, "auth_401_count": 0, "rate_429_count": 0, "total_failed": len(rows)}
@@ -2459,84 +2565,78 @@ async def export_session_report_get(request: Request):
 async def pnl_summary(request: Request):
     repo, owned = await _get_repo(request)
     try:
-        # Cash-flow per position: all CONFIRMED BUY/SELL events
-        cf_rows: List[Dict[str, Any]] = []
-        if await _table_exists(repo, "trade_events"):
-            cf_rows = await _fetch_all(repo,
-                "SELECT position_id, account_type, side, trade_value_usd_net FROM trade_events WHERE status='CONFIRMED' AND side IN ('BUY','SELL')")
+        rows = await _fetch_all(repo,
+            """SELECT position_id, account_type, side, trade_value_usd_net,
+                      COALESCE(executed_token_amount, requested_token_amount) AS token_amount
+               FROM trade_events
+               WHERE status='CONFIRMED'
+                 AND side IN ('BUY','SELL')
+                 AND position_id IS NOT NULL""")
 
-        # cashflow[acct][pid] = net cash flow (BUY=negative, SELL=positive)
-        cf: Dict[str, Dict[int, float]] = {"SIM": {}, "LIVE": {}}
-        buy_cost: Dict[str, Dict[int, float]] = {"SIM": {}, "LIVE": {}}
-        for row in cf_rows:
-            pid = row.get("position_id")
-            if pid is None:
-                continue
-            pid = int(pid)
-            acct = str(row.get("account_type") or "SIM")
-            if acct not in cf:
-                acct = "SIM"
-            val = float(row.get("trade_value_usd_net") or 0)
-            side = str(row.get("side") or "")
-            signed = -abs(val) if side == "BUY" else abs(val)
-            cf[acct][pid] = cf[acct].get(pid, 0.0) + signed
-            if side == "BUY":
-                buy_cost[acct][pid] = buy_cost[acct].get(pid, 0.0) + abs(val)
-
-        # Position status (OPEN / CLOSED) per pid
-        pos_info: Dict[str, Dict[int, str]] = {"SIM": {}, "LIVE": {}}
-        pos_remaining: Dict[str, Dict[int, float]] = {"SIM": {}, "LIVE": {}}
-        if await _table_exists(repo, "positions"):
-            all_pos = await _fetch_all(repo,
-                "SELECT id, account_type, status, COALESCE(remaining_value_usd,0) AS rv FROM positions")
-            for p in all_pos:
-                acct = str(p.get("account_type") or "SIM")
-                if acct not in pos_info:
-                    acct = "SIM"
-                pid = int(p["id"])
-                pos_info[acct][pid] = str(p["status"])
-                if str(p["status"]) not in OPEN_POSITION_EXCLUDED_STATUSES:
-                    pos_remaining[acct][pid] = float(p["rv"])
-
-        out: Dict[str, Dict[str, Any]] = {
-            "SIM": {"realized_pnl_usd": 0.0, "current_pnl_usd": 0.0, "total_pnl_usd": 0.0,
-                    "realized_pnl_pct": 0.0, "open_positions": 0, "closed_positions": 0,
-                    "losing_positions": 0, "winning_positions": 0, "closed_cost_basis": 0.0},
-            "LIVE": {"realized_pnl_usd": 0.0, "current_pnl_usd": 0.0, "total_pnl_usd": 0.0,
-                     "realized_pnl_pct": 0.0, "open_positions": 0, "closed_positions": 0,
-                     "losing_positions": 0, "winning_positions": 0, "closed_cost_basis": 0.0},
+        by_position = {
+            "SIM": defaultdict(lambda: {"buy_value": 0.0, "sell_value": 0.0, "buy_amount": 0.0, "sell_amount": 0.0}),
+            "LIVE": defaultdict(lambda: {"buy_value": 0.0, "sell_value": 0.0, "buy_amount": 0.0, "sell_amount": 0.0}),
         }
 
+        for r in rows:
+            acct = str(r.get("account_type") or "SIM").upper()
+            if acct not in by_position:
+                acct = "SIM"
+            pid = int(r["position_id"])
+            side = str(r.get("side") or "").upper()
+            value = abs(float(r.get("trade_value_usd_net") or 0))
+            amount = abs(float(r.get("token_amount") or 0))
+            p = by_position[acct][pid]
+            if side == "BUY":
+                p["buy_value"] += value
+                p["buy_amount"] += amount
+            elif side == "SELL":
+                p["sell_value"] += value
+                p["sell_amount"] += amount
+
+        def empty_bucket():
+            return {
+                "realized_pnl_usd": 0.0, "realized_pnl_pct": 0.0,
+                "near_closed_positions": 0, "open_positions": 0,
+                "closed_positions": 0, "losing_positions": 0, "winning_positions": 0,
+                "closed_cost_basis": 0.0,
+                "excluded_not_99pct_sold_positions": 0,
+                "excluded_invalid_amount_positions": 0,
+                "pnl_scope": "only_positions_with_sold_ratio_gt_0.99",
+                "sold_ratio_threshold": ">0.99",
+            }
+
+        out = {"SIM": empty_bucket(), "LIVE": empty_bucket()}
+
         for acct in ("SIM", "LIVE"):
-            info = pos_info[acct]
-            cashflows = cf[acct]
-            cost = buy_cost[acct]
-            pids = set(info.keys()) | set(cashflows.keys())
-            for pid in pids:
-                status = info.get(pid, "CLOSED")
-                cf_val = cashflows.get(pid, 0.0)
-                is_open = status not in OPEN_POSITION_EXCLUDED_STATUSES and status != ""
-                if is_open:
-                    rv = pos_remaining[acct].get(pid, 0.0)
-                    current_pnl = cf_val + rv
-                    out[acct]["current_pnl_usd"] += current_pnl
-                    out[acct]["total_pnl_usd"] += current_pnl
-                    out[acct]["open_positions"] += 1
-                else:
-                    out[acct]["realized_pnl_usd"] += cf_val
-                    out[acct]["total_pnl_usd"] += cf_val
-                    out[acct]["closed_positions"] += 1
-                    out[acct]["closed_cost_basis"] += cost.get(pid, 0.0)
-                    if cf_val < 0:
+            for pid, p in by_position[acct].items():
+                buy_amount = p["buy_amount"]
+                sell_amount = p["sell_amount"]
+                buy_value = p["buy_value"]
+                sell_value = p["sell_value"]
+
+                if buy_amount <= 0:
+                    out[acct]["excluded_invalid_amount_positions"] += 1
+                    continue
+
+                sold_ratio = sell_amount / buy_amount
+
+                if sold_ratio > 0.99:
+                    pnl = sell_value - buy_value
+                    out[acct]["realized_pnl_usd"] += pnl
+                    out[acct]["near_closed_positions"] += 1
+                    out[acct]["closed_cost_basis"] += buy_value
+                    if pnl < 0:
                         out[acct]["losing_positions"] += 1
                     else:
                         out[acct]["winning_positions"] += 1
+                else:
+                    out[acct]["excluded_not_99pct_sold_positions"] += 1
 
-            cost_basis = max(out[acct]["closed_cost_basis"], 0.000001)
-            out[acct]["realized_pnl_pct"] = round(out[acct]["realized_pnl_usd"] / cost_basis * 100, 2) if cost_basis > 0 else 0.0
+        for acct in ("SIM", "LIVE"):
+            cost = max(out[acct]["closed_cost_basis"], 0.000001)
+            out[acct]["realized_pnl_pct"] = round(out[acct]["realized_pnl_usd"] / cost * 100, 2) if cost > 0 else 0.0
             out[acct]["realized_pnl_usd"] = round(out[acct]["realized_pnl_usd"], 6)
-            out[acct]["current_pnl_usd"] = round(out[acct]["current_pnl_usd"], 6)
-            out[acct]["total_pnl_usd"] = round(out[acct]["total_pnl_usd"], 6)
 
         pending_rpc_backfill_count = 0
         final_trade_count = 0
@@ -2560,28 +2660,34 @@ async def pnl_summary(request: Request):
         return {
             "sim": {
                 "realized_pnl_usd": out["SIM"]["realized_pnl_usd"],
-                "unrealized_pnl_usd": out["SIM"]["current_pnl_usd"],
-                "total_pnl_usd": out["SIM"]["total_pnl_usd"],
+                "unrealized_pnl_usd": 0.0,
+                "total_pnl_usd": out["SIM"]["realized_pnl_usd"],
                 "realized_pnl_pct": out["SIM"]["realized_pnl_pct"],
-                "open_positions": out["SIM"]["open_positions"],
-                "closed_positions": out["SIM"]["closed_positions"],
+                "open_positions": 0,
+                "closed_positions": out["SIM"]["near_closed_positions"],
                 "losing_positions": out["SIM"]["losing_positions"],
                 "winning_positions": out["SIM"]["winning_positions"],
+                "sold_ratio_threshold": ">0.99",
+                "excluded_not_99pct_sold": out["SIM"]["excluded_not_99pct_sold_positions"],
+                "excluded_invalid_amount": out["SIM"]["excluded_invalid_amount_positions"],
             },
             "live": {
                 "realized_pnl_usd": out["LIVE"]["realized_pnl_usd"],
-                "unrealized_pnl_usd": out["LIVE"]["current_pnl_usd"],
-                "total_pnl_usd": out["LIVE"]["total_pnl_usd"],
+                "unrealized_pnl_usd": 0.0,
+                "total_pnl_usd": out["LIVE"]["realized_pnl_usd"],
                 "realized_pnl_pct": out["LIVE"]["realized_pnl_pct"],
-                "open_positions": out["LIVE"]["open_positions"],
-                "closed_positions": out["LIVE"]["closed_positions"],
+                "open_positions": 0,
+                "closed_positions": out["LIVE"]["near_closed_positions"],
                 "losing_positions": out["LIVE"]["losing_positions"],
                 "winning_positions": out["LIVE"]["winning_positions"],
+                "sold_ratio_threshold": ">0.99",
+                "excluded_not_99pct_sold": out["LIVE"]["excluded_not_99pct_sold_positions"],
+                "excluded_invalid_amount": out["LIVE"]["excluded_invalid_amount_positions"],
             },
             "accounting_status_summary": {
-                "pending_rpc_backfill_count": pending_rpc_backfill_count,
-                "final_trade_count": final_trade_count,
-                "estimated_trade_count": estimated_trade_count,
+                "pending_rpc_backfill": pending_rpc_backfill_count,
+                "final": final_trade_count,
+                "estimated": estimated_trade_count,
             },
         }
     finally:

@@ -14,6 +14,7 @@ from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from ..strategy.filters import (
     run_entry_local_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
+    validate_kline_quality,
     _parse_creation_ts, _compute_age_minutes, sort_klines,
 )
 from ..strategy.thresholds import compute_thresholds, StrategyThresholds, build_trench_filters_for_x, strip_internal_debug_fields, normalize_rate_fraction
@@ -772,20 +773,14 @@ class DiscoveryRunner:
                 })
 
         if duplicate_keys:
-            try:
-                await self.repo.append_system_event(
-                    'WARN', 'DISCOVERY',
-                    f'Duplicate tokens detected across type shards: {len(duplicate_keys)} keys',
-                    _json_dumps({
-                        "duplicate_count": len(duplicate_keys),
-                        "duplicate_keys": duplicate_keys,
-                        "per_type_raw_count": per_type_raw_count,
-                        "per_type_unique_count": per_type_unique_count,
-                    }),
-                    account_type='SIM',
-                )
-            except Exception:
-                pass
+            diag_dup = {
+                "duplicate_count": len(duplicate_keys),
+                "duplicate_keys_sample": duplicate_keys[:10],
+                "per_type_raw_count": per_type_raw_count,
+                "per_type_unique_count": per_type_unique_count,
+            }
+        else:
+            diag_dup = {}
 
         diag = {
             "mode": "type_sharded_discovery",
@@ -794,6 +789,7 @@ class DiscoveryRunner:
             "duplicate_count_estimate": dup_total,
             "per_type_raw_count": per_type_raw_count,
             "per_type_unique_count": per_type_unique_count,
+            **diag_dup,
             "groups": groups_results,
         }
         return all_items, diag
@@ -1156,57 +1152,28 @@ class DiscoveryRunner:
             stage_diag["kline_cached"] = 1
             stage_diag["kline_used"] = 1
             stage_diag["credential_slot"] = slot
-            # Stage 4 不重复完整价格过滤（Stage 3 已经用 klines 评估过了）
-            # 只写入一条 kline 确认记录
-            for sg in groups:
-                sg_id = int(sg.get('id') or 0)
-                config_version = int(sg.get('config_version') or 1)
-                discovery_id = discovery_event_ids.get(sg_id)
-                details = [{"rule": "kline_24h_available", "passed": True,
-                            "kline_count": len(klines),
-                            "source": "stage3_cached_klines",
-                            "stage": "kline_fallback"}]
-                fv = {"kline_source": "stage3_cached", "kline_count": len(klines)}
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, config_version, snapshot_id,
-                    'kline_fallback', True,
-                    _json_dumps(details), _json_dumps(fv),
-                    discovery_event_id=discovery_id,
-                )
-                stage_diag["checked"] += 1
-                stage_diag["passed"] += 1
-                passed_groups.append(sg)
-            return passed_groups, stage_diag
-
-        # 无缓存时，尝试拉 K 线
-        creation_ts, _, _age_missing = _parse_creation_ts(token)
-        try:
-            now_ts = int(datetime.now(timezone.utc).timestamp())
-            from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
-            klines, slot = await self._call_gmgn_with_token_slot(
-                token, "kline", "fetch_kline",
-                token_mint, "1m", 1440,
-                from_ts=from_ts, to_ts=now_ts,
-            )
-            stage_diag["credential_slot"] = slot
-        except Exception as e:
-            logger.warning(f"kline fetch failed for {token_mint}: {e}")
-            klines, slot = None, None
 
         if not klines:
-            for sg in groups:
-                sg_id = int(sg.get('id') or 0)
-                config_version = int(sg.get('config_version') or 1)
-                discovery_id = discovery_event_ids.get(sg_id)
-                await self.repo.insert_strategy_match(
-                    token_mint, sg_id, config_version, snapshot_id,
-                    'kline_fallback', False,
-                    _json_dumps([{"rule": "data_unavailable", "passed": False,
-                                  "reason": "kline API retries exhausted", "stage": "kline_fallback",
-                                  "missing": True}]),
-                    _json_dumps({"error": "kline API empty/error", "stage": "kline_fallback"}),
-                    discovery_event_id=discovery_id,
+            # 无缓存时，尝试拉 K 线
+            creation_ts, _, _age_missing = _parse_creation_ts(token)
+            try:
+                now_ts = int(datetime.now(timezone.utc).timestamp())
+                from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
+                klines, slot = await self._call_gmgn_with_token_slot(
+                    token, "kline", "fetch_kline",
+                    token_mint, "1m", 1440,
+                    from_ts=from_ts, to_ts=now_ts,
                 )
+                stage_diag["credential_slot"] = slot
+            except Exception as e:
+                logger.warning(f"kline fetch failed for {token_mint}: {e}")
+                klines, slot = None, None
+
+        if not klines:
+            await self._insert_match_data_unavailable(
+                token_mint, groups, snapshot_id, discovery_event_ids,
+                "kline_fallback", "kline API exhausted or empty",
+            )
             stage_diag["failed"] = len(groups)
             return passed_groups, stage_diag
 
@@ -1219,14 +1186,19 @@ class DiscoveryRunner:
             config_version = int(sg.get('config_version') or 1)
             discovery_id = discovery_event_ids.get(sg_id)
             res = await evaluate_price_activity_rules(token, sg, latest, klines=klines)
+
+            kline_ok = bool(res.feature_vector.get("kline_data_quality_pass"))
+            percentile = res.feature_vector.get("price_range_24h_percentile")
+            passed = bool(res.passed and kline_ok and percentile is not None)
+
             await self.repo.insert_strategy_match(
                 token_mint, sg_id, config_version, snapshot_id,
-                'kline_fallback', res.passed,
+                'kline_fallback', passed,
                 _json_dumps(res.details), _json_dumps(res.feature_vector),
                 discovery_event_id=discovery_id,
             )
             stage_diag["checked"] += 1
-            if res.passed:
+            if passed:
                 stage_diag["passed"] += 1
                 passed_groups.append(sg)
             else:

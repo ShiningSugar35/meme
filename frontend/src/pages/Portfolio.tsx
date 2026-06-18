@@ -97,7 +97,7 @@ function copyText(t: string) {
   navigator.clipboard.writeText(t).catch(() => undefined);
 }
 
-export default function Portfolio() {
+export default function Portfolio({ active }: { active: boolean }) {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [portfolioTab, setPortfolioTab] = useState<PortfolioTab>('CURRENT');
   const [tab, setTab] = useState<AccountTab>('LIVE');
@@ -154,6 +154,7 @@ export default function Portfolio() {
   };
 
   useEffect(() => {
+    if (!active) return;
     load().catch((e) => setMessage(e.message));
     loadFilterStats();
     loadPnlSummary();
@@ -163,7 +164,7 @@ export default function Portfolio() {
     const pnlTimer = window.setInterval(() => loadPnlSummary().catch(() => undefined), 15000);
     return () => { window.clearInterval(timer); window.clearInterval(historyTimer); window.clearInterval(statsTimer); window.clearInterval(pnlTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [active]);
 
   const switchTab = async (next: AccountTab) => {
     setTab(next);
@@ -235,7 +236,7 @@ export default function Portfolio() {
                   <strong>{String(pnlSummary.live.open_positions ?? 0)}</strong>
                 </div>
                 <div className="metric-row">
-                  <span>实盘PnL</span>
+                  <span>实盘PnL（卖出>99%）</span>
                   <strong style={pnlStyle(pnlSummary.live.realized_pnl_usd)}>{usd2(pnlSummary.live.realized_pnl_usd)}</strong>
                 </div>
               </>
@@ -247,7 +248,7 @@ export default function Portfolio() {
                   <strong>{String(pnlSummary.sim.open_positions ?? 0)}</strong>
                 </div>
                 <div className="metric-row">
-                  <span>模拟盘PnL</span>
+                  <span>模拟盘PnL（卖出>99%）</span>
                   <strong style={pnlStyle(pnlSummary.sim.realized_pnl_usd)}>{usd2(pnlSummary.sim.realized_pnl_usd)}</strong>
                 </div>
               </>
