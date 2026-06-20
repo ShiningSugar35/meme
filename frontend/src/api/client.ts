@@ -314,6 +314,7 @@ export interface FeatureStageHealthItem {
   avg_latency_ms: number;
   severity: 'ok' | 'warn' | 'critical';
   kline_invalid_or_missing_count?: number;
+  kline_api_calls?: number;
 }
 
 export interface DataSourceHealth {

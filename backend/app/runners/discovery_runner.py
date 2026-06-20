@@ -14,7 +14,6 @@ from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from ..strategy.filters import (
     run_entry_local_risk_filter, evaluate_price_activity_rules, evaluate_smart_degen,
-    validate_kline_quality,
     _parse_creation_ts, _compute_age_minutes, sort_klines,
 )
 from ..strategy.thresholds import compute_thresholds, StrategyThresholds, build_trench_filters_for_x, strip_internal_debug_fields, normalize_rate_fraction
@@ -1068,13 +1067,14 @@ class DiscoveryRunner:
         self, token_mint: str, token: Dict[str, Any], groups: List[dict],
         snapshot_id: int, discovery_event_ids: Dict[int, int],
     ) -> Tuple[List[dict], Dict[str, Any]]:
-        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "passed": 0, "failed": 0}
+        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "passed": 0, "failed": 0,
+                                       "kline_invalid_or_missing_count": 0}
         passed_groups: List[dict] = []
 
         if not groups:
             return passed_groups, stage_diag
 
-        # 先拉最新价格
+        # 拉最新价格
         try:
             latest, slot = await self._call_gmgn_with_token_slot(token, "price_info", "fetch_latest_price", token_mint)
         except Exception as e:
@@ -1091,14 +1091,31 @@ class DiscoveryRunner:
 
         stage_diag["credential_slot"] = slot
 
-        token["_stage3_latest_price"] = latest
+        # 拉 24h K 线
+        klines = None
+        creation_ts, _, _ = _parse_creation_ts(token)
+        try:
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
+            klines, kline_slot = await self._call_gmgn_with_token_slot(
+                token, "kline", "fetch_kline",
+                token_mint, "1m", 1440,
+                from_ts=from_ts, to_ts=now_ts,
+            )
+        except Exception as e:
+            logger.warning(f"kline fetch failed during price_filter for {token_mint}: {e}")
+            klines = None
 
         for sg in groups:
             sg_id = int(sg.get('id') or 0)
             config_version = int(sg.get('config_version') or 1)
             discovery_id = discovery_event_ids.get(sg_id)
 
-            res = await evaluate_price_activity_rules(token, sg, latest, klines=klines)
+            res = await evaluate_price_activity_rules(
+                token, sg, latest,
+                klines=klines,
+                require_kline=True,
+            )
             stage_diag["checked"] += 1
 
             await self.repo.insert_strategy_match(
@@ -1113,67 +1130,8 @@ class DiscoveryRunner:
                 passed_groups.append(sg)
             else:
                 stage_diag["failed"] += 1
-
-        return passed_groups, stage_diag
-
-    async def _run_stage4_kline_fallback(
-        self, token_mint: str, token: Dict[str, Any], groups: List[dict],
-        snapshot_id: int, discovery_event_ids: Dict[int, int],
-    ) -> Tuple[List[dict], Dict[str, Any]]:
-        stage_diag: Dict[str, Any] = {"candidates_in": len(groups), "checked": 0, "kline_used": 0, "kline_cached": 0, "passed": 0, "failed": 0}
-        passed_groups: List[dict] = []
-
-        if not groups:
-            return passed_groups, stage_diag
-
-        creation_ts, _, _age_missing = _parse_creation_ts(token)
-        try:
-            now_ts = int(datetime.now(timezone.utc).timestamp())
-            from_ts = max(int(creation_ts), now_ts - 86400) if creation_ts else now_ts - 86400
-            klines, slot = await self._call_gmgn_with_token_slot(
-                token, "kline", "fetch_kline",
-                token_mint, "1m", 1440,
-                from_ts=from_ts, to_ts=now_ts,
-            )
-            stage_diag["credential_slot"] = slot
-        except Exception as e:
-            logger.warning(f"kline fetch failed for {token_mint}: {e}")
-            klines, slot = None, None
-
-        if not klines:
-            await self._insert_match_data_unavailable(
-                token_mint, groups, snapshot_id, discovery_event_ids,
-                "kline_fallback", "kline API exhausted or empty",
-            )
-            stage_diag["failed"] = len(groups)
-            return passed_groups, stage_diag
-
-        stage_diag["kline_used"] = 1
-
-        # 兜底切：用 Stage 3 缓存的 latest（如果有）+ klines 评估
-        latest = token.get("_stage3_latest_price") or token.get("_latest_price_for_kline_fallback") or {}
-        for sg in groups:
-            sg_id = int(sg.get('id') or 0)
-            config_version = int(sg.get('config_version') or 1)
-            discovery_id = discovery_event_ids.get(sg_id)
-            res = await evaluate_price_activity_rules(token, sg, latest, klines=klines)
-
-            kline_ok = bool(res.feature_vector.get("kline_data_quality_pass"))
-            percentile = res.feature_vector.get("price_range_24h_percentile")
-            passed = bool(res.passed and kline_ok and percentile is not None)
-
-            await self.repo.insert_strategy_match(
-                token_mint, sg_id, config_version, snapshot_id,
-                'kline_fallback', passed,
-                _json_dumps(res.details), _json_dumps(res.feature_vector),
-                discovery_event_id=discovery_id,
-            )
-            stage_diag["checked"] += 1
-            if passed:
-                stage_diag["passed"] += 1
-                passed_groups.append(sg)
-            else:
-                stage_diag["failed"] += 1
+                if not res.feature_vector.get("kline_data_quality_pass"):
+                    stage_diag["kline_invalid_or_missing_count"] += 1
 
         return passed_groups, stage_diag
 
@@ -1353,37 +1311,26 @@ class DiscoveryRunner:
                     if not degen_passed:
                         continue
 
-                    # ---- Stage 3: price_filter ----
+                    # ---- Stage 3: price_filter（活跃度与价格面）----
                     price_passed, price_diag = await self._run_stage3_price_filter(
                         token_mint, enriched_token, degen_passed, snapshot_id, discovery_event_ids,
                     )
-                    stage_diags.setdefault("stage3_price", {"checked": 0, "passed": 0, "failed": 0})
+                    stage_diags.setdefault("stage3_price", {"checked": 0, "passed": 0, "failed": 0,
+                                                             "kline_invalid_or_missing_count": 0})
                     stage_diags["stage3_price"]["checked"] += price_diag["checked"]
                     stage_diags["stage3_price"]["passed"] += price_diag["passed"]
                     stage_diags["stage3_price"]["failed"] += price_diag["failed"]
+                    stage_diags["stage3_price"]["kline_invalid_or_missing_count"] += price_diag.get("kline_invalid_or_missing_count", 0)
 
                     if not price_passed:
                         continue
 
-                    # ---- Stage 4: kline_fallback (MANDATORY AND) ----
-                    kline_passed, kline_diag = await self._run_stage4_kline_fallback(
-                        token_mint, enriched_token, price_passed, snapshot_id, discovery_event_ids,
-                    )
-                    stage_diags.setdefault("stage4_kline", {"checked": 0, "kline_used": 0, "passed": 0, "failed": 0})
-                    stage_diags["stage4_kline"]["checked"] += kline_diag["checked"]
-                    stage_diags["stage4_kline"]["passed"] += kline_diag["passed"]
-                    stage_diags["stage4_kline"]["failed"] += kline_diag["failed"]
-                    stage_diags["stage4_kline"]["kline_used"] += kline_diag.get("kline_used", 0)
-
-                    if not kline_passed:
-                        continue
-
-                    # ---- Stage 5: create position ----
+                    # ---- Stage 4: create position ----
                     try:
                         result = await self.pipeline.handle_token_second_filter_result(
-                            token_mint, kline_passed,
+                            token_mint, price_passed,
                             snapshot_id=snapshot_id,
-                            discovery_event_id=discovery_event_ids.get(int(kline_passed[0].get('id') or 0)),
+                            discovery_event_id=discovery_event_ids.get(int(price_passed[0].get('id') or 0)),
                             discovery_event_ids_by_strategy=discovery_event_ids,
                         )
                         if degen_holders:

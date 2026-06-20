@@ -434,6 +434,7 @@ async def evaluate_price_activity_rules(
     strategy_group: Dict[str, Any],
     latest_price: Dict[str, Any],
     klines: Optional[List[Dict[str, Any]]] = None,
+    require_kline: bool = False,
 ) -> PriceFilterResult:
     details: List[Dict[str, Any]] = []
     x = float(strategy_group.get("x") if strategy_group.get("x") is not None else settings.STRATEGY_DEFAULT_X)
@@ -573,13 +574,23 @@ async def evaluate_price_activity_rules(
         "price_change_unit": "percent_points",
     })
 
-    # Kline data quality and price percentile — only evaluated when klines are provided
+    # Kline data quality and price percentile — mandatory when require_kline=True
     price_range_percentile = None
     percentile_source = "missing"
     high_24h = None
     low_24h = None
 
-    if klines is not None:
+    if require_kline and klines is None:
+        details.append({
+            "rule": "kline_data_quality",
+            "passed": False,
+            "reason": "kline required but not provided",
+            "kline_rows_count": 0,
+            "valid_ohlcv_count": 0,
+            "missing": True,
+            "stage": "kline_validation",
+        })
+    elif klines is not None:
         kq = validate_kline_quality(klines)
         details.append({
             "rule": "kline_data_quality",
@@ -638,6 +649,8 @@ async def evaluate_price_activity_rules(
     kline_api_ok = kline_api_called and not kline_empty and kline_valid_ohlcv_count > 0
     kline_validation_pass = kline_api_ok and high_24h is not None and low_24h is not None and high_24h > low_24h
 
+    kline_data_quality_pass = kq["passed"] if klines is not None else (False if require_kline else True)
+
     fv = {
         "x": x, "current_price": current_price,
         "swaps_1h": swaps_1h, "volume_1h": volume_1h, "volume_per_swap_1h": vps,
@@ -654,7 +667,7 @@ async def evaluate_price_activity_rules(
         "kline_rows_count": kline_rows_count,
         "kline_valid_ohlcv_count": kline_valid_ohlcv_count,
         "kline_empty": kline_empty,
-        "kline_data_quality_pass": kq["passed"],
+        "kline_data_quality_pass": kline_data_quality_pass,
         "kline_validation_pass": kline_validation_pass,
         "kline_time_min": kline_time_min,
         "kline_time_max": kline_time_max,

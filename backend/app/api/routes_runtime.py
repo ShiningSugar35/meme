@@ -756,7 +756,7 @@ async def runtime_filter_stats(request: Request):
         filter_fails: List[Dict[str, Any]] = []
         if run_started and latest_unique > 0:
             match_rows = await _fetch_all(repo,
-                "SELECT pass_fail_detail_json, stage, tsm.token_mint, COALESCE(NULLIF(de.pool_address,''), NULLIF(snap.pool_address,''), '') AS pool_addr FROM token_strategy_matches tsm LEFT JOIN token_metric_snapshots snap ON snap.id = tsm.snapshot_id LEFT JOIN discovery_events de ON de.id = tsm.discovery_event_id WHERE tsm.stage IN ('risk_filter','price_filter','kline_fallback','top_holder_filter','smart_degen_filter') AND tsm.created_at >= ? AND tsm.created_at <= ?",
+                "SELECT pass_fail_detail_json, stage, tsm.token_mint, COALESCE(NULLIF(de.pool_address,''), NULLIF(snap.pool_address,''), '') AS pool_addr FROM token_strategy_matches tsm LEFT JOIN token_metric_snapshots snap ON snap.id = tsm.snapshot_id LEFT JOIN discovery_events de ON de.id = tsm.discovery_event_id WHERE tsm.stage IN ('risk_filter','price_filter','top_holder_filter','smart_degen_filter') AND tsm.created_at >= ? AND tsm.created_at <= ?",
                 (run_started, run_finished))
             rule_stats: Dict[str, Dict[str, Any]] = {}
             for row in match_rows:
@@ -897,20 +897,18 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
         price_surface_pass_row = await _fetch_one(repo,
             """SELECT COUNT(DISTINCT tsm.discovery_event_id || '|' || tsm.strategy_id) AS c
                FROM token_strategy_matches tsm
-               WHERE tsm.stage='price_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='kline_fallback' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)""",
-            (lower_bound, upper_bound, lower_bound, upper_bound))
+               WHERE tsm.stage='price_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?""",
+            (lower_bound, upper_bound))
         summary["price_surface_pass_count"] = int((price_surface_pass_row or {}).get("c", 0))
 
-        # entry_ready = risk_surface_keys(已含 smart_degen 条件) + price_filter + kline_fallback
-        price_kline_rows = await _fetch_all(repo,
+        # entry_ready = risk_surface_keys(已含 smart_degen 条件) + price_filter passed
+        price_pass_rows = await _fetch_all(repo,
             """SELECT DISTINCT tsm.discovery_event_id AS eid, tsm.strategy_id AS sid
                FROM token_strategy_matches tsm
                WHERE tsm.stage='price_filter' AND tsm.passed=1 AND tsm.created_at>=? AND tsm.created_at<=?
-                 AND tsm.discovery_event_id IS NOT NULL AND tsm.strategy_id IS NOT NULL
-                 AND EXISTS (SELECT 1 FROM token_strategy_matches tsm2 WHERE tsm2.discovery_event_id=tsm.discovery_event_id AND tsm2.strategy_id=tsm.strategy_id AND tsm2.stage='kline_fallback' AND tsm2.passed=1 AND tsm2.created_at>=? AND tsm2.created_at<=?)""",
-            (lower_bound, upper_bound, lower_bound, upper_bound))
-        price_kline_keys = {(int(r["eid"]), int(r["sid"])) for r in price_kline_rows}
+                 AND tsm.discovery_event_id IS NOT NULL AND tsm.strategy_id IS NOT NULL""",
+            (lower_bound, upper_bound))
+        price_pass_keys = {(int(r["eid"]), int(r["sid"])) for r in price_pass_rows}
 
         risk_top_keys_set = set()
         for r in risk_top_rows:
@@ -921,7 +919,7 @@ async def _build_data_source_health(repo: Repositories, lower_bound: str, upper_
             elif key in smart_degen_passed:
                 risk_top_keys_set.add(key)
 
-        entry_ready_count = len(risk_top_keys_set & price_kline_keys)
+        entry_ready_count = len(risk_top_keys_set & price_pass_keys)
         summary["entry_ready_count"] = entry_ready_count
 
         pos_rows = await _fetch_all(repo,
@@ -1068,8 +1066,7 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
         {"stage": "risk_filter", "label": "风控面 AND-1: Trenches本地", "endpoint_filter": "%v1/trenches%", "weight": 3},
         {"stage": "top_holder_filter", "label": "风控面 AND-2: Top1 Holder", "endpoint_filter": "%v1/market/token_top_holders%", "weight": 5, "exclude_tag": "smart_degen"},
         {"stage": "smart_degen_filter", "label": "风控面 AND-3: Smart Degen", "endpoint_filter": "%v1/market/token_top_holders%", "weight": 5, "require_tag": "smart_degen"},
-        {"stage": "price_filter", "label": "价格面 AND-1: Token Info价格", "endpoint_filter": "%v1/token/info%", "weight": 1},
-        {"stage": "kline_fallback", "label": "价格面 AND-2: Kline验证", "endpoint_filter": "%v1/market/token_kline%", "weight": 2},
+        {"stage": "price_filter", "label": "价格面：活跃度与价格面", "endpoint_filter": "%v1/token/info%", "weight": 1},
     ]
     result: List[Dict[str, Any]] = []
     for s in stages:
@@ -1122,10 +1119,17 @@ async def _build_feature_stage_health(repo: Repositories, lower_bound: str, uppe
             "avg_latency_ms": 0, "severity": severity,
         }
 
-        if stage == "kline_fallback" and has_window:
+        if stage == "price_filter" and has_window:
+            kline_api_row = await _fetch_one(repo, """
+                SELECT COUNT(*) AS c FROM provider_requests
+                WHERE provider='GMGN' AND endpoint LIKE '%market/token_kline%'
+                  AND created_at>=? AND created_at<=?""",
+                (lower_bound, upper_bound))
+            item["kline_api_calls"] = int((kline_api_row or {}).get("c", 0))
+
             invalid_row = await _fetch_one(repo, """
                 SELECT COUNT(*) AS c FROM token_strategy_matches
-                WHERE stage='kline_fallback' AND passed=0
+                WHERE stage='price_filter' AND passed=0
                   AND created_at>=? AND created_at<?
                   AND (pass_fail_detail_json LIKE '%kline_data_quality%'
                        OR pass_fail_detail_json LIKE '%kline_validation_pass%'
@@ -2575,13 +2579,15 @@ async def export_session_report_get(request: Request):
 async def pnl_summary(request: Request):
     repo, owned = await _get_repo(request)
     try:
+        status_placeholders = ",".join(["?"] * len(FINAL_TRADE_STATUSES))
         rows = await _fetch_all(repo,
-            """SELECT position_id, account_type, side, trade_value_usd_net,
-                      COALESCE(executed_token_amount, requested_token_amount) AS token_amount
-               FROM trade_events
-               WHERE status='CONFIRMED'
-                 AND side IN ('BUY','SELL')
-                 AND position_id IS NOT NULL""")
+            f"""SELECT position_id, account_type, side, trade_value_usd_net,
+                       COALESCE(executed_token_amount, requested_token_amount) AS token_amount
+                FROM trade_events
+                WHERE status IN ({status_placeholders})
+                  AND side IN ('BUY','SELL')
+                  AND position_id IS NOT NULL""",
+            tuple(FINAL_TRADE_STATUSES))
 
         by_position = {
             "SIM": defaultdict(lambda: {"buy_value": 0.0, "sell_value": 0.0, "buy_amount": 0.0, "sell_amount": 0.0}),
@@ -2654,7 +2660,8 @@ async def pnl_summary(request: Request):
         try:
             if await _table_exists(repo, "trade_events"):
                 stats_rows = await _fetch_all(repo,
-                    "SELECT accounting_status, COUNT(*) AS cnt FROM trade_events WHERE status='CONFIRMED' AND accounting_status IS NOT NULL GROUP BY accounting_status")
+                    f"SELECT accounting_status, COUNT(*) AS cnt FROM trade_events WHERE status IN ({status_placeholders}) AND accounting_status IS NOT NULL GROUP BY accounting_status",
+                    tuple(FINAL_TRADE_STATUSES))
                 for sr in stats_rows:
                     s = str(sr.get("accounting_status") or "")
                     c = int(sr.get("cnt") or 0)

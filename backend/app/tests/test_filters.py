@@ -6,6 +6,8 @@ from ..strategy.filters import (
     run_holding_risk_filter, evaluate_top1_holder, run_risk_filter,
     _normalize_pct,
     _parse_creation_ts, _compute_age_minutes,
+    _kline_high_strict, _kline_low_strict, _kline_open_strict, _kline_close_strict,
+    sort_klines, validate_kline_quality,
 )
 from ..strategy.thresholds import compute_thresholds, entry_size_usd, StrategyThresholds
 from ..providers.gmgn_real import GMGNProvider
@@ -633,15 +635,18 @@ def test_price_range_percentile_fails_when_too_high_x02():
 
 
 def test_price_range_percentile_missing_without_klines():
-    """Without klines, percentile is missing => failed."""
+    """Without klines and not required, no kline details are emitted (no NameError)."""
     from ..strategy.filters import evaluate_price_activity_rules
     token = {"pool_created_at": "2025-01-01T00:00:00Z"}
     latest = {"price_usd": 1.5}
     res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=None))
-    pct_detail = next(d for d in res.details if d["rule"] == "price_range_24h_percentile")
-    assert pct_detail["passed"] is False
-    assert pct_detail["data_unavailable"] is True
-    assert pct_detail["source"] == "missing"
+    # No kline_data_quality or price_range_24h_percentile detail when klines=None and not required
+    kq = next((d for d in res.details if d.get("rule") == "kline_data_quality"), None)
+    assert kq is None
+    pct = next((d for d in res.details if d.get("rule") == "price_range_24h_percentile"), None)
+    assert pct is None
+    # feature_vector has kline_data_quality_pass=True (no error, kline not required)
+    assert res.feature_vector.get("kline_data_quality_pass") is True
 
 
 # ============================================================================
@@ -779,3 +784,162 @@ def test_build_entry_market_context_fallback_chain():
     assert ctx["liquidity_usd"] == 3000
     # price_usd from tokens table (latest was empty, columns None, raw_json no price_usd)
     assert ctx["price_usd"] == 0.3
+
+
+# ============================================================================
+# Kline strict getter tests (P0-3)
+# ============================================================================
+
+def test_kline_high_strict_returns_none_when_missing():
+    """_kline_high_strict returns None when high is absent (no fallback to close)."""
+    k = {"open": 1.0, "close": 1.5, "low": 0.8}
+    assert _kline_high_strict(k) is None
+
+
+def test_kline_low_strict_returns_none_when_missing():
+    """_kline_low_strict returns None when low is absent (no fallback to close)."""
+    k = {"open": 1.0, "close": 1.5, "high": 2.0}
+    assert _kline_low_strict(k) is None
+
+
+def test_kline_open_strict_returns_none_when_missing():
+    k = {"high": 2.0, "low": 0.8, "close": 1.5}
+    assert _kline_open_strict(k) is None
+
+
+def test_kline_close_strict_returns_none_when_missing():
+    k = {"open": 1.0, "high": 2.0, "low": 0.8}
+    assert _kline_close_strict(k) is None
+
+
+def test_kline_strict_getters_return_values():
+    k = {"open": 1.0, "high": 2.0, "low": 0.8, "close": 1.5}
+    assert _kline_high_strict(k) == 2.0
+    assert _kline_low_strict(k) == 0.8
+    assert _kline_open_strict(k) == 1.0
+    assert _kline_close_strict(k) == 1.5
+
+
+# ============================================================================
+# validate_kline_quality tests
+# ============================================================================
+
+def test_validate_kline_quality_none():
+    res = validate_kline_quality(None)
+    assert res["passed"] is False
+    assert "not called or returned None" in res["reason"]
+
+
+def test_validate_kline_quality_empty_list():
+    res = validate_kline_quality([])
+    assert res["passed"] is False
+    assert "empty" in res["reason"]
+
+
+def test_validate_kline_quality_valid():
+    klines = [
+        {"open": 1.0, "high": 2.0, "low": 0.8, "close": 1.5},
+        {"open": 1.5, "high": 2.5, "low": 1.2, "close": 2.0},
+    ]
+    res = validate_kline_quality(klines)
+    assert res["passed"] is True
+    assert res["valid_ohlcv_count"] == 2
+
+
+def test_validate_kline_quality_missing_high():
+    klines = [
+        {"open": 1.0, "low": 0.8, "close": 1.5},
+    ]
+    res = validate_kline_quality(klines)
+    assert res["passed"] is False
+    assert res["valid_ohlcv_count"] == 0
+
+
+def test_validate_kline_quality_high_low_swapped():
+    klines = [
+        {"open": 1.0, "high": 0.5, "low": 2.0, "close": 1.5},
+    ]
+    res = validate_kline_quality(klines)
+    assert res["passed"] is False
+
+
+# ============================================================================
+# require_kline parameter tests (merged stage 3+4)
+# ============================================================================
+
+def _pass_token():
+    return {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
+
+
+def _pass_latest():
+    return {"price": 0.001, "price_usd": 0.001, "swaps_1h": 500, "volume_1h": 14000, "price_1h": 0.0009}
+
+
+def test_require_kline_true_none_fails():
+    """require_kline=True, klines=None => passed=False, kline_data_quality fails."""
+    res = asyncio.run(evaluate_price_activity_rules(
+        _pass_token(), {"x": 0.2}, _pass_latest(),
+        klines=None, require_kline=True,
+    ))
+    assert res.passed is False
+    kq = next((d for d in res.details if d["rule"] == "kline_data_quality"), None)
+    assert kq is not None
+    assert kq["passed"] is False
+    assert kq["missing"] is True
+    assert res.feature_vector.get("kline_data_quality_pass") is False
+
+
+def test_require_kline_false_none_still_works():
+    """require_kline=False, klines=None => no kline error, kline_data_quality_pass=True."""
+    res = asyncio.run(evaluate_price_activity_rules(
+        _pass_token(), {"x": 0.2}, _pass_latest(),
+        klines=None, require_kline=False,
+    ))
+    # price rules still run, no kline error detail
+    kq = next((d for d in res.details if d["rule"] == "kline_data_quality"), None)
+    assert kq is None
+    assert res.feature_vector.get("kline_data_quality_pass") is True
+    # swaps_1h etc should still be evaluated
+    swaps = next((d for d in res.details if d["rule"] == "swaps_1h_min"), None)
+    assert swaps is not None
+
+
+def test_require_kline_true_empty_list_fails():
+    """require_kline=True, klines=[] => passed=False, kline quality fails."""
+    res = asyncio.run(evaluate_price_activity_rules(
+        _pass_token(), {"x": 0.2}, _pass_latest(),
+        klines=[], require_kline=True,
+    ))
+    assert res.passed is False
+    kq = next((d for d in res.details if d["rule"] == "kline_data_quality"), None)
+    assert kq is not None
+    assert kq["passed"] is False
+    assert res.feature_vector.get("kline_data_quality_pass") is False
+
+
+def test_require_kline_true_valid_klines_passes():
+    """require_kline=True with valid klines => all rules pass normally."""
+    res = asyncio.run(evaluate_price_activity_rules(
+        _pass_token(), {"x": 0.2}, _pass_latest(),
+        klines=_pass_range_klines(0.001), require_kline=True,
+    ))
+    kq = next((d for d in res.details if d["rule"] == "kline_data_quality"), None)
+    assert kq is not None
+    assert kq["passed"] is True
+    assert res.feature_vector.get("kline_data_quality_pass") is True
+    # overall should pass if all rules pass
+    assert res.passed is True
+
+
+def test_require_kline_true_klines_missing_high_fails():
+    """require_kline=True, klines with missing high => quality fails."""
+    klines = [{"open": 1.0, "close": 1.5, "low": 0.8}]
+    res = asyncio.run(evaluate_price_activity_rules(
+        _pass_token(), {"x": 0.2}, _pass_latest(),
+        klines=klines, require_kline=True,
+    ))
+    kq = next((d for d in res.details if d["rule"] == "kline_data_quality"), None)
+    assert kq is not None
+    assert kq["passed"] is False
+    assert res.feature_vector.get("kline_data_quality_pass") is False
+    assert res.passed is False
