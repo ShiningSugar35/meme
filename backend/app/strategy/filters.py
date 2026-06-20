@@ -91,6 +91,18 @@ def _kline_low(k: Dict[str, Any]) -> Optional[float]:
     low = _to_float(_first_present(k, ["low", "l"]))
     return low if low is not None else _kline_close(k)
 
+def _kline_high_strict(k: Dict[str, Any]) -> Optional[float]:
+    return _to_float(_first_present(k, ["high", "h"]))
+
+def _kline_low_strict(k: Dict[str, Any]) -> Optional[float]:
+    return _to_float(_first_present(k, ["low", "l"]))
+
+def _kline_open_strict(k: Dict[str, Any]) -> Optional[float]:
+    return _to_float(_first_present(k, ["open", "o", "price_open"]))
+
+def _kline_close_strict(k: Dict[str, Any]) -> Optional[float]:
+    return _to_float(_first_present(k, ["close", "c", "price", "price_usd"]))
+
 def _kline_volume_usd(k: Dict[str, Any]) -> Optional[float]:
     return _to_float(_first_present(k, ["volume_usd", "volume", "v"]))
 
@@ -119,10 +131,10 @@ def validate_kline_quality(klines: Optional[List[Dict[str, Any]]]) -> Dict[str, 
         }
     valid = []
     for k in klines:
-        o = _kline_open(k)
-        h = _kline_high(k)
-        l = _kline_low(k)
-        c = _kline_close(k)
+        o = _kline_open_strict(k)
+        h = _kline_high_strict(k)
+        l = _kline_low_strict(k)
+        c = _kline_close_strict(k)
         if (
             o is not None and h is not None and l is not None and c is not None
             and o > 0 and h > 0 and l > 0 and c > 0
@@ -561,51 +573,52 @@ async def evaluate_price_activity_rules(
         "price_change_unit": "percent_points",
     })
 
-    # Kline data quality validation
-    kq = validate_kline_quality(klines)
-    details.append({
-        "rule": "kline_data_quality",
-        "passed": kq["passed"],
-        "reason": kq["reason"],
-        "kline_rows_count": kq.get("kline_rows_count"),
-        "valid_ohlcv_count": kq.get("valid_ohlcv_count"),
-        "high_24h": kq.get("high_24h"),
-        "low_24h": kq.get("low_24h"),
-        "missing": not kq["passed"],
-        "stage": "kline_validation",
-    })
-
-    # 24h price-range percentile is derived from official OHLCV kline data.
+    # Kline data quality and price percentile — only evaluated when klines are provided
     price_range_percentile = None
     percentile_source = "missing"
     high_24h = None
     low_24h = None
-    if kq["passed"]:
-        high_24h = kq["high_24h"]
-        low_24h = kq["low_24h"]
-        if high_24h is not None and low_24h is not None and high_24h > low_24h:
-            price_range_percentile = (current_price - low_24h) / (high_24h - low_24h)
-            percentile_source = "kline_24h"
-    elif klines is not None:
-        percentile_source = "kline_invalid_or_missing"
-    cond_range = (
-        price_range_percentile is not None
-        and t.price_range_24h_percentile_min < price_range_percentile < t.price_range_24h_percentile_max
-    )
-    details.append({
-        "rule": "price_range_24h_percentile", "passed": cond_range,
-        "current_price": current_price, "high_24h": high_24h, "low_24h": low_24h,
-        "percentile": price_range_percentile, "value": price_range_percentile,
-        "lower_threshold": t.price_range_24h_percentile_min,
-        "upper_threshold": t.price_range_24h_percentile_max,
-        "source": percentile_source,
-        "data_unavailable": price_range_percentile is None,
-    })
+
+    if klines is not None:
+        kq = validate_kline_quality(klines)
+        details.append({
+            "rule": "kline_data_quality",
+            "passed": kq["passed"],
+            "reason": kq["reason"],
+            "kline_rows_count": kq.get("kline_rows_count"),
+            "valid_ohlcv_count": kq.get("valid_ohlcv_count"),
+            "high_24h": kq.get("high_24h"),
+            "low_24h": kq.get("low_24h"),
+            "missing": not kq["passed"],
+            "stage": "kline_validation",
+        })
+
+        if kq["passed"]:
+            high_24h = kq["high_24h"]
+            low_24h = kq["low_24h"]
+            if high_24h is not None and low_24h is not None and high_24h > low_24h:
+                price_range_percentile = (current_price - low_24h) / (high_24h - low_24h)
+                percentile_source = "kline_24h"
+        else:
+            percentile_source = "kline_invalid_or_missing"
+
+        cond_range = (
+            price_range_percentile is not None
+            and t.price_range_24h_percentile_min < price_range_percentile < t.price_range_24h_percentile_max
+        )
+        details.append({
+            "rule": "price_range_24h_percentile", "passed": cond_range,
+            "current_price": current_price, "high_24h": high_24h, "low_24h": low_24h,
+            "percentile": price_range_percentile, "value": price_range_percentile,
+            "lower_threshold": t.price_range_24h_percentile_min,
+            "upper_threshold": t.price_range_24h_percentile_max,
+            "source": percentile_source,
+            "data_unavailable": price_range_percentile is None,
+        })
 
     passed = all(d.get("passed") for d in details)
 
-    # Kline health metrics — allows the dashboard to distinguish
-    # "price filter passed via direct API" vs "price filter passed + kline validated"
+    # Kline health metrics
     kline_api_called = klines is not None
     kline_rows_count = len(klines) if klines else 0
     kline_empty = klines is not None and len(klines) == 0
@@ -615,9 +628,9 @@ async def evaluate_price_activity_rules(
     if klines:
         sorted_klines = sort_klines(klines)
         for k in klines:
-            if _kline_open(k) is not None and _kline_high(k) is not None and \
-               _kline_low(k) is not None and _kline_close(k) is not None and \
-               _kline_open(k) > 0 and _kline_high(k) > 0 and _kline_low(k) > 0 and _kline_close(k) > 0:
+            if _kline_open_strict(k) is not None and _kline_high_strict(k) is not None and \
+               _kline_low_strict(k) is not None and _kline_close_strict(k) is not None and \
+               _kline_open_strict(k) > 0 and _kline_high_strict(k) > 0 and _kline_low_strict(k) > 0 and _kline_close_strict(k) > 0:
                 kline_valid_ohlcv_count += 1
         if sorted_klines:
             kline_time_min = _kline_time(sorted_klines[0])

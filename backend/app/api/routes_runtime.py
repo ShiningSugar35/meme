@@ -283,8 +283,9 @@ def _utc_to_beijing(iso_str: Optional[str]) -> str:
         return ""
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        bj = dt + timedelta(hours=8)
-        return bj.isoformat()
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(BJ_TZ).isoformat()
     except Exception:
         return iso_str
 
@@ -466,7 +467,11 @@ async def runtime_status(request: Request):
     repo, owned = await _get_repo(request)
     try:
         runtime = await _runtime_settings(repo)
-        summary = await _positions_summary(repo)
+        try:
+            summary = await _positions_summary(repo)
+        except Exception as exc:
+            logger.warning("status _positions_summary failed", error=str(exc))
+            summary = {"live_open_count": 0, "sim_open_count": 0, "total_open": 0}
         worker_mgr = getattr(request.app.state, "worker_manager", None)
         worker_status = worker_mgr.get_status() if worker_mgr is not None else {}
         readiness = _live_readiness()
@@ -1751,11 +1756,12 @@ async def export_trade_audit(request: Request, payload: Dict[str, Any] = Body(de
         else:
             start_utc = window["start_utc"]
             end_utc = window["end_utc"]
-            params: List[Any] = list(FINAL_TRADE_STATUSES)
+            params: List[Any] = []
             if acct != "ALL":
                 params.append(acct)
             params.extend([start_utc, end_utc])
             params.extend([start_utc, end_utc])
+            params.extend(list(FINAL_TRADE_STATUSES))
             params.extend([start_utc, end_utc])
 
             account_clause = "AND p.account_type=?" if acct != "ALL" else ""
@@ -2135,6 +2141,12 @@ async def _deduped_issues(repo: Repositories, since: Optional[str] = None, until
     seen_keys: Dict[str, int] = {}
 
     for row in rows:
+        msg = str(row.get("message") or "")
+        category = row.get("category")
+
+        if _is_noise_log(msg, category):
+            continue
+
         level = str(row.get("level") or "").upper()
         if level == "WARNING" or level == "WARN":
             warning_count += int(row.get("count") or 0)
@@ -2144,7 +2156,6 @@ async def _deduped_issues(repo: Repositories, since: Optional[str] = None, until
             critical_count += int(row.get("count") or 0)
 
         ctx = _safe_json_loads(row.get("context_json"), {})
-        msg = str(row.get("message") or "")
         norm_msg = re.sub(r"slot=\d+", "slot=*", msg)
         norm_msg = re.sub(r"All \d+ discovery", "All N discovery", norm_msg)
 
@@ -2254,7 +2265,6 @@ async def _deduped_provider_failures(repo: Repositories, since: Optional[str] = 
         })
 
     return failures, summary
-    return rows
 
 
 def _strategy_label(sg: Dict[str, Any]) -> str:
@@ -2736,8 +2746,9 @@ async def trade_events_ledger(request: Request, account_type: str = "ALL", since
             if created_at_utc:
                 try:
                     dt = datetime.fromisoformat(created_at_utc.replace("Z", "+00:00"))
-                    dt_bj = dt + timedelta(hours=8)
-                    created_at_beijing = dt_bj.isoformat()
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    created_at_beijing = dt.astimezone(BJ_TZ).isoformat()
                 except Exception:
                     created_at_beijing = created_at_utc
 

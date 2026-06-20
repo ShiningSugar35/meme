@@ -389,12 +389,13 @@ export default function Portfolio({ active }: { active: boolean }) {
             {dsh.feature_stage_health && dsh.feature_stage_health.length > 0 && (
               <>
                 <h3 style={{fontSize:15,margin:'10px 0 4px',color:'#8892ae'}}>特征阶段流水线</h3>
-                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>阶段</th><th>候选</th><th>通过</th><th>失败</th><th>API次数</th><th>429</th></tr></thead><tbody>
+                <table style={{fontSize:12,marginTop:4}}><thead><tr><th>阶段</th><th>候选</th><th>通过</th><th>失败</th><th>API次数</th><th>429</th><th>Kline异常</th></tr></thead><tbody>
                 {dsh.feature_stage_health.map((fs) => (
                   <tr key={fs.stage}><td>{severityDot(fs.severity)} {fs.label}{fs.weight ? ` (w${fs.weight})` : ''}</td>
                     <td>{fs.candidates_in}</td><td>{fs.passed_count}</td><td>{fs.failed_count}</td>
                     <td>{fs.api_calls}</td>
                     <td style={{color:fs.rate_limited_count>0?'#f85149':''}}>{fs.rate_limited_count}</td>
+                    <td>{fs.kline_invalid_or_missing_count ?? '-'}</td>
                   </tr>))}</tbody></table></>)}
             {dsh.field_health && dsh.field_health.length > 0 && (
               <>

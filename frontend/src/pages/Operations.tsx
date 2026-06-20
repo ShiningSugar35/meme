@@ -46,6 +46,11 @@ export default function Operations({ active }: { active: boolean }) {
   const liveMode = status?.user_mode === 'FORMAL_SIM_LIVE';
   const showSellAll = liveMode && Boolean(status?.has_live_positions);
 
+  const [auditPreset, setAuditPreset] = useState<'24h'|'48h'|'7d'|'all'|'custom'>('24h');
+  const [auditAccount, setAuditAccount] = useState<'ALL'|'SIM'|'LIVE'>('ALL');
+  const [auditStart, setAuditStart] = useState('');
+  const [auditEnd, setAuditEnd] = useState('');
+
   return (
     <section className="page-stack">
       <div className="card danger-zone">
@@ -73,9 +78,49 @@ export default function Operations({ active }: { active: boolean }) {
       <div className="card">
         <h2>数据导出</h2>
         <p className="hint">交易审计默认过去24小时（北京时间），日志导出固定过去12小时。</p>
+
+        <div className="entry-row">
+          <label>时间范围</label>
+          <select value={auditPreset} onChange={e => setAuditPreset(e.target.value as typeof auditPreset)}>
+            <option value="24h">过去24小时</option>
+            <option value="48h">过去48小时</option>
+            <option value="7d">过去7天</option>
+            <option value="all">全部</option>
+            <option value="custom">自定义</option>
+          </select>
+        </div>
+
+        <div className="entry-row">
+          <label>账户类型</label>
+          <select value={auditAccount} onChange={e => setAuditAccount(e.target.value as typeof auditAccount)}>
+            <option value="ALL">全部</option>
+            <option value="SIM">模拟盘</option>
+            <option value="LIVE">实盘</option>
+          </select>
+        </div>
+
+        {auditPreset === 'custom' && (
+          <div className="entry-row">
+            <label>开始（北京时间）</label>
+            <input type="text" value={auditStart} onChange={e => setAuditStart(e.target.value)} placeholder="YYYY-MM-DD HH:mm:ss" />
+            <label>结束（北京时间）</label>
+            <input type="text" value={auditEnd} onChange={e => setAuditEnd(e.target.value)} placeholder="YYYY-MM-DD HH:mm:ss" />
+          </div>
+        )}
+
         <div className="button-row">
           <button disabled={loading} onClick={() => run(api.backupDb, (r) => `已备份数据库：${(r as Record<string, unknown>).export_path}`)}>备份数据库</button>
-          <button disabled={loading} onClick={() => run(api.exportTradeAudit, (r) => `已导出交易审计：${(r as Record<string, unknown>).export_path}`)}>导出交易审计（24h）</button>
+          <button disabled={loading} onClick={() => run(
+            () => api.exportTradeAudit({
+              preset: auditPreset,
+              account_type: auditAccount,
+              start_at_beijing: auditPreset === 'custom' ? auditStart : null,
+              end_at_beijing: auditPreset === 'custom' ? auditEnd : null,
+            }),
+            (r) => `已导出交易审计：${(r as Record<string, unknown>).export_path}`
+          )}>
+            导出交易审计{auditPreset === 'all' ? '（全部）' : auditPreset === 'custom' ? '（自定义）' : `（${auditPreset}）`}
+          </button>
           <button disabled={loading} onClick={() => run(api.exportLogs, (r) => `已导出日志：${(r as Record<string, unknown>).export_path}，WARNING ${(r as Record<string, unknown>).warning_count ?? 0} 条，ERROR ${(r as Record<string, unknown>).error_count ?? 0} 条`)}>导出日志（过去12小时）</button>
         </div>
         <p className="hint">日志导出仅保留过去12小时，过滤Duplicate tokens等无意义噪声。</p>

@@ -313,6 +313,7 @@ export interface FeatureStageHealthItem {
   rate_limited_count: number;
   avg_latency_ms: number;
   severity: 'ok' | 'warn' | 'critical';
+  kline_invalid_or_missing_count?: number;
 }
 
 export interface DataSourceHealth {
