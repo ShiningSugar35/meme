@@ -236,7 +236,7 @@ export default function Portfolio({ active }: { active: boolean }) {
                   <strong>{String(pnlSummary.live.open_positions ?? 0)}</strong>
                 </div>
                 <div className="metric-row">
-                  <span>实盘PnL（卖出>99%）</span>
+                    <span>实盘PnL（卖出{'>'}99%）</span>
                   <strong style={pnlStyle(pnlSummary.live.realized_pnl_usd)}>{usd2(pnlSummary.live.realized_pnl_usd)}</strong>
                 </div>
               </>
@@ -248,7 +248,7 @@ export default function Portfolio({ active }: { active: boolean }) {
                   <strong>{String(pnlSummary.sim.open_positions ?? 0)}</strong>
                 </div>
                 <div className="metric-row">
-                  <span>模拟盘PnL（卖出>99%）</span>
+                    <span>模拟盘PnL（卖出{'>'}99%）</span>
                   <strong style={pnlStyle(pnlSummary.sim.realized_pnl_usd)}>{usd2(pnlSummary.sim.realized_pnl_usd)}</strong>
                 </div>
               </>

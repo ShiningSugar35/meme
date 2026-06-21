@@ -872,9 +872,8 @@ class DiscoveryRunner:
     # Stage 0: risk_filter       — local risk filter (no extra API)
     # Stage 1: top_holder_filter — top1 holder rate via holders API
     # Stage 2: smart_degen_filter— smart degen holders via holders API
-    # Stage 3: price_filter      — latest price evaluation
-    # Stage 4: kline_fallback    — MANDATORY: re-evaluate price rules with klines
-    # Stage 5: create position
+    # Stage 3: price_filter      — latest price + kline evaluation (活跃度与价格面)
+    # Stage 4: create position
     #
     # If any stage fails, ALL subsequent stages are skipped (strict AND).
     # ----------------------------------------------------------------

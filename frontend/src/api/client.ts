@@ -409,7 +409,7 @@ export const api = {
   stopLive: () => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/emergency/stop-live', { method: 'POST' }),
   resumeLive: () => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/emergency/resume-live', { method: 'POST' }),
   backupDb: () => apiFetch<{ ok: boolean; export_path: string }>('/api/runtime/emergency/backup-db', { method: 'POST' }),
-  exportLosing: () => apiFetch<{ ok: boolean; export_path: string; losing_count: number }>('/api/runtime/emergency/export-losing', { method: 'POST' }),
+
   exportTradeAudit: (payload: Record<string, unknown> = {}) => {
     const body = {
       preset: (payload.preset as string) ?? '24h',
