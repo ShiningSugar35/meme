@@ -1223,14 +1223,13 @@ async def _build_endpoint_health(repo: Repositories, lower_bound: str, upper_bou
 async def _build_field_health(repo: Repositories, lower_bound: str, upper_bound: str, has_window: bool) -> List[Dict[str, Any]]:
     FIELDS = [
         ("type", "type"), ("liquidity_usd", "流动性"), ("top_10_holder_rate", "top10持仓率"),
-        ("top1_holder_rate", "top1持仓率"), ("renounced_mint", "mint renounce"),
+        ("renounced_mint", "mint renounce"),
         ("renounced_freeze_account", "freeze renounce"), ("max_rug_ratio", "rug比例"),
         ("max_entrapment_ratio", "entrapment比例"), ("is_wash_trading", "wash trading"),
         ("rat_trader_amount_rate", "rat trader"), ("suspected_insider_hold_rate", "内幕持仓率"),
         ("max_bundler_rate", "bundler比例"), ("fresh_wallet_rate", "新钱包比例"),
         ("sell_tax", "卖税"), ("has_social", "社交"), ("burn_status", "burn状态"),
         ("sniper_count", "sniper数量"), ("launchpad", "平台"), ("market_cap", "市值"),
-        ("price_usd", "价格"),
     ]
 
     token_count = 0
