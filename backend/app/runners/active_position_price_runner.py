@@ -3,6 +3,10 @@
 This runner polls all open positions every ACTIVE_POSITION_PRICE_POLL_SECONDS
 (1 second by default) and evaluates hard TP/SL plus completed exits
 independently of the slower risk-scan cycle.
+
+Each position makes at most ONE price API request per polling cycle.
+On failure the position stays open and is retried next cycle — no
+EXIT_PENDING, no intra-cycle retry burst.
 """
 from __future__ import annotations
 
@@ -13,10 +17,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set
 
-from ..config import settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
-from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from .discovery_runner import acquire_holding_slot
 
@@ -96,6 +98,10 @@ class ActivePositionPriceRunner:
     smart-degen fetch — only price-based exit rules.
     """
 
+    @staticmethod
+    def _failure_key(position: Dict[str, Any]) -> str:
+        return f"{position.get('id') or 0}:{_account_type(position)}:{position.get('token_mint', '?')}"
+
     def __init__(self, repo: Repositories, gmgn, trading_pipeline=None):
         self.repo = repo
         self.gmgn = gmgn
@@ -129,8 +135,8 @@ class ActivePositionPriceRunner:
         token = position["token_mint"]
         account_type = _account_type(position)
 
-        # Fetch latest price with retry across slots
-        latest = await self._fetch_latest_price(token, account_type, position=position)
+        # Fetch latest price — one attempt per cycle
+        latest = await self._fetch_latest_price(token, account_type, position)
         current_price = _to_float(
             latest.get("price_usd") or latest.get("latest_price_usd") or latest.get("price")
         )
@@ -213,51 +219,22 @@ class ActivePositionPriceRunner:
 
         await self._execute_exit(position, exit_pct, reason_code, current_price, now)
 
-    async def _fetch_price_with_retry(self, token_mint: str, preferred_slot: Optional[int]) -> Dict[str, Any]:
-        rl = get_rate_limiter()
-        feature_pool = settings.get_feature_slots()
-        attempted: Set[int] = set()
-        endpoint = getattr(settings, "GMGN_TOKEN_INFO_PATH", "/v1/token/info")
-
-        for attempt in range(4):
-            slot = None
-            if attempt == 0 and preferred_slot is not None and rl.is_slot_available(preferred_slot):
-                slot = preferred_slot
-            elif feature_pool:
-                for s in feature_pool:
-                    if s not in attempted and rl.is_slot_available(s):
-                        slot = s
-                        break
-                if slot is None:
-                    for s in feature_pool:
-                        if s not in attempted:
-                            slot = s
-                            break
-
-            if slot is None:
-                break
-
-            attempted.add(slot)
-            try:
-                data = await self.gmgn.fetch_latest_price(token_mint, credential_slot=slot)
-                price = data.get("price_usd") or data.get("price")
-                if price is not None and float(price) > 0:
-                    return data
-                await rl.report_failure(slot, endpoint=endpoint, kind="empty")
-            except Exception:
-                pass
-
-        raise RuntimeError(f"Price fetch failed for {token_mint}: all 4 retry attempts exhausted")
-
-    async def _fetch_latest_price(self, token: str, account_type: str, position: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        preferred_slot = acquire_holding_slot("price_runner")
+    async def _fetch_latest_price(self, token: str, account_type: str, position: Dict[str, Any]) -> Dict[str, Any]:
+        """Single-shot price fetch — one attempt per cycle, no retry loop."""
+        key = self._failure_key(position)
+        slot = acquire_holding_slot("price_runner")
         try:
-            data = await self._fetch_price_with_retry(token, preferred_slot)
-            was_failing = token in self._consecutive_price_failures
-            fail_start = self._failure_start_time.pop(token, None)
-            self._consecutive_price_failures.pop(token, None)
-            self._last_failure_event_at.pop(token, None)
-            if was_failing and fail_start is not None and position is not None:
+            data = await self.gmgn.fetch_latest_price(token, credential_slot=slot)
+            price = data.get("price_usd") or data.get("latest_price_usd") or data.get("price")
+            if price is None or float(price) <= 0:
+                raise ValueError("empty price")
+
+            # Success — clear failure state
+            was_failing = key in self._consecutive_price_failures
+            fail_start = self._failure_start_time.pop(key, None)
+            self._consecutive_price_failures.pop(key, None)
+            self._last_failure_event_at.pop(key, None)
+            if was_failing and fail_start is not None:
                 downtime = int(time.time() - fail_start)
                 try:
                     await self.repo.append_system_event(
@@ -275,41 +252,42 @@ class ActivePositionPriceRunner:
                 except Exception:
                     pass
             return data
+
         except Exception as e:
-            fails = self._consecutive_price_failures.get(token, 0) + 1
-            self._consecutive_price_failures[token] = fails
+            fails = self._consecutive_price_failures.get(key, 0) + 1
+            self._consecutive_price_failures[key] = fails
             if fails == 1:
-                self._failure_start_time[token] = time.time()
+                self._failure_start_time[key] = time.time()
 
             logger.warning(
                 "Price fetch failed; keep position open and retry next cycle",
                 token=token,
                 account_type=account_type,
+                position_id=position.get("id"),
                 failures=fails,
                 error=str(e),
             )
 
-            if position is not None:
-                last_event_at = self._last_failure_event_at.get(token, 0.0)
-                now = time.time()
-                if fails == 1 or (now - last_event_at) >= _PRICE_FAILURE_COOLDOWN_SECONDS:
-                    self._last_failure_event_at[token] = now
-                    try:
-                        await self.repo.append_system_event(
-                            "WARN", "PRICE",
-                            f"Price fetch failed for {token}; keep polling",
-                            _safe_json({
-                                "position_id": int(position.get("id") or 0),
-                                "token_mint": token,
-                                "account_type": account_type,
-                                "consecutive_failures": fails,
-                                "action": "KEEP_POLLING_NO_EXIT",
-                                "error": str(e)[:300],
-                            }),
-                            account_type=account_type,
-                        )
-                    except Exception:
-                        pass
+            last_event_at = self._last_failure_event_at.get(key, 0.0)
+            now = time.time()
+            if fails == 1 or (now - last_event_at) >= _PRICE_FAILURE_COOLDOWN_SECONDS:
+                self._last_failure_event_at[key] = now
+                try:
+                    await self.repo.append_system_event(
+                        "WARN", "PRICE",
+                        f"Price fetch failed for {token}; keep polling",
+                        _safe_json({
+                            "position_id": int(position.get("id") or 0),
+                            "token_mint": token,
+                            "account_type": account_type,
+                            "consecutive_failures": fails,
+                            "action": "KEEP_POLLING_NO_EXIT",
+                            "error": str(e)[:300],
+                        }),
+                        account_type=account_type,
+                    )
+                except Exception:
+                    pass
             return {}
 
     async def _execute_exit(

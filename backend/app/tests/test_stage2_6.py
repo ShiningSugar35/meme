@@ -674,17 +674,19 @@ class TestPriceRunnerKeepPollingOnFailure:
             last_fill_price_usd=0.01,
         )
 
+        positions = await repo.list_open_positions()
+        pos = positions[0]
+        fail_key = ActivePositionPriceRunner._failure_key(pos)
+
         with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
-            positions = await repo.list_open_positions()
-            pos = positions[0]
             await runner._process_position(pos, datetime.now(timezone.utc))
 
         # Status must remain SIM_OPEN, not EXIT_PENDING
         updated = await repo.get_position(pos_id)
         assert updated["status"] == "SIM_OPEN", "Price failure must not change status"
 
-        # Failure counter incremented but no exit was triggered
-        assert runner._consecutive_price_failures.get("SIM_PRICE_FAIL", 0) == 1
+        # Failure counter incremented with composite key
+        assert runner._consecutive_price_failures.get(fail_key, 0) == 1
 
     @pytest.mark.asyncio
     async def test_price_failure_keeps_position_in_next_poll(self, repo):
@@ -700,6 +702,9 @@ class TestPriceRunnerKeepPollingOnFailure:
             remaining_value_usd=10.0, account_type="SIM",
         )
 
+        positions = await repo.list_open_positions()
+        fail_key = ActivePositionPriceRunner._failure_key(positions[0])
+
         with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
             for _ in range(2):
                 await runner.run_once()
@@ -709,8 +714,8 @@ class TestPriceRunnerKeepPollingOnFailure:
         open_ids = {int(p["id"]) for p in open_positions}
         assert pos_id in open_ids, "Position must remain in open list after price failure"
 
-        # fetch_latest_price should have been attempted twice
-        assert runner._consecutive_price_failures.get("SIM_POLL_AGAIN", 0) >= 2
+        # fetch_latest_price should have been attempted twice (2 cycles, 1 each)
+        assert runner._consecutive_price_failures.get(fail_key, 0) >= 2
 
     @pytest.mark.asyncio
     async def test_price_failure_then_recovery_updates_value(self, repo):
@@ -728,22 +733,23 @@ class TestPriceRunnerKeepPollingOnFailure:
             last_fill_price_usd=0.01,
         )
 
+        positions = await repo.list_open_positions()
+        fail_key = ActivePositionPriceRunner._failure_key(positions[0])
+
         # First round: price fails
         with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
-            positions = await repo.list_open_positions()
             await runner._process_position(positions[0], datetime.now(timezone.utc))
 
-        assert runner._consecutive_price_failures.get("SIM_RECOVER", 0) == 1
+        assert runner._consecutive_price_failures.get(fail_key, 0) == 1
 
         # Second round: price recovers — value is low so no exit triggers
         with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
             "price_usd": 0.015, "price": 0.015,
         })):
-            positions = await repo.list_open_positions()
             await runner._process_position(positions[0], datetime.now(timezone.utc))
 
         # Consecutive failures must be cleared
-        assert runner._consecutive_price_failures.get("SIM_RECOVER") is None
+        assert runner._consecutive_price_failures.get(fail_key) is None
 
         # remaining_value_usd must be refreshed (500 * 0.015 = 7.5)
         updated = await repo.get_position(pos_id)
@@ -826,18 +832,24 @@ class TestPriceRunnerKeepPollingOnFailure:
         assert event_count == 1, f"Expected 1 throttled event, got {event_count}"
 
     @pytest.mark.asyncio
-    async def test_fetch_price_with_retry_no_sleep(self, repo):
-        """_fetch_price_with_retry does not sleep between slot retries."""
+    async def test_one_price_call_per_cycle(self, repo):
+        """_process_position makes exactly 1 API call per cycle, no retry."""
         gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
         runner = ActivePositionPriceRunner(repo, gmgn)
 
-        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
-            t0 = time.time()
-            try:
-                await runner._fetch_price_with_retry("NONEXISTENT", preferred_slot=None)
-            except RuntimeError:
-                pass
-            elapsed = time.time() - t0
+        pos_id = await repo.create_position(
+            token_mint="SINGLE_CALL", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
 
-        # 4 rapid attempts with no sleep should finish in < 0.5s
-        assert elapsed < 0.5, f"Expected fast retry, took {elapsed:.2f}s"
+        mock_fn = AsyncMock(return_value={"price_usd": 0.02, "price": 0.02})
+        with patch.object(gmgn, 'fetch_latest_price', new=mock_fn):
+            await runner.run_once()
+
+        # Exactly 1 call made, no retries
+        assert mock_fn.call_count == 1, f"Expected 1 call, got {mock_fn.call_count}"
