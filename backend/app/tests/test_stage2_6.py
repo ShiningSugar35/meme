@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, patch
@@ -748,3 +749,95 @@ class TestPriceRunnerKeepPollingOnFailure:
         updated = await repo.get_position(pos_id)
         assert updated["remaining_value_usd"] == 7.5
         assert updated["status"] == "SIM_OPEN", "No exit at 1.5x price"
+        # pnl_pct must be updated: (0.015 / 0.01) - 1 = 0.5
+        assert math.isclose(updated.get("pnl_pct") or 0, 0.5, rel_tol=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_one_failure_does_not_block_another(self, repo):
+        """One failing token does not block a healthy token's price fetch."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+
+        fail_id = await repo.create_position(
+            token_mint="BLOCKER_FAIL", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+        )
+        ok_id = await repo.create_position(
+            token_mint="BLOCKER_OK", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=500.0,
+            remaining_value_usd=5.0, account_type="SIM",
+        )
+
+        real_fetch = gmgn.fetch_latest_price
+
+        async def side_effect(token_mint, **kwargs):
+            if token_mint == "BLOCKER_FAIL":
+                raise GMGNAPIError("API down")
+            return await real_fetch(token_mint, **kwargs)
+
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=side_effect)):
+            await runner.run_once()
+
+        ok_pos = await repo.get_position(ok_id)
+        fail_pos = await repo.get_position(fail_id)
+
+        # OK token should still have its price refreshed
+        assert ok_pos["remaining_value_usd"] == 5.0, "Healthy token still processed"
+        assert ok_pos["status"] == "SIM_OPEN"
+        # Failing token stays open
+        assert fail_pos["status"] == "SIM_OPEN"
+
+    @pytest.mark.asyncio
+    async def test_throttle_system_events_on_consecutive_failures(self, repo):
+        """Repeated failures do not write a system event every cycle."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+
+        pos_id = await repo.create_position(
+            token_mint="THROTTLE_TEST", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+        )
+
+        event_count = 0
+
+        real_append = repo.append_system_event
+
+        async def counting_append(level, category, message, data, **kwargs):
+            nonlocal event_count
+            if "KEEP_POLLING_NO_EXIT" in str(data):
+                event_count += 1
+            await real_append(level, category, message, data, **kwargs)
+
+        repo.append_system_event = counting_append
+
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
+            for _ in range(3):
+                await runner._process_position(await repo.get_position(pos_id), datetime.now(timezone.utc))
+
+        # First failure writes event; subsequent failures within cooldown do not
+        assert event_count == 1, f"Expected 1 throttled event, got {event_count}"
+
+    @pytest.mark.asyncio
+    async def test_fetch_price_with_retry_no_sleep(self, repo):
+        """_fetch_price_with_retry does not sleep between slot retries."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
+            t0 = time.time()
+            try:
+                await runner._fetch_price_with_retry("NONEXISTENT", preferred_slot=None)
+            except RuntimeError:
+                pass
+            elapsed = time.time() - t0
+
+        # 4 rapid attempts with no sleep should finish in < 0.5s
+        assert elapsed < 0.5, f"Expected fast retry, took {elapsed:.2f}s"

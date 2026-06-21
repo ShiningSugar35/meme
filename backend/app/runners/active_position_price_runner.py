@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set
 
@@ -18,6 +19,8 @@ from ..logging_config import logger
 from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from .discovery_runner import acquire_holding_slot
+
+_PRICE_FAILURE_COOLDOWN_SECONDS = 60
 
 
 def _position_strategy_id(position: Dict[str, Any]) -> Optional[int]:
@@ -99,20 +102,28 @@ class ActivePositionPriceRunner:
         self.trading_pipeline = trading_pipeline
         self._last_price_update: Dict[int, Dict[str, Any]] = {}
         self._consecutive_price_failures: Dict[str, int] = {}
+        self._last_failure_event_at: Dict[str, float] = {}
+        self._failure_start_time: Dict[str, float] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
 
     async def run_once(self):
         now = _utc_now()
-
         positions = await self.repo.list_open_positions()
 
-        for position in positions:
-            try:
-                await self._process_position(position, now)
-            except Exception as e:
-                logger.exception("ActivePositionPriceRunner failed", token=position.get("token_mint"), error=str(e))
+        sem = asyncio.Semaphore(5)
+
+        async def _process_wrapper(pos):
+            async with sem:
+                try:
+                    await self._process_position(pos, now)
+                except Exception as e:
+                    logger.exception("ActivePositionPriceRunner failed", token=pos.get("token_mint"), error=str(e))
+
+        tasks = [_process_wrapper(p) for p in positions]
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def _process_position(self, position: Dict[str, Any], now: datetime):
         token = position["token_mint"]
@@ -136,12 +147,14 @@ class ActivePositionPriceRunner:
         if entry_price is None or entry_price <= 0:
             return
 
-        # Refresh position value in DB
+        # Refresh position value and PnL% in DB
+        pnl_pct = (current_price / entry_price) - 1.0
         try:
             await self.repo.update_position_remaining(
                 int(position["id"]),
                 remaining_token,
                 remaining_value_usd,
+                pnl_pct=pnl_pct,
             )
         except Exception as e:
             logger.warning(
@@ -234,20 +247,40 @@ class ActivePositionPriceRunner:
             except Exception:
                 pass
 
-            if attempt < 3:
-                await asyncio.sleep(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS)
-
         raise RuntimeError(f"Price fetch failed for {token_mint}: all 4 retry attempts exhausted")
 
     async def _fetch_latest_price(self, token: str, account_type: str, position: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         preferred_slot = acquire_holding_slot("price_runner")
         try:
             data = await self._fetch_price_with_retry(token, preferred_slot)
+            was_failing = token in self._consecutive_price_failures
+            fail_start = self._failure_start_time.pop(token, None)
             self._consecutive_price_failures.pop(token, None)
+            self._last_failure_event_at.pop(token, None)
+            if was_failing and fail_start is not None and position is not None:
+                downtime = int(time.time() - fail_start)
+                try:
+                    await self.repo.append_system_event(
+                        "INFO", "PRICE",
+                        f"Price fetch recovered for {token} after {downtime}s downtime",
+                        _safe_json({
+                            "position_id": int(position.get("id") or 0),
+                            "token_mint": token,
+                            "account_type": account_type,
+                            "downtime_seconds": downtime,
+                            "action": "PRICE_RECOVERED",
+                        }),
+                        account_type=account_type,
+                    )
+                except Exception:
+                    pass
             return data
         except Exception as e:
             fails = self._consecutive_price_failures.get(token, 0) + 1
             self._consecutive_price_failures[token] = fails
+            if fails == 1:
+                self._failure_start_time[token] = time.time()
+
             logger.warning(
                 "Price fetch failed; keep position open and retry next cycle",
                 token=token,
@@ -255,23 +288,28 @@ class ActivePositionPriceRunner:
                 failures=fails,
                 error=str(e),
             )
+
             if position is not None:
-                try:
-                    await self.repo.append_system_event(
-                        "WARN", "PRICE",
-                        f"Price fetch failed for {token}; keep polling",
-                        _safe_json({
-                            "position_id": int(position.get("id") or 0),
-                            "token_mint": token,
-                            "account_type": account_type,
-                            "consecutive_failures": fails,
-                            "action": "KEEP_POLLING_NO_EXIT",
-                            "error": str(e)[:300],
-                        }),
-                        account_type=account_type,
-                    )
-                except Exception:
-                    pass
+                last_event_at = self._last_failure_event_at.get(token, 0.0)
+                now = time.time()
+                if fails == 1 or (now - last_event_at) >= _PRICE_FAILURE_COOLDOWN_SECONDS:
+                    self._last_failure_event_at[token] = now
+                    try:
+                        await self.repo.append_system_event(
+                            "WARN", "PRICE",
+                            f"Price fetch failed for {token}; keep polling",
+                            _safe_json({
+                                "position_id": int(position.get("id") or 0),
+                                "token_mint": token,
+                                "account_type": account_type,
+                                "consecutive_failures": fails,
+                                "action": "KEEP_POLLING_NO_EXIT",
+                                "error": str(e)[:300],
+                            }),
+                            account_type=account_type,
+                        )
+                    except Exception:
+                        pass
             return {}
 
     async def _execute_exit(
