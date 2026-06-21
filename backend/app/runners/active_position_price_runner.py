@@ -15,7 +15,6 @@ from typing import Any, Dict, Optional, Set
 from ..config import settings
 from ..db.repositories import Repositories
 from ..logging_config import logger
-from ..providers.credential_router import get_credential_router
 from ..providers.rate_limiter import get_rate_limiter
 from ..services.event_bus import event_bus
 from .discovery_runner import acquire_holding_slot
@@ -137,6 +136,21 @@ class ActivePositionPriceRunner:
         if entry_price is None or entry_price <= 0:
             return
 
+        # Refresh position value in DB
+        try:
+            await self.repo.update_position_remaining(
+                int(position["id"]),
+                remaining_token,
+                remaining_value_usd,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to refresh position remaining value",
+                token=token,
+                position_id=position.get("id"),
+                error=str(e),
+            )
+
         executed_rules = _executed_exit_rules(position)
         multiple = current_price / entry_price
 
@@ -231,66 +245,34 @@ class ActivePositionPriceRunner:
             data = await self._fetch_price_with_retry(token, preferred_slot)
             self._consecutive_price_failures.pop(token, None)
             return data
-        except Exception:
+        except Exception as e:
             fails = self._consecutive_price_failures.get(token, 0) + 1
             self._consecutive_price_failures[token] = fails
-            if position is not None:
-                await self._emergency_price_exit(position)
-            return {}
-
-    async def _emergency_price_exit(self, position: Dict[str, Any]):
-        token = position["token_mint"]
-        pos_id = int(position["id"])
-        account_type = _account_type(position)
-        is_live = bool(position.get("is_live"))
-
-        logger.warning("Emergency price exit triggered", token=token, account_type=account_type)
-
-        if is_live and self.trading_pipeline is not None:
-            try:
-                await self.trading_pipeline.execute_sell(
-                    position=position,
-                    exit_pct=1.0,
-                    exit_reason="PRICE_API_UNAVAILABLE_EXIT",
-                )
-                await self.repo.append_system_event(
-                    "WARN", "PRICE",
-                    f"Emergency LIVE exit for {token} (price API unavailable)",
-                    _safe_json({"position_id": pos_id, "reason": "PRICE_API_UNAVAILABLE_EXIT"}),
-                    account_type=account_type,
-                )
-            except Exception as e:
-                logger.error("Emergency LIVE exit failed", error=str(e), token=token)
-            return
-
-        if is_live:
-            await self.repo.append_system_event(
-                "WARN", "PRICE",
-                f"Emergency LIVE exit skipped (no pipeline): {token}",
-                _safe_json({"position_id": pos_id}),
+            logger.warning(
+                "Price fetch failed; keep position open and retry next cycle",
+                token=token,
                 account_type=account_type,
+                failures=fails,
+                error=str(e),
             )
-            return
-
-        # SIM emergency exit — set EXIT_PENDING, don't write fake 0-price SELL
-        if self.trading_pipeline is not None and hasattr(self.trading_pipeline, "emergency_sim_exit"):
-            try:
-                await self.trading_pipeline.emergency_sim_exit(
-                    position=position,
-                    exit_reason="PRICE_API_UNAVAILABLE_EXIT_PENDING",
-                )
-                return
-            except Exception as e:
-                logger.error("Emergency SIM exit failed via pipeline", error=str(e), token=token)
-
-        # Fallback: mark as EXIT_PENDING instead of writing a fake 0-price SELL
-        await self.repo.append_system_event(
-            "WARN", "PRICE",
-            f"SIM exit pending for {token}: price API unavailable, will retry next cycle",
-            _safe_json({"position_id": pos_id, "reason": "PRICE_API_UNAVAILABLE_EXIT_PENDING"}),
-            account_type=account_type,
-        )
-        await self.repo.mark_position_exit_pending(pos_id, "PRICE_API_UNAVAILABLE_EXIT_PENDING")
+            if position is not None:
+                try:
+                    await self.repo.append_system_event(
+                        "WARN", "PRICE",
+                        f"Price fetch failed for {token}; keep polling",
+                        _safe_json({
+                            "position_id": int(position.get("id") or 0),
+                            "token_mint": token,
+                            "account_type": account_type,
+                            "consecutive_failures": fails,
+                            "action": "KEEP_POLLING_NO_EXIT",
+                            "error": str(e)[:300],
+                        }),
+                        account_type=account_type,
+                    )
+                except Exception:
+                    pass
+            return {}
 
     async def _execute_exit(
         self,

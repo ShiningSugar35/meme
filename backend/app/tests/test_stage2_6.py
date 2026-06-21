@@ -649,3 +649,102 @@ class TestSimStopLossIsolation:
             latest={}, current_price_usd=0.01,
         )
         pipeline.execute_sell.assert_called_once()
+
+
+# ============================================================================
+# Price runner: price API failure must NOT cause EXIT_PENDING
+# ============================================================================
+
+class TestPriceRunnerKeepPollingOnFailure:
+
+    @pytest.mark.asyncio
+    async def test_sim_price_failure_no_exit_pending(self, repo):
+        """Price API failure on SIM: status stays SIM_OPEN, no EXIT_PENDING."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+
+        pos_id = await repo.create_position(
+            token_mint="SIM_PRICE_FAIL", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
+            positions = await repo.list_open_positions()
+            pos = positions[0]
+            await runner._process_position(pos, datetime.now(timezone.utc))
+
+        # Status must remain SIM_OPEN, not EXIT_PENDING
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "SIM_OPEN", "Price failure must not change status"
+
+        # Failure counter incremented but no exit was triggered
+        assert runner._consecutive_price_failures.get("SIM_PRICE_FAIL", 0) == 1
+
+    @pytest.mark.asyncio
+    async def test_price_failure_keeps_position_in_next_poll(self, repo):
+        """After price failure, position is still returned by list_open_positions."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+
+        pos_id = await repo.create_position(
+            token_mint="SIM_POLL_AGAIN", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+        )
+
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
+            for _ in range(2):
+                await runner.run_once()
+
+        # Position must still be in open list (not EXIT_PENDING / CLOSED)
+        open_positions = await repo.list_open_positions()
+        open_ids = {int(p["id"]) for p in open_positions}
+        assert pos_id in open_ids, "Position must remain in open list after price failure"
+
+        # fetch_latest_price should have been attempted twice
+        assert runner._consecutive_price_failures.get("SIM_POLL_AGAIN", 0) >= 2
+
+    @pytest.mark.asyncio
+    async def test_price_failure_then_recovery_updates_value(self, repo):
+        """Price fails first, then recovers: remaining_value_usd is refreshed."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+
+        pos_id = await repo.create_position(
+            token_mint="SIM_RECOVER", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=500.0,
+            remaining_value_usd=5.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+
+        # First round: price fails
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(side_effect=GMGNAPIError("API down"))):
+            positions = await repo.list_open_positions()
+            await runner._process_position(positions[0], datetime.now(timezone.utc))
+
+        assert runner._consecutive_price_failures.get("SIM_RECOVER", 0) == 1
+
+        # Second round: price recovers — value is low so no exit triggers
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.015, "price": 0.015,
+        })):
+            positions = await repo.list_open_positions()
+            await runner._process_position(positions[0], datetime.now(timezone.utc))
+
+        # Consecutive failures must be cleared
+        assert runner._consecutive_price_failures.get("SIM_RECOVER") is None
+
+        # remaining_value_usd must be refreshed (500 * 0.015 = 7.5)
+        updated = await repo.get_position(pos_id)
+        assert updated["remaining_value_usd"] == 7.5
+        assert updated["status"] == "SIM_OPEN", "No exit at 1.5x price"

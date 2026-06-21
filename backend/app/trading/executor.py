@@ -43,7 +43,6 @@ EXIT_REASON_LABELS: Dict[str, str] = {
     "TOP3_SMART_DEGEN_DUMP": "TOP3聪明钱减仓超过25%",
     "RISK_RECHECK_FAILED": "持仓风控复查失败",
     "DUST_FORCE_EXIT": "尘埃仓强制清仓",
-    "PRICE_API_UNAVAILABLE_EXIT_PENDING": "价格接口异常，等待重试撤仓",
     "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
 }
 
