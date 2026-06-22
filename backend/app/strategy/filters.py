@@ -323,6 +323,17 @@ async def run_entry_local_risk_filter(
     details: List[FilterDetail] = []
     fv: Dict[str, Any] = {"x": x}
 
+    # Minimum age > 60 minutes
+    creation_ts, _, age_missing = _parse_creation_ts(snapshot)
+    age_minutes = _compute_age_minutes(creation_ts)
+    age_ok = age_minutes is not None and age_minutes > 60
+    details.append(FilterDetail(
+        name="min_age_minutes", passed=age_ok,
+        value=age_minutes, threshold="> 60",
+        reason=f"age={age_minutes:.1f}min {'>' if age_ok else '<='} 60" if age_minutes is not None else "age_missing",
+        missing=age_minutes is None,
+    ))
+
     _check_bool_one(details, snapshot, "renounced_mint", ["renounced_mint", "mint_renounced", "is_mint_renounced"])
     _check_bool_one(details, snapshot, "renounced_freeze_account", ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced", "freeze_authority_renounced"])
     _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected"])

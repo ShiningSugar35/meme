@@ -143,7 +143,7 @@ class StrategyThresholds:
         min_liquidity = 5000.0 - 2500.0 * xf
         min_liquidity_holder_ratio = 60.0 - 100.0 * xf
 
-        min_top_holder_rate = 0.155 - 0.5 * xf
+        min_top_holder_rate = 0.16 - 0.5 * xf
         max_top_holder_rate = 0.225 + 0.25 * xf
 
         max_fresh_wallet_rate = 0.13 + 0.1 * xf
@@ -173,14 +173,14 @@ class StrategyThresholds:
         # 买入条件 < 50x，持仓风控 < 75x
         entry_sniper_count_max = 50.0 * xf     # 买入本地风控：sniper_count < 50x
         sniper_count_max = 75.0 * xf            # 持仓风控轮询：sniper_count < 75x
-        top1_addr_type0_min = 0.022 - 0.02 * xf
-        top1_addr_type0_max = 0.054 + 0.01 * xf
+        top1_addr_type0_min = 0.033 - 0.02 * xf
+        top1_addr_type0_max = 0.049 + 0.01 * xf
 
-        price_change_1h_min_pct = 50.0 * (xf - 0.3)
-        price_change_1h_max_pct = 60.0 - 50.0 * xf
+        price_change_1h_min_pct = 50.0 * (xf - 0.1)
+        price_change_1h_max_pct = 50.0 - 50.0 * xf
         swaps_1h_min = 7.0 + 20.0 * xf
         volume_per_swap_1h_min = 23.0 + 20.0 * xf
-        price_range_24h_percentile_min = 0.13 - 0.4 * xf
+        price_range_24h_percentile_min = 0.07 - 0.2 * xf
         price_range_24h_percentile_max = 0.45 - 0.5 * xf
 
         return cls(
@@ -273,8 +273,8 @@ def compute_holding_thresholds(x: float) -> Dict[str, float]:
         "holding_bundler_rate": h,
         "holding_rat_trader_rate": h,
         "holding_suspected_insider_rate": h,
-        "holding_top1_addr_type0_min": 0.022 - 0.02 * xf,
-        "holding_top1_addr_type0_max": 0.054 + 0.01 * xf,
+        "holding_top1_addr_type0_min": 0.033 - 0.02 * xf,
+        "holding_top1_addr_type0_max": 0.049 + 0.01 * xf,
     }
 
 

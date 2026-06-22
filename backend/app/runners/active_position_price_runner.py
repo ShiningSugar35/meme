@@ -39,10 +39,10 @@ def _position_strategy_id(position: Dict[str, Any]) -> Optional[int]:
 
 
 EXIT_REASON_LABELS: Dict[str, str] = {
-    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
-    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
-    "HARD_SL_70": "硬止损：价格低于 0.7x，撤仓50%",
-    "HARD_SL_45": "硬止损：价格低于 0.45x，全部撤仓",
+    "HARD_TP_150": "硬止盈：价格超过 1.5x，撤仓50%",
+    "HARD_TP_200": "硬止盈：价格超过 2.0x，全部撤仓",
+    "HARD_TP_150_RETRACE": "硬止盈回撤：已超过1.5x后回落至1.5x及以下，全部撤仓",
+    "HARD_SL_75": "硬止损：价格低于 0.75x，全部撤仓",
     "COMPLETED": "池子 type 变为 completed，全部撤仓",
 }
 
@@ -176,22 +176,6 @@ class ActivePositionPriceRunner:
         # ---- Evaluate price rules ----
         reasons: list[tuple[str, float]] = []
 
-        # HARD_TP_210: full exit
-        if multiple >= 2.10 and "HARD_TP_210" not in executed_rules:
-            reasons.append(("HARD_TP_210", 1.0))
-
-        # HARD_TP_160: 50% exit (idempotent)
-        if multiple >= 1.60 and "HARD_TP_160" not in executed_rules:
-            reasons.append(("HARD_TP_160", 0.5))
-
-        # HARD_SL_45: full exit
-        if multiple <= 0.45 and "HARD_SL_45" not in executed_rules:
-            reasons.append(("HARD_SL_45", 1.0))
-
-        # HARD_SL_70: 50% exit
-        if multiple <= 0.70 and "HARD_SL_70" not in executed_rules and "HARD_SL_45" not in executed_rules:
-            reasons.append(("HARD_SL_70", 0.5))
-
         # Completed type — also try fetching latest token snapshot for up-to-date type
         token_type = position.get("latest_token_type") or position.get("type")
         if token_type != "completed":
@@ -207,10 +191,30 @@ class ActivePositionPriceRunner:
         if token_type == "completed":
             reasons.append(("COMPLETED", 1.0))
 
+        # >2.0x full exit
+        if multiple > 2.0 and "HARD_TP_200" not in executed_rules:
+            reasons.append(("HARD_TP_200", 1.0))
+
+        # <0.75x full exit
+        if multiple < 0.75 and "HARD_SL_75" not in executed_rules:
+            reasons.append(("HARD_SL_75", 1.0))
+
+        # Already executed 1.5x half-exit, now retraced to <=1.5x → full exit
+        if (
+            "HARD_TP_150" in executed_rules
+            and multiple <= 1.5
+            and "HARD_TP_150_RETRACE" not in executed_rules
+        ):
+            reasons.append(("HARD_TP_150_RETRACE", 1.0))
+
+        # First time >1.5x → 50% exit
+        if multiple > 1.5 and "HARD_TP_150" not in executed_rules:
+            reasons.append(("HARD_TP_150", 0.5))
+
         if not reasons:
             return
 
-        # Pick the highest-priority reason
+        # Pick the highest-priority reason (COMPLETED > HARD_TP_200 > HARD_SL_75 > RETRACE > HARD_TP_150)
         full_reasons = [r for r in reasons if r[1] >= 1.0]
         if full_reasons:
             reason_code, exit_pct = full_reasons[0]

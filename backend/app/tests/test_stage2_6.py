@@ -49,7 +49,7 @@ class TestTrenchesPushdown:
         assert math.isclose(payload["max_insider_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_bundler_rate"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["min_liquidity"], 4500.0, rel_tol=1e-9)
-        assert math.isclose(payload["min_top_holder_rate"], 0.055, rel_tol=1e-9)
+        assert math.isclose(payload["min_top_holder_rate"], 0.06, rel_tol=1e-9)
         assert math.isclose(payload["max_top_holder_rate"], 0.275, rel_tol=1e-9)
         assert math.isclose(payload["max_fresh_wallet_rate"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_creator_balance_rate"], 0.051, rel_tol=1e-9)  # 买入值 0.049+0.01*0.2
@@ -520,16 +520,16 @@ class TestNormalizeRateFraction:
 
 class TestTop1HolderNormalization:
     def test_x02_top1_passes_at_005(self):
-        """x=0.2, top1 rate=5% (0.05) should pass (holding threshold=0.056)."""
+        """x=0.2, top1 rate=5% (0.05) should pass (entry threshold=0.051)."""
         t = compute_thresholds(0.2)
-        assert math.isclose(t.top1_addr_type0_max, 0.056, rel_tol=1e-9)
+        assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
         holder = {"addr_type": 0, "amount_percentage": 5.0}
         res = evaluate_top1_holder(holder, 0.2)
         assert res.passed is True
         assert math.isclose(res.feature_vector["top1_holder_rate"], 0.05, rel_tol=1e-9)
 
     def test_x02_top1_fails_at_006(self):
-        """x=0.2, top1 rate=6% should fail (holding threshold=0.056)."""
+        """x=0.2, top1 rate=6% should fail (entry threshold=0.051)."""
         holder = {"addr_type": 0, "amount_percentage": 6.0}
         res = evaluate_top1_holder(holder, 0.2)
         assert res.passed is False
@@ -562,7 +562,7 @@ class TestTop1HolderNormalization:
 class TestSimStopLossIsolation:
     @pytest.mark.asyncio
     async def test_sim_hard_tp_closes_position_without_pipeline(self, repo):
-        """SIM HARD_TP_250 trigger closes position, does NOT call execute_sell."""
+        """SIM HARD_TP_200 trigger at 2.8x closes position."""
         gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
         runner = ActivePositionPriceRunner(repo, gmgn)
         pos_id = await repo.create_position(
@@ -580,7 +580,7 @@ class TestSimStopLossIsolation:
         })):
             await runner._process_position(pos, datetime.now(timezone.utc))
         updated = await repo.get_position(pos_id)
-        assert updated["status"] == "CLOSED", "SIM position closed on HARD_TP_250"
+        assert updated["status"] == "CLOSED", "SIM position closed on TP at 2.8x"
 
     @pytest.mark.asyncio
     async def test_sim_risk_recheck_paper_exit_closes(self, repo):
@@ -853,3 +853,241 @@ class TestPriceRunnerKeepPollingOnFailure:
 
         # Exactly 1 call made, no retries
         assert mock_fn.call_count == 1, f"Expected 1 call, got {mock_fn.call_count}"
+
+
+# ============================================================================
+# New TP/SL rule tests
+# ============================================================================
+
+class TestNewTPSLRules:
+
+    @pytest.mark.asyncio
+    async def test_hard_tp_150_half_exit(self, repo):
+        """Price = 1.51x entry, no prior HARD_TP_150 → sell 50%, record HARD_TP_150."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TP_150_HALF", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.0151, "price": 0.0151,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "SIM_OPEN", "50% exit keeps position open"
+        assert updated["remaining_token_amount"] == 500.0
+        # HARD_TP_150 must be recorded in executed_exit_rules_json
+        rules = json.loads(updated.get("executed_exit_rules_json") or "[]")
+        assert "HARD_TP_150" in rules
+
+    @pytest.mark.asyncio
+    async def test_hard_tp_150_not_triggered_at_1_5x(self, repo):
+        """Price = 1.5x entry, no prior HARD_TP_150 → NOT triggered (> not >=)."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TP_150_NO", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.015, "price": 0.015,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "SIM_OPEN", "Position remains open"
+        assert updated["remaining_token_amount"] == 1000.0
+
+    @pytest.mark.asyncio
+    async def test_hard_tp_200_full_exit(self, repo):
+        """Price = 2.01x entry → full exit, reason HARD_TP_200."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TP_200_FULL", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.0201, "price": 0.0201,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "CLOSED", "Full exit at 2.01x"
+
+    @pytest.mark.asyncio
+    async def test_hard_tp_200_not_triggered_at_2_0x(self, repo):
+        """Price = 2.0x entry → NOT triggered for HARD_TP_200."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TP_200_NO", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.02, "price": 0.02,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "SIM_OPEN", "No HARD_TP_200 at exactly 2.0x"
+
+    @pytest.mark.asyncio
+    async def test_hard_tp_150_retrace_full_exit(self, repo):
+        """Already executed HARD_TP_150, price = 1.5x → full exit, reason HARD_TP_150_RETRACE."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TP_150_RETRACE", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=500.0,
+            remaining_value_usd=5.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        await repo.db.execute("UPDATE positions SET executed_exit_rules_json=? WHERE id=?", (json.dumps(["HARD_TP_150"]), pos_id))
+        pos = await repo.get_position(pos_id)
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.015, "price": 0.015,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "CLOSED", "Full exit on retrace to 1.5x"
+
+    @pytest.mark.asyncio
+    async def test_hard_tp_150_retrace_below_1_5x(self, repo):
+        """Already executed HARD_TP_150, price = 1.49x → full exit."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="TP_150_RETRACE2", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=500.0,
+            remaining_value_usd=5.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        await repo.db.execute("UPDATE positions SET executed_exit_rules_json=? WHERE id=?", (json.dumps(["HARD_TP_150"]), pos_id))
+        pos = await repo.get_position(pos_id)
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.0149, "price": 0.0149,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "CLOSED", "Full exit on retrace below 1.5x"
+
+    @pytest.mark.asyncio
+    async def test_hard_sl_75_full_exit(self, repo):
+        """Price = 0.74x entry → full exit, reason HARD_SL_75."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="SL_75_FULL", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.0074, "price": 0.0074,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "CLOSED", "Full exit at 0.74x"
+
+    @pytest.mark.asyncio
+    async def test_hard_sl_75_not_triggered_at_0_75x(self, repo):
+        """Price = 0.75x → NOT triggered (< not <=)."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="SL_75_NO", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.0075, "price": 0.0075,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "SIM_OPEN", "No SL at exactly 0.75x"
+
+    @pytest.mark.asyncio
+    async def test_completed_full_exit(self, repo):
+        """Position with type=completed → full exit."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="COMPLETED_TEST", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+        pos["latest_token_type"] = "completed"
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.01, "price": 0.01,
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "CLOSED", "Completed triggers full exit"
+
+    @pytest.mark.asyncio
+    async def test_old_reason_codes_not_produced(self, repo):
+        """Old reason codes HARD_TP_160/HARD_TP_210/HARD_SL_70/HARD_SL_45 not produced."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        runner = ActivePositionPriceRunner(repo, gmgn)
+        pos_id = await repo.create_position(
+            token_mint="OLD_CODES", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=10.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+        # Try each price that would have triggered old rules
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.017, "price": 0.017,  # would have been HARD_TP_160
+        })):
+            await runner._process_position(pos, datetime.now(timezone.utc))
+        updated = await repo.get_position(pos_id)
+        rules = json.loads(updated.get("executed_exit_rules_json") or "[]")
+        for old in ("HARD_TP_160", "HARD_TP_210", "HARD_SL_70", "HARD_SL_45"):
+            assert old not in rules, f"Old reason code {old} must not be produced"

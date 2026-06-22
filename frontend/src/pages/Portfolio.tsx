@@ -50,10 +50,10 @@ function ruleLabel(name: string): string {
 
 function exitReasonLabel(code: string): string {
   const map: Record<string, string> = {
-    HARD_TP_160: '硬止盈1.6x撤50%',
-    HARD_TP_210: '硬止盈2.1x全平',
-    HARD_SL_45: '硬止损0.45x全平',
-    HARD_SL_70: '硬止损0.7x撤50%',
+    HARD_TP_150: '硬止盈1.5x撤50%',
+    HARD_TP_200: '硬止盈2.0x全平',
+    HARD_TP_150_RETRACE: '1.5x止盈后回撤全平',
+    HARD_SL_75: '硬止损0.75x全平',
     COMPLETED: '池子completed',
     SMART_MONEY_SELL: '聪明钱卖出',
     TOP3_SMART_DEGEN_DUMP: 'TOP3聪明钱减仓',

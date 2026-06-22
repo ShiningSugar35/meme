@@ -57,16 +57,16 @@ def test_thresholds_x_02():
     assert math.isclose(t.min_marketcap, 4950.0, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
     assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_min_pct, -5.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_max_pct, 50.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_min_pct, 5.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_max_pct, 40.0, rel_tol=1e-9)
     assert math.isclose(t.sell_tax_max, 0.02, rel_tol=1e-9)
     assert math.isclose(t.sniper_count_max, 15.0, rel_tol=1e-9)          # 持仓风控 75*0.2
     assert math.isclose(t.entry_sniper_count_max, 10.0, rel_tol=1e-9)     # 买入条件 50*0.2
-    assert math.isclose(t.top1_addr_type0_max, 0.056, rel_tol=1e-9)
-    assert math.isclose(t.top1_addr_type0_min, 0.018, rel_tol=1e-9)
+    assert math.isclose(t.top1_addr_type0_max, 0.051, rel_tol=1e-9)
+    assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
     assert math.isclose(t.min_liquidity_holder_ratio, 40.0, rel_tol=1e-9)
     assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
-    assert math.isclose(t.price_range_24h_percentile_min, 0.05, rel_tol=1e-9)
+    assert math.isclose(t.price_range_24h_percentile_min, 0.03, rel_tol=1e-9)
     assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
 
 
@@ -74,8 +74,8 @@ def test_thresholds_x_01():
     t = compute_thresholds(0.1)
     assert math.isclose(t.common_risk, 0.10, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1400.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_min_pct, -10.0, rel_tol=1e-9)
-    assert math.isclose(t.price_change_1h_max_pct, 55.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_min_pct, 0.0, rel_tol=1e-9)
+    assert math.isclose(t.price_change_1h_max_pct, 45.0, rel_tol=1e-9)
 
 
 def test_thresholds_x_03():
@@ -89,27 +89,52 @@ def test_thresholds_x_03():
 # ---------------------------------------------------------------------------
 
 def test_entry_risk_all_pass():
-    s = make_snapshot()
+    s = make_snapshot(pool_created_at=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat())
     res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
     assert res.passed is True
 
 
 def test_entry_risk_burn_fails():
-    s = make_snapshot(burn_status="not_burn")
+    s = make_snapshot(burn_status="not_burn", pool_created_at=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat())
     res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
     assert any(d.name == "burn_status" and not d.passed for d in res.details)
 
 
 def test_entry_risk_wash_trading_fails():
-    s = make_snapshot(is_wash_trading=1)
+    s = make_snapshot(is_wash_trading=1, pool_created_at=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat())
     res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
     assert any(d.name == "is_wash_trading" and not d.passed for d in res.details)
 
 
 def test_entry_risk_sniper_fails():
-    s = make_snapshot(sniper_count=99)
+    s = make_snapshot(sniper_count=99, pool_created_at=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat())
     res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
     assert any(d.name == "sniper_count" and not d.passed for d in res.details)
+
+
+def test_age_minutes_less_than_60_fails():
+    s = make_snapshot(pool_created_at=(datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat())
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    age_detail = next((d for d in res.details if d.name == "min_age_minutes"), None)
+    assert age_detail is not None
+    assert age_detail.passed is False
+
+
+def test_age_minutes_more_than_60_passes():
+    s = make_snapshot(pool_created_at=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat())
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    age_detail = next((d for d in res.details if d.name == "min_age_minutes"), None)
+    assert age_detail is not None
+    assert age_detail.passed is True
+
+
+def test_age_missing_fails():
+    s = make_snapshot(pool_created_at=None, creation_timestamp=None)
+    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
+    age_detail = next((d for d in res.details if d.name == "min_age_minutes"), None)
+    assert age_detail is not None
+    assert age_detail.passed is False
+    assert age_detail.missing is True
 
 
 # ---------------------------------------------------------------------------
@@ -185,11 +210,11 @@ def test_price_change_threshold():
     assert pct_detail is not None
     # (0.0011 - 0.001) / 0.001 * 100 = 10%
     assert math.isclose(pct_detail.get("pct_change") or 0, 10.0, rel_tol=1e-9)
-    # lower_threshold = 50 * (0.2 - 0.3) = -5
-    assert math.isclose(pct_detail.get("lower_threshold") or 0, -5.0, rel_tol=1e-9)
-    # upper_threshold = 60 - 50 * 0.2 = 50
-    assert math.isclose(pct_detail.get("upper_threshold") or 0, 50.0, rel_tol=1e-9)
-    assert pct_detail.get("passed") is True, "10% within (-10, 50) should pass"
+    # lower_threshold = 50 * (0.2 - 0.1) = 5
+    assert math.isclose(pct_detail.get("lower_threshold") or 0, 5.0, rel_tol=1e-9)
+    # upper_threshold = 50 - 50 * 0.2 = 40
+    assert math.isclose(pct_detail.get("upper_threshold") or 0, 40.0, rel_tol=1e-9)
+    assert pct_detail.get("passed") is True, "10% within (5, 40) should pass"
 
 
 def test_missing_price_fails():
@@ -216,6 +241,75 @@ def test_kline_fallback():
     res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=klines))
     pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
     assert pct_detail.get("source") == "kline_since_open"
+
+
+def test_price_change_min_boundary_fails():
+    """x=0.2: pct_change=5.0 not > 5.0 => fails."""
+    token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
+    latest = {"price": 0.00105, "price_usd": 0.00105, "swaps_1h": 500,
+              "price_1h": 0.001, "volume_1h": 14000}
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=_pass_range_klines(0.00105)))
+    pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
+    # (0.00105 - 0.001) / 0.001 * 100 = 5.0, equal to min, not >, so fails
+    assert pct_detail.get("passed") is False
+
+
+def test_price_change_max_boundary_fails():
+    """x=0.2: pct_change=40.0 not < 40.0 => fails."""
+    token = {"pool_created_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()}
+    latest = {"price": 0.0014, "price_usd": 0.0014, "swaps_1h": 500,
+              "price_1h": 0.001, "volume_1h": 14000}
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=_pass_range_klines(0.0014)))
+    pct_detail = next((d for d in res.details if d.get("rule") == "price_change_1h"), None)
+    # (0.0014 - 0.001) / 0.001 * 100 = 40.0, equal to max, not <, so fails
+    assert pct_detail.get("passed") is False
+
+
+def test_price_range_percentile_min_boundary_fails():
+    """x=0.2: percentile=0.0299 < 0.03 => fails (below min)."""
+    token = {"pool_created_at": "2025-01-01T00:00:00Z"}
+    latest = {"price_usd": 1.0599}
+    klines = [{"high": 3.0, "low": 1.0, "open": 1.2, "close": 1.0599}]
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=klines))
+    pct_detail = next(d for d in res.details if d["rule"] == "price_range_24h_percentile")
+    # (1.0599 - 1.0) / (3.0 - 1.0) = 0.02995 < 0.03 => fails
+    assert pct_detail["passed"] is False
+
+
+def test_price_range_percentile_max_boundary_fails():
+    """x=0.2: percentile=0.3501 > 0.35 => fails (above max)."""
+    token = {"pool_created_at": "2025-01-01T00:00:00Z"}
+    latest = {"price_usd": 1.7002}
+    klines = [{"high": 3.0, "low": 1.0, "open": 1.2, "close": 1.7002}]
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=klines))
+    pct_detail = next(d for d in res.details if d["rule"] == "price_range_24h_percentile")
+    # (1.7002 - 1.0) / (3.0 - 1.0) = 0.3501 > 0.35 => fails
+    assert pct_detail["passed"] is False
+
+
+def test_price_range_percentile_mid_range_passes():
+    """x=0.2: percentile=0.20 in (0.03, 0.35) => passes."""
+    token = {"pool_created_at": "2025-01-01T00:00:00Z"}
+    latest = {"price_usd": 1.4}
+    klines = [{"high": 3.0, "low": 1.0, "open": 1.2, "close": 1.4}]
+    res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=klines))
+    pct_detail = next(d for d in res.details if d["rule"] == "price_range_24h_percentile")
+    # (1.4 - 1.0) / (3.0 - 1.0) = 0.2, in range, so passes
+    assert pct_detail["passed"] is True
+
+
+def test_top1_holder_addr_type0_boundary_fails():
+    """x=0.2: values outside (0.029, 0.051) => fails."""
+    res_low = evaluate_top1_holder({"addr_type": 0, "top1_holder_rate": 0.028}, 0.2)
+    assert res_low.passed is False
+    res_high = evaluate_top1_holder({"addr_type": 0, "top1_holder_rate": 0.06}, 0.2)
+    assert res_high.passed is False
+
+
+def test_top1_holder_addr_type0_mid_passes():
+    """x=0.2: rate=0.04 in (0.029, 0.051) => passes."""
+    res = evaluate_top1_holder({"addr_type": 0, "top1_holder_rate": 0.04}, 0.2)
+    assert res.passed is True
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +649,7 @@ def test_trench_filters_x_02():
     filters = t.to_trench_filters()
     assert math.isclose(filters["min_liquidity"], 4500.0, rel_tol=1e-9)
     assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
-    assert math.isclose(filters["min_top_holder_rate"], 0.055, rel_tol=1e-9)
+    assert math.isclose(filters["min_top_holder_rate"], 0.06, rel_tol=1e-9)
     assert math.isclose(filters["max_top_holder_rate"], 0.275, rel_tol=1e-9)
 
 
@@ -605,7 +699,7 @@ def test_requires_smart_degen_for_x_none_safe():
 # ============================================================================
 
 def test_price_range_percentile_passes_with_klines_x02():
-    """x=0.2: percentile=0.25 in range (0, 0.35) => passed."""
+    """x=0.2: percentile=0.25 in range (0.03, 0.35) => passed."""
     from ..strategy.filters import evaluate_price_activity_rules
     token = {"pool_created_at": "2025-01-01T00:00:00Z"}
     latest = {"price_usd": 1.5}

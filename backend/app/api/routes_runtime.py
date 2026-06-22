@@ -2673,13 +2673,47 @@ async def pnl_summary(request: Request):
         except Exception:
             pass
 
+        # Open position stats
+        open_position_stats = {
+            "SIM": {"open_positions": 0, "open_value_usd": 0.0, "unrealized_pnl_usd": 0.0},
+            "LIVE": {"open_positions": 0, "open_value_usd": 0.0, "unrealized_pnl_usd": 0.0},
+        }
+        try:
+            open_rows = await _fetch_all(repo, """
+                SELECT
+                    account_type,
+                    COUNT(*) AS open_positions,
+                    COALESCE(SUM(COALESCE(remaining_value_usd, 0)), 0) AS open_value_usd,
+                    COALESCE(SUM(
+                        COALESCE(remaining_value_usd, 0)
+                        - COALESCE(remaining_token_amount, 0) * COALESCE(entry_price_usd, 0)
+                    ), 0) AS unrealized_pnl_usd
+                FROM positions
+                WHERE account_type IN ('SIM', 'LIVE')
+                  AND status IN ('POSITION_OPEN', 'SIM_OPEN', 'PARTIAL_EXIT')
+                  AND COALESCE(remaining_token_amount, 0) > 0
+                GROUP BY account_type
+            """)
+            for r in open_rows:
+                acct = str(r.get("account_type") or "").upper()
+                if acct in open_position_stats:
+                    open_position_stats[acct]["open_positions"] = int(r.get("open_positions") or 0)
+                    open_position_stats[acct]["open_value_usd"] = round(float(r.get("open_value_usd") or 0), 6)
+                    open_position_stats[acct]["unrealized_pnl_usd"] = round(float(r.get("unrealized_pnl_usd") or 0), 6)
+        except Exception:
+            pass
+
+        sim_open = open_position_stats["SIM"]
+        live_open = open_position_stats["LIVE"]
+
         return {
             "sim": {
                 "realized_pnl_usd": out["SIM"]["realized_pnl_usd"],
-                "unrealized_pnl_usd": 0.0,
-                "total_pnl_usd": out["SIM"]["realized_pnl_usd"],
+                "unrealized_pnl_usd": sim_open["unrealized_pnl_usd"],
+                "total_pnl_usd": round(out["SIM"]["realized_pnl_usd"] + sim_open["unrealized_pnl_usd"], 6),
                 "realized_pnl_pct": out["SIM"]["realized_pnl_pct"],
-                "open_positions": 0,
+                "open_positions": sim_open["open_positions"],
+                "open_value_usd": sim_open["open_value_usd"],
                 "closed_positions": out["SIM"]["near_closed_positions"],
                 "losing_positions": out["SIM"]["losing_positions"],
                 "winning_positions": out["SIM"]["winning_positions"],
@@ -2689,10 +2723,11 @@ async def pnl_summary(request: Request):
             },
             "live": {
                 "realized_pnl_usd": out["LIVE"]["realized_pnl_usd"],
-                "unrealized_pnl_usd": 0.0,
-                "total_pnl_usd": out["LIVE"]["realized_pnl_usd"],
+                "unrealized_pnl_usd": live_open["unrealized_pnl_usd"],
+                "total_pnl_usd": round(out["LIVE"]["realized_pnl_usd"] + live_open["unrealized_pnl_usd"], 6),
                 "realized_pnl_pct": out["LIVE"]["realized_pnl_pct"],
-                "open_positions": 0,
+                "open_positions": live_open["open_positions"],
+                "open_value_usd": live_open["open_value_usd"],
                 "closed_positions": out["LIVE"]["near_closed_positions"],
                 "losing_positions": out["LIVE"]["losing_positions"],
                 "winning_positions": out["LIVE"]["winning_positions"],

@@ -31,10 +31,10 @@ def _position_strategy_id(position: Dict[str, Any]) -> Optional[int]:
 
 
 EXIT_REASON_LABELS: Dict[str, str] = {
-    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
-    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
-    "HARD_SL_70": "硬止损：价格低于 0.7x，撤仓50%",
-    "HARD_SL_45": "硬止损：价格低于 0.45x，全部撤仓",
+    "HARD_TP_150": "硬止盈：价格超过 1.5x，撤仓50%",
+    "HARD_TP_200": "硬止盈：价格超过 2.0x，全部撤仓",
+    "HARD_TP_150_RETRACE": "硬止盈回撤：已超过1.5x后回落至1.5x及以下，全部撤仓",
+    "HARD_SL_75": "硬止损：价格低于 0.75x，全部撤仓",
     "COMPLETED": "池子 type 变为 completed，全部撤仓",
     "SMART_MONEY_SELL": "聪明钱卖出触发",
     "TOP3_SMART_DEGEN_DUMP": "TOP3聪明钱减仓超过25%",
