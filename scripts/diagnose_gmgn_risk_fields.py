@@ -16,9 +16,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-# ---------------------------------------------------------------------------
-# Bootstrap: make backend importable
-# ---------------------------------------------------------------------------
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "backend"))
 
@@ -30,7 +27,6 @@ from app.db.repositories import Repositories
 from app.providers.gmgn_real import GMGNProvider
 
 
-# Candidate key paths for each target field
 TARGET_FIELDS = {
     "rug_ratio": [
         "rug_ratio", "max_rug_ratio", "rug", "rugged_ratio", "rug_rate",
@@ -54,7 +50,6 @@ TARGET_FIELDS = {
 
 
 def _recursive_key_search(obj: Any, prefix: str = "", depth: int = 0) -> Dict[str, Any]:
-    """Walk a nested JSON-like structure and return all leaf key paths + sample values."""
     if depth > 6 or not isinstance(obj, dict):
         return {}
     results: Dict[str, Any] = {}
@@ -67,15 +62,12 @@ def _recursive_key_search(obj: Any, prefix: str = "", depth: int = 0) -> Dict[st
     return results
 
 
-def _find_candidate(endpoint: str, raw: Dict[str, Any], candidates: List[str]) -> Dict[str, Any]:
-    """Search raw JSON for any of the candidate keys (dot-path aware)."""
+def _find_candidate(raw: Dict[str, Any], candidates: List[str]) -> Dict[str, Any]:
     flat = _recursive_key_search(raw)
     found: Dict[str, Any] = {}
     for cand in candidates:
-        # Exact match
         if cand in flat:
             found[cand] = flat[cand]
-        # Partial match
         for path, val in flat.items():
             if cand in path or path.endswith(cand):
                 found[path] = val
@@ -88,13 +80,77 @@ def _top_level_keys(obj: Any, prefix: str = "") -> List[str]:
     return [f"{prefix}.{k}" if prefix else k for k in obj]
 
 
-def _summary_for_target(endpoint: str, raw: Any) -> str:
-    if not isinstance(raw, dict):
-        return "not_a_dict"
-    has = {f: len(_find_candidate(endpoint, raw, cands)) > 0
-           for f, cands in TARGET_FIELDS.items()}
-    parts = [f"{f}=Y" if v else f"{f}=N" for f, v in has.items()]
-    return ", ".join(parts)
+async def _probe_endpoint(
+    gmgn: GMGNProvider,
+    label: str,
+    path: str,
+    token_mint: str,
+    pool_address: str,
+) -> Dict[str, Any]:
+    """Probe a single endpoint and return the raw response + candidate analysis."""
+    result: Dict[str, Any] = {
+        "endpoint": label,
+        "path": path,
+        "token_mint": token_mint,
+        "pool_address": pool_address,
+        "via_mint": None,
+        "via_pool": None,
+    }
+
+    # Call with token_mint as address
+    if label == "trenches":
+        params = {"chain": "sol", "limit": 1, "type": "new_creation"}
+        try:
+            items = await gmgn.fetch_trenches(params)
+            raw = {"data": items, "_source": "fetch_trenches"}
+        except Exception as exc:
+            raw = {"_error": str(exc)[:200]}
+    else:
+        params_mint = {"chain": "sol", "address": token_mint}
+        try:
+            raw = await gmgn._make_request(path, params_mint, method="GET")
+        except Exception as exc:
+            raw = {"_error": str(exc)[:200]}
+
+    result["via_mint"] = {
+        "status": "ok" if raw and "_error" not in raw else "error",
+        "raw_json_preview": json.dumps(raw, indent=2, default=str)[:2000],
+        "has_data": "data" in raw,
+        "top_keys": _top_level_keys(raw.get("data", raw) if isinstance(raw, dict) else {}),
+        "candidates": {f: _find_candidate(raw if isinstance(raw, dict) else {}, cands)
+                       for f, cands in TARGET_FIELDS.items()},
+    }
+
+    # Call with pool_address if available
+    if pool_address:
+        if label == "trenches":
+            result["via_pool"] = {"status": "skipped", "reason": "trenches has no pool-address lookup"}
+        else:
+            params_pool = {"chain": "sol", "address": pool_address}
+            try:
+                raw_pool = await gmgn._make_request(path, params_pool, method="GET")
+            except Exception as exc:
+                raw_pool = {"_error": str(exc)[:200]}
+            result["via_pool"] = {
+                "status": "ok" if raw_pool and "_error" not in raw_pool else "error",
+                "candidates": {f: _find_candidate(raw_pool if isinstance(raw_pool, dict) else {}, cands)
+                               for f, cands in TARGET_FIELDS.items()},
+            }
+
+    return result
+
+
+async def _probe_normalized(gmgn: GMGNProvider, token_mint: str) -> Dict[str, Any]:
+    """Call fetch_token_snapshot and check normalized output for risk fields."""
+    try:
+        snap = await gmgn.fetch_token_snapshot(token_mint)
+        return {
+            field: snap.get(field)
+            for field in ("max_rug_ratio", "rug_ratio", "max_insider_ratio", "insider_ratio",
+                          "suspected_insider_hold_rate", "is_wash_trading")
+        }
+    except Exception as exc:
+        return {"_error": str(exc)[:200]}
 
 
 async def main():
@@ -104,17 +160,16 @@ async def main():
 
     probe: Dict[str, Any] = {
         "timestamp": ts,
-        "sample_tokens": [],
-        "endpoints": {},
+        "samples": [],
     }
 
-    # -----------------------------------------------------------------------
-    # DB connection & sample selection
-    # -----------------------------------------------------------------------
     db = await init_db(path=settings.SQLITE_PATH)
     repo = Repositories(db)
     gmgn = GMGNProvider(repo, mode="live")
 
+    # -----------------------------------------------------------------------
+    # Sample selection
+    # -----------------------------------------------------------------------
     samples: List[Dict[str, str]] = []
 
     # Priority 1: open positions
@@ -131,6 +186,7 @@ async def main():
     except Exception as exc:
         probe["sample_error"] = f"open_positions: {exc}"
 
+    # Priority 2: snapshots
     if not samples:
         try:
             snap_rows = await repo.fetchall(
@@ -143,21 +199,32 @@ async def main():
         except Exception as exc:
             probe["sample_error_snap"] = f"snapshots: {exc}"
 
-    probe["sample_tokens"] = samples
+    # Priority 3: fallback — call trenches to get sample tokens
+    if not samples:
+        try:
+            fallback_params = {"chain": "sol", "limit": 5, "type": "new_creation"}
+            trenches_items = await gmgn.fetch_trenches(fallback_params)
+            for item in (trenches_items or []):
+                samples.append({
+                    "token_mint": item.get("token_mint") or item.get("address") or "",
+                    "pool_address": item.get("pool_address") or "",
+                    "source": "trenches_fallback",
+                })
+        except Exception as exc:
+            probe["sample_fallback_error"] = f"trenches_fallback: {exc}"
+
+    probe["samples"] = samples
 
     # -----------------------------------------------------------------------
-    # Endpoint calls per sample
+    # Endpoint probes per sample
     # -----------------------------------------------------------------------
     ENDPOINTS = [
         ("token_info", settings.GMGN_TOKEN_INFO_PATH),
         ("token_security", getattr(settings, "GMGN_TOKEN_SECURITY_PATH", "/v1/token/security")),
         ("pool_info", getattr(settings, "GMGN_TOKEN_POOL_INFO_PATH", "/v1/token/pool_info")),
-        ("top_holders", getattr(settings, "GMGN_TOP_HOLDERS_PATH", "/v1/market/token_top_holders")),
+        ("top_holders", settings.GMGN_TOKEN_HOLDERS_PATH),
         ("trenches", settings.GMGN_TRENCHES_PATH),
     ]
-
-    for label, path in ENDPOINTS:
-        probe["endpoints"][label] = {"path": path, "samples": []}
 
     for sample in samples:
         mint = sample["token_mint"]
@@ -165,104 +232,84 @@ async def main():
         entry: Dict[str, Any] = {
             "token_mint": mint,
             "pool_address": pool,
+            "source": sample["source"],
+            "endpoints": {},
         }
 
         for label, path in ENDPOINTS:
-            if not path:
-                entry[f"{label}_skipped"] = "no_path"
-                continue
+            entry["endpoints"][label] = await _probe_endpoint(gmgn, label, path, mint, pool)
 
-            params_mint = {"chain": "sol", "address": mint}
-            if label == "trenches":
-                params_mint = {"chain": "sol", "limit": 1}
+        # Normalized check
+        entry["normalized"] = await _probe_normalized(gmgn, mint)
 
-            raw_mint = None
-            try:
-                raw_mint = await gmgn._make_request(path, params_mint, method="GET")
-            except Exception as exc:
-                raw_mint = {"_error": str(exc)[:200]}
-
-            entry[f"{label}_via_mint"] = {
-                "status": "ok" if raw_mint and "_error" not in raw_mint else "error",
-                "summary": _summary_for_target(label, raw_mint),
-                "top_keys": _top_level_keys(raw_mint.get("data", raw_mint) if isinstance(raw_mint, dict) else {}),
-                "candidates": {f: _find_candidate(label, raw_mint if isinstance(raw_mint, dict) else {}, cands)
-                               for f, cands in TARGET_FIELDS.items()},
-            }
-
-            # Also call with pool_address if available
-            if pool:
-                params_pool = {"chain": "sol", "address": pool}
-                raw_pool = None
-                try:
-                    raw_pool = await gmgn._make_request(path, params_pool, method="GET")
-                except Exception as exc:
-                    raw_pool = {"_error": str(exc)[:200]}
-                entry[f"{label}_via_pool"] = {
-                    "status": "ok" if raw_pool and "_error" not in raw_pool else "error",
-                    "summary": _summary_for_target(label, raw_pool),
-                }
-
-        # Also call current fetch_token_snapshot and check normalized output
-        try:
-            snap = await gmgn.fetch_token_snapshot(mint)
-            entry["normalized"] = {
-                field: snap.get(field) for field in
-                ("max_rug_ratio", "rug_ratio", "max_insider_ratio", "insider_ratio",
-                 "suspected_insider_hold_rate", "is_wash_trading")
-            }
-        except Exception as exc:
-            entry["normalized_error"] = str(exc)[:200]
-
-        for label in ENDPOINTS:
-            en = label[0]
-            if en in entry:
-                probe["endpoints"][label]["samples"].append(entry)
+        probe["samples"].append(entry)
 
     # -----------------------------------------------------------------------
-    # Build markdown report
+    # Build markdown report (aggregate from probe["samples"], not last entry)
     # -----------------------------------------------------------------------
     report_lines = [
         "# GMGN 风控字段缺失诊断报告",
         f"\n## 诊断时间\n{ts}",
-        "\n## 样本",
     ]
-    for s in samples:
-        report_lines.append(f"- token_mint: `{s['token_mint']}`, pool_address: `{s['pool_address']}`, source: {s['source']}")
 
+    if samples:
+        report_lines.append("\n## 样本")
+        for s in samples:
+            report_lines.append(f"- token_mint: `{s['token_mint']}`, pool_address: `{s['pool_address']}`, source: {s['source']}")
+
+    # Aggregate: for each endpoint, count how many samples have each field via mint
     report_lines.append("\n## 结论总览")
-    report_lines.append("\n| 字段 | token/info | token/security | pool_info | top_holders | trenches | normalized | 初步判断 |")
-    report_lines.append("|---|---|---|---|---|---|---|---|")
+    ep_labels = [ep[0] for ep in ENDPOINTS] + ["normalized"]
+    header = "| 字段 | " + " | ".join(ep_labels) + " | raw_path | value_sample |"
+    sep = "|" + "---|" * (len(ep_labels) + 2)
+    report_lines.append(header)
+    report_lines.append(sep)
 
-    for field, candidates in TARGET_FIELDS.items():
-        rows = []
-        for ep_label in ("token_info", "token_security", "pool_info", "top_holders", "trenches"):
-            found_any = False
-            for s_entry in entry.get(ep_label, {}).get("samples", []):
-                cands = s_entry.get(f"{ep_label}_via_mint", {}).get("candidates", {}).get(field, {})
-                if cands:
-                    found_any = True
-                    break
-            rows.append("Y" if found_any else "N")
-        # Normalized check
-        norm_val = entry.get("normalized", {}).get(field)
-        rows.append("Y" if norm_val is not None else "N")
-        rows.append("待分析")
-        report_lines.append(f"| {field} | {' | '.join(rows)} |")
+    # Aggregate candidate paths found
+    all_found_paths: Dict[str, List[tuple]] = {}
 
-    report_lines.append("\n## 发现的候选字段路径")
-    for field, candidates in TARGET_FIELDS.items():
+    for field in TARGET_FIELDS:
+        ep_found = []
+        for ep_label in ep_labels:
+            if ep_label == "normalized":
+                any_found = any(
+                    isinstance(s.get("normalized"), dict) and s["normalized"].get(field) is not None
+                    for s in probe["samples"]
+                )
+                ep_found.append("Y" if any_found else "N")
+            else:
+                any_found = False
+                for s in probe["samples"]:
+                    ep_data = s.get("endpoints", {}).get(ep_label, {})
+                    cands = ep_data.get("via_mint", {}).get("candidates", {}).get(field, {})
+                    if cands:
+                        any_found = True
+                        for raw_path, val in cands.items():
+                            all_found_paths.setdefault(field, []).append(
+                                (ep_label, raw_path, val)
+                            )
+                ep_found.append("Y" if any_found else "N")
+
+        # Pick first found raw_path and value_sample
+        first_path = ""
+        first_val = ""
+        if field in all_found_paths and all_found_paths[field]:
+            first_path = all_found_paths[field][0][1]
+            first_val = str(all_found_paths[field][0][2])
+        report_lines.append(f"| {field} | {' | '.join(ep_found)} | {first_path} | {first_val} |")
+
+    report_lines.append("\n## 所有候选字段路径")
+    for field, paths in sorted(all_found_paths.items()):
         report_lines.append(f"\n### {field}")
-        report_lines.append(f"- 候选 key: {', '.join(candidates)}")
-        for ep_label in ("token_info", "token_security", "pool_info", "top_holders", "trenches"):
-            for s_entry in entry.get(ep_label, {}).get("samples", []):
-                cands = s_entry.get(f"{ep_label}_via_mint", {}).get("candidates", {}).get(field, {})
-                if cands:
-                    for path, val in cands.items():
-                        report_lines.append(f"- endpoint={ep_label}, raw_path={path}, value_sample={val}")
+        report_lines.append(f"- 候选 key: {', '.join(TARGET_FIELDS[field])}")
+        for ep_label, raw_path, val in paths:
+            report_lines.append(f"- endpoint={ep_label}, raw_path={raw_path}, value_sample={val}")
 
-    report_lines.append("\n## 初步判断")
-    report_lines.append("请检查原始 JSON 输出后补充判断。")
+    report_lines.append("\n## 未匹配到的候选 key")
+    for field, candidates in TARGET_FIELDS.items():
+        if field not in all_found_paths or not all_found_paths[field]:
+            report_lines.append(f"\n### {field} — 未找到")
+            report_lines.append(f"- 候选 key: {', '.join(candidates)}")
 
     report_lines.append("\n## 建议下一步")
     report_lines.append("1. 确认 raw JSON 中是否包含候选 key。")

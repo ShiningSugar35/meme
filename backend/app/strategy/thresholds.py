@@ -273,8 +273,8 @@ def compute_holding_thresholds(x: float) -> Dict[str, float]:
         "holding_bundler_rate": h,
         "holding_rat_trader_rate": h,
         "holding_suspected_insider_rate": h,
-        "holding_top1_addr_type0_min": 0.033 - 0.02 * xf,
-        "holding_top1_addr_type0_max": 0.049 + 0.01 * xf,
+        "holding_top1_addr_type0_min": 0.028 - 0.02 * xf,
+        "holding_top1_addr_type0_max": 0.054 + 0.01 * xf,
     }
 
 

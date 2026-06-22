@@ -413,6 +413,8 @@ class DiscoveryRunner:
             t = compute_thresholds(x)
             params['trench_filters'] = t.to_trench_filters()
             params['_x'] = x
+        # max_created: exclude tokens younger than 60 minutes
+        params['max_created'] = int(datetime.now(timezone.utc).timestamp()) - 3600
         return params
 
     @staticmethod

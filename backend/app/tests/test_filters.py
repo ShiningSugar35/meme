@@ -112,31 +112,6 @@ def test_entry_risk_sniper_fails():
     assert any(d.name == "sniper_count" and not d.passed for d in res.details)
 
 
-def test_age_minutes_less_than_60_fails():
-    s = make_snapshot(pool_created_at=(datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat())
-    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
-    age_detail = next((d for d in res.details if d.name == "min_age_minutes"), None)
-    assert age_detail is not None
-    assert age_detail.passed is False
-
-
-def test_age_minutes_more_than_60_passes():
-    s = make_snapshot(pool_created_at=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat())
-    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
-    age_detail = next((d for d in res.details if d.name == "min_age_minutes"), None)
-    assert age_detail is not None
-    assert age_detail.passed is True
-
-
-def test_age_missing_fails():
-    s = make_snapshot(pool_created_at=None, creation_timestamp=None)
-    res = asyncio.run(run_entry_local_risk_filter(s, {"x": 0.2}))
-    age_detail = next((d for d in res.details if d.name == "min_age_minutes"), None)
-    assert age_detail is not None
-    assert age_detail.passed is False
-    assert age_detail.missing is True
-
-
 # ---------------------------------------------------------------------------
 # Top1 holder test
 # ---------------------------------------------------------------------------
@@ -966,7 +941,8 @@ def _pass_token():
 
 
 def _pass_latest():
-    return {"price": 0.001, "price_usd": 0.001, "swaps_1h": 500, "volume_1h": 14000, "price_1h": 0.0009}
+    # price_5m < price_1h => 5m upward momentum > 1h (17.6% > 11.1%) so price_change_5m_gt_1h passes
+    return {"price": 0.001, "price_usd": 0.001, "swaps_1h": 500, "volume_1h": 14000, "price_1h": 0.0009, "price_5m": 0.00085}
 
 
 def test_require_kline_true_none_fails():

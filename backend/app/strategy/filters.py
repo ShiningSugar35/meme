@@ -323,17 +323,6 @@ async def run_entry_local_risk_filter(
     details: List[FilterDetail] = []
     fv: Dict[str, Any] = {"x": x}
 
-    # Minimum age > 60 minutes
-    creation_ts, _, age_missing = _parse_creation_ts(snapshot)
-    age_minutes = _compute_age_minutes(creation_ts)
-    age_ok = age_minutes is not None and age_minutes > 60
-    details.append(FilterDetail(
-        name="min_age_minutes", passed=age_ok,
-        value=age_minutes, threshold="> 60",
-        reason=f"age={age_minutes:.1f}min {'>' if age_ok else '<='} 60" if age_minutes is not None else "age_missing",
-        missing=age_minutes is None,
-    ))
-
     _check_bool_one(details, snapshot, "renounced_mint", ["renounced_mint", "mint_renounced", "is_mint_renounced"])
     _check_bool_one(details, snapshot, "renounced_freeze_account", ["renounced_freeze_account", "freeze_renounced", "is_freeze_renounced", "freeze_authority_renounced"])
     _check_bool_zero(details, snapshot, "is_wash_trading", ["is_wash_trading", "wash_trading", "wash_trading_detected"])
@@ -583,6 +572,28 @@ async def evaluate_price_activity_rules(
         "lower_threshold": lower_pct, "upper_threshold": upper_pct, "source": price_change_source,
         "age_mode": price_change_age_mode, "age_minutes": age_minutes, "age_missing": age_missing,
         "price_change_unit": "percent_points",
+    })
+
+    # price_change_percent5m > price_change_percent1h — 5m upward momentum should exceed 1h
+    pct_change_5m = _to_float(_first_present(latest_price, ["price_change_percent5m", "price_change_5m", "change_5m"]))
+    pct_change_5m_source = "direct"
+    if pct_change_5m is None:
+        price_5m = _to_float(_first_present(latest_price, ["price_5m", "price5m"]))
+        if price_5m is not None and price_5m > 0 and current_price > 0:
+            pct_change_5m = (current_price / price_5m - 1.0) * 100.0
+            pct_change_5m_source = "computed_from_price_5m"
+        else:
+            pct_change_5m_source = "missing"
+    cond_pct_5m_vs_1h = (
+        pct_change_5m is not None
+        and pct_change_1h is not None
+        and pct_change_5m > pct_change_1h
+    )
+    details.append({
+        "rule": "price_change_5m_gt_1h", "passed": cond_pct_5m_vs_1h,
+        "pct_change_5m": pct_change_5m, "pct_change_1h": pct_change_1h,
+        "source_5m": pct_change_5m_source,
+        "data_unavailable": pct_change_5m is None or pct_change_1h is None,
     })
 
     # Kline data quality and price percentile — mandatory when require_kline=True
