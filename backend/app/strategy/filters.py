@@ -574,28 +574,6 @@ async def evaluate_price_activity_rules(
         "price_change_unit": "percent_points",
     })
 
-    # price_change_percent5m > price_change_percent1h — 5m upward momentum should exceed 1h
-    pct_change_5m = _to_float(_first_present(latest_price, ["price_change_percent5m", "price_change_5m", "change_5m"]))
-    pct_change_5m_source = "direct"
-    if pct_change_5m is None:
-        price_5m = _to_float(_first_present(latest_price, ["price_5m", "price5m"]))
-        if price_5m is not None and price_5m > 0 and current_price > 0:
-            pct_change_5m = (current_price / price_5m - 1.0) * 100.0
-            pct_change_5m_source = "computed_from_price_5m"
-        else:
-            pct_change_5m_source = "missing"
-    cond_pct_5m_vs_1h = (
-        pct_change_5m is not None
-        and pct_change_1h is not None
-        and pct_change_5m > pct_change_1h
-    )
-    details.append({
-        "rule": "price_change_5m_gt_1h", "passed": cond_pct_5m_vs_1h,
-        "pct_change_5m": pct_change_5m, "pct_change_1h": pct_change_1h,
-        "source_5m": pct_change_5m_source,
-        "data_unavailable": pct_change_5m is None or pct_change_1h is None,
-    })
-
     # Kline data quality and price percentile — mandatory when require_kline=True
     price_range_percentile = None
     percentile_source = "missing"

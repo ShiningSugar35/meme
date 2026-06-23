@@ -67,7 +67,7 @@ def test_thresholds_x_02():
     assert math.isclose(t.min_liquidity_holder_ratio, 40.0, rel_tol=1e-9)
     assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
     assert math.isclose(t.price_range_24h_percentile_min, 0.03, rel_tol=1e-9)
-    assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
+    assert math.isclose(t.price_range_24h_percentile_max, 0.4, rel_tol=1e-9)
 
 
 def test_thresholds_x_01():
@@ -252,18 +252,18 @@ def test_price_range_percentile_min_boundary_fails():
 
 
 def test_price_range_percentile_max_boundary_fails():
-    """x=0.2: percentile=0.3501 > 0.35 => fails (above max)."""
+    """x=0.2: percentile=0.4001 > 0.4 => fails (above max)."""
     token = {"pool_created_at": "2025-01-01T00:00:00Z"}
-    latest = {"price_usd": 1.7002}
-    klines = [{"high": 3.0, "low": 1.0, "open": 1.2, "close": 1.7002}]
+    latest = {"price_usd": 1.8002}
+    klines = [{"high": 3.0, "low": 1.0, "open": 1.2, "close": 1.8002}]
     res = asyncio.run(evaluate_price_activity_rules(token, {"x": 0.2}, latest, klines=klines))
     pct_detail = next(d for d in res.details if d["rule"] == "price_range_24h_percentile")
-    # (1.7002 - 1.0) / (3.0 - 1.0) = 0.3501 > 0.35 => fails
+    # (1.8002 - 1.0) / (3.0 - 1.0) = 0.4001 > 0.4 => fails
     assert pct_detail["passed"] is False
 
 
 def test_price_range_percentile_mid_range_passes():
-    """x=0.2: percentile=0.20 in (0.03, 0.35) => passes."""
+    """x=0.2: percentile=0.20 in (0.03, 0.4) => passes."""
     token = {"pool_created_at": "2025-01-01T00:00:00Z"}
     latest = {"price_usd": 1.4}
     klines = [{"high": 3.0, "low": 1.0, "open": 1.2, "close": 1.4}]
