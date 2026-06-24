@@ -288,6 +288,7 @@ class Settings(BaseSettings):
     SELL_SLIPPAGE_CAP_BPS: int = Field(2000)
     EMERGENCY_SLIPPAGE_CAP_BPS: int = Field(3500)
     PRICE_IMPACT_HARD_CAP_PCT: float = Field(10.0)
+    SIM_SELL_FEE_UPPER_BOUND_USD: float = Field(0.0)
     LIVE_ROLLING_10_LOSS_LIMIT: float = Field(-0.20)
     MAX_REQUOTE_RETRY: int = Field(2)
     ENTRY_SIZE_LIQUIDITY_PCT: float = Field(0.01)

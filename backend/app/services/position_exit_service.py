@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 from ..db.repositories import Repositories
 from ..logging_config import logger
 from ..strategy.exit_rules import EXIT_REASON_LABELS
+from ..trading.sim_sell_accounting import prepare_sim_sell_accounting
 
 
 def _utc_now_iso() -> str:
@@ -171,7 +172,7 @@ class PositionExitService:
         try:
             # ---- LIVE pathway ----
             if is_live:
-                result = await self._exit_live(fresh_position, exit_pct, reason_code, price, source)
+                result = await self._exit_live(fresh_position, exit_pct, reason_code, price, source, audit_context=audit_context)
                 if result["ok"]:
                     if exit_pct < 0.999999:
                         await self._release_exit_claim(pos_id, original_status)
@@ -206,39 +207,35 @@ class PositionExitService:
         token = position["token_mint"]
         remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
 
-        sell_amount = remaining_token * exit_pct
-        new_remaining = max(0.0, remaining_token - sell_amount)
-        gross_value_usd = sell_amount * current_price_usd
-        fee_usd_est = 0.0
-        trade_value_usd_net = gross_value_usd - fee_usd_est
-        trade_value_usd_expected = trade_value_usd_net
-        trade_value_usd_conservative = trade_value_usd_net
-        trade_value_usd_actual = trade_value_usd_net
-        sell_price_usd_effective = trade_value_usd_net / sell_amount if sell_amount > 0 else current_price_usd
+        ctx = await prepare_sim_sell_accounting(
+            repo=self.repo,
+            gmgn=self.gmgn,
+            jupiter=self.trading_pipeline.jupiter if self.trading_pipeline else None,
+            position=position,
+            exit_pct=exit_pct,
+            reason_code=reason_code,
+            current_price_usd_override=current_price_usd,
+        )
+
+        pct = ctx["pct"]
+        current_price_usd = ctx["current_price_usd"]
+        current_price_sol = ctx["current_price_sol"]
+        sell_amount_human = ctx["sell_amount_human"]
+        new_remaining = ctx["new_remaining"]
+        gross_value_usd = ctx["gross_value_usd"]
+        acct = ctx["acct"]
+        fee_detail_json = ctx["fee_detail_json"]
+        sell_price_effective = ctx["sell_price_effective"]
+        quote = ctx["quote"]
+        quote_json = ctx["quote_json"]
+        route_plan_json = ctx["route_plan_json"]
+        price_impact_pct = ctx["price_impact_pct"]
+        execution_detail = ctx["execution_detail"]
 
         exit_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
-        idem_key = f"EXIT_SVC:{pos_id}:{reason_code}:{remaining_token:.6f}:{exit_pct:.4f}"
+        idem_key = f"SIM_SELL:{pos_id}:{reason_code}:{remaining_token:.6f}:{pct:.4f}"
 
-        fee_detail = {
-            "accounting_mode": "SIM_PAPER_FALLBACK",
-            "fallback": True,
-            "source": source,
-            "fee_usd_est": fee_usd_est,
-            "note": "No Jupiter quote — using current_price_usd as effective price",
-        }
-        execution_detail = {
-            "service": "PositionExitService",
-            "reason_code": reason_code,
-            "exit_pct": exit_pct,
-            "current_price_usd": current_price_usd,
-            "remaining_token_before": remaining_token,
-            "sell_token_amount": sell_amount,
-            "remaining_token_after": new_remaining,
-            "gross_value_usd": gross_value_usd,
-            "trade_value_usd_net": trade_value_usd_net,
-        }
-
-        await self.repo.append_trade_event(
+        te = await self.repo.append_trade_event(
             idem_key,
             position_id=pos_id,
             token_mint=token,
@@ -248,27 +245,32 @@ class PositionExitService:
             side="SELL",
             event_type="SIM_SELL",
             status="CONFIRMED",
-            requested_pct=exit_pct,
-            requested_token_amount=sell_amount,
-            executed_token_amount=sell_amount,
+            requested_pct=pct,
+            requested_token_amount=sell_amount_human,
+            executed_token_amount=sell_amount_human,
             price_usd=current_price_usd,
+            price_sol=current_price_sol,
             exit_reason=reason_code,
             exit_reason_label=exit_label,
-            gross_value_usd=gross_value_usd,
-            trade_value_usd_net=trade_value_usd_net,
-            trade_value_usd_expected=trade_value_usd_expected,
-            trade_value_usd_conservative=trade_value_usd_conservative,
-            trade_value_usd_actual=trade_value_usd_actual,
-            fee_usd_est=fee_usd_est,
-            fee_detail_json=json.dumps(fee_detail, ensure_ascii=False),
+            gross_value_usd=acct["gross_value_usd"],
+            trade_value_usd_net=acct["trade_value_usd_net"],
+            trade_value_usd_expected=acct["trade_value_usd_expected"],
+            trade_value_usd_conservative=acct["trade_value_usd_conservative"],
+            trade_value_usd_actual=acct["trade_value_usd_net"],
+            fee_usd_est=acct["fee_usd_est"],
+            fee_detail_json=fee_detail_json,
             execution_detail_json=json.dumps(execution_detail, ensure_ascii=False),
-            accounting_source="sim_paper_fallback",
-            accounting_status="FINAL",
-            sell_price_usd_effective=sell_price_usd_effective,
-            provider=source,
+            accounting_source=acct["accounting_source"],
+            accounting_status=acct["accounting_status"],
+            sell_price_usd_effective=sell_price_effective,
+            platform_fee_amount=acct.get("fee_detail", {}).get("platformFee_amount"),
+            provider="PIPELINE_SIM",
+            price_impact_pct=price_impact_pct,
+            quote_json=quote_json,
+            route_plan_json=route_plan_json,
         )
 
-        if exit_pct >= 0.999999 or new_remaining <= 0:
+        if pct >= 0.999999 or new_remaining <= 0:
             close_reason = reason_code
             if risk_details:
                 close_reason = f"{reason_code} ({', '.join(str(d) for d in risk_details)})"
@@ -285,7 +287,7 @@ class PositionExitService:
         if hasattr(self.repo, "mark_exit_rule_executed"):
             await self.repo.mark_exit_rule_executed(pos_id, reason_code)
 
-        # Position audit — match old pipeline's EXIT audit for SIM sells
+        # Position audit — use real trade_event and real quote
         if hasattr(self.repo, "insert_position_audit"):
             try:
                 from ..trading.audit_builder import build_exit_audit_payload
@@ -293,17 +295,14 @@ class PositionExitService:
                 audit_payload = await build_exit_audit_payload(
                     repo=self.repo,
                     position=position,
-                    sell_trade_event={
-                        "created_at": _utc_now_iso(),
-                        "sell_price_usd_effective": sell_price_usd_effective,
-                        "sell_price_usd": current_price_usd,
-                    },
+                    sell_trade_event=te,
                     exit_reason=reason_code,
-                    exit_pct=exit_pct,
-                    sell_amount_human=sell_amount,
+                    exit_pct=pct,
+                    sell_amount_human=sell_amount_human,
                     gross_value_usd=gross_value_usd,
                     current_price_usd=current_price_usd,
-                    quote=None,
+                    current_price_sol=current_price_sol,
+                    quote=quote,
                     **(audit_context or {}),
                 )
                 await self.repo.insert_position_audit(
@@ -324,15 +323,30 @@ class PositionExitService:
                     error=str(e),
                 )
 
+        await self.repo.append_system_event(
+            "INFO", "TRADE",
+            "SIM sell executed (paper)",
+            _safe_json({
+                "position_id": pos_id,
+                "exit_pct": pct,
+                "exit_reason": reason_code,
+                "trade_event_id": te.get("id"),
+                "jupiter_quote_ok": ctx["quote_ok"],
+                "accounting_source": acct["accounting_source"],
+                "accounting_status": acct["accounting_status"],
+            }),
+            account_type=_account_type(position),
+        )
+
         logger.info(
             "PositionExitService SIM exit",
             position_id=pos_id,
             token=token,
             reason=reason_code,
-            exit_pct=exit_pct,
+            exit_pct=pct,
             source=source,
         )
-        return {"ok": True, "mode": "SIM", "position_id": pos_id, "reason": reason_code, "exit_pct": exit_pct}
+        return {"ok": True, "mode": "SIM", "position_id": pos_id, "reason": reason_code, "exit_pct": pct}
 
     # ------------------------------------------------------------------
     # LIVE exit (must go through trading pipeline)
@@ -344,6 +358,7 @@ class PositionExitService:
         reason_code: str,
         current_price_usd: float,
         source: str,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -369,6 +384,7 @@ class PositionExitService:
                 position=position,
                 exit_pct=exit_pct,
                 exit_reason=reason_code,
+                audit_context=audit_context,
             )
         except Exception as exc:
             logger.exception("LIVE execute_sell raised exception", position_id=pos_id, token=token)

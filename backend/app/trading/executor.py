@@ -19,6 +19,7 @@ from ..config import settings, ProviderMode
 from ..strategy.thresholds import requires_smart_degen_for_x
 from ..strategy.exit_rules import EXIT_REASON_LABELS
 from .audit_builder import build_entry_audit_payload, build_exit_audit_payload
+from .sim_sell_accounting import prepare_sim_sell_accounting
 from .accounting import (
     compute_sim_buy_accounting,
     compute_sim_sell_accounting,
@@ -153,35 +154,6 @@ def _usd_to_sol_amount(size_usd: float, snapshot: Dict[str, Any], latest: Dict[s
     if not sol_usd or sol_usd <= 0:
         return 0.0
     return math.floor((size_usd / sol_usd) * 1_000_000_000) / 1_000_000_000
-
-
-async def _load_sell_tax_for_position(repo, position, gmgn) -> Optional[float]:
-    try:
-        pos_id = int(position["id"])
-        audits = await repo.get_position_audits(pos_id, audit_type="ENTRY")
-        if audits:
-            entry_json = audits[0].get("audit_json") or {}
-            if isinstance(entry_json, str):
-                entry_json = json.loads(entry_json)
-            if isinstance(entry_json, dict) and entry_json.get("sell_tax") is not None:
-                return float(entry_json["sell_tax"])
-    except Exception:
-        pass
-    try:
-        token_mint = position["token_mint"]
-        snap = await repo.get_latest_token_metric_snapshot(token_mint)
-        if snap and snap.get("sell_tax") is not None:
-            return float(snap["sell_tax"])
-    except Exception:
-        pass
-    try:
-        token_mint = position["token_mint"]
-        sec = await gmgn.fetch_token_security(token_mint) if gmgn else None
-        if isinstance(sec, dict) and sec.get("sell_tax") is not None:
-            return float(sec["sell_tax"])
-    except Exception:
-        pass
-    return None
 
 
 async def backfill_trade_event_from_solana_tx_meta(
@@ -1371,7 +1343,7 @@ class TradingPipeline:
         exit_reason: str,
         audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Paper-sell a SIM position — try Jupiter quote, no Jito send."""
+        """Paper-sell a SIM position — delegates accounting to shared helper."""
         pos_id = int(position["id"])
         token_mint = position["token_mint"]
         remaining_token = self._to_float(position.get("remaining_token_amount"), 0.0) or 0.0
@@ -1382,98 +1354,30 @@ class TradingPipeline:
         if pct <= 0:
             return {"ok": False, "error": "ZERO_EXIT_PCT"}
 
-        try:
-            latest = await self.gmgn.fetch_latest_price(token_mint)
-        except Exception:
-            latest = {}
-        current_price_usd = self._get_price_usd(latest) or self._to_float(position.get("last_fill_price_usd"), 0.0) or 0.0
-        current_price_sol = self._get_price_sol(latest) or self._to_float(position.get("entry_price_sol"), 0.0) or 0.0
-
-        sell_amount_human = remaining_token * pct
-        gross_value_usd = sell_amount_human * current_price_usd
-
-        locked_cfg: Dict[str, Any] = {}
-        locked = position.get("locked_strategy_config_json")
-        if locked:
-            try:
-                locked_cfg = json.loads(locked)
-            except (json.JSONDecodeError, TypeError):
-                locked_cfg = {}
-
-        token_decimals = self._extract_token_decimals(token_mint, latest=latest, strategy=locked_cfg)
-        sell_amount_raw = self._human_to_raw_amount(sell_amount_human, token_decimals)
-
-        quote: Dict[str, Any] = {}
-        price_impact = None
-        quote_json = None
-        route_plan_json = None
-        fee_detail = None
-        if sell_amount_raw > 0:
-            try:
-                sell_cap = int(locked_cfg.get("sell_slippage_cap_bps", getattr(settings, "SELL_SLIPPAGE_CAP_BPS", SELL_SLIPPAGE_CAP_BPS)))
-                quote = await self._get_quote(
-                    token_mint,
-                    WRAPPED_SOL_MINT,
-                    sell_amount_raw,
-                    sell_cap,
-                    token_mint=token_mint,
-                    strategy=locked_cfg,
-                    context_id=pos_id,
-                )
-            except Exception:
-                quote = {}
-            if quote and not quote.get("error"):
-                price_impact = self._price_impact_fraction(quote)
-                quote_json = self._safe_json(quote)
-                route_plan_json = self._safe_json((quote.get("routePlan") or [])[:3])
-                out_sol = (self._to_float(quote.get("outAmount"), 0.0) or 0.0) / LAMPORTS_PER_SOL
-                sol_usd = _derive_sol_usd_price({}, latest) or 200.0
-                gross_value_usd = out_sol * sol_usd
-
-                fee_upper_bound_usd = float(getattr(settings, "SIM_SELL_FEE_UPPER_BOUND_USD", 0.0))
-                sell_tax = await _load_sell_tax_for_position(self.repo, position, self.gmgn)
-                acct = compute_sim_sell_accounting(
-                    quote=quote,
-                    sol_usd=sol_usd,
-                    sell_tax=sell_tax,
-                    fee_upper_bound_usd=fee_upper_bound_usd,
-                )
-                fee_detail = json.dumps(acct["fee_detail"], ensure_ascii=False)
-            else:
-                fee_upper_bound_usd = float(getattr(settings, "SIM_SELL_FEE_UPPER_BOUND_USD", 0.0))
-                fallback_net = +abs(gross_value_usd - fee_upper_bound_usd)
-                acct = {
-                    "trade_value_usd_expected": gross_value_usd,
-                    "trade_value_usd_conservative": fallback_net,
-                    "trade_value_usd_net": fallback_net,
-                    "gross_value_usd": gross_value_usd,
-                    "fee_usd_est": fee_upper_bound_usd,
-                    "fee_detail": {"fallback": True, "reason": "no_quote_or_sell_amount_raw_rounds_to_zero"},
-                    "accounting_source": "gmgn_price_fallback",
-                    "accounting_status": "ESTIMATED",
-                }
-                fee_detail = json.dumps(acct["fee_detail"], ensure_ascii=False)
-        else:
-            gross_value_usd = sell_amount_human * current_price_usd
-            acct = {
-                "trade_value_usd_expected": gross_value_usd,
-                "trade_value_usd_conservative": gross_value_usd,
-                "trade_value_usd_net": gross_value_usd,
-                "gross_value_usd": gross_value_usd,
-                "fee_usd_est": 0.0,
-                "fee_detail": {"fallback": True, "reason": "sell_amount_raw_rounds_to_zero"},
-                "accounting_source": "gmgn_price_fallback",
-                "accounting_status": "ESTIMATED",
-            }
-            fee_detail = json.dumps(acct["fee_detail"], ensure_ascii=False)
-
-        sell_price_effective = compute_effective_price_usd(
-            trade_value_usd_net=acct["trade_value_usd_net"],
-            token_amount=sell_amount_human,
+        ctx = await prepare_sim_sell_accounting(
+            repo=self.repo,
+            gmgn=self.gmgn,
+            jupiter=self.jupiter,
+            position=position,
+            exit_pct=pct,
+            reason_code=exit_reason,
         )
 
+        current_price_usd = ctx["current_price_usd"]
+        current_price_sol = ctx["current_price_sol"]
+        sell_amount_human = ctx["sell_amount_human"]
+        gross_value_usd = ctx["gross_value_usd"]
+        acct = ctx["acct"]
+        fee_detail_json = ctx["fee_detail_json"]
+        sell_price_effective = ctx["sell_price_effective"]
+        quote = ctx["quote"]
+        quote_json = ctx["quote_json"]
+        route_plan_json = ctx["route_plan_json"]
+        price_impact_pct = ctx["price_impact_pct"]
+        remaining_token_val = ctx["remaining_token"]
+
         te = await self.repo.append_trade_event(
-            f"SIM_SELL:{pos_id}:{exit_reason}:{remaining_token:.6f}:{pct:.4f}",
+            f"SIM_SELL:{pos_id}:{exit_reason}:{remaining_token_val:.6f}:{pct:.4f}",
             position_id=pos_id,
             token_mint=token_mint,
             strategy_id=self._position_strategy_id(position),
@@ -1493,13 +1397,13 @@ class TradingPipeline:
             trade_value_usd_expected=acct["trade_value_usd_expected"],
             trade_value_usd_conservative=acct["trade_value_usd_conservative"],
             fee_usd_est=acct["fee_usd_est"],
-            fee_detail_json=fee_detail,
+            fee_detail_json=fee_detail_json,
             accounting_source=acct["accounting_source"],
             accounting_status=acct["accounting_status"],
             sell_price_usd_effective=sell_price_effective,
             platform_fee_amount=acct.get("fee_detail", {}).get("platformFee_amount"),
             provider="PIPELINE_SIM",
-            price_impact_pct=(price_impact * 100.0) if price_impact else None,
+            price_impact_pct=price_impact_pct,
             quote_json=quote_json,
             route_plan_json=route_plan_json,
         )
@@ -1554,7 +1458,9 @@ class TradingPipeline:
                 "exit_pct": pct,
                 "exit_reason": exit_reason,
                 "trade_event_id": te.get("id"),
-                "jupiter_quote_ok": bool(quote and not quote.get("error")),
+                "jupiter_quote_ok": ctx["quote_ok"],
+                "accounting_source": acct["accounting_source"],
+                "accounting_status": acct["accounting_status"],
             }),
             account_type="SIM",
         )
