@@ -1687,8 +1687,6 @@ async def resume_live(request: Request):
 
 @router.post("/emergency/sell-all-live")
 async def sell_all_live(request: Request):
-    # Do not invent a sell implementation here. This endpoint removes frontend
-    # 404s while preserving the existing trading pipeline boundary.
     repo, owned = await _get_repo(request)
     try:
         await repo.append_system_event(
@@ -1699,6 +1697,78 @@ async def sell_all_live(request: Request):
             account_type="LIVE",
         )
         return JSONResponse({"ok": False, "error": "Bulk live liquidation is not wired in the current backend; no order was sent."}, status_code=501)
+    finally:
+        if owned:
+            await repo.close()
+
+
+@router.post("/positions/{position_id}/sell")
+async def manual_sell_position(
+    position_id: int,
+    body: dict = Body(...),
+    request: Request = None,
+):
+    """Manual sell/exit for a single position.
+
+    Body:
+        account_type: "LIVE" | "SIM"
+        exit_pct: 0 < x <= 1 (default 1.0)
+        confirm: bool (required=true for LIVE)
+
+    SIM exits are paper-sold instantly.
+    LIVE exits MUST have confirm=true and go through TradingPipeline.execute_sell.
+    """
+    repo, owned = await _get_repo(request)
+    try:
+        account_type = str(body.get("account_type", "SIM")).upper()
+        exit_pct = float(body.get("exit_pct", 1.0))
+        confirm = bool(body.get("confirm", False))
+
+        if exit_pct <= 0 or exit_pct > 1.0:
+            return JSONResponse({"ok": False, "error": "exit_pct must be in (0, 1]"}, status_code=400)
+
+        # Fetch position
+        position = await repo.get_position(position_id)
+        if not position:
+            return JSONResponse({"ok": False, "error": "Position not found"}, status_code=404)
+
+        if account_type not in ("SIM", "LIVE"):
+            return JSONResponse({"ok": False, "error": "account_type must be SIM or LIVE"}, status_code=400)
+
+        pos_account = position.get("account_type") or ("LIVE" if position.get("is_live") else "SIM")
+        if account_type != pos_account:
+            return JSONResponse({"ok": False, "error": f"Position is {pos_account}, not {account_type}"}, status_code=400)
+
+        status = str(position.get("status") or "").upper()
+        if "CLOSED" in status:
+            return JSONResponse({"ok": False, "error": "Position is already closed"}, status_code=400)
+
+        remaining = float(position.get("remaining_token_amount") or 0)
+        if remaining <= 0:
+            return JSONResponse({"ok": False, "error": "No remaining token amount"}, status_code=400)
+
+        # LIVE safety gate
+        if account_type == "LIVE":
+            if not confirm:
+                return JSONResponse({"ok": False, "error": "LIVE_CONFIRM_REQUIRED"}, status_code=400)
+            tpl = getattr(request.app.state, "trading_pipeline", None)
+            if tpl is None:
+                return JSONResponse({"ok": False, "error": "Trading pipeline not available"}, status_code=500)
+
+        from ..services.position_exit_service import PositionExitService
+        tpl = getattr(request.app.state, "trading_pipeline", None)
+        exit_svc = PositionExitService(repo, trading_pipeline=tpl)
+
+        result = await exit_svc.exit_position(
+            position=position,
+            exit_pct=exit_pct,
+            reason_code="MANUAL_SELL",
+            source="MANUAL_API",
+        )
+
+        if result.get("ok"):
+            return JSONResponse({"ok": True, "mode": account_type, "position_id": position_id, "reason": "MANUAL_SELL"})
+        return JSONResponse({"ok": False, "error": result.get("error", "Unknown error"), "detail": result.get("detail")}, status_code=500)
     finally:
         if owned:
             await repo.close()

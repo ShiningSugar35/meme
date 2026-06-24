@@ -50,17 +50,23 @@ function ruleLabel(name: string): string {
 
 function exitReasonLabel(code: string): string {
   const map: Record<string, string> = {
-    HARD_TP_150: '硬止盈1.5x撤50%',
-    HARD_TP_200: '硬止盈2.0x全平',
-    HARD_TP_150_RETRACE: '1.5x止盈后回撤全平',
+    HARD_TP_160: '硬止盈1.6x撤50%',
+    HARD_TP_210: '硬止盈2.1x全平',
+    HARD_TP_160_RETRACE: '1.6x止盈后回撤全平',
     HARD_SL_75: '硬止损0.75x全平',
     COMPLETED: '池子completed',
+    DULL_DROP_SL: '阴跌止损全平',
+    LOW_ACTIVITY_SL: '活跃度止损全平',
     SMART_MONEY_SELL: '聪明钱卖出',
     TOP3_SMART_DEGEN_DUMP: 'TOP3聪明钱减仓',
     RISK_RECHECK_FAILED: '风控复查失败',
     DUST_FORCE_EXIT: '尘埃仓强制清仓',
-
     RISK_DATA_UNAVAILABLE_EXIT: '风控数据异常',
+    MANUAL_SELL: '手动卖出',
+    // legacy compat — keep historical display working
+    HARD_TP_150: '硬止盈1.5x撤50%',
+    HARD_TP_200: '硬止盈2.0x全平',
+    HARD_TP_150_RETRACE: '1.5x止盈后回撤全平',
     MANUAL: '手动平仓',
   };
   return map[code] || code;
@@ -107,6 +113,7 @@ export default function Portfolio({ active }: { active: boolean }) {
   const [historyRows, setHistoryRows] = useState<TradeEventsLedgerRow[]>([]);
   const [historyAccount, setHistoryAccount] = useState<string>('LIVE');
   const [pnlSummary, setPnlSummary] = useState<PnlSummary | null>(null);
+  const [sellBusyId, setSellBusyId] = useState<number | null>(null);
   const tabRef = useRef<AccountTab>('LIVE');
 
   useEffect(() => { tabRef.current = tab; }, [tab]);
@@ -190,6 +197,31 @@ export default function Portfolio({ active }: { active: boolean }) {
   };
 
   const currentRows = rows.filter((r) => r.status !== 'CLOSED' && (r.remaining == null || r.remaining > 0));
+
+  const sellRow = async (row: PortfolioRow) => {
+    if (sellBusyId !== null) return;
+    const account = tab;
+    if (account === 'LIVE') {
+      const confirmed = window.confirm(
+        `当前为实盘卖出，会提交真实链上交易。确认卖出该持仓吗？\nToken: ${row.token_mint}\n当前持仓价值: ${usd2(row.remaining_value_usd ?? row.remaining)}`
+      );
+      if (!confirmed) return;
+    }
+    setSellBusyId(row.id);
+    try {
+      const result = await api.manualSellPosition(row.id, account, account === 'LIVE', 1.0);
+      if (result.ok) {
+        setMessage(`卖出请求已提交 (${account})`);
+        await load(tabRef.current);
+      } else {
+        setMessage(`卖出失败: ${String(result.error || '未知错误')}`);
+      }
+    } catch (e) {
+      setMessage((e as Error).message);
+    } finally {
+      setSellBusyId(null);
+    }
+  };
 
   const latestTrench = fstats?.trench_history?.[(fstats?.trench_history?.length ?? 0) - 1];
   const rawLast = latestTrench?.raw_count ?? latestTrench?.count ?? 0;
@@ -276,11 +308,12 @@ export default function Portfolio({ active }: { active: boolean }) {
                 <th>当前持仓</th>
                 <th>收益率</th>
                 <th>价格变化</th>
+                <th>sell</th>
               </tr>
             </thead>
             <tbody>
               {currentRows.length === 0 && (
-                <tr><td colSpan={6} className="empty">当前看板暂无持仓。</td></tr>
+                <tr><td colSpan={7} className="empty">当前看板暂无持仓。</td></tr>
               )}
               {currentRows.map((row) => (
                 <tr key={row.id}>
@@ -290,6 +323,11 @@ export default function Portfolio({ active }: { active: boolean }) {
                   <td>{usd2(row.remaining_value_usd ?? row.remaining)}</td>
                   <td>{pct(row.pnl_pct)}</td>
                   <td>{row.ratio ?? '-'}</td>
+                  <td>
+                    <button disabled={sellBusyId === row.id} onClick={() => sellRow(row)}>
+                      {sellBusyId === row.id ? '...' : 'sell'}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

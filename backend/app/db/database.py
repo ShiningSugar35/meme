@@ -330,6 +330,8 @@ async def _migrate_positions(db: aiosqlite.Connection):
         "risk_check_interval_seconds": "INTEGER",
         "executed_exit_rules_json": "TEXT NOT NULL DEFAULT '[]'",
         "last_exit_reason": "TEXT",
+        "last_soft_stop_check_at": "TEXT",
+        "last_activity_stop_check_at": "TEXT",
     }
     for column, definition in additions.items():
         await _add_column_if_missing(db, "positions", column, definition)

@@ -52,7 +52,7 @@ class TestThresholds:
         assert math.isclose(t.top1_addr_type0_min, 0.029, rel_tol=1e-9)
         assert math.isclose(t.swaps_1h_min, 11.0, rel_tol=1e-9)
         assert math.isclose(t.price_range_24h_percentile_min, 0.03, rel_tol=1e-9)
-        assert math.isclose(t.price_range_24h_percentile_max, 0.35, rel_tol=1e-9)
+        assert math.isclose(t.price_range_24h_percentile_max, 0.4, rel_tol=1e-9)
         assert math.isclose(t.sniper_count_max, 15.0, rel_tol=1e-9)           # 持仓风控 75*0.2
         assert math.isclose(t.entry_sniper_count_max, 10.0, rel_tol=1e-9)      # 买入条件 50*0.2
 

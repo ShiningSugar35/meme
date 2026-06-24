@@ -406,6 +406,22 @@ export const api = {
   }),
   getPortfolio: (account: 'LIVE' | 'SIM') => apiFetch<PortfolioRow[]>(`/api/runtime/portfolio/table?account_type=${account}`),
   sellAllLive: () => apiFetch<{ ok: boolean; sold_count: number; user_mode: RuntimeMode }>('/api/runtime/emergency/sell-all-live', { method: 'POST' }),
+  manualSellPosition: (
+    positionId: number,
+    account: 'LIVE' | 'SIM',
+    confirm = false,
+    exitPct = 1.0,
+  ) => apiFetch<{ ok: boolean; [key: string]: unknown }>(
+    `/api/runtime/positions/${positionId}/sell`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        account_type: account,
+        exit_pct: exitPct,
+        confirm,
+      }),
+    },
+  ),
   stopLive: () => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/emergency/stop-live', { method: 'POST' }),
   resumeLive: () => apiFetch<{ ok: boolean; user_mode: RuntimeMode }>('/api/runtime/emergency/resume-live', { method: 'POST' }),
   backupDb: () => apiFetch<{ ok: boolean; export_path: string }>('/api/runtime/emergency/backup-db', { method: 'POST' }),

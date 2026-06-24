@@ -267,6 +267,9 @@ CREATE TABLE IF NOT EXISTS positions (
 
   executed_exit_rules_json TEXT NOT NULL DEFAULT '[]',
 
+  last_soft_stop_check_at TEXT,
+  last_activity_stop_check_at TEXT,
+
   opened_at TEXT NOT NULL,
   last_fill_at TEXT,
   last_fill_price_usd REAL,

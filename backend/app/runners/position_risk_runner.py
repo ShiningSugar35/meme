@@ -31,16 +31,19 @@ def _position_strategy_id(position: Dict[str, Any]) -> Optional[int]:
 
 
 EXIT_REASON_LABELS: Dict[str, str] = {
-    "HARD_TP_150": "硬止盈：价格超过 1.5x，撤仓50%",
-    "HARD_TP_200": "硬止盈：价格超过 2.0x，全部撤仓",
-    "HARD_TP_150_RETRACE": "硬止盈回撤：已超过1.5x后回落至1.5x及以下，全部撤仓",
+    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
+    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
+    "HARD_TP_160_RETRACE": "硬止盈回撤：已超过1.6x后回撤到1.5x以下，全部撤仓",
     "HARD_SL_75": "硬止损：价格低于 0.75x，全部撤仓",
     "COMPLETED": "池子 type 变为 completed，全部撤仓",
+    "DULL_DROP_SL": "阴跌止损：1h和5m涨幅均<1%，全部撤仓",
+    "LOW_ACTIVITY_SL": "活跃度止损：1h交易<7次且1h涨幅<5%，全部撤仓",
     "SMART_MONEY_SELL": "聪明钱卖出触发",
     "TOP3_SMART_DEGEN_DUMP": "TOP3聪明钱减仓超过25%",
     "RISK_RECHECK_FAILED": "持仓风控复查失败",
     "DUST_FORCE_EXIT": "尘埃仓强制清仓",
     "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
+    "MANUAL_SELL": "手动卖出",
 }
 
 
