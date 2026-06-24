@@ -7,17 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..db.repositories import Repositories
 from ..logging_config import logger
-
-EXIT_REASON_LABELS: Dict[str, str] = {
-    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
-    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
-    "HARD_SL_70": "硬止损：价格低于 0.7x，撤仓50%",
-    "HARD_SL_45": "硬止损：价格低于 0.45x，全部撤仓",
-    "COMPLETED": "池子 type 变为 completed，全部撤仓",
-    "RISK_RECHECK_FAILED": "持仓风控复查失败",
-    "DUST_FORCE_EXIT": "尘埃仓强制清仓",
-    "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
-}
+from ..strategy.exit_rules import EXIT_REASON_LABELS
 
 ENTRY_AUDIT_REQUIRED_FIELDS = [
     "buy_time_utc", "buy_time_beijing", "token_mint", "symbol", "name",

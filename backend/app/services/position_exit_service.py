@@ -124,6 +124,7 @@ class PositionExitService:
         emergency: bool = False,
         source: str = "UNKNOWN",
         risk_details: Optional[list] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Close or partially exit a position.
 
@@ -179,7 +180,7 @@ class PositionExitService:
                 return result
 
             # ---- SIM pathway ----
-            result = await self._exit_sim(fresh_position, exit_pct, reason_code, price, source, risk_details)
+            result = await self._exit_sim(fresh_position, exit_pct, reason_code, price, source, risk_details, audit_context)
             # Partial exit: release claim so remaining can be re-sold; full exit already set CLOSED
             if result.get("ok") and exit_pct < 0.999999:
                 await self._release_exit_claim(pos_id, original_status)
@@ -199,6 +200,7 @@ class PositionExitService:
         current_price_usd: float,
         source: str,
         risk_details: Optional[list] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -215,7 +217,7 @@ class PositionExitService:
         sell_price_usd_effective = trade_value_usd_net / sell_amount if sell_amount > 0 else current_price_usd
 
         exit_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
-        idem_key = f"EXIT_SVC:{pos_id}:{reason_code}"
+        idem_key = f"EXIT_SVC:{pos_id}:{reason_code}:{remaining_token:.6f}:{exit_pct:.4f}"
 
         fee_detail = {
             "accounting_mode": "SIM_PAPER_FALLBACK",
@@ -302,6 +304,7 @@ class PositionExitService:
                     gross_value_usd=gross_value_usd,
                     current_price_usd=current_price_usd,
                     quote=None,
+                    **(audit_context or {}),
                 )
                 await self.repo.insert_position_audit(
                     position_id=pos_id,

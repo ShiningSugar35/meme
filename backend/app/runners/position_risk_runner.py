@@ -706,6 +706,8 @@ class PositionRiskRunner:
                 return
 
         # Delegate to unified exit service
+        # audit_context (e.g. risk_failed_rules) is forwarded to exit_service
+        # so that PositionExitService writes the EXIT audit with risk context.
         result = await self.exit_service.exit_position(
             position=position,
             exit_pct=exit_pct,
@@ -714,41 +716,5 @@ class PositionRiskRunner:
             emergency=emergency,
             source="RISK_RUNNER",
             risk_details=risk_details,
+            audit_context=audit_context or None,
         )
-
-        # Post-exit audit for risk-specific context
-        if result.get("ok") and audit_context and hasattr(self.repo, "insert_position_audit"):
-            from ..trading.audit_builder import build_exit_audit_payload
-            try:
-                trade_events = await self.repo.get_position_trade_events(pos_id, limit=1)
-                te = trade_events[0] if trade_events else None
-                if te:
-                    sell_amount = min(
-                        _to_float(position.get("remaining_token_amount"), 0.0) or 0.0,
-                        (_to_float(position.get("remaining_token_amount"), 0.0) or 0.0) * exit_pct,
-                    )
-                    gross_value = sell_amount * (current_price_usd or 0.0)
-                    exit_audit = await build_exit_audit_payload(
-                        repo=self.repo,
-                        position=position,
-                        sell_trade_event=te,
-                        exit_reason=reason_code,
-                        exit_pct=exit_pct,
-                        sell_amount_human=sell_amount,
-                        gross_value_usd=gross_value,
-                        current_price_usd=current_price_usd,
-                        quote=None,
-                        **(audit_context or {}),
-                    )
-                    await self.repo.insert_position_audit(
-                        position_id=pos_id,
-                        token_mint=token,
-                        account_type=account_type,
-                        strategy_id=_position_strategy_id(position),
-                        discovery_event_id=position.get("discovery_event_id"),
-                        snapshot_id=None,
-                        audit_type="EXIT",
-                        audit_json=exit_audit,
-                    )
-            except Exception:
-                logger.warning("Risk audit insert failed", position_id=pos_id, reason=reason_code)

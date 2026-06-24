@@ -17,6 +17,7 @@ from ..logging_config import logger
 from ..providers.base import SwapProvider, ExecutionProvider, RpcProvider, MarketDataProvider
 from ..config import settings, ProviderMode
 from ..strategy.thresholds import requires_smart_degen_for_x
+from ..strategy.exit_rules import EXIT_REASON_LABELS
 from .audit_builder import build_entry_audit_payload, build_exit_audit_payload
 from .accounting import (
     compute_sim_buy_accounting,
@@ -32,20 +33,6 @@ from .accounting import (
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL = 1_000_000_000
 DEFAULT_TOKEN_DECIMALS = 9
-
-EXIT_REASON_LABELS: Dict[str, str] = {
-    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
-    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
-    "HARD_TP_160_RETRACE": "硬止盈回撤：已超过1.6x后回撤到1.5x以下，全部撤仓",
-    "HARD_SL_75": "硬止损：价格低于 0.75x，全部撤仓",
-    "COMPLETED": "池子 type 变为 completed，全部撤仓",
-    "DULL_DROP_SL": "阴跌止损：1h和5m涨幅均<1%，全部撤仓",
-    "LOW_ACTIVITY_SL": "活跃度止损：1h交易<7次且1h涨幅<5%，全部撤仓",
-    "RISK_RECHECK_FAILED": "持仓风控复查失败",
-    "DUST_FORCE_EXIT": "尘埃仓强制清仓",
-    "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
-    "MANUAL_SELL": "手动卖出",
-}
 
 def validate_and_select_sim_token_amount(
     *,
@@ -1486,7 +1473,7 @@ class TradingPipeline:
         )
 
         te = await self.repo.append_trade_event(
-            f"SIM_SELL:{pos_id}:{exit_reason}",
+            f"SIM_SELL:{pos_id}:{exit_reason}:{remaining_token:.6f}:{pct:.4f}",
             position_id=pos_id,
             token_mint=token_mint,
             strategy_id=self._position_strategy_id(position),
