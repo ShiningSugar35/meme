@@ -941,7 +941,7 @@ def _pass_token():
 
 
 def _pass_latest():
-    # price_5m < price_1h => 5m upward momentum > 1h (17.6% > 11.1%) so price_change_5m_gt_1h passes
+    # Simple valid snapshot for kline tests
     return {"price": 0.001, "price_usd": 0.001, "swaps_1h": 500, "volume_1h": 14000, "price_1h": 0.0009, "price_5m": 0.00085}
 
 
