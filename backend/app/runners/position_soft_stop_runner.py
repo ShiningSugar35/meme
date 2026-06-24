@@ -82,6 +82,7 @@ _PCT_5M_ALIASES = [
 DULL_DROP_COOLDOWN_SECONDS = 1800     # 30 min
 DULL_DROP_MIN_AGE_HOURS = 4.0
 LOW_ACT_COOLDOWN_SECONDS = 300         # 5 min
+LOW_ACT_MIN_AGE_HOURS = 1.0             # start from 1st hour
 
 
 class PositionSoftStopRunner:
@@ -139,8 +140,11 @@ class PositionSoftStopRunner:
                 await self._write_soft_stop_check(pos_id, now)
                 return
 
-        # ---- Low-activity (300s cooldown) ----
-        if _due_by_field(position, "last_activity_stop_check_at", LOW_ACT_COOLDOWN_SECONDS, now):
+        # ---- Low-activity (300s cooldown, min 1h age) ----
+        act_due = age_h is not None and age_h >= LOW_ACT_MIN_AGE_HOURS and _due_by_field(
+            position, "last_activity_stop_check_at", LOW_ACT_COOLDOWN_SECONDS, now,
+        )
+        if act_due:
             triggered = await self._check_low_activity(position, latest, current_price, now)
             await self._write_activity_check(pos_id, now)
             if triggered:
