@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 from ..db.repositories import Repositories
 from ..logging_config import logger
 from ..strategy.exit_rules import EXIT_REASON_LABELS
+from ..trading.accounting import platform_fee_amount_raw
 from ..trading.sim_sell_accounting import prepare_sim_sell_accounting
 
 
@@ -155,11 +156,12 @@ class PositionExitService:
 
         # Resolve price — try current_price, then GMGN live fetch, then DB fallback
         price = current_price_usd
+        latest_snapshot: Dict[str, Any] = {}
         if price is None or price <= 0:
             if self.gmgn is not None:
                 try:
-                    latest = await self.gmgn.fetch_latest_price(token, credential_slot=None)
-                    price = _to_float(latest.get("price_usd") or latest.get("latest_price_usd") or latest.get("price"))
+                    latest_snapshot = await self.gmgn.fetch_latest_price(token, credential_slot=None)
+                    price = _to_float(latest_snapshot.get("price_usd") or latest_snapshot.get("latest_price_usd") or latest_snapshot.get("price"))
                 except Exception:
                     pass
         if price is None or price <= 0:
@@ -181,7 +183,7 @@ class PositionExitService:
                 return result
 
             # ---- SIM pathway ----
-            result = await self._exit_sim(fresh_position, exit_pct, reason_code, price, source, risk_details, audit_context)
+            result = await self._exit_sim(fresh_position, exit_pct, reason_code, price, source, risk_details, audit_context, latest_override=latest_snapshot)
             # Partial exit: release claim so remaining can be re-sold; full exit already set CLOSED
             if result.get("ok") and exit_pct < 0.999999:
                 await self._release_exit_claim(pos_id, original_status)
@@ -202,6 +204,7 @@ class PositionExitService:
         source: str,
         risk_details: Optional[list] = None,
         audit_context: Optional[Dict[str, Any]] = None,
+        latest_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -215,6 +218,7 @@ class PositionExitService:
             exit_pct=exit_pct,
             reason_code=reason_code,
             current_price_usd_override=current_price_usd,
+            latest_override=latest_override,
         )
 
         pct = ctx["pct"]
@@ -263,7 +267,7 @@ class PositionExitService:
             accounting_source=acct["accounting_source"],
             accounting_status=acct["accounting_status"],
             sell_price_usd_effective=sell_price_effective,
-            platform_fee_amount=acct.get("fee_detail", {}).get("platformFee_amount"),
+            platform_fee_amount=platform_fee_amount_raw(quote),
             provider="PIPELINE_SIM",
             price_impact_pct=price_impact_pct,
             quote_json=quote_json,

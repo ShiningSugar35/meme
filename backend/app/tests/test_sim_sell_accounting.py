@@ -256,14 +256,14 @@ class TestPrepareSimSellAccounting:
 
         fd = acct["fee_detail"]
         assert fd["fallback"] is True
-        assert fd["reason"] == "no_quote_or_sell_amount_raw_rounds_to_zero"
+        assert fd["reason"] == "no_quote"
 
         # sell_price_effective = 4.5 / 500 = 0.009
         assert ctx["sell_price_effective"] == pytest.approx(0.009, rel=0.01)
 
     @pytest.mark.asyncio
     async def test_no_jupiter_provider_uses_fallback(self):
-        """When jupiter is None, fallback path is used."""
+        """When jupiter is None, fallback path is used with fee_upper_bound."""
         gmgn = AsyncMock()
         gmgn.fetch_latest_price = AsyncMock(return_value={
             "price_usd": 0.02, "price_sol": 1e-9,
@@ -280,18 +280,26 @@ class TestPrepareSimSellAccounting:
             "discovery_event_id": 1,
         }
 
-        ctx = await prepare_sim_sell_accounting(
-            repo=repo,
-            gmgn=gmgn,
-            jupiter=None,
-            position=position,
-            exit_pct=0.3,
-        )
+        _set_fee_upper(0.5)
+        try:
+            ctx = await prepare_sim_sell_accounting(
+                repo=repo,
+                gmgn=gmgn,
+                jupiter=None,
+                position=position,
+                exit_pct=0.3,
+            )
+        finally:
+            _reset_fee_upper()
 
         assert ctx["quote_ok"] is False
         acct = ctx["acct"]
         assert acct["accounting_source"] == "gmgn_price_fallback"
         assert acct["accounting_status"] == "ESTIMATED"
+        # sell_amount_human = 300, price = 0.02, gross = 6.0
+        # fee_upper = 0.5 → fee_usd_est = 0.5
+        assert acct["fee_usd_est"] == 0.5
+        assert acct["fee_detail"]["reason"] == "no_jupiter"
 
     @pytest.mark.asyncio
     async def test_sell_amount_raw_rounds_to_zero_fallback(self):
@@ -366,10 +374,11 @@ class TestPrepareSimSellAccounting:
             exit_pct=0.5,
         )
 
-        # Impact capped → falls back to GMGN
+        # Impact capped → falls back to GMGN with fee_upper_bound
         assert ctx["quote_ok"] is False
         assert ctx["quote"].get("error") == "PRICE_IMPACT_HARD_CAP"
         assert ctx["acct"]["accounting_source"] == "gmgn_price_fallback"
+        assert ctx["acct"]["fee_detail"]["reason"] == "price_impact_cap"
 
 
 # ---------------------------------------------------------------------------
@@ -502,18 +511,22 @@ class TestSimSellAccountingIntegration:
 
     @pytest.mark.asyncio
     async def test_service_fallback_audit_no_jupiter_available(self, repo):
-        """When no trading_pipeline/jupiter, PositionExitService uses fallback accounting for audit."""
+        """When no trading_pipeline/jupiter, PositionExitService uses fallback accounting with fee_upper_bound."""
         pos_id = await _make_sim_position(repo)
 
         exit_svc = PositionExitService(repo)  # no pipeline, no jupiter
 
-        pos = await repo.get_position(pos_id)
-        r = await exit_svc.exit_position(
-            position=pos, exit_pct=0.5,
-            reason_code="MANUAL_SELL",
-            current_price_usd=0.01,
-            source="MANUAL_API",
-        )
+        _set_fee_upper(0.3)
+        try:
+            pos = await repo.get_position(pos_id)
+            r = await exit_svc.exit_position(
+                position=pos, exit_pct=0.5,
+                reason_code="MANUAL_SELL",
+                current_price_usd=0.01,
+                source="MANUAL_API",
+            )
+        finally:
+            _reset_fee_upper()
         assert r["ok"] is True
 
         trade_events = await repo.list_trade_events()
@@ -522,7 +535,10 @@ class TestSimSellAccountingIntegration:
         te = sells[-1]
         assert te["accounting_source"] == "gmgn_price_fallback"
         assert te["accounting_status"] == "ESTIMATED"
-        assert te["fee_usd_est"] == 0.0  # raw rounds to zero or no jupiter → fee=0
+        # sell_amount_human = 5000, price = 0.01, gross = 50
+        # fee_upper = 0.3 → conservative_net = abs(50 - 0.3) = 49.7
+        assert te["fee_usd_est"] == 0.3
+        assert te["trade_value_usd_conservative"] == pytest.approx(49.7, rel=0.01)
 
     @pytest.mark.asyncio
     async def test_service_full_exit_writes_quote_fallback_info(self, repo):

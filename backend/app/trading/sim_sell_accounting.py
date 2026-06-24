@@ -208,6 +208,7 @@ async def prepare_sim_sell_accounting(
     exit_pct: float,
     reason_code: str = "EXIT",
     current_price_usd_override: Optional[float] = None,
+    latest_override: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """Compute SIM sell accounting values matching old TradingPipeline._execute_sim_paper_sell().
 
@@ -222,7 +223,9 @@ async def prepare_sim_sell_accounting(
 
     # ---- fetch latest price ----
     has_override = current_price_usd_override is not None and current_price_usd_override > 0
-    if gmgn is not None and not has_override:
+    if latest_override is not None and isinstance(latest_override, dict) and latest_override:
+        latest = latest_override
+    elif gmgn is not None and not has_override:
         try:
             latest = await gmgn.fetch_latest_price(token_mint)
         except Exception:
@@ -273,7 +276,39 @@ async def prepare_sim_sell_accounting(
     acct: Dict[str, Any]
     fee_detail_json: str
 
-    if sell_amount_raw > 0 and jupiter is not None:
+    if sell_amount_raw <= 0:
+        # ── raw rounds to zero — fee=0, no jupiter quote possible ──
+        gross_value_usd = sell_amount_human * current_price_usd
+        acct = {
+            "trade_value_usd_expected": gross_value_usd,
+            "trade_value_usd_conservative": gross_value_usd,
+            "trade_value_usd_net": gross_value_usd,
+            "gross_value_usd": gross_value_usd,
+            "fee_usd_est": 0.0,
+            "fee_detail": {"fallback": True, "reason": "sell_amount_raw_rounds_to_zero"},
+            "accounting_source": "gmgn_price_fallback",
+            "accounting_status": "ESTIMATED",
+        }
+        fee_detail_json = json.dumps(acct["fee_detail"], ensure_ascii=False)
+
+    elif jupiter is None:
+        # ── no Jupiter provider — fallback to GMGN price with fee_upper_bound ──
+        fee_upper_bound_usd = float(getattr(settings, "SIM_SELL_FEE_UPPER_BOUND_USD", 0.0))
+        fallback_net = abs(gross_value_usd - fee_upper_bound_usd)
+        acct = {
+            "trade_value_usd_expected": gross_value_usd,
+            "trade_value_usd_conservative": fallback_net,
+            "trade_value_usd_net": fallback_net,
+            "gross_value_usd": gross_value_usd,
+            "fee_usd_est": fee_upper_bound_usd,
+            "fee_detail": {"fallback": True, "reason": "no_jupiter"},
+            "accounting_source": "gmgn_price_fallback",
+            "accounting_status": "ESTIMATED",
+        }
+        fee_detail_json = json.dumps(acct["fee_detail"], ensure_ascii=False)
+
+    else:
+        # sell_amount_raw > 0 and jupiter is not None — try quote
         # Build slippage cap
         sell_slippage_cap_bps = int(
             locked_cfg.get(
@@ -317,16 +352,16 @@ async def prepare_sim_sell_accounting(
                 fee_detail_json = json.dumps(acct["fee_detail"], ensure_ascii=False)
                 quote_ok = True
             else:
-                # quote hit price impact cap → fallback
+                # quote hit price impact cap → fallback with fee_upper_bound
                 fee_upper_bound_usd = float(getattr(settings, "SIM_SELL_FEE_UPPER_BOUND_USD", 0.0))
-                fallback_net = +abs(gross_value_usd - fee_upper_bound_usd)
+                fallback_net = abs(gross_value_usd - fee_upper_bound_usd)
                 acct = {
                     "trade_value_usd_expected": gross_value_usd,
                     "trade_value_usd_conservative": fallback_net,
                     "trade_value_usd_net": fallback_net,
                     "gross_value_usd": gross_value_usd,
                     "fee_usd_est": fee_upper_bound_usd,
-                    "fee_detail": {"fallback": True, "reason": "no_quote_or_sell_amount_raw_rounds_to_zero"},
+                    "fee_detail": {"fallback": True, "reason": "price_impact_cap"},
                     "accounting_source": "gmgn_price_fallback",
                     "accounting_status": "ESTIMATED",
                 }
@@ -338,32 +373,18 @@ async def prepare_sim_sell_accounting(
             # ── quote FAILED or jupiter returned error ──
             quote = raw_quote if isinstance(raw_quote, dict) else {"error": "NO_QUOTE"}
             fee_upper_bound_usd = float(getattr(settings, "SIM_SELL_FEE_UPPER_BOUND_USD", 0.0))
-            fallback_net = +abs(gross_value_usd - fee_upper_bound_usd)
+            fallback_net = abs(gross_value_usd - fee_upper_bound_usd)
             acct = {
                 "trade_value_usd_expected": gross_value_usd,
                 "trade_value_usd_conservative": fallback_net,
                 "trade_value_usd_net": fallback_net,
                 "gross_value_usd": gross_value_usd,
                 "fee_usd_est": fee_upper_bound_usd,
-                "fee_detail": {"fallback": True, "reason": "no_quote_or_sell_amount_raw_rounds_to_zero"},
+                "fee_detail": {"fallback": True, "reason": "no_quote"},
                 "accounting_source": "gmgn_price_fallback",
                 "accounting_status": "ESTIMATED",
             }
             fee_detail_json = json.dumps(acct["fee_detail"], ensure_ascii=False)
-    else:
-        # ── sell_amount_raw <= 0 or no jupiter ──
-        gross_value_usd = sell_amount_human * current_price_usd
-        acct = {
-            "trade_value_usd_expected": gross_value_usd,
-            "trade_value_usd_conservative": gross_value_usd,
-            "trade_value_usd_net": gross_value_usd,
-            "gross_value_usd": gross_value_usd,
-            "fee_usd_est": 0.0,
-            "fee_detail": {"fallback": True, "reason": "sell_amount_raw_rounds_to_zero"},
-            "accounting_source": "gmgn_price_fallback",
-            "accounting_status": "ESTIMATED",
-        }
-        fee_detail_json = json.dumps(acct["fee_detail"], ensure_ascii=False)
 
     # ---- sell_price_usd_effective ----
     sell_price_effective = compute_effective_price_usd(

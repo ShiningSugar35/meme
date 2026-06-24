@@ -27,6 +27,7 @@ from .accounting import (
     extract_account_keys,
     find_wallet_index,
     extract_token_delta_from_meta,
+    platform_fee_amount_raw,
     summarize_tx_meta,
 )
 
@@ -541,7 +542,6 @@ class TradingPipeline:
         token_decimals: int,
         discovery_event_id: Optional[int],
         entry_size_usd: Optional[float] = None,
-        top3_smart_degen_snapshot: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         locked = dict(strategy)
         locked["token_decimals"] = token_decimals
@@ -552,27 +552,7 @@ class TradingPipeline:
         locked.setdefault("sell_slippage_cap_bps", getattr(settings, "SELL_SLIPPAGE_CAP_BPS", SELL_SLIPPAGE_CAP_BPS))
         locked.setdefault("emergency_slippage_cap_bps", getattr(settings, "EMERGENCY_SLIPPAGE_CAP_BPS", EMERGENCY_SLIPPAGE_CAP_BPS))
         locked.setdefault("price_impact_hard_cap_pct", getattr(settings, "PRICE_IMPACT_HARD_CAP_PCT", 10.0))
-        if top3_smart_degen_snapshot:
-            locked["top3_smart_degen_snapshot"] = top3_smart_degen_snapshot
         return self._safe_json(locked)
-
-    async def _fetch_top3_smart_degen_snapshot(self, token_mint: str) -> Optional[List[Dict[str, Any]]]:
-        """Fetch TOP3 smart degen holders at entry time for position locking."""
-        try:
-            holders = await self.gmgn.fetch_smart_degen_holders(token_mint, limit=5)
-        except Exception:
-            return None
-        if not holders:
-            return None
-        sorted_h = sorted(holders, key=lambda h: float(h.get("amount_percentage") or 0), reverse=True)
-        top3 = []
-        for h in sorted_h[:3]:
-            top3.append({
-                "address": h.get("address", ""),
-                "amount_percentage": float(h.get("amount_percentage") or 0),
-                "usd_value": float(h.get("usd_value") or 0),
-            })
-        return top3 if top3 else None
 
     def _is_emergency_exit(self, exit_reason: str) -> bool:
         r = (exit_reason or "").upper()
@@ -645,21 +625,12 @@ class TradingPipeline:
                 )
                 return {"status": "SKIPPED_DUPLICATE_SNAPSHOT", "created": [], "discovery_event_id": discovery_event_id}
 
-        # Capture TOP3 smart degen snapshot BEFORE creating positions
-        # so it can be embedded in locked_strategy_config_json at creation time.
-        # 仅当至少一个策略要求聪明钱时才调用 smart_degen API
-        top3_snapshot = None
         requires_any_smart_degen = any(
             requires_smart_degen_for_x(
                 s.get("x") if s.get("x") is not None else settings.STRATEGY_DEFAULT_X
             )
             for s in passed_strategies
         )
-        if requires_any_smart_degen:
-            try:
-                top3_snapshot = await self._fetch_top3_smart_degen_snapshot(token_mint)
-            except Exception:
-                pass
 
         live_strategies = [s for s in passed_strategies if bool(s.get("is_live"))]
         sim_strategies = [s for s in passed_strategies if not bool(s.get("is_live"))]
@@ -675,7 +646,6 @@ class TradingPipeline:
                 de_id = discovery_event_ids_by_strategy.get(sg_id, discovery_event_id)
             pos = await self._create_sim_position(
                 token_mint, strategy, snapshot_id, de_id,
-                top3_smart_degen_snapshot=top3_snapshot,
                 smart_degen_required=requires_any_smart_degen,
             )
             if pos:
@@ -731,7 +701,6 @@ class TradingPipeline:
             # Only one live strategy is allowed by Control Center validation.
             res = await self._execute_buy(
                 token_mint, live_strategies[0], snapshot_id, discovery_event_id,
-                top3_smart_degen_snapshot=top3_snapshot,
                 smart_degen_required=requires_any_smart_degen,
             )
             if res:
@@ -745,7 +714,6 @@ class TradingPipeline:
         strategy: Dict[str, Any],
         snapshot_id: Optional[int],
         discovery_event_id: Optional[int],
-        top3_smart_degen_snapshot: Optional[List[Dict[str, Any]]] = None,
         smart_degen_required: bool = True,
     ) -> Optional[Dict[str, Any]]:
         # Per-strategy dedup: if an open SIM position already exists for this strategy+token, skip
@@ -939,7 +907,6 @@ class TradingPipeline:
             token_decimals=token_decimals,
             discovery_event_id=discovery_event_id,
             entry_size_usd=size_usd,
-            top3_smart_degen_snapshot=top3_smart_degen_snapshot,
         )
         pos_id = await self.repo.create_position(
             token_mint=token_mint,
@@ -1028,7 +995,6 @@ class TradingPipeline:
         strategy: Dict[str, Any],
         snapshot_id: Optional[int] = None,
         discovery_event_id: Optional[int] = None,
-        top3_smart_degen_snapshot: Optional[List[Dict[str, Any]]] = None,
         smart_degen_required: bool = True,
     ) -> Optional[Dict[str, Any]]:
         gate = self._safety_gate()
@@ -1205,7 +1171,6 @@ class TradingPipeline:
             token_decimals=token_decimals,
             discovery_event_id=discovery_event_id,
             entry_size_usd=size_usd,
-            top3_smart_degen_snapshot=top3_smart_degen_snapshot,
         )
         pos_id = await self.repo.create_position(
             token_mint=token_mint,
@@ -1390,18 +1355,21 @@ class TradingPipeline:
             requested_token_amount=sell_amount_human,
             executed_token_amount=sell_amount_human,
             price_usd=current_price_usd,
+            price_sol=current_price_sol,
             exit_reason=exit_reason,
             exit_reason_label=EXIT_REASON_LABELS.get(exit_reason, exit_reason),
             gross_value_usd=acct["gross_value_usd"],
             trade_value_usd_net=acct["trade_value_usd_net"],
             trade_value_usd_expected=acct["trade_value_usd_expected"],
             trade_value_usd_conservative=acct["trade_value_usd_conservative"],
+            trade_value_usd_actual=acct["trade_value_usd_net"],
             fee_usd_est=acct["fee_usd_est"],
             fee_detail_json=fee_detail_json,
+            execution_detail_json=json.dumps(ctx["execution_detail"], ensure_ascii=False),
             accounting_source=acct["accounting_source"],
             accounting_status=acct["accounting_status"],
             sell_price_usd_effective=sell_price_effective,
-            platform_fee_amount=acct.get("fee_detail", {}).get("platformFee_amount"),
+            platform_fee_amount=platform_fee_amount_raw(quote),
             provider="PIPELINE_SIM",
             price_impact_pct=price_impact_pct,
             quote_json=quote_json,
