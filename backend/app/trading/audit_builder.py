@@ -14,8 +14,6 @@ EXIT_REASON_LABELS: Dict[str, str] = {
     "HARD_SL_70": "硬止损：价格低于 0.7x，撤仓50%",
     "HARD_SL_45": "硬止损：价格低于 0.45x，全部撤仓",
     "COMPLETED": "池子 type 变为 completed，全部撤仓",
-    "SMART_MONEY_SELL": "聪明钱卖出触发",
-    "TOP3_SMART_DEGEN_DUMP": "TOP3聪明钱减仓超过25%",
     "RISK_RECHECK_FAILED": "持仓风控复查失败",
     "DUST_FORCE_EXIT": "尘埃仓强制清仓",
     "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
@@ -53,7 +51,6 @@ EXIT_AUDIT_REQUIRED_FIELDS = [
     "remaining_token_amount_after", "remaining_value_usd_after",
     "jupiter_quote_ok", "quote_json", "route_plan_json", "price_impact_pct",
     "risk_failed_rules", "dust_detail",
-    "smart_money_trigger_detail", "top3_smart_degen_trigger_detail",
     "exit_data_sources", "exit_missing_fields",
 ]
 
@@ -650,8 +647,6 @@ async def build_exit_audit_payload(
     quote: Optional[Dict[str, Any]] = None,
     risk_failed_rules: Optional[List[Dict[str, Any]]] = None,
     dust_detail: Optional[Dict[str, Any]] = None,
-    smart_money_trigger_detail: Optional[Dict[str, Any]] = None,
-    top3_smart_degen_trigger_detail: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {k: None for k in EXIT_AUDIT_REQUIRED_FIELDS}
 
@@ -719,9 +714,6 @@ async def build_exit_audit_payload(
 
     payload["risk_failed_rules"] = risk_failed_rules or []
     payload["dust_detail"] = dust_detail
-    payload["smart_money_trigger_detail"] = smart_money_trigger_detail
-    payload["top3_smart_degen_trigger_detail"] = top3_smart_degen_trigger_detail
-
     payload["exit_data_sources"] = {
         "entry_audit_found": buy_price_usd is not None,
         "position_id": position.get("id"),

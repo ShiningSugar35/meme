@@ -3,16 +3,13 @@
 import asyncio
 import json
 import math
-import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
 from ..config import settings, ProviderMode
-from ..db.repositories import Repositories
 from ..providers.gmgn_real import GMGNProvider, GMGNAPIError
 from ..providers.jupiter_real import JupiterProvider
 from ..providers.jito_real import JitoProvider
@@ -298,52 +295,7 @@ class TestTrenchesPushdown:
         assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(filters["min_liquidity"], 4500.0, rel_tol=1e-9)
 
-    @pytest.mark.asyncio
-    async def test_save_top3_baselines_does_not_run_discovery_loop(self, repo):
-        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-        runner = DiscoveryRunner(repo=repo, gmgn=gmgn, strategy_groups=[])
-        runner._run_once_locked = AsyncMock()
-        position_id = await repo.create_position(
-            token_mint="BASELINE_SAVE_TEST", is_live=False,
-            locked_strategy_config_json='{"x": 0.2}',
-            status="POSITION_OPEN", entry_price_usd=0.01,
-            entry_token_amount=1000.0, remaining_token_amount=1000.0,
-            remaining_value_usd=10.0, account_type="SIM",
-        )
 
-        await runner._save_top3_smart_money_baselines(position_id, "BASELINE_SAVE_TEST", [
-            {"address": "wallet1", "amount_percentage": 2.0, "usd_value": 200.0},
-        ])
-
-        runner._run_once_locked.assert_not_called()
-        baselines = await repo.get_position_smart_money_baselines(position_id)
-        assert len(baselines) == 1
-        assert math.isclose(baselines[0]["baseline_amount_percentage"], 0.02, rel_tol=1e-9)
-
-    @pytest.mark.asyncio
-    async def test_save_top3_baselines_does_not_lookup_position_by_token(self):
-        class BaselineRepo:
-            def __init__(self):
-                self.inserted = []
-
-            async def delete_smart_money_baselines_for_position(self, position_id):
-                self.deleted_position_id = position_id
-
-            async def insert_smart_money_baseline(self, *args):
-                self.inserted.append(args)
-
-            async def list_positions_by_token(self, *args, **kwargs):
-                raise AssertionError("must not lookup positions by token")
-
-        fake_repo = BaselineRepo()
-        runner = DiscoveryRunner(repo=fake_repo, gmgn=None, strategy_groups=[])
-
-        await runner._save_top3_smart_money_baselines(123, "NO_LOOKUP_TEST", [
-            {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0},
-        ])
-
-        assert fake_repo.deleted_position_id == 123
-        assert fake_repo.inserted[0][0] == 123
 
 
 # ============================================================================
@@ -366,77 +318,7 @@ class TestDefaultX:
         assert math.isclose(xs[1], 0.5, rel_tol=1e-9)
 
 
-class TestTop3BaselineFallback:
-    @pytest.mark.asyncio
-    async def test_baseline_table_fallback_no_unboundlocalerror(self, repo):
-        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-        runner = PositionRiskRunner(repo, gmgn)
-        pos_id = await repo.create_position(
-            token_mint="TOP3_FALLBACK_TEST", is_live=False,
-            locked_strategy_config_json='{"x": 0.2}',
-            status="POSITION_OPEN", entry_price_usd=0.01,
-            entry_token_amount=1000.0, remaining_token_amount=1000.0,
-            remaining_value_usd=10.0, account_type="SIM",
-        )
-        await repo.insert_smart_money_baseline(
-            pos_id, "TOP3_FALLBACK_TEST", "wallet1", 1, 0.02, 200.0,
-        )
-        pos = await repo.get_position(pos_id)
-        gmgn.fetch_smart_degen_holders = AsyncMock(return_value=[
-            {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0},
-        ])
 
-        result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
-
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_fallback_amount_percentage_reduction_triggers(self, repo):
-        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-        runner = PositionRiskRunner(repo, gmgn)
-        pos_id = await repo.create_position(
-            token_mint="TOP3_PERCENT_TEST", is_live=False,
-            locked_strategy_config_json='{"x": 0.2}',
-            status="POSITION_OPEN", entry_price_usd=0.01,
-            entry_token_amount=1000.0, remaining_token_amount=1000.0,
-            remaining_value_usd=10.0, account_type="SIM",
-        )
-        await repo.insert_smart_money_baseline(
-            pos_id, "TOP3_PERCENT_TEST", "wallet1", 1, 0.02, 200.0,
-        )
-        pos = await repo.get_position(pos_id)
-        gmgn.fetch_smart_degen_holders = AsyncMock(return_value=[
-            {"address": "wallet1", "amount_percentage": 0.014, "usd_value": 140.0},
-        ])
-
-        result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
-
-        assert result is not None
-
-    @pytest.mark.asyncio
-    async def test_current_percentage_normalizes_percent_units(self, repo):
-        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-        runner = PositionRiskRunner(repo, gmgn)
-        pos_id = await repo.create_position(
-            token_mint="TOP3_PERCENT_UNITS_TEST", is_live=False,
-            locked_strategy_config_json=json.dumps({
-                "x": 0.2,
-                "top3_smart_degen_snapshot": [
-                    {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0},
-                ],
-            }),
-            status="POSITION_OPEN", entry_price_usd=0.01,
-            entry_token_amount=1000.0, remaining_token_amount=1000.0,
-            remaining_value_usd=10.0, account_type="SIM",
-        )
-        pos = await repo.get_position(pos_id)
-        gmgn.fetch_smart_degen_holders = AsyncMock(return_value=[
-            {"address": "wallet1", "amount_percentage": 1.4, "usd_value": 140.0},
-        ])
-
-        result = await runner._check_top3_smart_degen_reduction(pos, datetime.now(timezone.utc))
-
-        assert result is not None
 
 
 # ============================================================================
@@ -605,29 +487,6 @@ class TestSimStopLossIsolation:
         )
         updated = await repo.get_position(pos_id)
         assert updated["status"] == "CLOSED", "SIM position closed via unified exit service"
-
-    @pytest.mark.asyncio
-    async def test_sim_top3_exit_via_exit_service_updates_remaining(self, repo):
-        """SIM TOP3 smart degen dump partial exit via exit_service updates remaining."""
-        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-        runner = PositionRiskRunner(repo, gmgn)
-        pos_id = await repo.create_position(
-            token_mint="SIM_TOP3_TEST", is_live=False,
-            locked_strategy_config_json='{"x": 0.2}',
-            status="POSITION_OPEN", entry_price_usd=0.01,
-            entry_token_amount=1000.0, remaining_token_amount=1000.0,
-            remaining_value_usd=20.0, account_type="SIM",
-        )
-        pos = await repo.get_position(pos_id)
-        await runner._request_exit(
-            position=pos, exit_pct=0.5,
-            reason_code="TOP3_SMART_DEGEN_DUMP", emergency=False,
-            latest={}, current_price_usd=0.01,
-        )
-        updated = await repo.get_position(pos_id)
-        assert updated["status"] != "CLOSED", "50% exit keeps position open"
-        assert updated["remaining_token_amount"] == 500.0
-        assert math.isclose(updated["remaining_value_usd"], 5.0, rel_tol=1e-9)
 
     @pytest.mark.asyncio
     async def test_live_position_calls_execute_sell(self, repo):

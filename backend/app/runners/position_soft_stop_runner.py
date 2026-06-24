@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from ..db.repositories import Repositories
 from ..logging_config import logger
-from ..strategy.exit_rules import normalize_pct_change, EXIT_REASON_LABELS
+from ..strategy.exit_rules import normalize_gmgn_percent_change, EXIT_REASON_LABELS
 from ..services.position_exit_service import PositionExitService
 from .discovery_runner import acquire_holding_slot
 
@@ -247,7 +247,7 @@ class PositionSoftStopRunner:
         # A. Direct API fields
         pct = self._get_price_change(latest, aliases)
         if pct is not None:
-            return normalize_pct_change(pct)
+            return normalize_gmgn_percent_change(pct)
 
         # B. Compute from price_5m / price_1h in latest
         if window_seconds == 300:

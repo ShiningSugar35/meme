@@ -57,8 +57,6 @@ function exitReasonLabel(code: string): string {
     COMPLETED: '池子completed',
     DULL_DROP_SL: '阴跌止损全平',
     LOW_ACTIVITY_SL: '活跃度止损全平',
-    SMART_MONEY_SELL: '聪明钱卖出',
-    TOP3_SMART_DEGEN_DUMP: 'TOP3聪明钱减仓',
     RISK_RECHECK_FAILED: '风控复查失败',
     DUST_FORCE_EXIT: '尘埃仓强制清仓',
     RISK_DATA_UNAVAILABLE_EXIT: '风控数据异常',

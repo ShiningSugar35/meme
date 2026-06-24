@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
-from app.strategy.exit_rules import decide_exit, normalize_pct_change
+from app.strategy.exit_rules import decide_exit, normalize_gmgn_percent_change
 
 
 def test_exit_small_remaining_forces_full():
@@ -139,20 +139,20 @@ class TestDustForceExit:
 
 class TestNormalizePctChange:
     def test_percentage_divided(self):
-        assert normalize_pct_change(1.2) == 0.012
+        assert normalize_gmgn_percent_change(1.2) == 0.012
 
     def test_small_percentage_under_1_pct(self):
         """GMGN returns 0.8 for 0.8% — must divide by 100."""
-        assert normalize_pct_change(0.8) == 0.008
+        assert normalize_gmgn_percent_change(0.8) == 0.008
 
     def test_large_percentage(self):
-        assert normalize_pct_change(120) == 1.2
+        assert normalize_gmgn_percent_change(120) == 1.2
 
     def test_none(self):
-        assert normalize_pct_change(None) is None
+        assert normalize_gmgn_percent_change(None) is None
 
     def test_negative(self):
-        assert normalize_pct_change(-3.5) == -0.035
+        assert normalize_gmgn_percent_change(-3.5) == -0.035
 
     def test_negative_small_pct(self):
-        assert normalize_pct_change(-0.5) == -0.005
+        assert normalize_gmgn_percent_change(-0.5) == -0.005

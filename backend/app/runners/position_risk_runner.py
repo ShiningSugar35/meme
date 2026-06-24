@@ -162,7 +162,6 @@ class PositionRiskRunner:
         self.trading_pipeline = trading_pipeline
         self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline, gmgn=gmgn)
         self._legacy_warned: set[int] = set()
-        self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
         self._last_risk_fail_details: Dict[int, List[str]] = {}
         self._last_risk_fail_structured: Dict[int, List[Dict[str, Any]]] = {}
         self._last_scan: Dict[int, datetime] = {}
@@ -454,47 +453,9 @@ class PositionRiskRunner:
             )
             return
 
-        # Smart money sell monitoring (feature-flagged, polling)
-        try:
-            smart_dump_wallet = await self._check_smart_money_sell(position_for_decision, now)
-        except RuntimeError:
-            await self._emergency_risk_exit(position)
-            return
-        if smart_dump_wallet:
-            await self._request_exit(
-                position=position_for_decision,
-                exit_pct=0.5,
-                reason_code="SMART_MONEY_SELL",
-                emergency=False,
-                latest=latest,
-                current_price_usd=price_usd,
-                triggered_wallet=smart_dump_wallet,
-            )
-            return
-
-        # TOP3 smart degen reduction check: if any of the original TOP3 reduced
-        # holdings by >25%, exit 50%
-        try:
-            top3_triggered_wallet = await self._check_top3_smart_degen_reduction(position_for_decision, now)
-        except RuntimeError:
-            await self._emergency_risk_exit(position)
-            return
-        if top3_triggered_wallet:
-            await self._request_exit(
-                position=position_for_decision,
-                exit_pct=0.5,
-                reason_code="TOP3_SMART_DEGEN_DUMP",
-                emergency=False,
-                latest=latest,
-                current_price_usd=price_usd,
-                triggered_wallet=top3_triggered_wallet,
-            )
-            return
-
-        # NOTE: Price-based exit rules (HARD_TP, HARD_SL)
-        # are handled exclusively by ActivePositionPriceRunner to avoid duplicate triggers.
-        # PositionRiskRunner covers only holding risk, smart money sell,
-        # TOP3 smart degen dump, completed, and dust force exit.
+        # NOTE: Price-based exit rules (HARD_TP, HARD_SL) are handled exclusively
+        # by ActivePositionPriceRunner to avoid duplicate triggers.
+        # PositionRiskRunner covers only holding risk, completed, and dust force exit.
 
     async def _fetch_latest_price(self, token: str, account_type: str, retry_delay_seconds: float = 0) -> Dict[str, Any]:
         preferred = acquire_holding_slot("risk_price")
@@ -712,185 +673,6 @@ class PositionRiskRunner:
         )
         return False
 
-    async def _check_smart_money_sell(self, position: Dict[str, Any], now: datetime) -> Optional[str]:
-        """Returns triggered wallet address if smart money sell detected, else None."""
-        if not getattr(settings, "SMART_MONEY_SELL_MONITOR_ENABLED", False):
-            return None
-        pos_id = int(position["id"])
-        remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
-        interval = settings.get_risk_scan_interval_seconds(remaining_value_usd)
-        if interval <= 0:
-            return None
-
-        last_check = self._last_smart_degen_sell.get(pos_id, {})
-        last_time_val = last_check.get("_ts")
-        if last_time_val is not None and now.timestamp() < last_time_val + interval:
-            return None
-
-        token = position["token_mint"]
-        account_type = _account_type(position)
-
-        preferred = acquire_holding_slot("risk_smart_money")
-
-        async def _do_fetch(*, credential_slot):
-            return await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=credential_slot)
-
-        holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None, retry_delay_seconds=interval)
-
-        if not holders:
-            return None
-
-        sell_trigger = float(getattr(settings, "SMART_MONEY_SELL_THRESHOLD_USD", 50.0))
-        triggered_wallet: Optional[str] = None
-        for h in holders:
-            addr = h.get("address") or ""
-            if not addr:
-                continue
-            sell_cur = _to_float(h.get("sell_volume_cur")) or 0.0
-            prev = last_check.get(addr, 0.0)
-            delta = sell_cur - prev
-            if delta > sell_trigger:
-                triggered_wallet = addr
-                await self.repo.append_system_event(
-                    "INFO", "RISK",
-                    f"Smart money sell detected: wallet {addr} sold +${delta:.0f}",
-                    _safe_json_dumps({
-                        "position_id": pos_id, "token": token,
-                        "wallet": addr, "sell_delta_usd": delta,
-                        "threshold": sell_trigger,
-                    }),
-                    account_type=account_type,
-                )
-                break
-
-        snapshot: Dict[str, Any] = {"_ts": now.timestamp()}
-        for h in holders:
-            addr = h.get("address") or ""
-            snapshot[addr] = _to_float(h.get("sell_volume_cur")) or 0.0
-        self._last_smart_degen_sell[pos_id] = snapshot
-
-        return triggered_wallet
-
-    async def _check_top3_smart_degen_reduction(self, position: Dict[str, Any], now: datetime) -> Optional[str]:
-        """Check if any of the original TOP3 smart degen holders reduced holdings by >25%.
-
-        Per-wallet one-shot: once a wallet triggers an exit, it is recorded in
-        executed_exit_rules_json as TOP3_SMART_DEGEN_DUMP:<address> and will not
-        trigger a second time.
-
-        Comparison priority: token amount > amount_percentage.  Do NOT use usd_value
-        alone because price change affects it.
-
-        Returns the triggered wallet address if risk is detected, None otherwise.
-        IMPORTANT: does NOT mark exit rule as executed — that happens only after
-        the sell succeeds (in _request_exit), so a failed sell can be retried.
-        """
-        locked = position.get("locked_strategy_config_json")
-        if not locked:
-            return None
-        try:
-            cfg = json.loads(locked)
-        except (json.JSONDecodeError, TypeError):
-            return None
-
-        token = position["token_mint"]
-        pos_id = int(position["id"])
-
-        top3_snapshot = cfg.get("top3_smart_degen_snapshot")
-        if not top3_snapshot or not isinstance(top3_snapshot, list):
-            baselines = []
-            try:
-                baselines = await self.repo.get_position_smart_money_baselines(pos_id)
-            except Exception as e:
-                logger.warning(
-                    "top3 smart degen baseline fallback failed",
-                    position_id=pos_id,
-                    token=token,
-                    error=str(e),
-                )
-            if baselines:
-                top3_snapshot = [
-                    {"address": b.get("wallet_address", ""),
-                     "amount_percentage": _normalize_amount_percentage(b.get("baseline_amount_percentage")),
-                     "usd_value": _to_float(b.get("baseline_usd_value"), 0.0)}
-                    for b in baselines if b.get("wallet_address")
-                ]
-        if not top3_snapshot or not isinstance(top3_snapshot, list):
-            return None
-
-        executed = _executed_exit_rules(position)
-        already_triggered_wallets: set[str] = set()
-        for rule in executed:
-            if rule.startswith("TOP3_SMART_DEGEN_DUMP:"):
-                already_triggered_wallets.add(rule.split(":", 1)[1])
-
-        preferred = acquire_holding_slot("risk_top3_degen")
-
-        async def _do_fetch(*, credential_slot):
-            return await self.gmgn.fetch_smart_degen_holders(token, limit=20, credential_slot=credential_slot)
-
-        remaining_value_usd_for_delay = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
-        retry_delay = risk_scan_interval_seconds(remaining_value_usd_for_delay)
-        holders = await self._fetch_risk_data_with_retry(_do_fetch, preferred, None, retry_delay_seconds=retry_delay)
-
-        current_map: Dict[str, Dict[str, float]] = {}
-        if holders:
-            for h in holders:
-                addr = h.get("address", "")
-                if addr:
-                    current_map[addr] = {
-                        "token_amount": float(h.get("token_amount") or 0),
-                        "amount_percentage": _normalize_amount_percentage(h.get("amount_percentage")) or 0.0,
-                    }
-
-        triggered_addr: Optional[str] = None
-        for snap in top3_snapshot:
-            addr = snap.get("address", "")
-            if not addr or addr in already_triggered_wallets:
-                continue
-
-            if addr not in current_map:
-                triggered_addr = addr
-                break
-
-            curr = current_map[addr]
-            initial_token = float(snap.get("token_amount") or 0)
-            initial_pct = _normalize_amount_percentage(snap.get("amount_percentage")) or 0.0
-
-            if initial_token > 0:
-                current_token = curr["token_amount"]
-                if current_token <= 0:
-                    triggered_addr = addr
-                    break
-                reduction = (initial_token - current_token) / initial_token
-                if reduction > 0.25:
-                    triggered_addr = addr
-                    break
-            elif initial_pct > 0:
-                current_pct = curr["amount_percentage"]
-                if current_pct <= 0:
-                    triggered_addr = addr
-                    break
-                reduction = (initial_pct - current_pct) / initial_pct
-                if reduction > 0.25:
-                    triggered_addr = addr
-                    break
-
-        if triggered_addr is not None:
-            account_type = _account_type(position)
-            await self.repo.append_system_event(
-                "WARN", "RISK",
-                f"TOP3 smart degen dump detected: {triggered_addr}",
-                _safe_json_dumps({
-                    "position_id": pos_id, "token": token,
-                    "address": triggered_addr,
-                }),
-                account_type=account_type,
-            )
-            return triggered_addr
-
-        return None
-
     async def _request_exit(
         self,
         position: Dict[str, Any],
@@ -899,7 +681,6 @@ class PositionRiskRunner:
         emergency: bool,
         latest: Dict[str, Any],
         current_price_usd: Optional[float],
-        triggered_wallet: Optional[str] = None,
         risk_details: Optional[List[str]] = None,
     ):
         pos_id = int(position["id"])
@@ -918,20 +699,10 @@ class PositionRiskRunner:
             risk_failed_rules = self._last_risk_fail_structured.get(pos_id, [])
             if risk_failed_rules:
                 audit_context["risk_failed_rules"] = risk_failed_rules
-        if reason_code == "SMART_MONEY_SELL" and triggered_wallet:
-            audit_context["smart_money_trigger_detail"] = {"triggered_wallet": triggered_wallet}
-        if reason_code == "TOP3_SMART_DEGEN_DUMP" and triggered_wallet:
-            audit_context["top3_smart_degen_trigger_detail"] = {"triggered_wallet": triggered_wallet, "reduction_threshold_pct": 25.0}
 
         # One-shot rule idempotency for partial exits
-        # TOP wallet exits are gated per-wallet, not by base reason, so
-        # that wallet A reducing 25% does not block wallet B from selling.
         if exit_pct < 1.0 and hasattr(self.repo, "has_exit_rule_executed"):
-            if reason_code == "TOP3_SMART_DEGEN_DUMP" and triggered_wallet:
-                wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
-                if await self.repo.has_exit_rule_executed(pos_id, wallet_rule):
-                    return
-            elif await self.repo.has_exit_rule_executed(pos_id, reason_code):
+            if await self.repo.has_exit_rule_executed(pos_id, reason_code):
                 return
 
         # Delegate to unified exit service
@@ -943,7 +714,6 @@ class PositionRiskRunner:
             emergency=emergency,
             source="RISK_RUNNER",
             risk_details=risk_details,
-            triggered_wallet=triggered_wallet,
         )
 
         # Post-exit audit for risk-specific context

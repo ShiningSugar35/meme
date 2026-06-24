@@ -35,8 +35,6 @@ EXIT_REASON_LABELS: Dict[str, str] = {
     "COMPLETED": "池子 type 变为 completed，全部撤仓",
     "DULL_DROP_SL": "阴跌止损：1h和5m涨幅均<1%，全部撤仓",
     "LOW_ACTIVITY_SL": "活跃度止损：1h交易<7次且1h涨幅<5%，全部撤仓",
-    "SMART_MONEY_SELL": "聪明钱卖出触发",
-    "TOP3_SMART_DEGEN_DUMP": "TOP3聪明钱减仓超过25%",
     "RISK_RECHECK_FAILED": "持仓风控复查失败",
     "DUST_FORCE_EXIT": "尘埃仓强制清仓",
     "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
@@ -80,7 +78,7 @@ def _env_float(name: str, default: float) -> float:
     return default if v is None else v
 
 
-def normalize_pct_change(value: Any) -> Optional[float]:
+def normalize_gmgn_percent_change(value: Any) -> Optional[float]:
     """Convert GMGN percentage value to decimal ratio (e.g. 1.2 → 0.012).
 
     GMGN's price_change_percent1h etc. are always percentage numbers

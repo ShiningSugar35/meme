@@ -367,25 +367,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_discovery_snapshot_token_pool_strategy
 ON discovery_events(source_snapshot_id, token_mint, pool_address, strategy_id)
 WHERE source_snapshot_id IS NOT NULL AND strategy_id IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS position_smart_money_baselines (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  position_id INTEGER NOT NULL,
-  token_mint TEXT NOT NULL,
-  wallet_address TEXT NOT NULL,
-  rank_at_entry INTEGER NOT NULL,
-  baseline_amount_percentage REAL,
-  baseline_usd_value REAL,
-  latest_amount_percentage REAL,
-  latest_usd_value REAL,
-  latest_reduction_rate REAL,
-  triggered INTEGER NOT NULL DEFAULT 0,
-  baseline_observed_at TEXT NOT NULL,
-  latest_observed_at TEXT,
-  raw_json TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_position_smart_money
-ON position_smart_money_baselines(position_id, wallet_address);
-
 CREATE TABLE IF NOT EXISTS position_audits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   position_id INTEGER,

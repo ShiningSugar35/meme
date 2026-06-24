@@ -1137,35 +1137,6 @@ class DiscoveryRunner:
 
         return passed_groups, stage_diag
 
-    async def _save_top3_smart_money_baselines(self, position_id: int, token_mint: str, degen_holders: List[Dict[str, Any]]):
-        if not degen_holders:
-            return
-        try:
-            pos_id = int(position_id)
-            if not pos_id:
-                return
-            if hasattr(self.repo, "delete_smart_money_baselines_for_position"):
-                await self.repo.delete_smart_money_baselines_for_position(pos_id)
-            holders_sorted = sorted(degen_holders, reverse=True,
-                key=lambda h: (float(h.get("amount_percentage", 0) or 0) / 100.0 if (h.get("amount_percentage") and float(str(h.get("amount_percentage", 0))) > 1.0) else float(h.get("amount_percentage", 0) or 0)))
-            top3 = holders_sorted[:3]
-            for i, holder in enumerate(top3):
-                wallet = str(holder.get("address") or holder.get("wallet") or "")
-                if not wallet:
-                    continue
-                amt_pct = float(holder.get("amount_percentage", 0) or 0)
-                if amt_pct > 1.0:
-                    amt_pct = amt_pct / 100.0
-                usd_val = float(holder.get("usd_value", 0) or 0)
-                try:
-                    await self.repo.insert_smart_money_baseline(
-                        pos_id, token_mint, wallet, i + 1, amt_pct, usd_val,
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.warning(f"save_top3_smart_money_baselines failed for position_id={position_id} token={token_mint}: {e}")
-
     async def run_once(self):
         async with self._run_lock:
             await self._run_once_locked()
@@ -1335,14 +1306,6 @@ class DiscoveryRunner:
                             discovery_event_id=discovery_event_ids.get(int(price_passed[0].get('id') or 0)),
                             discovery_event_ids_by_strategy=discovery_event_ids,
                         )
-                        if degen_holders:
-                            for created in (result or {}).get("created", []):
-                                try:
-                                    position_id = int(created.get("position_id") or 0)
-                                except Exception:
-                                    position_id = 0
-                                if position_id:
-                                    await self._save_top3_smart_money_baselines(position_id, token_mint, degen_holders)
                     except Exception as e:
                         logger.error(f"pipeline entry failed for {token_mint}: {e}")
 

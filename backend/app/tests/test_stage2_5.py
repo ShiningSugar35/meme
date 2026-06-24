@@ -2,15 +2,11 @@
 
 import asyncio
 import math
-import json
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
 
 import pytest
 import pytest_asyncio
 
 from ..config import settings, ProviderMode
-from ..db.repositories import Repositories
 from ..providers.gmgn_real import GMGNProvider
 from ..providers.jupiter_real import JupiterProvider
 from ..providers.jito_real import JitoProvider
@@ -280,121 +276,6 @@ class TestActivePriceRunnerRegistration:
         gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
         runner = ActivePositionPriceRunner(repo, gmgn)
         await runner.run_once()
-
-
-# ============================================================================
-# 6. TOP3 smart degen (P1)
-# ============================================================================
-
-@pytest.mark.asyncio
-async def test_top3_wallet_disappears_triggers(repo):
-    """Wallet not in current holders list -> treat as 100% reduction -> trigger."""
-    from ..runners.position_risk_runner import PositionRiskRunner
-    gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-    runner = PositionRiskRunner(repo, gmgn)
-
-    locked = json.dumps({
-        "x": 0.2,
-        "top3_smart_degen_snapshot": [
-            {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0, "token_amount": 100.0},
-        ],
-    })
-    pos_id = await repo.create_position(
-        token_mint="TOP3TKN", is_live=False,
-        locked_strategy_config_json=locked,
-        status="POSITION_OPEN", entry_price_usd=0.01,
-        entry_token_amount=1000.0, remaining_token_amount=1000.0,
-        remaining_value_usd=10.0, account_type="SIM",
-    )
-    pos = await repo.get_position(pos_id)
-    now = datetime.now(timezone.utc)
-
-    import backend.app.providers.gmgn_real as gmgn_mod
-    original = gmgn_mod.GMGNProvider.fetch_smart_degen_holders
-    async def empty_fetch(*args, **kwargs):
-        return []
-    gmgn_mod.GMGNProvider.fetch_smart_degen_holders = empty_fetch
-    try:
-        result = await runner._check_top3_smart_degen_reduction(pos, now)
-        assert result is not None
-    finally:
-        gmgn_mod.GMGNProvider.fetch_smart_degen_holders = original
-
-
-@pytest.mark.asyncio
-async def test_top3_reduction_25pct_triggers(repo):
-    """Wallet reduction >25% should trigger 50% exit."""
-    from ..runners.position_risk_runner import PositionRiskRunner
-    gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-    runner = PositionRiskRunner(repo, gmgn)
-
-    locked = json.dumps({
-        "x": 0.2,
-        "top3_smart_degen_snapshot": [
-            {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0, "token_amount": 100.0},
-        ],
-    })
-    pos_id = await repo.create_position(
-        token_mint="TOP3TKN", is_live=False,
-        locked_strategy_config_json=locked,
-        status="POSITION_OPEN", entry_price_usd=0.01,
-        entry_token_amount=1000.0, remaining_token_amount=1000.0,
-        remaining_value_usd=10.0, account_type="SIM",
-    )
-    pos = await repo.get_position(pos_id)
-    now = datetime.now(timezone.utc)
-
-    import backend.app.providers.gmgn_real as gmgn_mod
-    original = gmgn_mod.GMGNProvider.fetch_smart_degen_holders
-    async def reduced_holders(*args, **kwargs):
-        return [{"address": "wallet1", "amount_percentage": 0.014, "usd_value": 140.0, "token_amount": 70.0}]
-    gmgn_mod.GMGNProvider.fetch_smart_degen_holders = reduced_holders
-    try:
-        result = await runner._check_top3_smart_degen_reduction(pos, now)
-        assert result is not None
-    finally:
-        gmgn_mod.GMGNProvider.fetch_smart_degen_holders = original
-
-
-@pytest.mark.asyncio
-async def test_top3_same_wallet_idempotent(repo):
-    """Same wallet should not trigger twice after first trigger."""
-    from ..runners.position_risk_runner import PositionRiskRunner
-    gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
-    runner = PositionRiskRunner(repo, gmgn)
-
-    locked = json.dumps({
-        "x": 0.2,
-        "top3_smart_degen_snapshot": [
-            {"address": "wallet1", "amount_percentage": 0.02, "usd_value": 200.0, "token_amount": 100.0},
-        ],
-    })
-    pos_id = await repo.create_position(
-        token_mint="TOP3TKN", is_live=False,
-        locked_strategy_config_json=locked,
-        status="POSITION_OPEN", entry_price_usd=0.01,
-        entry_token_amount=1000.0, remaining_token_amount=1000.0,
-        remaining_value_usd=10.0, account_type="SIM",
-    )
-    pos = await repo.get_position(pos_id)
-    now = datetime.now(timezone.utc)
-
-    import backend.app.providers.gmgn_real as gmgn_mod
-    original = gmgn_mod.GMGNProvider.fetch_smart_degen_holders
-    async def reduced_holders(*args, **kwargs):
-        return [{"address": "wallet1", "amount_percentage": 0.014, "usd_value": 140.0, "token_amount": 70.0}]
-    gmgn_mod.GMGNProvider.fetch_smart_degen_holders = reduced_holders
-    try:
-        result1 = await runner._check_top3_smart_degen_reduction(pos, now)
-        assert result1 is not None
-
-        # Mark exit rule as executed
-        await repo.mark_exit_rule_executed(pos_id, "TOP3_SMART_DEGEN_DUMP:wallet1")
-        pos = await repo.get_position(pos_id)
-        result2 = await runner._check_top3_smart_degen_reduction(pos, now)
-        assert result2 is None
-    finally:
-        gmgn_mod.GMGNProvider.fetch_smart_degen_holders = original
 
 
 # ============================================================================

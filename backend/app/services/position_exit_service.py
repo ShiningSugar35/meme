@@ -124,7 +124,6 @@ class PositionExitService:
         emergency: bool = False,
         source: str = "UNKNOWN",
         risk_details: Optional[list] = None,
-        triggered_wallet: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Close or partially exit a position.
 
@@ -171,7 +170,7 @@ class PositionExitService:
         try:
             # ---- LIVE pathway ----
             if is_live:
-                result = await self._exit_live(fresh_position, exit_pct, reason_code, price, source, triggered_wallet=triggered_wallet)
+                result = await self._exit_live(fresh_position, exit_pct, reason_code, price, source)
                 if result["ok"]:
                     if exit_pct < 0.999999:
                         await self._release_exit_claim(pos_id, original_status)
@@ -180,7 +179,7 @@ class PositionExitService:
                 return result
 
             # ---- SIM pathway ----
-            result = await self._exit_sim(fresh_position, exit_pct, reason_code, price, source, risk_details, triggered_wallet)
+            result = await self._exit_sim(fresh_position, exit_pct, reason_code, price, source, risk_details)
             # Partial exit: release claim so remaining can be re-sold; full exit already set CLOSED
             if result.get("ok") and exit_pct < 0.999999:
                 await self._release_exit_claim(pos_id, original_status)
@@ -200,7 +199,6 @@ class PositionExitService:
         current_price_usd: float,
         source: str,
         risk_details: Optional[list] = None,
-        triggered_wallet: Optional[str] = None,
     ) -> Dict[str, Any]:
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -208,12 +206,35 @@ class PositionExitService:
 
         sell_amount = remaining_token * exit_pct
         new_remaining = max(0.0, remaining_token - sell_amount)
-        trade_value_usd_net = sell_amount * current_price_usd
+        gross_value_usd = sell_amount * current_price_usd
+        fee_usd_est = 0.0
+        trade_value_usd_net = gross_value_usd - fee_usd_est
+        trade_value_usd_expected = trade_value_usd_net
+        trade_value_usd_conservative = trade_value_usd_net
+        trade_value_usd_actual = trade_value_usd_net
+        sell_price_usd_effective = trade_value_usd_net / sell_amount if sell_amount > 0 else current_price_usd
 
         exit_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
         idem_key = f"EXIT_SVC:{pos_id}:{reason_code}"
-        if reason_code == "TOP3_SMART_DEGEN_DUMP" and triggered_wallet:
-            idem_key = f"EXIT_SVC:{pos_id}:{reason_code}:{triggered_wallet}"
+
+        fee_detail = {
+            "accounting_mode": "SIM_PAPER_FALLBACK",
+            "fallback": True,
+            "source": source,
+            "fee_usd_est": fee_usd_est,
+            "note": "No Jupiter quote — using current_price_usd as effective price",
+        }
+        execution_detail = {
+            "service": "PositionExitService",
+            "reason_code": reason_code,
+            "exit_pct": exit_pct,
+            "current_price_usd": current_price_usd,
+            "remaining_token_before": remaining_token,
+            "sell_token_amount": sell_amount,
+            "remaining_token_after": new_remaining,
+            "gross_value_usd": gross_value_usd,
+            "trade_value_usd_net": trade_value_usd_net,
+        }
 
         await self.repo.append_trade_event(
             idem_key,
@@ -226,12 +247,22 @@ class PositionExitService:
             event_type="SIM_SELL",
             status="CONFIRMED",
             requested_pct=exit_pct,
+            requested_token_amount=sell_amount,
             executed_token_amount=sell_amount,
             price_usd=current_price_usd,
             exit_reason=reason_code,
             exit_reason_label=exit_label,
+            gross_value_usd=gross_value_usd,
             trade_value_usd_net=trade_value_usd_net,
-            fee_detail_json=json.dumps({"fallback": True, "source": source}),
+            trade_value_usd_expected=trade_value_usd_expected,
+            trade_value_usd_conservative=trade_value_usd_conservative,
+            trade_value_usd_actual=trade_value_usd_actual,
+            fee_usd_est=fee_usd_est,
+            fee_detail_json=json.dumps(fee_detail, ensure_ascii=False),
+            execution_detail_json=json.dumps(execution_detail, ensure_ascii=False),
+            accounting_source="sim_paper_fallback",
+            accounting_status="FINAL",
+            sell_price_usd_effective=sell_price_usd_effective,
             provider=source,
         )
 
@@ -251,9 +282,44 @@ class PositionExitService:
 
         if hasattr(self.repo, "mark_exit_rule_executed"):
             await self.repo.mark_exit_rule_executed(pos_id, reason_code)
-            if triggered_wallet:
-                wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
-                await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
+
+        # Position audit — match old pipeline's EXIT audit for SIM sells
+        if hasattr(self.repo, "insert_position_audit"):
+            try:
+                from ..trading.audit_builder import build_exit_audit_payload
+                account_type = _account_type(position)
+                audit_payload = await build_exit_audit_payload(
+                    repo=self.repo,
+                    position=position,
+                    sell_trade_event={
+                        "created_at": _utc_now_iso(),
+                        "sell_price_usd_effective": sell_price_usd_effective,
+                        "sell_price_usd": current_price_usd,
+                    },
+                    exit_reason=reason_code,
+                    exit_pct=exit_pct,
+                    sell_amount_human=sell_amount,
+                    gross_value_usd=gross_value_usd,
+                    current_price_usd=current_price_usd,
+                    quote=None,
+                )
+                await self.repo.insert_position_audit(
+                    position_id=pos_id,
+                    token_mint=token,
+                    account_type=account_type,
+                    strategy_id=_position_strategy_id(position),
+                    discovery_event_id=position.get("discovery_event_id"),
+                    snapshot_id=None,
+                    audit_type="EXIT",
+                    audit_json=audit_payload,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Position exit audit insert failed",
+                    position_id=pos_id,
+                    reason=reason_code,
+                    error=str(e),
+                )
 
         logger.info(
             "PositionExitService SIM exit",
@@ -275,7 +341,6 @@ class PositionExitService:
         reason_code: str,
         current_price_usd: float,
         source: str,
-        triggered_wallet: Optional[str] = None,
     ) -> Dict[str, Any]:
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -315,9 +380,6 @@ class PositionExitService:
         if result and (result.get("ok") is True or result.get("success") is True):
             if hasattr(self.repo, "mark_exit_rule_executed"):
                 await self.repo.mark_exit_rule_executed(pos_id, reason_code)
-                if triggered_wallet:
-                    wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
-                    await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
 
             await self.repo.append_system_event(
                 "INFO", "EXIT",
