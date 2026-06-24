@@ -140,7 +140,7 @@ class StrategyThresholds:
         entry_insider_ratio = common_risk
         entry_bundler_rate = common_risk
 
-        min_liquidity = 5000.0 - 2500.0 * xf
+        min_liquidity = 4750.0 - 2500.0 * xf
         min_liquidity_holder_ratio = 60.0 - 100.0 * xf
 
         min_top_holder_rate = 0.16 - 0.5 * xf
@@ -157,8 +157,8 @@ class StrategyThresholds:
         max_holder_count_raw = 400.0 + 2000.0 * xf
         max_holder_count_api = int(math.ceil(max_holder_count_raw)) - 1
 
-        min_marketcap_raw = min_liquidity * (1.3 - xf)
-        min_marketcap_api = min_liquidity * (1.3 - xf)
+        min_marketcap_raw = 5000.0
+        min_marketcap_api = 5000.0
 
         min_smart_degen_count_raw = 1.5 - 10.0 * xf
         min_smart_degen_count_api = (

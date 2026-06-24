@@ -51,10 +51,10 @@ def make_snapshot(**kwargs):
 def test_thresholds_x_02():
     t = compute_thresholds(0.2)
     assert math.isclose(t.common_risk, 0.15, rel_tol=1e-9)
-    assert math.isclose(t.min_liquidity, 4500.0, rel_tol=1e-9)
+    assert math.isclose(t.min_liquidity, 4250.0, rel_tol=1e-9)
     assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
     assert math.isclose(t.min_holder_count, 24.0, rel_tol=1e-9)
-    assert math.isclose(t.min_marketcap, 4950.0, rel_tol=1e-9)
+    assert math.isclose(t.min_marketcap, 5000.0, rel_tol=1e-9)
     assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
     assert math.isclose(t.volume_per_swap_1h_min, 27.0, rel_tol=1e-9)
     assert math.isclose(t.price_change_1h_min_pct, 5.0, rel_tol=1e-9)
@@ -622,7 +622,7 @@ def test_smart_degen_15_pct_format():
 def test_trench_filters_x_02():
     t = StrategyThresholds.compute(0.2)
     filters = t.to_trench_filters()
-    assert math.isclose(filters["min_liquidity"], 4500.0, rel_tol=1e-9)
+    assert math.isclose(filters["min_liquidity"], 4250.0, rel_tol=1e-9)
     assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
     assert math.isclose(filters["min_top_holder_rate"], 0.06, rel_tol=1e-9)
     assert math.isclose(filters["max_top_holder_rate"], 0.275, rel_tol=1e-9)

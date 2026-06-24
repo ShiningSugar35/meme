@@ -47,13 +47,13 @@ class TestTrenchesPushdown:
         assert math.isclose(payload["max_entrapment_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_insider_ratio"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_bundler_rate"], 0.15, rel_tol=1e-9)
-        assert math.isclose(payload["min_liquidity"], 4500.0, rel_tol=1e-9)
+        assert math.isclose(payload["min_liquidity"], 4250.0, rel_tol=1e-9)
         assert math.isclose(payload["min_top_holder_rate"], 0.06, rel_tol=1e-9)
         assert math.isclose(payload["max_top_holder_rate"], 0.275, rel_tol=1e-9)
         assert math.isclose(payload["max_fresh_wallet_rate"], 0.15, rel_tol=1e-9)
         assert math.isclose(payload["max_creator_balance_rate"], 0.051, rel_tol=1e-9)  # 买入值 0.049+0.01*0.2
         assert payload["min_holder_count"] == 25
-        assert math.isclose(payload["min_marketcap"], 4950.0, rel_tol=1e-9)
+        assert math.isclose(payload["min_marketcap"], 5000.0, rel_tol=1e-9)
         assert math.isclose(payload["min_volume_24h"], 1200.0, rel_tol=1e-9)
         assert payload.get("min_smart_degen_count") is None
 
@@ -188,7 +188,7 @@ class TestTrenchesPushdown:
             "platforms": ["Pump.fun"],
             "min_created": "60m",
             "max_created": "120m",
-            "trench_filters": {"min_liquidity": 4500.0},
+            "trench_filters": {"min_liquidity": 4250.0},
         }, credential_slot=3)
 
         assert captured["path"] == settings.GMGN_TRENCHES_PATH
@@ -202,7 +202,7 @@ class TestTrenchesPushdown:
         assert body["new_creation"]["max_created"] == "120m"
         assert body["near_completion"]["min_created"] == "60m"
         assert body["near_completion"]["max_created"] == "120m"
-        assert body["new_creation"]["min_liquidity"] == 4500.0
+        assert body["new_creation"]["min_liquidity"] == 4250.0
         assert [item["type"] for item in result] == ["new_creation", "near_completion"]
 
     @pytest.mark.asyncio
@@ -293,7 +293,7 @@ class TestTrenchesPushdown:
         assert math.isclose(params["_x"], settings.STRATEGY_DEFAULT_X, rel_tol=1e-9)
         filters = params["trench_filters"]
         assert math.isclose(filters["max_rug_ratio"], 0.15, rel_tol=1e-9)
-        assert math.isclose(filters["min_liquidity"], 4500.0, rel_tol=1e-9)
+        assert math.isclose(filters["min_liquidity"], 4250.0, rel_tol=1e-9)
 
 
 
@@ -1099,12 +1099,14 @@ class TestSoftStopTickFallback:
 
         runner = PositionSoftStopRunner(repo, gmgn)
 
-        # Mock GMGN to return latest price WITHOUT change fields
-        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
-            "price_usd": 0.0095,  # ~5% drop from 0.01 ref, below 1% → triggers dull-drop
-        })):
-            did_exit = await runner._check_dull_drop(pos, {"price_usd": 0.0095}, 0.0095, now)
-            assert did_exit is True, "Dull-drop should trigger via tick fallback"
+        # Mock the retry methods to return kline open and price without real API
+        runner._fetch_latest_price_with_retry = AsyncMock(return_value={
+            "price_usd": 0.0095,
+        })
+        runner._fetch_4h_kline_with_retry = AsyncMock(return_value=0.01)
+
+        did_exit = await runner._check_dull_drop(pos, 0.0095, now)
+        assert did_exit is True, "Dull-drop should trigger when 4h growth < 4%"
 
         updated = await repo.get_position(pos_id)
-        assert updated["status"] == "CLOSED", "Position closed after dull-drop via tick fallback"
+        assert updated["status"] == "CLOSED", "Position closed after dull-drop"

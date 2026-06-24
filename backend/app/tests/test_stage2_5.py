@@ -28,7 +28,7 @@ class TestThresholds:
     def test_x_02_formulas(self):
         t = compute_thresholds(0.2)
         assert math.isclose(t.common_risk, 0.15, rel_tol=1e-9)
-        assert math.isclose(t.min_liquidity, 4500.0, rel_tol=1e-9)
+        assert math.isclose(t.min_liquidity, 4250.0, rel_tol=1e-9)
         assert math.isclose(t.min_top_holder_rate, 0.06, rel_tol=1e-9)
         assert math.isclose(t.max_top_holder_rate, 0.275, rel_tol=1e-9)
         assert math.isclose(t.max_fresh_wallet_rate, 0.15, rel_tol=1e-9)
@@ -38,7 +38,7 @@ class TestThresholds:
         assert t.max_holder_count_api == 799
         assert math.isclose(t.min_holder_count_raw, 24.0, rel_tol=1e-9)
         assert math.isclose(t.max_holder_count_raw, 800.0, rel_tol=1e-9)
-        assert math.isclose(t.min_marketcap_api, 4950.0, rel_tol=1e-9)
+        assert math.isclose(t.min_marketcap_api, 5000.0, rel_tol=1e-9)
         assert t.min_smart_degen_count_api is None
         assert t.min_smart_degen_count_raw == -0.5
         assert math.isclose(t.min_volume_24h, 1200.0, rel_tol=1e-9)
@@ -55,7 +55,7 @@ class TestThresholds:
     def test_x_05_formulas(self):
         t = compute_thresholds(0.5)
         assert math.isclose(t.common_risk, 0.30, rel_tol=1e-9)
-        assert math.isclose(t.min_liquidity, 3750.0, rel_tol=1e-9)
+        assert math.isclose(t.min_liquidity, 3500.0, rel_tol=1e-9)
         assert math.isclose(t.min_top_holder_rate, -0.09, rel_tol=1e-9)
         assert math.isclose(t.max_top_holder_rate, 0.35, rel_tol=1e-9)
         assert math.isclose(t.min_holder_count_raw, 12.0, rel_tol=1e-9)
@@ -72,7 +72,7 @@ class TestThresholds:
         assert "_computed_from_x" not in payload
         assert isinstance(payload["min_liquidity"], float)
         assert isinstance(payload["min_holder_count"], int)
-        assert payload["min_liquidity"] == 4500.0
+        assert payload["min_liquidity"] == 4250.0
         assert payload["min_holder_count"] == 25
         assert payload["max_holder_count"] == 799
 
