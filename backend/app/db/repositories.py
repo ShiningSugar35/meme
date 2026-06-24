@@ -623,15 +623,19 @@ class Repositories:
     async def get_reference_tick_before(self, token_mint: str, seconds_ago: int, tolerance_seconds: int = 120) -> Optional[Dict[str, Any]]:
         target_dt = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
         target_iso = target_dt.isoformat()
+        lower_iso = (target_dt - timedelta(seconds=tolerance_seconds)).isoformat()
+        upper_iso = (target_dt + timedelta(seconds=tolerance_seconds)).isoformat()
         async with self.db.execute(
             """
             SELECT *
             FROM tick_snapshots
             WHERE token_mint = ?
+              AND observed_at >= ?
+              AND observed_at <= ?
             ORDER BY ABS(JULIANDAY(observed_at) - JULIANDAY(?)) ASC
             LIMIT 1
             """,
-            (token_mint, target_iso),
+            (token_mint, lower_iso, upper_iso, target_iso),
         ) as cur:
             row = await cur.fetchone()
         if not row:

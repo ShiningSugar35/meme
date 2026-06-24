@@ -117,9 +117,10 @@ class PositionSoftStopRunner:
             except Exception:
                 pass
         if due:
-            if await self._check_low_activity(position, latest, current_price, now):
-                return
+            triggered = await self._check_low_activity(position, latest, current_price, now)
             await self._write_activity_check(pos_id, now)
+            if triggered:
+                return
 
     async def _write_soft_stop_check(self, pos_id: int, now: datetime):
         if hasattr(self.repo, "update_position_soft_stop_schedule"):

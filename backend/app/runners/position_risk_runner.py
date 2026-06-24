@@ -924,8 +924,14 @@ class PositionRiskRunner:
             audit_context["top3_smart_degen_trigger_detail"] = {"triggered_wallet": triggered_wallet, "reduction_threshold_pct": 25.0}
 
         # One-shot rule idempotency for partial exits
+        # TOP wallet exits are gated per-wallet, not by base reason, so
+        # that wallet A reducing 25% does not block wallet B from selling.
         if exit_pct < 1.0 and hasattr(self.repo, "has_exit_rule_executed"):
-            if await self.repo.has_exit_rule_executed(pos_id, reason_code):
+            if reason_code == "TOP3_SMART_DEGEN_DUMP" and triggered_wallet:
+                wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
+                if await self.repo.has_exit_rule_executed(pos_id, wallet_rule):
+                    return
+            elif await self.repo.has_exit_rule_executed(pos_id, reason_code):
                 return
 
         # Delegate to unified exit service

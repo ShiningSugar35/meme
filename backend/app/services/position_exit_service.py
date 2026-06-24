@@ -211,9 +211,12 @@ class PositionExitService:
         trade_value_usd_net = sell_amount * current_price_usd
 
         exit_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
+        idem_key = f"EXIT_SVC:{pos_id}:{reason_code}"
+        if reason_code == "TOP3_SMART_DEGEN_DUMP" and triggered_wallet:
+            idem_key = f"EXIT_SVC:{pos_id}:{reason_code}:{triggered_wallet}"
 
         await self.repo.append_trade_event(
-            f"EXIT_SVC:{pos_id}:{reason_code}",
+            idem_key,
             position_id=pos_id,
             token_mint=token,
             strategy_id=_position_strategy_id(position),
