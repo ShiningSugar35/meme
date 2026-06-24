@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set
 import json
 
 from ..db.repositories import Repositories
-from ..strategy.thresholds import normalize_rate_fraction
+
 from ..strategy.filters import run_holding_risk_filter
 from ..services.event_bus import event_bus
 from ..config import settings
@@ -138,16 +138,12 @@ def _risk_detail_summary(details: Any) -> List[str]:
     return out
 
 
-def _normalize_amount_percentage(value: Any) -> Optional[float]:
-    return normalize_rate_fraction(_to_float(value))
-
-
 class PositionRiskRunner:
     """
     Risk and exit runner.
 
     This runner now does two separate jobs:
-    1. Non-price safety exits: dust, completed, holder/smart-money checks.
+    1. Non-price safety exits: dust, completed.
     2. Risk recheck: after entry, re-run the initial risk-threshold filter on a dynamic schedule:
        >=150 USD every 4s; >=100 every 8s; >=50 every 16s;
        >=25 every 32s; <25 every 64s.
