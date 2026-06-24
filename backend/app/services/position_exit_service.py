@@ -79,9 +79,10 @@ class PositionExitService:
         )
     """
 
-    def __init__(self, repo: Repositories, trading_pipeline=None):
+    def __init__(self, repo: Repositories, trading_pipeline=None, gmgn=None):
         self.repo = repo
         self.trading_pipeline = trading_pipeline
+        self.gmgn = gmgn
 
     # ------------------------------------------------------------------
     # Atomic claim — prevents concurrent duplicate exits
@@ -151,9 +152,16 @@ class PositionExitService:
             await self._release_exit_claim(pos_id, original_status)
             return {"ok": False, "error": "ZERO_EXIT_PCT"}
 
-        # Resolve price
+        # Resolve price — try current_price, then GMGN live fetch, then DB fallback
         price = current_price_usd
-        if price is None:
+        if price is None or price <= 0:
+            if self.gmgn is not None:
+                try:
+                    latest = await self.gmgn.fetch_latest_price(token, credential_slot=None)
+                    price = _to_float(latest.get("price_usd") or latest.get("latest_price_usd") or latest.get("price"))
+                except Exception:
+                    pass
+        if price is None or price <= 0:
             price = (
                 _to_float(fresh_position.get("last_fill_price_usd"))
                 or _to_float(fresh_position.get("entry_price_usd"))
@@ -164,7 +172,10 @@ class PositionExitService:
             # ---- LIVE pathway ----
             if is_live:
                 result = await self._exit_live(fresh_position, exit_pct, reason_code, price, source, triggered_wallet=triggered_wallet)
-                if not result["ok"]:
+                if result["ok"]:
+                    if exit_pct < 0.999999:
+                        await self._release_exit_claim(pos_id, original_status)
+                else:
                     await self._release_exit_claim(pos_id, original_status)
                 return result
 

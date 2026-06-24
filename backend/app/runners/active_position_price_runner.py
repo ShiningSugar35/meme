@@ -84,11 +84,12 @@ class ActivePositionPriceRunner:
         self.repo = repo
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
-        self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline)
+        self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline, gmgn=gmgn)
         self._last_price_update: Dict[int, Dict[str, Any]] = {}
         self._consecutive_price_failures: Dict[str, int] = {}
         self._last_failure_event_at: Dict[str, float] = {}
         self._failure_start_time: Dict[str, float] = {}
+        self._last_snapshot_fetch_at: Dict[str, float] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -159,15 +160,19 @@ class ActivePositionPriceRunner:
         if token_type:
             latest_snapshot["type"] = token_type
         if token_type != "completed":
-            try:
-                slot = acquire_holding_slot("price_runner_snapshot")
-                snap = await self.gmgn.fetch_token_snapshot(token, credential_slot=slot)
-                if snap:
-                    snap_type = snap.get("type") or snap.get("token_type")
-                    if snap_type:
-                        latest_snapshot["type"] = snap_type
-            except Exception:
-                pass
+            now_ts = time.time()
+            last_snap = self._last_snapshot_fetch_at.get(token, 0.0)
+            if now_ts - last_snap >= 30.0:
+                self._last_snapshot_fetch_at[token] = now_ts
+                try:
+                    slot = acquire_holding_slot("price_runner_snapshot")
+                    snap = await self.gmgn.fetch_token_snapshot(token, credential_slot=slot)
+                    if snap:
+                        snap_type = snap.get("type") or snap.get("token_type")
+                        if snap_type:
+                            latest_snapshot["type"] = snap_type
+                except Exception:
+                    pass
 
         # Delegate to unified exit rules
         decision = await decide_exit(

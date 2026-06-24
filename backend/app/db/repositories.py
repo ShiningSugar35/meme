@@ -620,6 +620,34 @@ class Repositories:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_reference_tick_before(self, token_mint: str, seconds_ago: int, tolerance_seconds: int = 120) -> Optional[Dict[str, Any]]:
+        target_dt = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        target_iso = target_dt.isoformat()
+        async with self.db.execute(
+            """
+            SELECT *
+            FROM tick_snapshots
+            WHERE token_mint = ?
+            ORDER BY ABS(JULIANDAY(observed_at) - JULIANDAY(?)) ASC
+            LIMIT 1
+            """,
+            (token_mint, target_iso),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        tick = dict(row)
+        obs_str = tick.get("observed_at", "")
+        if obs_str:
+            try:
+                obs_dt = datetime.fromisoformat(obs_str.replace("Z", "+00:00"))
+                diff = abs((obs_dt - target_dt).total_seconds())
+                if diff <= tolerance_seconds:
+                    return tick
+            except (ValueError, TypeError):
+                pass
+        return None
+
     # discovery_events
 
     def normalize_pool_address(self, pool_address: Optional[str]) -> str:

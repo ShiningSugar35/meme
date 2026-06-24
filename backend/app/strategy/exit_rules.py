@@ -81,17 +81,17 @@ def _env_float(name: str, default: float) -> float:
 
 
 def normalize_pct_change(value: Any) -> Optional[float]:
-    """Convert raw price-change value to a decimal ratio (e.g. 1.2% → 0.012).
+    """Convert GMGN percentage value to decimal ratio (e.g. 1.2 → 0.012).
 
-    If abs(value) > 1, it's likely percentage; divide by 100.
-    Values already in [−1, 1] are returned as-is.
+    GMGN's price_change_percent1h etc. are always percentage numbers
+    (e.g. 1.2 for 1.2%, 0.5 for 0.5%), so we always divide by 100.
+    Path B/C in soft-stop fallback compute their own decimal ratio and
+    do NOT call this function.
     """
     v = _to_float(value)
     if v is None:
         return None
-    if abs(v) > 1.0:
-        return v / 100.0
-    return v
+    return v / 100.0
 
 
 def _executed_exit_rules(position: Dict[str, Any]) -> Set[str]:

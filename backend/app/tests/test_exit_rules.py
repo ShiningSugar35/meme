@@ -141,8 +141,9 @@ class TestNormalizePctChange:
     def test_percentage_divided(self):
         assert normalize_pct_change(1.2) == 0.012
 
-    def test_decimal_kept(self):
-        assert normalize_pct_change(0.05) == 0.05
+    def test_small_percentage_under_1_pct(self):
+        """GMGN returns 0.8 for 0.8% — must divide by 100."""
+        assert normalize_pct_change(0.8) == 0.008
 
     def test_large_percentage(self):
         assert normalize_pct_change(120) == 1.2
@@ -153,5 +154,5 @@ class TestNormalizePctChange:
     def test_negative(self):
         assert normalize_pct_change(-3.5) == -0.035
 
-    def test_negative_decimal(self):
-        assert normalize_pct_change(-0.01) == -0.01
+    def test_negative_small_pct(self):
+        assert normalize_pct_change(-0.5) == -0.005

@@ -63,7 +63,7 @@ class PositionSoftStopRunner:
         self.repo = repo
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
-        self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline)
+        self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline, gmgn=gmgn)
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -258,12 +258,14 @@ class PositionSoftStopRunner:
         if price_ref and price_ref > 0:
             return (current_price / price_ref) - 1.0
 
-        # C. Tick snapshots fallback
+        # C. Tick snapshots fallback — find tick at approximately window start
+        #    (e.g. ~3600s ago for 1h window, ~300s ago for 5m window).
+        #    Cannot use `get_recent_ticks` because a 2-min-old position would
+        #    return only 2 min of data, misrepresenting "1h change".
         try:
-            ticks = await self.repo.get_recent_ticks(token, window_seconds)
-            if ticks:
-                # Use the oldest tick in the window as reference
-                ref_tick = ticks[-1]  # ordered DESC, last = oldest
+            tolerance = min(120, max(30, window_seconds // 30))
+            ref_tick = await self.repo.get_reference_tick_before(token, window_seconds, tolerance_seconds=tolerance)
+            if ref_tick:
                 ref_price = _to_float(ref_tick.get("price_usd") or ref_tick.get("price_sol"))
                 if ref_price and ref_price > 0:
                     return (current_price / ref_price) - 1.0

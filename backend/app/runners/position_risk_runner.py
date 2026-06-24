@@ -160,7 +160,7 @@ class PositionRiskRunner:
         self.repo = repo
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
-        self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline)
+        self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline, gmgn=gmgn)
         self._legacy_warned: set[int] = set()
         self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
         self._last_risk_fail_details: Dict[int, List[str]] = {}

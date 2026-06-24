@@ -1654,7 +1654,9 @@ async def update_trading_params(request: Request, payload: Dict[str, Any] = Body
                 interval = int(updates["POLL_INTERVAL_SECONDS"])
                 worker_mgr.update_interval("discovery", interval)
             if "ACTIVE_POSITION_PRICE_POLL_SECONDS" in updates:
-                worker_mgr.update_interval("price_monitor", int(updates["ACTIVE_POSITION_PRICE_POLL_SECONDS"]))
+                interval = int(updates["ACTIVE_POSITION_PRICE_POLL_SECONDS"])
+                worker_mgr.update_interval("price_monitor", interval)
+                worker_mgr.update_interval("active_position_price", interval)
 
         values = await _trading_param_values(repo)
         return {"ok": True, "values": values}
@@ -1757,7 +1759,8 @@ async def manual_sell_position(
 
         from ..services.position_exit_service import PositionExitService
         tpl = getattr(request.app.state, "trading_pipeline", None)
-        exit_svc = PositionExitService(repo, trading_pipeline=tpl)
+        gmgn_provider = getattr(getattr(request.app.state, "providers", None), "gmgn", None)
+        exit_svc = PositionExitService(repo, trading_pipeline=tpl, gmgn=gmgn_provider)
 
         result = await exit_svc.exit_position(
             position=position,
