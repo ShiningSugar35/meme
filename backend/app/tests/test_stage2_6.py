@@ -4,7 +4,7 @@ import asyncio
 import json
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, patch
 
@@ -20,6 +20,8 @@ from ..providers.rpc_real import RpcRealProvider
 from ..runners.discovery_runner import DiscoveryRunner
 from ..runners.active_position_price_runner import ActivePositionPriceRunner
 from ..runners.position_risk_runner import PositionRiskRunner
+from ..runners.position_soft_stop_runner import PositionSoftStopRunner
+from ..services.position_exit_service import PositionExitService
 from ..strategy.thresholds import (
     compute_thresholds, build_trench_filters_for_x,
     strip_internal_debug_fields, normalize_rate_fraction,
@@ -583,8 +585,8 @@ class TestSimStopLossIsolation:
         assert updated["status"] == "CLOSED", "SIM position closed on TP at 2.8x"
 
     @pytest.mark.asyncio
-    async def test_sim_risk_recheck_paper_exit_closes(self, repo):
-        """SIM risk recheck failure via paper exit closes position."""
+    async def test_sim_risk_recheck_exit_via_exit_service(self, repo):
+        """SIM risk recheck failure delegates to PositionExitService and closes position."""
         gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
         runner = PositionRiskRunner(repo, gmgn)
         pos_id = await repo.create_position(
@@ -592,20 +594,21 @@ class TestSimStopLossIsolation:
             locked_strategy_config_json='{"x": 0.2}',
             status="POSITION_OPEN", entry_price_usd=0.01,
             entry_token_amount=1000.0, remaining_token_amount=1000.0,
-            remaining_value_usd=10.0, account_type="SIM",
+            remaining_value_usd=20.0, account_type="SIM",
         )
         pos = await repo.get_position(pos_id)
-        # Paper exit with full pct -> closes
-        await runner._paper_exit(
+        # _request_exit delegates to exit_service.exit_position()
+        await runner._request_exit(
             position=pos, exit_pct=1.0,
-            reason_code="RISK_RECHECK_FAILED", current_price_usd=0.01,
+            reason_code="RISK_RECHECK_FAILED", emergency=True,
+            latest={}, current_price_usd=0.01,
         )
         updated = await repo.get_position(pos_id)
-        assert updated["status"] == "CLOSED", "SIM position closed on risk fail paper exit"
+        assert updated["status"] == "CLOSED", "SIM position closed via unified exit service"
 
     @pytest.mark.asyncio
-    async def test_sim_top3_paper_exit_updates_remaining(self, repo):
-        """SIM TOP3 smart degen dump partial paper exit updates remaining."""
+    async def test_sim_top3_exit_via_exit_service_updates_remaining(self, repo):
+        """SIM TOP3 smart degen dump partial exit via exit_service updates remaining."""
         gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
         runner = PositionRiskRunner(repo, gmgn)
         pos_id = await repo.create_position(
@@ -613,12 +616,13 @@ class TestSimStopLossIsolation:
             locked_strategy_config_json='{"x": 0.2}',
             status="POSITION_OPEN", entry_price_usd=0.01,
             entry_token_amount=1000.0, remaining_token_amount=1000.0,
-            remaining_value_usd=10.0, account_type="SIM",
+            remaining_value_usd=20.0, account_type="SIM",
         )
         pos = await repo.get_position(pos_id)
-        await runner._paper_exit(
+        await runner._request_exit(
             position=pos, exit_pct=0.5,
-            reason_code="TOP3_SMART_DEGEN_DUMP", current_price_usd=0.01,
+            reason_code="TOP3_SMART_DEGEN_DUMP", emergency=False,
+            latest={}, current_price_usd=0.01,
         )
         updated = await repo.get_position(pos_id)
         assert updated["status"] != "CLOSED", "50% exit keeps position open"
@@ -1089,3 +1093,159 @@ class TestNewTPSLRules:
         rules = json.loads(updated.get("executed_exit_rules_json") or "[]")
         for old in ("HARD_TP_150", "HARD_TP_200", "HARD_TP_250", "HARD_SL_70", "HARD_SL_50", "HARD_SL_45"):
             assert old not in rules, f"Old reason code {old} must not be produced"
+
+
+# ============================================================================
+# Concurrent exit protection
+# ============================================================================
+
+class TestConcurrentExitProtection:
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sim_second_exit_blocked(self, repo):
+        """Two concurrent exit_position calls on same SIM position: second gets POSITION_ALREADY_EXITING."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        exit_svc = PositionExitService(repo)
+        pos_id = await repo.create_position(
+            token_mint="SIM_CONCUR", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=20.0, account_type="SIM",
+        )
+        pos = await repo.get_position(pos_id)
+
+        # First call succeeds
+        r1 = await exit_svc.exit_position(
+            position=pos, exit_pct=1.0,
+            reason_code="HARD_TP_210", current_price_usd=0.021,
+            source="TEST",
+        )
+        assert r1["ok"] is True, f"First exit should succeed: {r1}"
+
+        # Second call on same (now closed) position should fail
+        r2 = await exit_svc.exit_position(
+            position=pos, exit_pct=1.0,
+            reason_code="MANUAL_SELL", current_price_usd=0.021,
+            source="TEST",
+        )
+        assert r2["ok"] is False
+        assert "POSITION_ALREADY" in r2.get("error", ""), f"Expected POSITION_ALREADY_*, got {r2}"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_live_only_one_execute_sell(self, repo):
+        """Two concurrent LIVE exit calls: only the first claims and calls execute_sell."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        jupiter = JupiterProvider(repo, mode=ProviderMode.MOCK)
+        jito = JitoProvider(repo, mode=ProviderMode.MOCK)
+        rpc = RpcRealProvider(repo, mode=ProviderMode.MOCK)
+        pipeline = TradingPipeline(repo, gmgn, jupiter, jito, rpc)
+        pipeline.execute_sell = AsyncMock(return_value={"ok": True})
+        exit_svc = PositionExitService(repo, trading_pipeline=pipeline)
+
+        pos_id = await repo.create_position(
+            token_mint="LIVE_CONCUR", is_live=True,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="POSITION_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=20.0, account_type="LIVE",
+        )
+        pos = await repo.get_position(pos_id)
+
+        # First LIVE exit
+        r1 = await exit_svc.exit_position(
+            position=pos, exit_pct=1.0,
+            reason_code="RISK_RECHECK_FAILED", current_price_usd=0.01,
+            source="TEST",
+        )
+        assert r1["ok"] is True
+        assert pipeline.execute_sell.call_count == 1
+
+        # Second LIVE exit on same position — blocked by EXIT_PENDING
+        r2 = await exit_svc.exit_position(
+            position=pos, exit_pct=1.0,
+            reason_code="MANUAL_SELL", current_price_usd=0.01,
+            source="TEST",
+        )
+        assert r2["ok"] is False
+        assert pipeline.execute_sell.call_count == 1, "execute_sell must NOT be called a second time"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sim_partial_then_full(self, repo):
+        """SIM position partial exit (50%) succeeds, then full exit on remaining works."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+        exit_svc = PositionExitService(repo)
+        pos_id = await repo.create_position(
+            token_mint="SIM_PART_THEN_FULL", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=20.0, account_type="SIM",
+        )
+        pos = await repo.get_position(pos_id)
+
+        # 50% partial exit
+        r1 = await exit_svc.exit_position(
+            position=pos, exit_pct=0.5,
+            reason_code="HARD_TP_160", current_price_usd=0.016,
+            source="TEST",
+        )
+        assert r1["ok"] is True
+        p1 = await repo.get_position(pos_id)
+        assert p1["remaining_token_amount"] == 500.0
+
+        # Claim was released, so second exit on same position works
+        r2 = await exit_svc.exit_position(
+            position=p1, exit_pct=1.0,
+            reason_code="HARD_SL_75", current_price_usd=0.007,
+            source="TEST",
+        )
+        assert r2["ok"] is True
+        p2 = await repo.get_position(pos_id)
+        assert p2["status"] == "CLOSED"
+
+
+# ============================================================================
+# Soft stop tick fallback
+# ============================================================================
+
+class TestSoftStopTickFallback:
+
+    @pytest.mark.asyncio
+    async def test_dull_drop_ticks_fallback(self, repo):
+        """Soft stop: if latest price lacks change fields, tick_snapshots are used as fallback."""
+        gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
+
+        pos_id = await repo.create_position(
+            token_mint="SOFT_TICK_FALLBACK", is_live=False,
+            locked_strategy_config_json='{"x": 0.2}',
+            status="SIM_OPEN", entry_price_usd=0.01,
+            entry_token_amount=1000.0, remaining_token_amount=1000.0,
+            remaining_value_usd=20.0, account_type="SIM",
+            last_fill_at=datetime.now(timezone.utc).isoformat(),
+            last_fill_price_usd=0.01,
+        )
+        pos = await repo.get_position(pos_id)
+
+        # Insert tick snapshots safely inside the query window (use offsets
+        # slightly less than window_seconds to avoid cutoff-edge race)
+        now = datetime.now(timezone.utc)
+        for offset_sec, price_val in [(3595, 0.02), (295, 0.02)]:
+            observed = (now - timedelta(seconds=offset_sec)).isoformat()
+            await repo.db.execute(
+                "INSERT INTO tick_snapshots (token_mint, source, observed_at, price_usd, price_sol) VALUES (?, ?, ?, ?, ?)",
+                ("SOFT_TICK_FALLBACK", "GMGN", observed, price_val, price_val),
+            )
+        await repo.db.commit()
+
+        runner = PositionSoftStopRunner(repo, gmgn)
+
+        # Mock GMGN to return latest price WITHOUT change fields
+        with patch.object(gmgn, 'fetch_latest_price', new=AsyncMock(return_value={
+            "price_usd": 0.0095,  # ~5% drop from 0.01 ref, below 1% → triggers dull-drop
+        })):
+            did_exit = await runner._check_dull_drop(pos, {"price_usd": 0.0095}, 0.0095, now)
+            assert did_exit is True, "Dull-drop should trigger via tick fallback"
+
+        updated = await repo.get_position(pos_id)
+        assert updated["status"] == "CLOSED", "Position closed after dull-drop via tick fallback"

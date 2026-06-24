@@ -11,9 +11,10 @@ from ..strategy.filters import run_holding_risk_filter
 from ..services.event_bus import event_bus
 from ..config import settings
 from ..logging_config import logger
-from ..strategy.exit_rules import _executed_exit_rules
+from ..strategy.exit_rules import _executed_exit_rules, EXIT_REASON_LABELS
 from ..providers.credential_router import get_credential_router
 from ..providers.rate_limiter import get_rate_limiter
+from ..services.position_exit_service import PositionExitService
 from .discovery_runner import acquire_holding_slot
 
 
@@ -28,23 +29,6 @@ def _position_strategy_id(position: Dict[str, Any]) -> Optional[int]:
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
     return None
-
-
-EXIT_REASON_LABELS: Dict[str, str] = {
-    "HARD_TP_160": "硬止盈：价格超过 1.6x，撤仓50%",
-    "HARD_TP_210": "硬止盈：价格超过 2.1x，全部撤仓",
-    "HARD_TP_160_RETRACE": "硬止盈回撤：已超过1.6x后回撤到1.5x以下，全部撤仓",
-    "HARD_SL_75": "硬止损：价格低于 0.75x，全部撤仓",
-    "COMPLETED": "池子 type 变为 completed，全部撤仓",
-    "DULL_DROP_SL": "阴跌止损：1h和5m涨幅均<1%，全部撤仓",
-    "LOW_ACTIVITY_SL": "活跃度止损：1h交易<7次且1h涨幅<5%，全部撤仓",
-    "SMART_MONEY_SELL": "聪明钱卖出触发",
-    "TOP3_SMART_DEGEN_DUMP": "TOP3聪明钱减仓超过25%",
-    "RISK_RECHECK_FAILED": "持仓风控复查失败",
-    "DUST_FORCE_EXIT": "尘埃仓强制清仓",
-    "RISK_DATA_UNAVAILABLE_EXIT": "风控数据连续异常，撤仓",
-    "MANUAL_SELL": "手动卖出",
-}
 
 
 def _utc_now() -> datetime:
@@ -176,6 +160,7 @@ class PositionRiskRunner:
         self.repo = repo
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
+        self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline)
         self._legacy_warned: set[int] = set()
         self._last_smart_degen_sell: Dict[int, Dict[str, float]] = {}
         self._last_risk_fail_details: Dict[int, List[str]] = {}
@@ -186,6 +171,7 @@ class PositionRiskRunner:
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
+        self.exit_service.trading_pipeline = trading_pipeline
 
     async def _fetch_risk_data_with_retry(self, method_ref, preferred_slot, validate_func, endpoint="", retry_delay_seconds=0):
         """Call GMGN with retry across different slots.
@@ -919,258 +905,74 @@ class PositionRiskRunner:
         pos_id = int(position["id"])
         token = position["token_mint"]
         account_type = _account_type(position)
-        is_live = bool(position.get("is_live"))
 
         remaining_value_usd = _to_float(position.get("remaining_value_usd"), 0.0) or 0.0
         dust_threshold = float(getattr(settings, "DUST_FORCE_EXIT_USD", 12.5))
-        dust_detail = None
         if remaining_value_usd < dust_threshold:
             exit_pct = 1.0
             if reason_code != "DUST_FORCE_EXIT":
                 reason_code = "DUST_FORCE_EXIT"
-            dust_detail = {
-                "remaining_value_usd_before": remaining_value_usd,
-                "dust_threshold": dust_threshold,
-                "current_price_usd": current_price_usd,
-                "remaining_token_amount_before": _to_float(position.get("remaining_token_amount"), 0.0) or 0.0,
-            }
 
         audit_context: Dict[str, Any] = {}
         if reason_code == "RISK_RECHECK_FAILED":
             risk_failed_rules = self._last_risk_fail_structured.get(pos_id, [])
             if risk_failed_rules:
                 audit_context["risk_failed_rules"] = risk_failed_rules
-        if reason_code == "DUST_FORCE_EXIT" and dust_detail:
-            audit_context["dust_detail"] = dust_detail
         if reason_code == "SMART_MONEY_SELL" and triggered_wallet:
-            audit_context["smart_money_trigger_detail"] = {
-                "triggered_wallet": triggered_wallet,
-            }
+            audit_context["smart_money_trigger_detail"] = {"triggered_wallet": triggered_wallet}
         if reason_code == "TOP3_SMART_DEGEN_DUMP" and triggered_wallet:
-            audit_context["top3_smart_degen_trigger_detail"] = {
-                "triggered_wallet": triggered_wallet,
-                "reduction_threshold_pct": 25.0,
-            }
+            audit_context["top3_smart_degen_trigger_detail"] = {"triggered_wallet": triggered_wallet, "reduction_threshold_pct": 25.0}
 
-        # One-shot rule idempotency. Full emergency exits are allowed to retry if a prior sell failed.
+        # One-shot rule idempotency for partial exits
         if exit_pct < 1.0 and hasattr(self.repo, "has_exit_rule_executed"):
             if await self.repo.has_exit_rule_executed(pos_id, reason_code):
                 return
 
-        if self.trading_pipeline is not None and hasattr(self.trading_pipeline, "execute_sell"):
-            ok = await self._try_pipeline_execute_sell(
-                position=position,
-                exit_pct=exit_pct,
-                reason_code=reason_code,
-                emergency=emergency,
-                latest=latest,
-                audit_context=audit_context,
-            )
-            if ok:
-                if hasattr(self.repo, "mark_exit_rule_executed"):
-                    await self.repo.mark_exit_rule_executed(pos_id, reason_code)
-                    if triggered_wallet:
-                        wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
-                        await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
-                if exit_pct < 1.0:
-                    if hasattr(self.repo, "update_position_remaining"):
-                        now_iso = _iso(_utc_now())
-                        remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
-                        sell_amt = remaining_token * exit_pct
-                        new_remaining = max(0.0, remaining_token - sell_amt)
-                        new_value = new_remaining * (current_price_usd or 0.0)
-                        await self.repo.update_position_remaining(
-                            pos_id,
-                            new_remaining,
-                            new_value,
-                            last_fill_at=now_iso,
-                            last_fill_price_usd=current_price_usd,
-                        )
-                return
-
-        if is_live:
-            exit_reason_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
-            await self.repo.append_trade_event(
-                f"SELL_FAILED_PIPELINE_MISSING:{pos_id}:{reason_code}",
-                position_id=pos_id,
-                token_mint=token,
-                strategy_id=_position_strategy_id(position),
-                is_live=1,
-                account_type=account_type,
-                side="SELL",
-                event_type="SELL",
-                status="FAILED",
-                requested_pct=exit_pct,
-                price_usd=current_price_usd,
-                exit_reason=reason_code,
-                exit_reason_label=exit_reason_label,
-                error_code="TRADING_PIPELINE_MISSING",
-                error_message=(
-                    "LIVE exit was requested, but no TradingPipeline.execute_sell was available."
-                    + (f" Risk details: {', '.join(risk_details)}" if risk_details else "")
-                ),
-                provider="POSITION_RISK",
-            )
-            await self.repo.append_system_event(
-                "ERROR",
-                "RISK",
-                "LIVE exit requested but TradingPipeline is missing; position not closed",
-                _safe_json_dumps({"position_id": pos_id, "token": token, "reason": reason_code, "risk_details": risk_details or []}),
-                account_type=account_type,
-            )
-            return
-
-        await self._paper_exit(
+        # Delegate to unified exit service
+        result = await self.exit_service.exit_position(
             position=position,
             exit_pct=exit_pct,
             reason_code=reason_code,
             current_price_usd=current_price_usd,
-            triggered_wallet=triggered_wallet,
+            emergency=emergency,
+            source="RISK_RUNNER",
             risk_details=risk_details,
-            audit_context=audit_context,
+            triggered_wallet=triggered_wallet,
         )
 
-    async def _try_pipeline_execute_sell(
-        self,
-        position: Dict[str, Any],
-        exit_pct: float,
-        reason_code: str,
-        emergency: bool,
-        latest: Dict[str, Any],
-        audit_context: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        fn = self.trading_pipeline.execute_sell
-
-        try:
-            result = await fn(position=position, exit_pct=exit_pct, exit_reason=reason_code, audit_context=audit_context)
-        except TypeError as e:
-            # Fallback for older signatures
+        # Post-exit audit for risk-specific context
+        if result.get("ok") and audit_context and hasattr(self.repo, "insert_position_audit"):
+            from ..trading.audit_builder import build_exit_audit_payload
             try:
-                result = await fn(position, exit_pct, reason_code)
-            except Exception as e2:
-                logger.warning("execute_sell call failed", error=str(e2), position_id=position.get("id"))
-                return False
-        except Exception as e:
-            logger.warning("execute_sell call failed", error=str(e), position_id=position.get("id"))
-            return False
-
-        if result is None:
-            return True
-        if isinstance(result, dict):
-            if result.get("ok") is False or result.get("success") is False:
-                return False
-            status = str(result.get("status") or result.get("result") or "").upper()
-            if result.get("ok") is True or result.get("success") is True:
-                return True
-            if status in {"CONFIRMED", "FILLED", "SUCCESS", "OK"}:
-                return True
-            if status in {"FAILED", "ERROR", "REJECTED"}:
-                return False
-        return bool(result)
-
-    async def _paper_exit(
-        self,
-        position: Dict[str, Any],
-        exit_pct: float,
-        reason_code: str,
-        current_price_usd: Optional[float],
-        triggered_wallet: Optional[str] = None,
-        risk_details: Optional[List[str]] = None,
-        audit_context: Optional[Dict[str, Any]] = None,
-    ):
-        from ..trading.audit_builder import build_exit_audit_payload
-
-        pos_id = int(position["id"])
-        token = position["token_mint"]
-        account_type = _account_type(position)
-        now = _utc_now()
-
-        remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
-        sell_token_amount = max(remaining_token * min(max(exit_pct, 0.0), 1.0), 0.0)
-        new_remaining = max(remaining_token - sell_token_amount, 0.0)
-        new_value = new_remaining * (current_price_usd or 0.0)
-
-        exit_reason_label = EXIT_REASON_LABELS.get(reason_code, reason_code)
-        trade_value_usd_net = sell_token_amount * (current_price_usd or 0.0)
-
-        te = await self.repo.append_trade_event(
-            f"SELL_SIM:{pos_id}:{reason_code}",
-            position_id=pos_id,
-            token_mint=token,
-            strategy_id=_position_strategy_id(position),
-            is_live=0,
-            account_type=account_type,
-            side="SELL",
-            event_type="SELL",
-            status="CONFIRMED",
-            requested_pct=exit_pct,
-            requested_token_amount=sell_token_amount,
-            executed_token_amount=sell_token_amount,
-            price_usd=current_price_usd,
-            exit_reason=reason_code,
-            exit_reason_label=exit_reason_label,
-            trade_value_usd_net=trade_value_usd_net,
-            fee_detail_json=json.dumps({"fallback": True}),
-            error_message=(f"Risk details: {', '.join(risk_details)}" if risk_details else None),
-            provider="POSITION_RISK_SIM",
-        )
-
-        exit_audit = await build_exit_audit_payload(
-            repo=self.repo,
-            position=position,
-            sell_trade_event=te,
-            exit_reason=reason_code,
-            exit_pct=exit_pct,
-            sell_amount_human=sell_token_amount,
-            gross_value_usd=trade_value_usd_net,
-            current_price_usd=current_price_usd,
-            quote=None,
-            **(audit_context or {}),
-        )
-        if hasattr(self.repo, "insert_position_audit"):
-            await self.repo.insert_position_audit(
-                position_id=pos_id,
-                token_mint=token,
-                account_type=account_type,
-                strategy_id=_position_strategy_id(position),
-                discovery_event_id=position.get("discovery_event_id"),
-                snapshot_id=None,
-                audit_type="EXIT",
-                audit_json=exit_audit,
-            )
-
-        if exit_pct >= 1.0 or new_remaining <= 0:
-            await self.repo.close_position(
-                pos_id,
-                close_reason=reason_code,
-            )
-            await event_bus.publish(
-                "system",
-                {
-                    "level": "INFO",
-                    "category": "RISK",
-                    "message": f"Full SIM exit for {token}: {reason_code}" + (f" ({', '.join(risk_details)[:160]})" if risk_details else ""),
-                },
-            )
-        else:
-            await self.repo.update_position_remaining(
-                pos_id,
-                remaining_token_amount=new_remaining,
-                remaining_value_usd=new_value,
-                last_fill_at=_iso(now),
-                last_fill_price_usd=current_price_usd,
-            )
-            await event_bus.publish(
-                "system",
-                {
-                    "level": "INFO",
-                    "category": "RISK",
-                    "message": f"Partial SIM exit {exit_pct:.0%} for {token}: {reason_code}",
-                },
-            )
-
-        if hasattr(self.repo, "mark_exit_rule_executed"):
-            await self.repo.mark_exit_rule_executed(pos_id, reason_code)
-            if triggered_wallet:
-                wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
-                await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
+                trade_events = await self.repo.get_position_trade_events(pos_id, limit=1)
+                te = trade_events[0] if trade_events else None
+                if te:
+                    sell_amount = min(
+                        _to_float(position.get("remaining_token_amount"), 0.0) or 0.0,
+                        (_to_float(position.get("remaining_token_amount"), 0.0) or 0.0) * exit_pct,
+                    )
+                    gross_value = sell_amount * (current_price_usd or 0.0)
+                    exit_audit = await build_exit_audit_payload(
+                        repo=self.repo,
+                        position=position,
+                        sell_trade_event=te,
+                        exit_reason=reason_code,
+                        exit_pct=exit_pct,
+                        sell_amount_human=sell_amount,
+                        gross_value_usd=gross_value,
+                        current_price_usd=current_price_usd,
+                        quote=None,
+                        **(audit_context or {}),
+                    )
+                    await self.repo.insert_position_audit(
+                        position_id=pos_id,
+                        token_mint=token,
+                        account_type=account_type,
+                        strategy_id=_position_strategy_id(position),
+                        discovery_event_id=position.get("discovery_event_id"),
+                        snapshot_id=None,
+                        audit_type="EXIT",
+                        audit_json=exit_audit,
+                    )
+            except Exception:
+                logger.warning("Risk audit insert failed", position_id=pos_id, reason=reason_code)

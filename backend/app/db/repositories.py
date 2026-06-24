@@ -1292,17 +1292,58 @@ class Repositories:
         except Exception as e:
             self._safe_log("mark_position_legacy_config failed", position_id=position_id, error=str(e))
 
-    async def mark_position_exit_pending(self, position_id: int, reason: str):
+    async def mark_position_exit_pending(self, position_id: int, reason: str) -> int:
+        now = utc_now_iso()
+        async def _do():
+            cursor = await self.db.execute(
+                "UPDATE positions SET last_exit_reason = ?, status = 'EXIT_PENDING', updated_at = ? WHERE id = ? AND status IN ('POSITION_OPEN','SIM_OPEN','PARTIAL_EXIT') AND remaining_token_amount > 0",
+                (reason, now, position_id),
+            )
+            return cursor.rowcount
+        try:
+            return await self._write_txn(_do())
+        except Exception as e:
+            self._safe_log("mark_position_exit_pending failed", position_id=position_id, error=str(e))
+            return 0
+
+    async def restore_position_status(self, position_id: int, status: str = "POSITION_OPEN"):
         now = utc_now_iso()
         async def _do():
             await self.db.execute(
-                "UPDATE positions SET last_exit_reason = ?, status = 'EXIT_PENDING', updated_at = ? WHERE id = ?",
-                (reason, now, position_id),
+                "UPDATE positions SET status = ?, updated_at = ? WHERE id = ? AND status = 'EXIT_PENDING'",
+                (status, now, position_id),
             )
         try:
             await self._write_txn(_do())
         except Exception as e:
-            self._safe_log("mark_position_exit_pending failed", position_id=position_id, error=str(e))
+            self._safe_log("restore_position_status failed", position_id=position_id, error=str(e))
+
+    async def update_position_soft_stop_schedule(
+        self,
+        position_id: int,
+        last_soft_stop_check_at: Optional[str] = None,
+        last_activity_stop_check_at: Optional[str] = None,
+    ):
+        now = utc_now_iso()
+        updates: Dict[str, Any] = {"updated_at": now}
+        if last_soft_stop_check_at is not None:
+            updates["last_soft_stop_check_at"] = last_soft_stop_check_at
+        if last_activity_stop_check_at is not None:
+            updates["last_activity_stop_check_at"] = last_activity_stop_check_at
+        if len(updates) <= 1:
+            return
+        cols = [f"{k} = ?" for k in updates.keys()]
+        params = list(updates.values())
+        params.append(position_id)
+        async def _do():
+            await self.db.execute(
+                f"UPDATE positions SET {', '.join(cols)} WHERE id = ?",
+                tuple(params),
+            )
+        try:
+            await self._write_txn(_do())
+        except Exception as e:
+            self._safe_log("update_position_soft_stop_schedule failed", position_id=position_id, error=str(e))
 
     async def get_executed_exit_rules(self, position_id: int) -> set[str]:
         position = await self.get_position(position_id)

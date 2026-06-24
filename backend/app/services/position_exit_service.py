@@ -33,6 +33,18 @@ def _account_type(position: Dict[str, Any]) -> str:
     return position.get("account_type") or ("LIVE" if position.get("is_live") else "SIM")
 
 
+def _is_live_position(position: Dict[str, Any]) -> bool:
+    account_type = str(position.get("account_type") or "").upper()
+    if account_type in ("LIVE", "SIM"):
+        return account_type == "LIVE"
+    raw = position.get("is_live")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return int(raw) == 1
+    return str(raw).strip().lower() in ("1", "true", "yes", "live")
+
+
 def _safe_json(obj: Any) -> str:
     try:
         return json.dumps(obj, ensure_ascii=False, default=str)
@@ -72,6 +84,34 @@ class PositionExitService:
         self.trading_pipeline = trading_pipeline
 
     # ------------------------------------------------------------------
+    # Atomic claim — prevents concurrent duplicate exits
+    # ------------------------------------------------------------------
+    async def _claim_exit(self, position: Dict[str, Any], reason_code: str) -> Dict[str, Any]:
+        pos_id = int(position["id"])
+        fresh = await self.repo.get_position(pos_id)
+        if not fresh:
+            return {"ok": False, "error": "POSITION_NOT_FOUND"}
+        status = str(fresh.get("status") or "").upper()
+        if "CLOSED" in status:
+            return {"ok": False, "error": "POSITION_ALREADY_CLOSED"}
+        if status == "EXIT_PENDING":
+            return {"ok": False, "error": "POSITION_ALREADY_EXITING"}
+        remaining = _to_float(fresh.get("remaining_token_amount"), 0.0) or 0.0
+        if remaining <= 0:
+            return {"ok": False, "error": "ZERO_REMAINING"}
+        original_status = str(fresh.get("status") or "POSITION_OPEN")
+        affected = await self.repo.mark_position_exit_pending(pos_id, reason_code)
+        if affected == 0:
+            return {"ok": False, "error": "POSITION_ALREADY_EXITING"}
+        return {"ok": True, "position": fresh, "original_status": original_status}
+
+    async def _release_exit_claim(self, pos_id: int, original_status: str = "POSITION_OPEN"):
+        try:
+            await self.repo.restore_position_status(pos_id, original_status)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     async def exit_position(
@@ -87,40 +127,56 @@ class PositionExitService:
     ) -> Dict[str, Any]:
         """Close or partially exit a position.
 
-        Returns  {"ok": True/False, ...}  usable by every caller.
+        Every exit goes through an atomic EXIT_PENDING claim to prevent
+        concurrent duplicate exits from different runners.
 
         SIM positions are paper-sold instantly.
         LIVE positions MUST be routed through TradingPipeline.execute_sell();
-        if that fails the position is NOT closed.
+        if that fails the position is NOT closed and the claim is released.
         """
-        pos_id = int(position["id"])
-        token = position["token_mint"]
-        account_type = _account_type(position)
-        is_live = bool(position.get("is_live"))
+        # 1. Atomic claim — re-reads fresh position from DB
+        claim = await self._claim_exit(position, reason_code)
+        if not claim["ok"]:
+            return claim
+
+        fresh_position = claim["position"]
+        original_status = claim.get("original_status", "POSITION_OPEN")
+        pos_id = int(fresh_position["id"])
+        token = fresh_position["token_mint"]
+        account_type = _account_type(fresh_position)
+        is_live = _is_live_position(fresh_position)
 
         exit_pct = max(0.0, min(1.0, float(exit_pct)))
         if exit_pct <= 0:
+            await self._release_exit_claim(pos_id, original_status)
             return {"ok": False, "error": "ZERO_EXIT_PCT"}
-
-        remaining_token = _to_float(position.get("remaining_token_amount"), 0.0) or 0.0
-        if remaining_token <= 0:
-            return {"ok": False, "error": "ZERO_REMAINING"}
 
         # Resolve price
         price = current_price_usd
         if price is None:
             price = (
-                _to_float(position.get("last_fill_price_usd"))
-                or _to_float(position.get("entry_price_usd"))
+                _to_float(fresh_position.get("last_fill_price_usd"))
+                or _to_float(fresh_position.get("entry_price_usd"))
                 or 0.0
             )
 
-        # ---- LIVE pathway ----
-        if is_live:
-            return await self._exit_live(position, exit_pct, reason_code, price, source)
+        try:
+            # ---- LIVE pathway ----
+            if is_live:
+                result = await self._exit_live(fresh_position, exit_pct, reason_code, price, source, triggered_wallet=triggered_wallet)
+                if not result["ok"]:
+                    await self._release_exit_claim(pos_id, original_status)
+                return result
 
-        # ---- SIM pathway ----
-        return await self._exit_sim(position, exit_pct, reason_code, price, source, risk_details, triggered_wallet)
+            # ---- SIM pathway ----
+            result = await self._exit_sim(fresh_position, exit_pct, reason_code, price, source, risk_details, triggered_wallet)
+            # Partial exit: release claim so remaining can be re-sold; full exit already set CLOSED
+            if result.get("ok") and exit_pct < 0.999999:
+                await self._release_exit_claim(pos_id, original_status)
+            return result
+        except Exception:
+            await self._release_exit_claim(pos_id, original_status)
+            raise
 
     # ------------------------------------------------------------------
     # SIM paper exit
@@ -181,6 +237,9 @@ class PositionExitService:
 
         if hasattr(self.repo, "mark_exit_rule_executed"):
             await self.repo.mark_exit_rule_executed(pos_id, reason_code)
+            if triggered_wallet:
+                wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
+                await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
 
         logger.info(
             "PositionExitService SIM exit",
@@ -202,6 +261,7 @@ class PositionExitService:
         reason_code: str,
         current_price_usd: float,
         source: str,
+        triggered_wallet: Optional[str] = None,
     ) -> Dict[str, Any]:
         pos_id = int(position["id"])
         token = position["token_mint"]
@@ -241,6 +301,9 @@ class PositionExitService:
         if result and (result.get("ok") is True or result.get("success") is True):
             if hasattr(self.repo, "mark_exit_rule_executed"):
                 await self.repo.mark_exit_rule_executed(pos_id, reason_code)
+                if triggered_wallet:
+                    wallet_rule = f"TOP3_SMART_DEGEN_DUMP:{triggered_wallet}"
+                    await self.repo.mark_exit_rule_executed(pos_id, wallet_rule)
 
             await self.repo.append_system_event(
                 "INFO", "EXIT",

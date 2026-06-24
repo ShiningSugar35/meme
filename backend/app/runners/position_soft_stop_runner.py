@@ -35,6 +35,23 @@ def _account_type(position: Dict[str, Any]) -> str:
     return position.get("account_type") or ("LIVE" if position.get("is_live") else "SIM")
 
 
+def _safe_json(obj: Any) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        return json.dumps(str(obj), ensure_ascii=False)
+
+
+_PCT_1H_ALIASES = [
+    "price_change_percent1h", "price_change_1h", "price_change_percent_1h",
+    "price_change1h", "change_1h", "price_change_1h_percent",
+]
+_PCT_5M_ALIASES = [
+    "price_change_percent5m", "price_change_5m", "price_change_percent_5m",
+    "price_change5m", "change_5m", "price_change_5m_percent",
+]
+
+
 class PositionSoftStopRunner:
     """Periodic soft-stop evaluation.
 
@@ -47,8 +64,6 @@ class PositionSoftStopRunner:
         self.gmgn = gmgn
         self.trading_pipeline = trading_pipeline
         self.exit_service = PositionExitService(repo, trading_pipeline=trading_pipeline)
-        # In-memory last-check times for activity cadence
-        self._last_activity_check: Dict[int, datetime] = {}
 
     def set_trading_pipeline(self, trading_pipeline):
         self.trading_pipeline = trading_pipeline
@@ -83,34 +98,55 @@ class PositionSoftStopRunner:
         if current_price is None or current_price <= 0:
             return
 
-        # ---- Dull-drop evaluation (every 60s) ----
-        if await self._check_dull_drop(position, latest, current_price, entry_price, now):
+        # ---- Dull-drop evaluation (every cycle = 60s) ----
+        if await self._check_dull_drop(position, latest, current_price, now):
+            # Write last_soft_stop_check_at
+            await self._write_soft_stop_check(pos_id, now)
             return
 
-        # ---- Low-activity evaluation (every 300s) ----
-        last_activity = self._last_activity_check.get(pos_id)
-        if last_activity is None or (now - last_activity).total_seconds() >= 300:
-            self._last_activity_check[pos_id] = now
-            if await self._check_low_activity(position, latest, current_price, entry_price, now):
+        # ---- Low-activity evaluation (every 300s via DB field) ----
+        last_activity_str = position.get("last_activity_stop_check_at")
+        due = True
+        if last_activity_str:
+            try:
+                last_activity_dt = datetime.fromisoformat(str(last_activity_str).replace("Z", "+00:00"))
+                if last_activity_dt.tzinfo is None:
+                    last_activity_dt = last_activity_dt.replace(tzinfo=timezone.utc)
+                if (now - last_activity_dt).total_seconds() < 300:
+                    due = False
+            except Exception:
+                pass
+        if due:
+            if await self._check_low_activity(position, latest, current_price, now):
                 return
+            await self._write_activity_check(pos_id, now)
+
+    async def _write_soft_stop_check(self, pos_id: int, now: datetime):
+        if hasattr(self.repo, "update_position_soft_stop_schedule"):
+            await self.repo.update_position_soft_stop_schedule(
+                position_id=pos_id,
+                last_soft_stop_check_at=_iso(now),
+            )
+
+    async def _write_activity_check(self, pos_id: int, now: datetime):
+        if hasattr(self.repo, "update_position_soft_stop_schedule"):
+            await self.repo.update_position_soft_stop_schedule(
+                position_id=pos_id,
+                last_activity_stop_check_at=_iso(now),
+            )
 
     # ------------------------------------------------------------------
     # Dull-drop: 1h change < 1% AND 5m change < 1%
     # ------------------------------------------------------------------
     async def _check_dull_drop(
-        self, position, latest, current_price, entry_price, now
+        self, position, latest, current_price, now
     ) -> bool:
         token = position["token_mint"]
         pos_id = int(position["id"])
+        account_type = _account_type(position)
 
-        pct_1h = self._get_price_change(latest, ["price_change_percent1h", "price_change_1h", "price_change_percent_1h"])
-        pct_5m_raw = _to_float(latest.get("price_change_percent5m") or latest.get("price_change_5m") or latest.get("change_5m"))
-        if pct_5m_raw is None:
-            price_5m = _to_float(latest.get("price_5m") or latest.get("price5m"))
-            if price_5m and price_5m > 0:
-                pct_5m_raw = (current_price / price_5m - 1.0) * 100.0
-        pct_5m = normalize_pct_change(pct_5m_raw)
-        pct_1h = normalize_pct_change(pct_1h)
+        pct_1h = await self._get_price_change_with_fallback(token, latest, current_price, account_type, 3600, _PCT_1H_ALIASES)
+        pct_5m = await self._get_price_change_with_fallback(token, latest, current_price, account_type, 300, _PCT_5M_ALIASES)
 
         if pct_1h is None or pct_5m is None:
             return False
@@ -137,10 +173,11 @@ class PositionSoftStopRunner:
     # Low-activity: swaps_1h < 7 AND 1h change < 5%
     # ------------------------------------------------------------------
     async def _check_low_activity(
-        self, position, latest, current_price, entry_price, now
+        self, position, latest, current_price, now
     ) -> bool:
         token = position["token_mint"]
         pos_id = int(position["id"])
+        account_type = _account_type(position)
 
         swaps_1h = _to_float(
             latest.get("swaps_1h") or latest.get("swaps1h") or latest.get("swaps_60m")
@@ -154,9 +191,7 @@ class PositionSoftStopRunner:
         if swaps_1h is None:
             return False
 
-        pct_1h = self._get_price_change(latest, ["price_change_percent1h", "price_change_1h", "price_change_percent_1h"])
-        pct_1h = normalize_pct_change(pct_1h)
-
+        pct_1h = await self._get_price_change_with_fallback(token, latest, current_price, account_type, 3600, _PCT_1H_ALIASES)
         if pct_1h is None:
             return False
 
@@ -195,3 +230,66 @@ class PositionSoftStopRunner:
                     if v is not None:
                         return v
         return None
+
+    async def _get_price_change_with_fallback(
+        self,
+        token: str,
+        latest: Dict[str, Any],
+        current_price: float,
+        account_type: str,
+        window_seconds: int,
+        aliases: List[str],
+    ) -> Optional[float]:
+        """Try latest price-change fields, then tick_snapshots fallback, then WARN."""
+        pos_id = None  # only for logging
+
+        # A. Direct API fields
+        pct = self._get_price_change(latest, aliases)
+        if pct is not None:
+            return normalize_pct_change(pct)
+
+        # B. Compute from price_5m / price_1h in latest
+        if window_seconds == 300:
+            price_ref = _to_float(latest.get("price_5m") or latest.get("price5m"))
+        elif window_seconds == 3600:
+            price_ref = _to_float(latest.get("price_1h") or latest.get("price1h") or latest.get("price_h1"))
+        else:
+            price_ref = None
+        if price_ref and price_ref > 0:
+            return (current_price / price_ref) - 1.0
+
+        # C. Tick snapshots fallback
+        try:
+            ticks = await self.repo.get_recent_ticks(token, window_seconds)
+            if ticks:
+                # Use the oldest tick in the window as reference
+                ref_tick = ticks[-1]  # ordered DESC, last = oldest
+                ref_price = _to_float(ref_tick.get("price_usd") or ref_tick.get("price_sol"))
+                if ref_price and ref_price > 0:
+                    return (current_price / ref_price) - 1.0
+        except Exception:
+            pass
+
+        # D. Missing — write WARN system event
+        logger.warning(
+            "Soft stop price change unavailable",
+            token=token,
+            window_seconds=window_seconds,
+            wildcard="no_field_or_fallback",
+        )
+        try:
+            await self.repo.append_system_event(
+                "WARN", "SOFT_STOP",
+                f"Price change data unavailable for {token} ({window_seconds}s window); no soft-stop triggered",
+                _safe_json({"token": token, "window_seconds": window_seconds, "action": "SKIP_SOFT_STOP"}),
+                account_type=account_type,
+            )
+        except Exception:
+            pass
+        return None
+
+
+def _iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()

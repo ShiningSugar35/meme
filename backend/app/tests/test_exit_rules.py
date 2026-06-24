@@ -120,6 +120,14 @@ class TestCompleted:
         res = asyncio.run(decide_exit(position, tick, {}, {}))
         assert any(r.name == "COMPLETED" for r in res.reasons)
 
+    def test_completed_snapshot_overrides_position_type(self):
+        """latest_snapshot.type=completed takes priority over position.latest_token_type=new_creation."""
+        position = {"entry_price_sol": 1.0, "remaining_value_usd": 100, "latest_token_type": "new_creation"}
+        tick = {"price_sol": 1.0}
+        latest_snapshot = {"type": "completed"}
+        res = asyncio.run(decide_exit(position, tick, {}, latest_snapshot))
+        assert any(r.name == "COMPLETED" for r in res.reasons)
+
 
 class TestDustForceExit:
     def test_dust_exit(self):

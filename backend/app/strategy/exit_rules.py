@@ -108,8 +108,8 @@ def _executed_exit_rules(position: Dict[str, Any]) -> Set[str]:
 
 
 def _token_type(position: Dict[str, Any], latest_snapshot: Dict[str, Any]) -> Optional[str]:
-    for container in (position or {}, latest_snapshot or {}):
-        for key in ("latest_token_type", "type", "latest_type", "token_type"):
+    for container in (latest_snapshot or {}, position or {}):
+        for key in ("type", "token_type", "latest_token_type", "latest_type"):
             value = container.get(key)
             if value:
                 return str(value)

@@ -208,9 +208,10 @@ async def test_sim_50pct_exit_updates_remaining(repo):
     pos = await repo.get_position(pos_id)
     gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
     runner = PositionRiskRunner(repo, gmgn)
-    await runner._paper_exit(
+    await runner.exit_service.exit_position(
         position=pos, exit_pct=0.5,
         reason_code="TEST_HALF_SELL", current_price_usd=0.01,
+        source="STAGE2_5_TEST",
     )
     updated = await repo.get_position(pos_id)
     assert updated["status"] != "CLOSED"
@@ -232,9 +233,10 @@ async def test_sim_100pct_exit_closes(repo):
     pos = await repo.get_position(pos_id)
     gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
     runner = PositionRiskRunner(repo, gmgn)
-    await runner._paper_exit(
+    await runner.exit_service.exit_position(
         position=pos, exit_pct=1.0,
         reason_code="TEST_FULL_EXIT", current_price_usd=0.01,
+        source="STAGE2_5_TEST",
     )
     updated = await repo.get_position(pos_id)
     assert updated["status"] == "CLOSED"
@@ -254,9 +256,10 @@ async def test_sim_exit_no_unexpected_kwargs(repo):
     pos = await repo.get_position(pos_id)
     gmgn = GMGNProvider(repo, mode=ProviderMode.MOCK)
     runner = PositionRiskRunner(repo, gmgn)
-    await runner._paper_exit(
+    await runner.exit_service.exit_position(
         position=pos, exit_pct=0.3,
         reason_code="TEST_PARTIAL", current_price_usd=0.01,
+        source="STAGE2_5_TEST",
     )
     # Should not raise TypeError
     assert True
