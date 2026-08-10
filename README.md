@@ -37,7 +37,7 @@ GMGN Trenches 发现
 - `believe`
 - `heaven`
 
-生命周期包括 `new_creation`、`near_completion`、`completed`。采集器保留 12 个 GMGN API 槽位的角色分工：0–2 为三类 discovery，3 为 discovery fallback，4–7 为 realtime enrichment，8–9 为 realtime fallback，10–11 为 K 线。多个 Key 不代表 IP 总吞吐可以相乘；所有槽位仍受共享限流门控。
+生命周期包括 `new_creation`、`near_completion`、`completed`。每个完整采集周期按 **New Creation → Near Completion → Completed** 顺序分别请求 Trenches；当前单类请求按 GMGN 契约最多取 80 条，并对偶发的超量响应再次本地截断。采集器保留 12 个 GMGN API 槽位的角色分工：0–2 为三类 discovery，3 为 discovery fallback，4–7 为 realtime enrichment，8–9 为 realtime fallback，10–11 为 K 线。多个 Key 不代表 IP 总吞吐可以相乘；所有槽位仍受共享限流门控。
 
 当前历史 CSV 全部来自 Pump.fun，这只说明已有样本覆盖不足，不能据此改动平台列表或宣称模型可泛化到其他平台。
 
@@ -274,6 +274,8 @@ npm run dev
 
 访问 `http://127.0.0.1:5173`。Vite 会把 `/api` 和 `/health` 代理到 `127.0.0.1:8000`。
 
+“运行监控”页提供 Collector 的结构化实时终端：后端保留最近 250 条采集事件，前端约每 1.5 秒刷新，按三生命周期分别显示 returned / accepted / rejected / duplicate，并逐条展示候选二筛拒绝原因、成功入样、T+2h 标签补齐和阶段异常。该终端来自 Collector 的实际事件流，不是对静态日志文件的装饰性回放。
+
 ### 6.4 训练、自更新与自选特征
 
 “模型中心”会列出全部可选特征及成熟样本覆盖率。默认 recipe 使用 README 冻结的 31 个输入特征；`ln(liquidity_usd)` 从新样本开始持续采集，但默认关闭，等覆盖率足够后可直接勾选并创建新的训练 recipe。API 也支持显式提交特征列表：
@@ -287,7 +289,7 @@ Invoke-RestMethod -Method Post `
 
 HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。周日北京时间 03:00 自动训练，错过后下次启动补排；7 日模型健康监控只在真实 USD 经济口径可比较时触发 degraded 重训。自动训练继承当前 Champion 的 feature schema，除非用户再次手工改变 recipe。
 
-当前真实 2319 条 legacy 数据已完成两次训练验收：首轮由奥卡姆选择得到 Logistic Regression Champion（31 特征，`EARLY_STAGE_MODEL`）；第二轮成功重建 incumbent recipe 并在同一 OOS 窗口比较，因 legacy 数据缺 raw liquidity/精确 tag=2 close 而安全拒绝自动晋级。数据完整性门禁按预期生效。
+当前 legacy 数据已完成多轮真实训练验收：首轮由奥卡姆选择得到 Logistic Regression Champion（31 特征，`EARLY_STAGE_MODEL`）；后续成功重建 incumbent recipe 并在同一 OOS 窗口比较，因 legacy 数据缺 raw liquidity/精确 tag=2 close 而安全限制自动晋级。2026-08-10 已在项目 `.venv` 安装并实测 `xgboost 3.4.0`，真实训练 run `0e4a4cd7-d933-45f3-8c1b-3662a566d21e` 中五个候选全部实际参与，XGBoost 状态为 `ok`；该轮仍由 Logistic Regression 胜出，但未替换当前 Champion。数据完整性与 Champion 晋级门禁均按预期生效。
 
 ## 7. 测试与构建
 

@@ -143,6 +143,13 @@ class RuntimeService:
         )
         return {"id": job_id, "status": "queued", "execution": "sequential"}
 
+    def collector_events(self, limit: int = 200) -> list[dict[str, Any]]:
+        events = self.database.get_runtime_state("collector_events", [])
+        if not isinstance(events, list):
+            return []
+        bounded = max(1, min(int(limit), 250))
+        return [dict(item) for item in events[-bounded:] if isinstance(item, dict)]
+
     def status(self) -> dict[str, Any]:
         return {
             "app_env": self.settings.app_env,

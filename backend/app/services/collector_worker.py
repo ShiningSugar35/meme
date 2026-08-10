@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -164,6 +166,78 @@ class CollectorWorker:
         self._transport: HttpxTransport | None = None
         self._service: CollectorService | None = None
         self._paper_monitor = PaperPositionMonitor(database, self.settings)
+        existing_events = database.get_runtime_state("collector_events", [])
+        seed = existing_events[-250:] if isinstance(existing_events, list) else []
+        self._events: deque[dict[str, Any]] = deque(seed, maxlen=250)
+        self._active_cycle_id: str | None = None
+
+    @staticmethod
+    def _type_label(token_type: object) -> str:
+        return {
+            "new_creation": "New Creation",
+            "near_completion": "Near Completion",
+            "completed": "Completed",
+        }.get(str(token_type), str(token_type or "Collector"))
+
+    def _record_event(
+        self,
+        action: str,
+        details: Mapping[str, object] | None = None,
+        *,
+        level: str | None = None,
+    ) -> None:
+        payload = dict(details or {})
+        label = self._type_label(payload.get("token_type"))
+        token = str(payload.get("token") or "")
+        reasons = payload.get("reasons")
+        reason_text = ", ".join(str(item) for item in reasons) if isinstance(reasons, list) else ""
+        messages = {
+            "cycle_started": (
+                "采集周期开始：依次扫描 New Creation → Near Completion → Completed，"
+                f"单类 limit={int(payload.get('requested_limit') or 0)}"
+            ),
+            "discovery_start": f"开始拉取 {label}",
+            "discovery_result": f"{label} 拉回 {int(payload.get('returned') or 0)} 个候选",
+            "candidate_duplicate": f"{token or 'candidate'} [{label}] 跳过：该 Token 仍有未成熟样本",
+            "candidate_rejected": f"{token or 'candidate'} [{label}] 拒绝：{reason_text or 'unspecified'}",
+            "candidate_accepted": f"{token or 'candidate'} [{label}] 已入样，进入 2h 标签等待",
+            "discovery_type_complete": (
+                f"{label} 完成：返回 {int(payload.get('returned') or 0)} / "
+                f"入样 {int(payload.get('accepted') or 0)} / "
+                f"拒绝 {int(payload.get('rejected') or 0)} / "
+                f"重复 {int(payload.get('duplicates') or 0)}"
+            ),
+            "label_finalization": f"本轮完成 {int(payload.get('finalized') or 0)} 条 T+2h 标签补齐",
+            "paper_monitor": (
+                f"模拟盘监控：检查 {int(payload.get('checked') or 0)} 仓 / "
+                f"退出 {int(payload.get('closed') or 0)} / 待重试 {int(payload.get('pending') or 0)}"
+            ),
+            "stage_error": f"{payload.get('stage') or 'collector'} 异常：{payload.get('error') or 'unknown'}",
+            "cycle_complete": (
+                f"采集周期完成：发现 {int(payload.get('discovered') or 0)} / "
+                f"入样 {int(payload.get('accepted') or 0)} / "
+                f"拒绝 {int(payload.get('rejected') or 0)} / "
+                f"重复 {int(payload.get('duplicates') or 0)}，"
+                f"耗时 {float(payload.get('elapsed_seconds') or 0):.1f}s"
+            ),
+        }
+        resolved_level = level or (
+            "error" if action == "stage_error" else
+            "success" if action == "candidate_accepted" else
+            "debug" if action in {"candidate_rejected", "candidate_duplicate"} else
+            "info"
+        )
+        event = {
+            "id": uuid.uuid4().hex[:12],
+            "created_at": utc_now_iso(),
+            "level": resolved_level,
+            "action": action,
+            "message": messages.get(action, action),
+            "cycle_id": self._active_cycle_id,
+            "details": payload,
+        }
+        self._events.append(event)
+        self.database.set_runtime_state("collector_events", list(self._events))
 
     def _build(self) -> CollectorService:
         env = _env_values()
@@ -208,6 +282,24 @@ class CollectorWorker:
             return
         while not self._stop.is_set():
             started = time.time()
+            self._active_cycle_id = uuid.uuid4().hex[:10]
+            requested_limit = min(self.settings.gmgn_trenches_limit, 80)
+            previous_status = self.database.get_runtime_state("collector_status", {})
+            previous_status = previous_status if isinstance(previous_status, dict) else {}
+            self.database.set_runtime_state(
+                "collector_status",
+                {
+                    **previous_status,
+                    "state": "monitor_only" if self.monitor_only else "running",
+                    "mode": "monitor_only" if self.monitor_only else "collector",
+                    "cycle_state": "in_progress",
+                    "cycle_id": self._active_cycle_id,
+                    "cycle_started_at": utc_now_iso(),
+                    "requested_limit_per_type": requested_limit,
+                },
+            )
+            if not self.monitor_only:
+                self._record_event("cycle_started", {"requested_limit": requested_limit})
             cycle_errors: list[dict[str, str]] = []
             collection_stats = {
                 "discovered": 0,
@@ -215,6 +307,7 @@ class CollectorWorker:
                 "rejected": 0,
                 "duplicates": 0,
                 "rejection_reasons": {},
+                "type_stats": {},
             }
             monitor_stats = {
                 "paper_positions_checked": 0,
@@ -235,9 +328,19 @@ class CollectorWorker:
                     "paper_positions_pending_exit": monitor.pending_positions,
                     "paper_positions_blocked": monitor.blocked_positions,
                 }
+                if monitor.checked_positions or monitor.closed_positions or monitor.pending_positions:
+                    self._record_event(
+                        "paper_monitor",
+                        {
+                            "checked": monitor.checked_positions,
+                            "closed": monitor.closed_positions,
+                            "pending": monitor.pending_positions,
+                        },
+                    )
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"[:500]
                 cycle_errors.append({"stage": "paper_monitor", "error": message})
+                self._record_event("stage_error", {"stage": "paper_monitor", "error": message})
                 self.database.audit(
                     category="simulation",
                     action="paper_monitor_cycle_failed",
@@ -248,9 +351,12 @@ class CollectorWorker:
             try:
                 finalization = await self._service.finalize_due()
                 finalized = finalization.finalized
+                if finalized:
+                    self._record_event("label_finalization", {"finalized": finalized})
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"[:500]
                 cycle_errors.append({"stage": "label_finalization", "error": message})
+                self._record_event("stage_error", {"stage": "label_finalization", "error": message})
                 self.database.audit(
                     category="collector",
                     action="label_finalization_failed",
@@ -261,7 +367,8 @@ class CollectorWorker:
             if not self.monitor_only:
                 try:
                     collection = await self._service.collect_once(
-                        limit=min(self.settings.gmgn_trenches_limit, 80)
+                        limit=requested_limit,
+                        event_sink=self._record_event,
                     )
                     collection_stats = {
                         "discovered": collection.discovered,
@@ -269,10 +376,12 @@ class CollectorWorker:
                         "rejected": collection.rejected,
                         "duplicates": collection.unfinished_duplicates,
                         "rejection_reasons": dict(collection.rejection_reasons),
+                        "type_stats": {key: dict(value) for key, value in collection.type_stats.items()},
                     }
                 except Exception as exc:
                     message = f"{type(exc).__name__}: {exc}"[:500]
                     cycle_errors.append({"stage": "discovery", "error": message})
+                    self._record_event("stage_error", {"stage": "discovery", "error": message})
                     self.database.audit(
                         category="collector",
                         action="discovery_cycle_failed",
@@ -280,19 +389,32 @@ class CollectorWorker:
                         details={"error": message},
                     )
 
+            elapsed = time.time() - started
+            if not self.monitor_only:
+                self._record_event(
+                    "cycle_complete",
+                    {
+                        **collection_stats,
+                        "elapsed_seconds": elapsed,
+                    },
+                    level="warning" if cycle_errors else "info",
+                )
             self.database.set_runtime_state(
                 "collector_status",
                 {
                     "state": "degraded" if cycle_errors else ("monitor_only" if self.monitor_only else "running"),
                     "mode": "monitor_only" if self.monitor_only else "collector",
+                    "cycle_state": "idle",
+                    "cycle_id": self._active_cycle_id,
                     "last_cycle_at": utc_now_iso(),
+                    "last_cycle_duration_seconds": elapsed,
+                    "requested_limit_per_type": requested_limit,
                     **collection_stats,
                     "finalized": finalized,
                     **monitor_stats,
                     "errors": cycle_errors,
                 },
             )
-            elapsed = time.time() - started
             wait_seconds = max(1.0, self.settings.collector_poll_seconds - elapsed)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=wait_seconds)

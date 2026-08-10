@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from .constants import DISCOVERY_TYPES
 from .discovery import DiscoveryService
@@ -32,6 +32,7 @@ class CollectionReport:
     unfinished_duplicates: int
     finalized: int = 0
     rejection_reasons: Mapping[str, int] = field(default_factory=dict)
+    type_stats: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
 
 
 class CollectorService:
@@ -49,29 +50,65 @@ class CollectorService:
         self.sink = sink
         self.finalizer = finalizer or LabelFinalizer()
 
-    async def collect_once(self, *, limit: int = 80, now_ts: int | None = None) -> CollectionReport:
+    async def collect_once(
+        self,
+        *,
+        limit: int = 80,
+        now_ts: int | None = None,
+        event_sink: Callable[[str, Mapping[str, object]], None] | None = None,
+    ) -> CollectionReport:
         discovered = accepted = rejected = duplicates = 0
         rejection_reasons: Counter[str] = Counter()
+        type_stats: dict[str, dict[str, int]] = {}
+
+        def emit(action: str, details: Mapping[str, object]) -> None:
+            if event_sink is not None:
+                event_sink(action, details)
+
         for token_type in DISCOVERY_TYPES:
+            emit("discovery_start", {"token_type": token_type, "requested_limit": limit})
             candidates = await self.discovery.discover(token_type, limit=limit)
             discovered += len(candidates)
+            current = {"returned": len(candidates), "accepted": 0, "rejected": 0, "duplicates": 0}
+            type_stats[token_type] = current
+            emit(
+                "discovery_result",
+                {"token_type": token_type, "returned": len(candidates), "requested_limit": limit},
+            )
             for candidate in candidates:
+                token_label = str(
+                    candidate.raw.get("symbol")
+                    or candidate.raw.get("name")
+                    or candidate.address[:8]
+                )[:32]
                 if await self.sink.has_unfinished_address(candidate.address):
                     duplicates += 1
+                    current["duplicates"] += 1
+                    emit("candidate_duplicate", {"token_type": token_type, "token": token_label})
                     continue
                 result = await self.enrichment.enrich(candidate, now_ts=now_ts)
                 if result.sample is None:
                     rejected += 1
-                    rejection_reasons.update(result.decision.reasons or ("unspecified",))
+                    current["rejected"] += 1
+                    reasons = tuple(result.decision.reasons or ("unspecified",))
+                    rejection_reasons.update(reasons)
+                    emit(
+                        "candidate_rejected",
+                        {"token_type": token_type, "token": token_label, "reasons": list(reasons)},
+                    )
                     continue
                 await self.sink.add_sample(result.sample)
                 accepted += 1
+                current["accepted"] += 1
+                emit("candidate_accepted", {"token_type": token_type, "token": token_label})
+            emit("discovery_type_complete", {"token_type": token_type, **current})
         return CollectionReport(
             discovered,
             accepted,
             rejected,
             duplicates,
             rejection_reasons=dict(rejection_reasons.most_common()),
+            type_stats=type_stats,
         )
 
     async def finalize_due(self, *, now_ts: int | None = None) -> CollectionReport:

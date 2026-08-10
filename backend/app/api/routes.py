@@ -122,6 +122,11 @@ def runtime_status() -> dict:
     return {"runtime": RuntimeService(database).status(), "risk": RiskService(database).status()}
 
 
+@router.get("/runtime/collector-events")
+def collector_events(limit: int = Query(default=200, ge=1, le=250)) -> dict:
+    return {"items": RuntimeService(get_database()).collector_events(limit=limit)}
+
+
 @router.post("/runtime/live/prepare")
 def prepare_live() -> dict:
     return asdict(RuntimeService(get_database()).prepare_live_start())

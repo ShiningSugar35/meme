@@ -20,6 +20,16 @@ export interface RuntimeStatus {
   liquidation_worker: Record<string, unknown>;
 }
 
+export interface CollectorEvent {
+  id: string;
+  created_at: string;
+  level: "debug" | "info" | "success" | "warning" | "error";
+  action: string;
+  message: string;
+  cycle_id: string | null;
+  details: Record<string, unknown>;
+}
+
 export interface RiskStatus {
   new_entries_paused: boolean;
   pause_reason: string | null;

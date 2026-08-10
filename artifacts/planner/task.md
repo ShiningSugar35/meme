@@ -42,7 +42,7 @@
 - [x] 模型中心自选 feature schema + 成熟样本 coverage
 - [x] 默认 recipe 31 个输入特征；`ln(liquidity_usd)` 可后续 opt-in
 - [x] 时序扩展窗口、2h embargo、<120d EARLY_STAGE / >=120d 120d+30d 规则
-- [x] 五候选：Logistic Regression / HistGradientBoosting / XGBoost / ExtraTrees / RandomForest
+- [x] 五候选：Logistic Regression / HistGradientBoosting / XGBoost / ExtraTrees / RandomForest；2026-08-10 当前 `.venv` 已安装 XGBoost 3.4.0，真实训练 run `0e4a4cd7-d933-45f3-8c1b-3662a566d21e` 验证五候选均实际执行，XGBoost=`ok`
 - [x] Precision 20% + min trades 硬门槛
 - [x] 一个 Champion + aggressive/balanced/conservative 三阈值
 - [x] Occam 近似等价优先简单模型
@@ -100,6 +100,7 @@
 - [x] 模型中心 feature coverage、自选 schema、训练 queue、rollback
 - [x] Portfolio simulation session history
 - [x] Runtime 显示 TrainingWorker / model health / monitor-only / reconciliation / liquidation
+- [x] Runtime Collector 实时终端：三生命周期独立 returned/accepted/rejected/duplicate 统计 + 最近 250 条后端结构化采集事件
 
 ## Phase 6：API / Regression / Real DB 验收 — COMPLETE
 
@@ -113,7 +114,7 @@
 - [x] persistent liquidation mock tests
 - [x] 后端 full `pytest -q`：**86/86 passed**
 - [x] 前端 `npm run build`：passed
-- [x] 真实 `data/meme_quant.db`：schema v6 / 2319 samples / Champion 工件存在
+- [x] 真实 `data/meme_quant.db`：schema v6 / 2319 条 legacy 已迁移并开始持续追加新样本；2026-08-10 当前 2320 samples（2319 mature + 1 pending）/ Champion 工件存在
 
 ## Phase 7：Live — PARKED BY USER SCOPE
 
@@ -144,6 +145,6 @@
 
 ## 环境事实
 
-- `D:\meme` 当前没有 `.git` 元数据，因此本轮没有 commit/push；不得伪造 Git 状态。
+- `D:\meme` 已重新关联 `https://github.com/ShiningSugar35/meme.git`；2026-08-10 已将完整非实盘重构与 Collector 可观测性提交并推送到 `main`，后续改动继续按正常 Git 流程提交。
 - 根目录没有 `AGENTS.md`。
 - `.env` 未被复制到文档、测试或前端；真实凭据继续留在本地秘密配置。
