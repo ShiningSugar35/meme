@@ -1,45 +1,55 @@
-import { useState } from 'react';
-import './App.css';
-import ControlCenter from './pages/ControlCenter';
-import Portfolio from './pages/Portfolio';
-import Operations from './pages/Operations';
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import type { ComponentType } from "react";
+import { AppShell } from "./components/AppShell";
+import { PageLoading } from "./components/PageState";
 
-const tabs = [
-  { key: 'control', label: 'Control Center' },
-  { key: 'portfolio', label: '交易看板' },
-  { key: 'ops', label: 'Ops & Emergency' },
-];
+const DashboardPage = lazy(async () => ({ default: (await import("./pages/DashboardPage")).DashboardPage }));
+const ModelsPage = lazy(async () => ({ default: (await import("./pages/ModelsPage")).ModelsPage }));
+const SignalsPage = lazy(async () => ({ default: (await import("./pages/SignalsPage")).SignalsPage }));
+const PortfolioPage = lazy(async () => ({ default: (await import("./pages/PortfolioPage")).PortfolioPage }));
+const RuntimePage = lazy(async () => ({ default: (await import("./pages/RuntimePage")).RuntimePage }));
+const AgentPage = lazy(async () => ({ default: (await import("./pages/AgentPage")).AgentPage }));
 
-function App() {
-  const [activeTab, setActiveTab] = useState('control');
+const pages: Record<string, ComponentType> = {
+  "/": DashboardPage,
+  "/models": ModelsPage,
+  "/signals": SignalsPage,
+  "/portfolio": PortfolioPage,
+  "/runtime": RuntimePage,
+  "/agent": AgentPage
+};
 
-  return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div>
-          <h1>Solana Meme Trading Bot</h1>
-          <p>模拟盘用于策略对照，实盘仅执行唯一实盘策略，二者在同一运行态下统一记录。</p>
-        </div>
-        <nav className="tab-nav">
-          {tabs.map((tab) => (
-            <button
-              key={tab.key}
-              className={activeTab === tab.key ? 'active' : ''}
-              onClick={() => setActiveTab(tab.key)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-      </header>
-
-      <main>
-        <div hidden={activeTab !== 'control'}><ControlCenter /></div>
-        <div hidden={activeTab !== 'portfolio'}><Portfolio active={activeTab === 'portfolio'} /></div>
-        <div hidden={activeTab !== 'ops'}><Operations active={activeTab === 'ops'} /></div>
-      </main>
-    </div>
-  );
+function browserPath() {
+  return window.location.pathname.replace(/\/+$/, "") || "/";
 }
 
-export default App;
+export default function App() {
+  const [path, setPath] = useState(browserPath);
+  const currentPath = pages[path] ? path : "/";
+  const Page = pages[currentPath];
+
+  useEffect(() => {
+    const onPopState = () => setPath(browserPath());
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (path === currentPath) return;
+    window.history.replaceState(null, "", currentPath);
+    setPath(currentPath);
+  }, [currentPath, path]);
+
+  const navigate = useCallback((nextPath: string) => {
+    if (nextPath === browserPath()) return;
+    window.history.pushState(null, "", nextPath);
+    setPath(nextPath);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  return (
+    <AppShell currentPath={currentPath} onNavigate={navigate}>
+      <Suspense fallback={<PageLoading />}><Page /></Suspense>
+    </AppShell>
+  );
+}

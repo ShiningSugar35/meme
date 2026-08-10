@@ -1,0 +1,509 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterator, Mapping, Sequence
+
+from .config import get_settings
+
+
+SCHEMA_VERSION = 6
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class Database:
+    """Small SQLite data-access boundary with one connection per operation."""
+
+    def __init__(self, path: Path | str | None = None) -> None:
+        self.path = Path(path) if path is not None else get_settings().database_path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        return connection
+
+    @contextmanager
+    def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] = ()) -> int:
+        with self.transaction(immediate=True) as connection:
+            cursor = connection.execute(sql, parameters)
+            return cursor.rowcount
+
+    def fetch_one(
+        self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] = ()
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(sql, parameters).fetchone()
+            return dict(row) if row is not None else None
+
+    def fetch_all(
+        self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] = ()
+    ) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute(sql, parameters).fetchall()]
+
+    def initialize(self) -> None:
+        with self.transaction(immediate=True) as connection:
+            connection.executescript(SCHEMA_SQL)
+            self._migrate_schema(connection)
+            connection.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+
+    @staticmethod
+    def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+        return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    @classmethod
+    def _ensure_column(
+        cls,
+        connection: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        if column not in cls._column_names(connection, table):
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @classmethod
+    def _migrate_schema(cls, connection: sqlite3.Connection) -> None:
+        # v2: preserve complete label-path facts and durable training requests.
+        for column, definition in (
+            ("first_take_profit_at", "INTEGER"),
+            ("first_stop_loss_at", "INTEGER"),
+            ("exit_reason", "TEXT"),
+            ("same_bar_conflict", "INTEGER NOT NULL DEFAULT 0"),
+            ("gross_return_rate", "REAL"),
+            ("return_source", "TEXT"),
+        ):
+            cls._ensure_column(connection, "samples", column, definition)
+        cls._ensure_column(
+            connection,
+            "training_runs",
+            "request_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
+        cls._ensure_column(connection, "training_runs", "scheduled_for", "TEXT")
+        cls._ensure_column(
+            connection,
+            "training_runs",
+            "retry_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS one_training_run_per_schedule "
+            "ON training_runs(scheduled_for) WHERE scheduled_for IS NOT NULL"
+        )
+        cls._ensure_column(connection, "positions", "simulation_session_id", "TEXT")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_positions_simulation_session "
+            "ON positions(simulation_session_id, account_kind, status)"
+        )
+
+        # v5: promote simulation sessions from an ephemeral runtime pointer into
+        # a durable registry so resets keep auditable historical sessions.
+        current_session: dict[str, Any] = {}
+        current_row = connection.execute(
+            "SELECT value_json FROM runtime_state WHERE key='simulation_session'"
+        ).fetchone()
+        if current_row:
+            try:
+                decoded = json.loads(current_row["value_json"] or "{}")
+                if isinstance(decoded, dict):
+                    current_session = decoded
+            except (TypeError, json.JSONDecodeError):
+                current_session = {}
+        current_id = str(current_session.get("id") or "")
+        historical = connection.execute(
+            """
+            SELECT simulation_session_id AS id,
+                   MIN(entry_time) AS started_at,
+                   MAX(COALESCE(exit_time, entry_time)) AS ended_at
+            FROM positions
+            WHERE simulation_session_id IS NOT NULL
+              AND account_kind IN ('paper','shadow_aggressive','shadow_conservative')
+            GROUP BY simulation_session_id
+            """
+        ).fetchall()
+        for row in historical:
+            session_id = str(row["id"])
+            is_current = bool(current_id and session_id == current_id)
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO simulation_sessions(
+                    id,started_at,ended_at,status,initial_cash_usd,
+                    initial_sol_fee_reserve,created_reason
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    session_id,
+                    row["started_at"] or current_session.get("started_at") or utc_now_iso(),
+                    None if is_current else row["ended_at"],
+                    "active" if is_current else "closed",
+                    float(current_session.get("initial_cash_usd") or 1000.0) if is_current else 1000.0,
+                    float(current_session.get("initial_sol_fee_reserve") or 0.1) if is_current else 0.1,
+                    "runtime_backfill" if is_current else "legacy_backfill",
+                ),
+            )
+        if current_id:
+            connection.execute(
+                "UPDATE simulation_sessions SET status='closed', ended_at=COALESCE(ended_at, ?) WHERE status='active' AND id<>?",
+                (utc_now_iso(), current_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO simulation_sessions(
+                    id,started_at,ended_at,status,initial_cash_usd,
+                    initial_sol_fee_reserve,created_reason
+                ) VALUES(?,?,NULL,'active',?,?,?)
+                ON CONFLICT(id) DO UPDATE SET status='active', ended_at=NULL
+                """,
+                (
+                    current_id,
+                    current_session.get("started_at") or utc_now_iso(),
+                    float(current_session.get("initial_cash_usd") or 1000.0),
+                    float(current_session.get("initial_sol_fee_reserve") or 0.1),
+                    "runtime_backfill",
+                ),
+            )
+
+        # v6: migrate the old bounded runtime-state proposal list into a durable
+        # approval registry. Runtime data remains untouched for forensic safety;
+        # the service reads only this table after migration.
+        proposal_row = connection.execute(
+            "SELECT value_json FROM runtime_state WHERE key='agent_proposals'"
+        ).fetchone()
+        if proposal_row:
+            try:
+                legacy_proposals = json.loads(proposal_row["value_json"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                legacy_proposals = []
+            if isinstance(legacy_proposals, list):
+                allowed_status = {
+                    "pending_approval",
+                    "approved",
+                    "rejected",
+                    "executed",
+                    "failed",
+                }
+                for record in legacy_proposals:
+                    if not isinstance(record, dict) or not record.get("id"):
+                        continue
+                    status = str(record.get("status") or "pending_approval")
+                    if status not in allowed_status:
+                        status = "pending_approval"
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO agent_proposals(
+                            id,proposal_type,payload_json,status,created_at
+                        ) VALUES(?,?,?,?,?)
+                        """,
+                        (
+                            str(record["id"]),
+                            str(record.get("proposal_type") or "unknown"),
+                            json.dumps(record.get("payload") or {}, ensure_ascii=False, separators=(",", ":")),
+                            status,
+                            str(record.get("created_at") or utc_now_iso()),
+                        ),
+                    )
+
+        # Completed non-promoted model runs are terminal rejected candidates, not
+        # models still awaiting a decision. Preserve artifacts for audit, while
+        # keeping `retired` reserved for models that were once Champion.
+        connection.execute(
+            """
+            UPDATE models
+            SET status='rejected'
+            WHERE status='candidate'
+              AND id IN (
+                    SELECT candidate_model_id FROM training_runs
+                    WHERE status='completed' AND promoted=0
+                      AND candidate_model_id IS NOT NULL
+              )
+            """
+        )
+
+    def set_runtime_state(self, key: str, value: Any) -> None:
+        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        now = utc_now_iso()
+        self.execute(
+            """
+            INSERT INTO runtime_state(key, value_json, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at
+            """,
+            (key, payload, now),
+        )
+
+    def get_runtime_state(self, key: str, default: Any = None) -> Any:
+        row = self.fetch_one("SELECT value_json FROM runtime_state WHERE key = ?", (key,))
+        if row is None:
+            return default
+        try:
+            return json.loads(row["value_json"])
+        except (TypeError, json.JSONDecodeError):
+            return default
+
+    def audit(
+        self,
+        *,
+        category: str,
+        action: str,
+        severity: str = "info",
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.execute(
+            """
+            INSERT INTO audit_logs(
+                created_at, severity, category, action, entity_type, entity_id, details_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now_iso(),
+                severity,
+                category,
+                action,
+                entity_type,
+                entity_id,
+                json.dumps(details or {}, ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_key TEXT NOT NULL UNIQUE,
+    chain TEXT NOT NULL DEFAULT 'sol',
+    address TEXT NOT NULL,
+    name TEXT,
+    symbol TEXT,
+    token_type TEXT,
+    entry_time INTEGER NOT NULL,
+    age_minutes REAL,
+    launchpad TEXT,
+    entry_price REAL NOT NULL,
+    liquidity REAL,
+    liquidity_estimated INTEGER NOT NULL DEFAULT 0 CHECK(liquidity_estimated IN (0,1)),
+    utility_eligible INTEGER NOT NULL DEFAULT 1 CHECK(utility_eligible IN (0,1)),
+    holder_count REAL,
+    features_json TEXT NOT NULL,
+    price_2h_max_ratio REAL,
+    price_2h_min_ratio REAL,
+    final_close_ratio REAL,
+    first_take_profit_at INTEGER,
+    first_stop_loss_at INTEGER,
+    exit_reason TEXT,
+    same_bar_conflict INTEGER NOT NULL DEFAULT 0 CHECK(same_bar_conflict IN (0,1)),
+    gross_return_rate REAL,
+    return_source TEXT,
+    tag INTEGER CHECK(tag IN (0, 1, 2) OR tag IS NULL),
+    label_status TEXT NOT NULL DEFAULT 'pending' CHECK(label_status IN ('pending','mature','failed')),
+    label_version TEXT NOT NULL DEFAULT 'sl090_tp160_h2_close120_v2',
+    label_source TEXT NOT NULL DEFAULT 'collector',
+    terminal_return_estimated INTEGER NOT NULL DEFAULT 0 CHECK(terminal_return_estimated IN (0,1)),
+    raw_json TEXT,
+    collected_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_samples_entry_time ON samples(entry_time);
+CREATE INDEX IF NOT EXISTS idx_samples_label_status ON samples(label_status, entry_time);
+CREATE INDEX IF NOT EXISTS idx_samples_address_status ON samples(chain, address, label_status);
+
+CREATE TABLE IF NOT EXISTS models (
+    id TEXT PRIMARY KEY,
+    version TEXT NOT NULL UNIQUE,
+    algorithm TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('candidate','champion','retired','rejected','failed')),
+    early_stage INTEGER NOT NULL CHECK(early_stage IN (0,1)),
+    trained_at TEXT NOT NULL,
+    training_window_start INTEGER,
+    training_window_end INTEGER,
+    validation_window_start INTEGER,
+    validation_window_end INTEGER,
+    feature_names_json TEXT NOT NULL,
+    parameters_json TEXT NOT NULL,
+    thresholds_json TEXT NOT NULL,
+    metrics_json TEXT NOT NULL,
+    artifact_path TEXT NOT NULL,
+    training_data_hash TEXT,
+    parent_model_id TEXT REFERENCES models(id),
+    promoted_at TEXT,
+    rejection_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_models_status_trained ON models(status, trained_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS only_one_champion ON models(status) WHERE status = 'champion';
+
+CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL REFERENCES samples(id) ON DELETE CASCADE,
+    model_id TEXT NOT NULL REFERENCES models(id),
+    probability REAL NOT NULL CHECK(probability >= 0 AND probability <= 1),
+    profile TEXT NOT NULL CHECK(profile IN ('aggressive','balanced','conservative','shadow')),
+    threshold REAL NOT NULL CHECK(threshold >= 0 AND threshold <= 1),
+    selected INTEGER NOT NULL CHECK(selected IN (0,1)),
+    predicted_at TEXT NOT NULL,
+    UNIQUE(sample_id, model_id, profile)
+);
+CREATE INDEX IF NOT EXISTS idx_predictions_time ON predictions(predicted_at DESC);
+
+CREATE TABLE IF NOT EXISTS simulation_sessions (
+    id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    status TEXT NOT NULL CHECK(status IN ('active','closed')),
+    initial_cash_usd REAL NOT NULL CHECK(initial_cash_usd >= 0),
+    initial_sol_fee_reserve REAL NOT NULL CHECK(initial_sol_fee_reserve >= 0),
+    created_reason TEXT NOT NULL DEFAULT 'automatic'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS only_one_active_simulation_session
+    ON simulation_sessions(status) WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_simulation_sessions_started
+    ON simulation_sessions(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS positions (
+    id TEXT PRIMARY KEY,
+    token_address TEXT NOT NULL,
+    account_kind TEXT NOT NULL CHECK(account_kind IN ('paper','shadow_aggressive','shadow_conservative','live')),
+    profile TEXT NOT NULL CHECK(profile IN ('aggressive','balanced','conservative')),
+    status TEXT NOT NULL CHECK(status IN ('opening','open','closing','closed','manual_intervention','failed')),
+    simulation_session_id TEXT REFERENCES simulation_sessions(id),
+    prediction_id INTEGER REFERENCES predictions(id),
+    model_id TEXT REFERENCES models(id),
+    entry_time TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    invested_usd REAL NOT NULL CHECK(invested_usd >= 0),
+    token_amount REAL,
+    entry_price REAL,
+    stop_loss_price REAL,
+    take_profit_price REAL,
+    exit_time TEXT,
+    exit_price REAL,
+    exit_reason TEXT,
+    gross_pnl_usd REAL,
+    net_pnl_usd REAL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_positions_status_kind ON positions(status, account_kind);
+CREATE UNIQUE INDEX IF NOT EXISTS one_position_per_prediction_account
+    ON positions(prediction_id, account_kind) WHERE prediction_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_position_per_token
+    ON positions(token_address) WHERE account_kind = 'live' AND status IN ('opening','open','closing');
+
+CREATE TABLE IF NOT EXISTS trades (
+    id TEXT PRIMARY KEY,
+    position_id TEXT REFERENCES positions(id),
+    client_order_id TEXT NOT NULL UNIQUE,
+    intent_fingerprint TEXT NOT NULL,
+    journal_state TEXT NOT NULL DEFAULT 'reserved',
+    provider_order_id TEXT,
+    transaction_hash TEXT,
+    side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+    account_kind TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('created','quoting','submitted','pending','processed','confirmed','failed','expired','cancelled')),
+    requested_amount REAL NOT NULL,
+    filled_amount REAL,
+    expected_output REAL,
+    actual_output REAL,
+    slippage_bps INTEGER,
+    priority_fee_sol REAL,
+    tip_fee_sol REAL,
+    network_fee_sol REAL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    failure_category TEXT,
+    failure_code TEXT,
+    failure_message TEXT,
+    request_json TEXT NOT NULL DEFAULT '{}',
+    response_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trades_position ON trades(position_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS training_runs (
+    id TEXT PRIMARY KEY,
+    trigger TEXT NOT NULL CHECK(trigger IN ('manual','weekly','startup_catchup','degraded')),
+    status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','skipped')),
+    requested_at TEXT NOT NULL,
+    request_json TEXT NOT NULL DEFAULT '{}',
+    scheduled_for TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT,
+    completed_at TEXT,
+    candidate_model_id TEXT REFERENCES models(id),
+    champion_before_id TEXT REFERENCES models(id),
+    promoted INTEGER NOT NULL DEFAULT 0 CHECK(promoted IN (0,1)),
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_proposals (
+    id TEXT PRIMARY KEY,
+    proposal_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL CHECK(status IN ('pending_approval','approved','rejected','executed','failed')),
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decision_note TEXT,
+    executed_at TEXT,
+    result_json TEXT,
+    error_message TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_proposals_status_created
+    ON agent_proposals(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS runtime_state (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK(severity IN ('debug','info','warning','error','critical')),
+    category TEXT NOT NULL,
+    action TEXT NOT NULL,
+    entity_type TEXT,
+    entity_id TEXT,
+    details_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_category ON audit_logs(category, created_at DESC);
+"""
+
+
+def get_database() -> Database:
+    return Database()

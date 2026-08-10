@@ -1,75 +1,32 @@
-﻿# Environment variables
+.venv/
 .env
 .env.*
 !.env.example
-
-# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-eggs/
-parts/
-bin/
-var/
-sdist/
-develop-eggs/
-.installed.cfg
-lib/
-lib64/
-venv/
-.venv/
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# pytest
+*.py[cod]
 .pytest_cache/
-
-# Databases
-*.sqlite
-*.sqlite3
-*.sqlite3-wal
-*.sqlite3-shm
-*.db
-*.db-wal
-*.db-shm
-
-# Logs
-logs/
-*.log
-
-# Node.js (if applicable)
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+data/*.db
+data/*.db-*
+data/*.sqlite*
+data/backups/
+logs/*
+!logs/.gitkeep
+ml_models/*
+!ml_models/.gitkeep
+*.joblib
+*.pkl
+*.onnx
+*.zip
+meme数据.csv
+*.pem
+*.key
 
-# Torch models (if applicable)
-*.pth
-*.pt
-*.ckpt
-
-# Temporary files
-tmp/
-temp/
-*.tmp
-tsconfig.tsbuildinfo
-
-# Simulation script (not committed)
-妯℃嫙浜ゆ槗.py
-
-# Simulation script (not committed)
-模拟交易.py

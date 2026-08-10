@@ -1,148 +1,160 @@
-from datetime import datetime, timezone
-from contextlib import asynccontextmanager
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-from .config import settings
-from .logging_config import logger
-from .db.repositories import Repositories
-from .services.provider_factory import create_providers
-from .services.worker_manager import WorkerManager
-from .services.price_aggregator import PriceAggregator
-from .providers.gmgn_subscriber import create_gmgn_subscriber
-from .services.event_bus import event_bus
-from .runners.discovery_runner import DiscoveryRunner
-from .runners.price_monitor_runner import PriceMonitorRunner
-from .runners.position_risk_runner import PositionRiskRunner
-from .runners.kill_switch_runner import KillSwitchRunner
-from .runners.active_position_price_runner import ActivePositionPriceRunner
-from .runners.position_soft_stop_runner import PositionSoftStopRunner
-from .trading.executor import TradingPipeline
-from .api.routes_mock import router as mock_router
-from .api.routes_strategies import router as strategies_router
-from .api.routes_tokens import router as tokens_router
-from .api.routes_positions import router as positions_router
-from .api.routes_trades import router as trades_router
-from .api.routes_logs import router as logs_router
-from .api.routes_risk import router as risk_router
-from .api.routes_providers import router as providers_router
-from .api.routes_runtime import router as runtime_router, ensure_runtime_defaults
-
-
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from .api.routes import router
+from .config import get_settings
+from .database import get_database, utc_now_iso
+from .scheduler.service import TrainingScheduler
+from .services.collector_worker import CollectorWorker
+from .services.csv_importer import CsvImporter
+from .services.liquidation import LiquidationWorker
+from .services.model_health import ModelHealthWorker
+from .services.prediction import PredictionWorker
+from .services.reconciliation import ReconciliationWorker
+from .services.training_worker import TrainingWorker
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting backend", env=settings.APP_ENV)
+async def lifespan(_: FastAPI):
+    settings = get_settings()
+    database = get_database()
+    database.initialize()
+    if settings.csv_import_path.exists():
+        CsvImporter(database).import_file(settings.csv_import_path)
 
-    try:
-        repo = await Repositories.create(settings.SQLITE_PATH)
-    except Exception as e:
-        logger.exception("Failed to create DB repo; backend aborting")
-        raise
+    tasks: list[asyncio.Task] = []
+    collector: CollectorWorker | None = None
+    scheduler: TrainingScheduler | None = None
+    prediction_worker: PredictionWorker | None = None
+    reconciliation_worker: ReconciliationWorker | None = None
+    liquidation_worker: LiquidationWorker | None = None
+    model_health_worker: ModelHealthWorker | None = None
+    training_worker: TrainingWorker | None = None
 
-    try:
-        await ensure_runtime_defaults(repo)
-    except Exception as e:
-        logger.error(f"ensure_runtime_defaults failed (non-fatal): {e}")
+    if settings.app_env != "test":
+        # Reconcile durable non-terminal orders before any worker can create new
+        # signals or orders. Any unresolved outcome keeps new entries fail-closed.
+        reconciliation_worker = ReconciliationWorker(database, settings)
+        try:
+            await reconciliation_worker.run_once()
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"[:500]
+            database.set_runtime_state("new_entries_paused", True)
+            database.set_runtime_state(
+                "new_entries_pause_reason", "startup_reconciliation_failed"
+            )
+            database.set_runtime_state(
+                "reconciliation_worker_status",
+                {
+                    "state": "degraded",
+                    "last_error": message,
+                    "last_run_at": utc_now_iso(),
+                },
+            )
+            database.audit(
+                category="reconciliation",
+                action="startup_failed",
+                severity="error",
+                details={"error": message},
+            )
 
-    app.state.repo = repo
-    app.state.session_started_at = _iso_now()
+    if settings.background_workers_enabled and settings.app_env != "test":
+        training_worker = TrainingWorker(database, settings)
+        # Recover interrupted runs before any producer (scheduler/model health/API)
+        # can enqueue more work; subsequent execution is serialized by this worker.
+        recovery = training_worker.recover_interrupted_runs()
+        tasks.append(
+            asyncio.create_task(
+                training_worker.run_forever(recovery=recovery),
+                name="training-worker",
+            )
+        )
 
-    try:
-        providers = create_providers(repo)
-    except Exception as e:
-        logger.error(f"create_providers failed: {e}")
-        providers = None
-    app.state.providers = providers
-    app.state.pause_new_entries = True
+        scheduler = TrainingScheduler(database, settings)
+        tasks.append(asyncio.create_task(scheduler.run_forever(), name="weekly-training-scheduler"))
 
-    subscriber = create_gmgn_subscriber()
-    try:
-        aggregator = PriceAggregator(repo, providers.gmgn if providers else None, providers.jupiter if providers else None, subscriber)
-    except Exception as e:
-        logger.error(f"PriceAggregator init failed: {e}")
-        aggregator = None
-    app.state.price_aggregator = aggregator
+        assert reconciliation_worker is not None
+        tasks.append(
+            asyncio.create_task(
+                reconciliation_worker.run_forever(), name="order-reconciliation-worker"
+            )
+        )
+        liquidation_worker = LiquidationWorker(database, settings)
+        tasks.append(
+            asyncio.create_task(
+                liquidation_worker.run_forever(), name="liquidation-worker"
+            )
+        )
 
-    try:
-        trading_pipeline = TradingPipeline(repo, providers.gmgn if providers else None, providers.jupiter if providers else None, providers.jito if providers else None, providers.rpc if providers else None)
-    except Exception as e:
-        logger.error(f"TradingPipeline init failed: {e}")
-        trading_pipeline = None
-    app.state.trading_pipeline = trading_pipeline
+        model_health_worker = ModelHealthWorker(database, settings)
+        tasks.append(asyncio.create_task(model_health_worker.run_forever(), name="model-health-worker"))
 
-    worker_mgr = WorkerManager(repo, event_bus=event_bus)
-    app.state.worker_manager = worker_mgr
-
-    try:
-        strategy_groups = await repo.list_strategy_groups()
-    except Exception:
-        strategy_groups = []
-    discovery = DiscoveryRunner(repo, providers.gmgn if providers else None, strategy_groups, providers.jupiter if providers else None, providers.jito if providers else None, providers.rpc if providers else None)
-    price = PriceMonitorRunner(repo, aggregator) if aggregator else None
-    risk = PositionRiskRunner(repo, providers.gmgn if providers else None, trading_pipeline=trading_pipeline)
-    kill = KillSwitchRunner(repo)
-    active_price_runner = ActivePositionPriceRunner(repo, providers.gmgn if providers else None, trading_pipeline=trading_pipeline)
-    soft_stop_runner = PositionSoftStopRunner(repo, providers.gmgn if providers else None, trading_pipeline=trading_pipeline)
-
-    worker_mgr.register_worker('discovery', discovery.run_once, int(settings.POLL_INTERVAL_SECONDS))
-    if price:
-        worker_mgr.register_worker('price_monitor', price.run_once, int(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS))
-    worker_mgr.register_worker('position_risk', risk.run_once, 1)
-    worker_mgr.register_worker('kill_switch', kill.run_once, 30)
-    worker_mgr.register_worker('active_position_price', active_price_runner.run_once, int(settings.ACTIVE_POSITION_PRICE_POLL_SECONDS))
-    worker_mgr.register_worker('position_soft_stop', soft_stop_runner.run_once, 60)
-
-    try:
-        await repo.set_runtime_setting('user_mode', 'IDLE', 'system')
-        await repo.set_runtime_setting('workers_enabled', 'false', 'system')
-        await repo.set_runtime_setting('live_entries_enabled', 'false', 'system')
-        await repo.set_runtime_setting('session_started_at', app.state.session_started_at, 'system')
-        await repo.append_system_event('INFO', 'RUNTIME', 'Backend session started', app.state.session_started_at, account_type='SIM')
-    except Exception as e:
-        logger.error(f"Init runtime settings/event failed (non-fatal): {e}")
+        prediction_worker = PredictionWorker(database, settings)
+        tasks.append(asyncio.create_task(prediction_worker.run_forever(), name="prediction-worker"))
+        if settings.collector_enabled or settings.paper_market_monitor_enabled:
+            collector = CollectorWorker(
+                database,
+                settings,
+                monitor_only=not settings.collector_enabled,
+            )
+            tasks.append(
+                asyncio.create_task(
+                    collector.run_forever(),
+                    name="gmgn-collector" if settings.collector_enabled else "paper-market-monitor",
+                )
+            )
 
     try:
         yield
     finally:
-        logger.info("Shutting down backend")
-        await worker_mgr.stop_all()
-        try:
-            await repo.close()
-        except Exception:
-            logger.exception("Error closing repo on shutdown")
+        if collector:
+            collector.stop()
+        if scheduler:
+            scheduler.stop()
+        if prediction_worker:
+            prediction_worker.stop()
+        if reconciliation_worker:
+            reconciliation_worker.stop()
+        if liquidation_worker:
+            liquidation_worker.stop()
+        if model_health_worker:
+            model_health_worker.stop()
+        if training_worker:
+            training_worker.stop()
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=10)
+            for task in pending:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
 
-app = FastAPI(title="Solana Meme Trading Bot", lifespan=lifespan)
+def create_app() -> FastAPI:
+    settings = get_settings()
+    app = FastAPI(
+        title="Solana Meme Quant Trading System",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[settings.frontend_origin],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok", "environment": settings.app_env}
 
-app.include_router(mock_router)
-app.include_router(strategies_router)
-app.include_router(tokens_router)
-app.include_router(positions_router)
-app.include_router(trades_router)
-app.include_router(logs_router)
-app.include_router(risk_router)
-app.include_router(providers_router)
-app.include_router(runtime_router)
+    app.include_router(router)
+    return app
 
 
-@app.get("/health")
-async def health():
-    return JSONResponse({
-        "status": "ok",
-        "version": "1.1.1-runtime-api-merged",
-        "timestamp": _iso_now(),
-    })
+app = create_app()

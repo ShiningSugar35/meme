@@ -1,0 +1,116 @@
+{
+  "cli_quote_success": {
+    "return_code": 0,
+    "data": {
+      "data": {
+        "input_token": "SOL",
+        "output_token": "TOKEN",
+        "input_amount": "1000000",
+        "output_amount": "500000000",
+        "min_output_amount": "475000000",
+        "slippage": 0.05
+      }
+    },
+    "error_message": ""
+  },
+  "cli_swap_pending": {
+    "return_code": 0,
+    "data": {
+      "data": {
+        "order_id": "order-fixture-1",
+        "status": "pending",
+        "hash": "tx-fixture-1"
+      }
+    },
+    "error_message": ""
+  },
+  "cli_query_processed": {
+    "return_code": 0,
+    "data": {
+      "data": {
+        "order_id": "order-fixture-1",
+        "status": "processed"
+      }
+    },
+    "error_message": ""
+  },
+  "cli_query_confirmed_alias": {
+    "return_code": 0,
+    "data": {
+      "data": {
+        "order_id": "order-fixture-1",
+        "status": "success",
+        "hash": "tx-fixture-1"
+      }
+    },
+    "error_message": ""
+  },
+  "cli_query_expired": {
+    "return_code": 0,
+    "data": {
+      "data": {
+        "order_id": "order-expired",
+        "status": "expired",
+        "error_code": "TRANSACTION_EXPIRED",
+        "error_status": "transaction expired before confirmation"
+      }
+    },
+    "error_message": ""
+  },
+  "cli_query_slippage_failed": {
+    "return_code": 0,
+    "data": {
+      "data": {
+        "order_id": "order-slippage",
+        "status": "failed",
+        "error_code": "SLIPPAGE_EXCEEDED",
+        "error_status": "slippage exceeded on-chain"
+      }
+    },
+    "error_message": ""
+  },
+  "cli_rate_limit": {
+    "return_code": 1,
+    "data": {
+      "code": 429,
+      "message": "RATE_LIMIT_BANNED",
+      "reset_at": 1800000000
+    },
+    "error_message": ""
+  },
+  "cli_server_error": {
+    "return_code": 1,
+    "data": {
+      "code": 500,
+      "message": "internal server error"
+    },
+    "error_message": ""
+  },
+  "collector_rate_limit": {
+    "status_code": 429,
+    "data": {
+      "code": 429,
+      "error": "RATE_LIMIT_BANNED",
+      "reset_at": 1800000000
+    },
+    "headers": {
+      "X-RateLimit-Reset": "1800000000"
+    }
+  },
+  "collector_server_error": {
+    "status_code": 503,
+    "data": {
+      "code": 503,
+      "message": "service unavailable"
+    },
+    "headers": {}
+  },
+  "collector_validation_error": {
+    "status_code": 422,
+    "data": {
+      "code": 422,
+      "message": "invalid token address"
+    },
+    "headers": {}
+  }
+}
