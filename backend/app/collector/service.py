@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Protocol, Sequence
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Mapping, Protocol, Sequence
 
 from .constants import DISCOVERY_TYPES
 from .discovery import DiscoveryService
@@ -30,6 +31,7 @@ class CollectionReport:
     rejected: int
     unfinished_duplicates: int
     finalized: int = 0
+    rejection_reasons: Mapping[str, int] = field(default_factory=dict)
 
 
 class CollectorService:
@@ -49,6 +51,7 @@ class CollectorService:
 
     async def collect_once(self, *, limit: int = 80, now_ts: int | None = None) -> CollectionReport:
         discovered = accepted = rejected = duplicates = 0
+        rejection_reasons: Counter[str] = Counter()
         for token_type in DISCOVERY_TYPES:
             candidates = await self.discovery.discover(token_type, limit=limit)
             discovered += len(candidates)
@@ -59,10 +62,17 @@ class CollectorService:
                 result = await self.enrichment.enrich(candidate, now_ts=now_ts)
                 if result.sample is None:
                     rejected += 1
+                    rejection_reasons.update(result.decision.reasons or ("unspecified",))
                     continue
                 await self.sink.add_sample(result.sample)
                 accepted += 1
-        return CollectionReport(discovered, accepted, rejected, duplicates)
+        return CollectionReport(
+            discovered,
+            accepted,
+            rejected,
+            duplicates,
+            rejection_reasons=dict(rejection_reasons.most_common()),
+        )
 
     async def finalize_due(self, *, now_ts: int | None = None) -> CollectionReport:
         current = int(now_ts or time.time())

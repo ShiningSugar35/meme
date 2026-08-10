@@ -60,6 +60,9 @@ export function RuntimePage() {
   const health = runtime.model_health;
   const healthState = text(health.state, "not_evaluated");
   const healthReason = text(health.reason, "尚未形成足够的近期成熟 OOS 样本");
+  const rejectionReasons = runtime.collector.rejection_reasons && typeof runtime.collector.rejection_reasons === "object"
+    ? Object.entries(runtime.collector.rejection_reasons as Record<string, unknown>).sort((a, b) => number(b[1]) - number(a[1])).slice(0, 8)
+    : [];
 
   const workers = [
     ["Collector", "Trenches → enrichment → 标签补齐", runtime.collector, RefreshCw],
@@ -123,6 +126,17 @@ export function RuntimePage() {
             <div><dt>训练任务</dt><dd className="mono">{text(health.training_run_id)}</dd></div>
           </dl>
         </article>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading"><div><h2>最近采集周期</h2><p>只增加可观测性，不改变任何准入阈值；拒绝原因按本轮候选命中次数排序</p></div><StatusBadge label={text(runtime.collector.mode, "collector")} /></div>
+        <dl className="health-list">
+          <div><dt>发现候选</dt><dd>{number(runtime.collector.discovered)}</dd></div>
+          <div><dt>成功入样</dt><dd>{number(runtime.collector.accepted)}</dd></div>
+          <div><dt>规则拒绝</dt><dd>{number(runtime.collector.rejected)}</dd></div>
+          <div><dt>未成熟重复</dt><dd>{number(runtime.collector.duplicates)}</dd></div>
+          {rejectionReasons.length ? rejectionReasons.map(([reason, count]) => <div key={reason}><dt className="mono">{reason}</dt><dd>{number(count)}</dd></div>) : <div><dt>拒绝原因</dt><dd>—</dd></div>}
+        </dl>
       </section>
 
       <section className="panel">

@@ -209,7 +209,13 @@ class CollectorWorker:
         while not self._stop.is_set():
             started = time.time()
             cycle_errors: list[dict[str, str]] = []
-            collection_stats = {"discovered": 0, "accepted": 0, "rejected": 0, "duplicates": 0}
+            collection_stats = {
+                "discovered": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "duplicates": 0,
+                "rejection_reasons": {},
+            }
             monitor_stats = {
                 "paper_positions_checked": 0,
                 "paper_positions_closed": 0,
@@ -262,6 +268,7 @@ class CollectorWorker:
                         "accepted": collection.accepted,
                         "rejected": collection.rejected,
                         "duplicates": collection.unfinished_duplicates,
+                        "rejection_reasons": dict(collection.rejection_reasons),
                     }
                 except Exception as exc:
                     message = f"{type(exc).__name__}: {exc}"[:500]
