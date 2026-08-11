@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.database import Database
+from backend.app.repositories.models import ModelRepository
 from backend.app.services.dashboard import DashboardService
 from backend.app.services.paper_trading import PaperTradingService
 
@@ -89,6 +90,7 @@ def test_dashboard_excludes_previous_simulation_sessions_but_keeps_live(tmp_path
     dashboard = DashboardService(database).overview()
 
     assert dashboard["simulation"]["session"]["id"] == current
+    assert dashboard["live_realized_pnl_usd"] == pytest.approx(2.5)
     assert dashboard["simulation"]["accounts"]["paper"]["realized_pnl_usd"] == pytest.approx(7.5)
     assert dashboard["pnl"]["seven_days"]["paper"] == pytest.approx(7.5)
     assert dashboard["pnl"]["seven_days"]["live"] == pytest.approx(2.5)
@@ -112,6 +114,23 @@ def test_dashboard_excludes_previous_simulation_sessions_but_keeps_live(tmp_path
 def test_portfolio_view_filters_profile_time_and_exposes_market_snapshot(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     paper = PaperTradingService(database)
+    models = ModelRepository(database)
+    models.register(
+        {
+            "id": "internal-long-model-id",
+            "version": "internal-long-model-id",
+            "algorithm": "logistic_regression",
+            "status": "candidate",
+            "early_stage": True,
+            "trained_at": "2026-08-10T10:00:00+00:00",
+            "feature_names": ["age"],
+            "parameters": {},
+            "thresholds": {"aggressive": 0.2, "balanced": 0.4, "conservative": 0.8},
+            "metrics": {},
+            "artifact_path": "ml_models/test.joblib",
+        }
+    )
+    models.promote("internal-long-model-id")
     session_id = paper.ensure_simulation_session()["id"]
     now = datetime.now(timezone.utc)
     insert_closed(
@@ -168,6 +187,7 @@ def test_portfolio_view_filters_profile_time_and_exposes_market_snapshot(tmp_pat
     )
 
     assert view["history"]["total"] == 1
+    assert view["model_alias"] == "sim_20260810"
     assert [row["id"] for row in view["history"]["items"]] == ["balanced-recent"]
     assert [row["id"] for row in view["current"]] == ["balanced-open"]
     assert view["current"][0]["current_liquidity_usd"] == pytest.approx(12345.0)
@@ -187,5 +207,9 @@ def test_simulation_audit_has_one_row_per_profile_per_session(tmp_path: Path) ->
     rows = paper.simulation_audit(limit_sessions=1)
 
     assert [row["profile"] for row in rows] == ["balanced", "aggressive", "conservative"]
+    assert rows[0]["first_entry_time"] == (now - timedelta(hours=1)).isoformat()
+    assert rows[0]["last_exit_time"] == now.isoformat()
+    assert rows[0]["source_label"] == "模型自动更新"
+    assert rows[2]["first_entry_time"] is None
     pnl = {row["profile"]: row["realized_pnl_usd"] for row in rows}
     assert pnl == {"balanced": pytest.approx(1.0), "aggressive": pytest.approx(2.0), "conservative": pytest.approx(0.0)}

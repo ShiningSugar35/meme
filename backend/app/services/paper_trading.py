@@ -47,6 +47,8 @@ class PaperMonitorResult:
 class PaperTradingService:
     """SQLite-backed paper ledger using the high-fidelity quote model."""
 
+    EXIT_MAX_ATTEMPTS = 7
+
     def __init__(
         self,
         database: Database,
@@ -343,15 +345,35 @@ class PaperTradingService:
             accounts = session.get("accounts") or {}
             for account in PAPER_ACCOUNTS:
                 summary = accounts.get(account) or {}
+                timing = self.database.fetch_one(
+                    """
+                    SELECT MIN(entry_time) AS first_entry_time,
+                           MAX(exit_time) AS last_exit_time
+                    FROM positions
+                    WHERE simulation_session_id=? AND account_kind=?
+                    """,
+                    (session["id"], account),
+                ) or {}
+                latest_model = self.database.fetch_one(
+                    """
+                    SELECT model_id FROM positions
+                    WHERE simulation_session_id=? AND account_kind=? AND model_id IS NOT NULL
+                    ORDER BY entry_time DESC LIMIT 1
+                    """,
+                    (session["id"], account),
+                ) or {}
                 rows.append(
                     {
                         "session_id": session["id"],
                         "profile": profile_by_account[account],
                         "account_kind": account,
                         "status": session["status"],
-                        "started_at": session["started_at"],
-                        "ended_at": session.get("ended_at"),
-                        "created_reason": session.get("created_reason"),
+                        "first_entry_time": timing.get("first_entry_time"),
+                        "last_exit_time": timing.get("last_exit_time"),
+                        "source_label": self._model_update_source(
+                            latest_model.get("model_id"),
+                            str(session.get("created_reason") or ""),
+                        ),
                         "positions": int(summary.get("positions") or 0),
                         "open_positions": int(summary.get("open_positions") or 0),
                         "closed_positions": int(summary.get("closed_positions") or 0),
@@ -359,6 +381,23 @@ class PaperTradingService:
                     }
                 )
         return rows
+
+    def _model_update_source(self, model_id: str | None, fallback_reason: str) -> str:
+        if model_id:
+            run = self.database.fetch_one(
+                """
+                SELECT trigger FROM training_runs
+                WHERE candidate_model_id=? AND status='completed'
+                ORDER BY completed_at DESC LIMIT 1
+                """,
+                (model_id,),
+            ) or {}
+            trigger = str(run.get("trigger") or "")
+            if trigger == "manual":
+                return "模型手动更新"
+            if trigger:
+                return "模型自动更新"
+        return "模型手动更新" if fallback_reason == "manual_reset" else "模型自动更新"
 
     def sync_shadow_accounts(self, *, cash_usd: float, sol_fee_reserve: float, snapshot_id: str) -> None:
         session = self.ensure_simulation_session()
@@ -521,17 +560,17 @@ class PaperTradingService:
         if row["status"] == "closed":
             return PaperMonitorResult(position_id, "closed", "already_closed")
 
+        current_ts = int(now_ts or datetime.now(timezone.utc).timestamp())
         try:
             metadata = json.loads(row.get("metadata_json") or "{}")
         except (TypeError, json.JSONDecodeError):
             metadata = {}
         pending_exit = metadata.get("paper_exit_pending")
         if isinstance(pending_exit, dict):
-            return self._execute_monitored_exit(row, metadata, pending_exit)
+            return self._execute_monitored_exit(row, metadata, pending_exit, now_ts=current_ts)
         if row["status"] != "open":
             return PaperMonitorResult(position_id, "pending", f"position_{row['status']}")
 
-        current_ts = int(now_ts or datetime.now(timezone.utc).timestamp())
         opened_at = datetime.fromisoformat(str(row["entry_time"]))
         if opened_at.tzinfo is None:
             opened_at = opened_at.replace(tzinfo=timezone.utc)
@@ -604,13 +643,15 @@ class PaperTradingService:
         )
         row["status"] = "closing"
         row["metadata_json"] = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
-        return self._execute_monitored_exit(row, metadata, pending_exit)
+        return self._execute_monitored_exit(row, metadata, pending_exit, now_ts=current_ts)
 
     def _execute_monitored_exit(
         self,
         row: dict[str, Any],
         metadata: dict[str, Any],
         pending_exit: dict[str, Any],
+        *,
+        now_ts: int,
     ) -> PaperMonitorResult:
         position_id = str(row["id"])
         quantity = float(row.get("token_amount") or 0)
@@ -647,23 +688,34 @@ class PaperTradingService:
                 float(pending_exit.get("network_fee_sol_charged") or 0) + charged_network_fee
             )
             metadata["paper_exit_pending"] = pending_exit
-            with self.database.transaction(immediate=True) as connection:
-                connection.execute(
-                    "UPDATE positions SET status='closing', metadata_json=? WHERE id=?",
-                    (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
+            if charged_network_fee:
+                self.database.set_runtime_state(f"portfolio_account:{row['account_kind']}", next_state)
+            if self._sell_failure_is_terminal(row, pending_exit, now_ts=now_ts):
+                return self._finalize_failed_exit(
+                    row,
+                    metadata,
+                    failure_reason=str(pending_exit["last_failure"]),
+                    failed_at=now_ts,
                 )
-                if charged_network_fee:
-                    self._write_runtime_state(
-                        connection,
-                        f"portfolio_account:{row['account_kind']}",
-                        next_state,
-                    )
+            self.database.execute(
+                "UPDATE positions SET status='closing', metadata_json=? WHERE id=?",
+                (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
+            )
             return PaperMonitorResult(position_id, "pending", pending_exit["last_failure"], trigger_at)
 
         state = self.ensure_account(row["account_kind"])
         if float(state["sol_fee_reserve"]) < quote.network_fee_sol:
+            pending_exit["attempt_count"] = int(pending_exit.get("attempt_count") or 0) + 1
             pending_exit["last_failure"] = "paper_sol_reserve_depleted"
+            pending_exit["last_attempt_at"] = utc_now_iso()
             metadata["paper_exit_pending"] = pending_exit
+            if self._sell_failure_is_terminal(row, pending_exit, now_ts=now_ts):
+                return self._finalize_failed_exit(
+                    row,
+                    metadata,
+                    failure_reason="paper_sol_reserve_depleted",
+                    failed_at=now_ts,
+                )
             self.database.execute(
                 "UPDATE positions SET status='closing', metadata_json=? WHERE id=?",
                 (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
@@ -732,6 +784,108 @@ class PaperTradingService:
             details={"account_kind": row["account_kind"], "exit_reason": reason},
         )
         return PaperMonitorResult(position_id, "closed", reason, trigger_at)
+
+    def _sell_failure_is_terminal(
+        self,
+        row: dict[str, Any],
+        pending_exit: dict[str, Any],
+        *,
+        now_ts: int,
+    ) -> bool:
+        attempts = int(pending_exit.get("attempt_count") or 0)
+        if attempts >= self.EXIT_MAX_ATTEMPTS:
+            return True
+        failure = str(pending_exit.get("last_failure") or "")
+        if failure not in {"no_route", "paper_sol_reserve_depleted"}:
+            return False
+        try:
+            expires_at = datetime.fromisoformat(str(row["expires_at"]))
+        except (TypeError, ValueError):
+            return False
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return now_ts >= int(expires_at.timestamp())
+
+    def _finalize_failed_exit(
+        self,
+        row: dict[str, Any],
+        metadata: dict[str, Any],
+        *,
+        failure_reason: str,
+        failed_at: int,
+    ) -> PaperMonitorResult:
+        position_id = str(row["id"])
+        pending_exit = metadata.get("paper_exit_pending")
+        pending_exit = pending_exit if isinstance(pending_exit, dict) else {}
+        trigger_at = int(pending_exit.get("trigger_at") or 0)
+        invested = float(row.get("invested_usd") or 0)
+        entry_fee = float(metadata.get("entry_fee_usd") or 0)
+        final_metadata = dict(metadata)
+        final_metadata.pop("paper_exit_pending", None)
+        final_metadata["sell_failed"] = True
+        final_metadata["sell_failure_reason"] = failure_reason
+        final_metadata["sell_failure_attempts"] = int(pending_exit.get("attempt_count") or 0)
+        final_metadata["sell_failed_at"] = datetime.fromtimestamp(failed_at, timezone.utc).isoformat()
+        exit_reason = f"sell_failed_{failure_reason}"
+        gross_pnl = -invested
+        net_pnl = -invested - entry_fee
+        with self.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE positions
+                SET status='closed', exit_time=?, exit_price=0, exit_reason=?,
+                    gross_pnl_usd=?, net_pnl_usd=?, metadata_json=?
+                WHERE id=? AND status='closing'
+                """,
+                (
+                    datetime.fromtimestamp(failed_at, timezone.utc).isoformat(),
+                    exit_reason,
+                    gross_pnl,
+                    net_pnl,
+                    json.dumps(final_metadata, ensure_ascii=False, separators=(",", ":")),
+                    position_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return PaperMonitorResult(position_id, "pending", "position_state_changed", trigger_at or None)
+            client_order_id = f"{position_id}:sell_failed"
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO trades(
+                    id,position_id,client_order_id,intent_fingerprint,journal_state,side,account_kind,
+                    status,requested_amount,failure_category,failure_message,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    position_id,
+                    client_order_id,
+                    hashlib.sha256(client_order_id.encode()).hexdigest(),
+                    "terminal",
+                    "sell",
+                    row["account_kind"],
+                    "failed",
+                    invested,
+                    failure_reason,
+                    failure_reason,
+                    utc_now_iso(),
+                    utc_now_iso(),
+                ),
+            )
+        self.database.audit(
+            category="simulation",
+            action="paper_sell_failed_closed",
+            severity="warning",
+            entity_type="position",
+            entity_id=position_id,
+            details={
+                "account_kind": row["account_kind"],
+                "failure_reason": failure_reason,
+                "attempts": int(pending_exit.get("attempt_count") or 0),
+                "net_pnl_usd": net_pnl,
+            },
+        )
+        return PaperMonitorResult(position_id, "closed", exit_reason, trigger_at or None)
 
     def liquidate_position(
         self,

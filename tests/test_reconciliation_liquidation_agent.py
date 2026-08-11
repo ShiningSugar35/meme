@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -394,6 +395,41 @@ async def test_pending_live_liquidation_resumes_same_order_id_after_restart_cycl
     ]
     position = database.fetch_one("SELECT status, exit_reason FROM positions WHERE id='live-resume'")
     assert position == {"status": "closed", "exit_reason": "liquidate_all"}
+
+
+@pytest.mark.asyncio
+async def test_terminal_live_sell_failure_is_closed_and_counted_as_loss(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    insert_position(
+        database,
+        position_id="live-terminal-failure",
+        address="live-terminal-token",
+        account_kind="live",
+        metadata_json='{"quantity_atomic":"123456","quote_token":"SOL","entry_fee_usd":0.5}',
+    )
+    runtime = RuntimeService(database, settings)
+    database.set_runtime_state("live_trading_enabled", True)
+    prepared = runtime.prepare_liquidation("live")
+    runtime.confirm_liquidation(prepared.challenge, "live")
+    executor = SequencedLiveExecutor([OrderStatus.FAILED])
+
+    report = await LiquidationService(
+        database,
+        settings,
+        live_executor=executor,
+    ).process_active_job()
+
+    assert report is not None and report.status == "completed"
+    assert report.closed_positions == 1
+    row = database.fetch_one(
+        "SELECT status,exit_reason,exit_time,net_pnl_usd,metadata_json FROM positions WHERE id='live-terminal-failure'"
+    )
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "sell_failed_order_failed"
+    assert row["exit_time"] is not None
+    assert row["net_pnl_usd"] == pytest.approx(-50.5)
+    assert json.loads(row["metadata_json"])["sell_failed"] is True
 
 
 def test_agent_routes_require_human_approval_and_never_expose_live_execution(tmp_path: Path) -> None:

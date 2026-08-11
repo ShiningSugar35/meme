@@ -280,7 +280,11 @@ npm run dev
 
 左侧导航固定为：`总览 → 持仓 → 样本采集 → 运行监控 → 模型中心 → Agent审批`。`/signals` 路由保留，但产品名称显示为“样本采集”。
 
-“持仓”页采用两层视图：先切换 `模拟仓 / 实盘`，再点击 `平衡 / 激进 / 保守` 档位。仅模拟运行时默认进入模拟仓；实盘与模拟均运行时默认进入实盘。右上角原 `Asia / Shanghai` 位置用于 `切换至实盘 / 切换至模拟仓` 按钮。当前持仓只显示所选档位，并展示由持仓监控周期写入的当前流动性/市值快照，以及 `当前价格 / 买入价格` 的当前涨幅倍数（两位小数，如 `0.92x`）；Token 支持悬浮复制。市值优先使用 GMGN 直接 marketcap 字段，若当前 token-info 响应未给出，则用同一 GMGN 响应的当前价格 × circulating_supply（缺失时 total_supply）回补，不使用 migration_market_cap 冒充当前市值。交易历史由 SQLite 真分页，默认 30 行/页，可持久记忆用户选择的每页行数，并支持页码跳转和退出时间范围筛选。交易审计按每个 simulation session 的三档分别列示，不再把三档 PnL 合并成一个 session 总数。一键清仓 challenge/job 同样跟随当前 `mode`：模拟页只冻结当前模拟 session，实盘页只冻结 live 仓；兼容 API 仍保留 `all` 全局应急作用域。`mode=live` 的同构视图和后端账本接口已搭好，数据源契约标记为 GMGN Trading API，但不会因此启用自动 live BUY 或伪造钱包余额。
+“持仓”页采用两层视图：先切换 `模拟仓 / 实盘`，再点击 `平衡 / 激进 / 保守` 档位。仅模拟运行时默认进入模拟仓；实盘与模拟均运行时默认进入实盘。右上角原 `Asia / Shanghai` 位置用于 `切换至实盘 / 切换至模拟仓` 按钮。当前模型在该页使用 `sim_YYYYMMDD` / `live_YYYYMMDD` 运行别名，日期取当前 Champion 的北京时间训练日期；数据库/模型工件仍保留内部唯一 ID，不用短名做主键。当前持仓只显示所选档位，并展示由持仓监控周期写入的当前流动性/市值快照，以及 `当前价格 / 买入价格` 的当前涨幅倍数（两位小数，如 `0.92x`）；Token 支持悬浮复制。市值优先使用 GMGN 直接 marketcap 字段，若当前 token-info 响应未给出，则用同一 GMGN 响应的当前价格 × circulating_supply（缺失时 total_supply）回补，不使用 migration_market_cap 冒充当前市值。交易历史由 SQLite 真分页，默认 30 行/页，可持久记忆用户选择的每页行数，并支持页码跳转和退出时间范围筛选；新增平仓时间，终态卖出失败显示“卖出失败”并给出对应失败原因。交易审计按每个 simulation session 的三档分别列示，买入/卖出时间来自该档位实际仓位的第一笔 entry 与最后一笔 exit，来源统一显示为“模型自动更新/模型手动更新”。一键清仓 challenge/job 同样跟随当前 `mode`：模拟页只冻结当前模拟 session，实盘页只冻结 live 仓；兼容 API 仍保留 `all` 全局应急作用域。`mode=live` 的同构视图和后端账本接口已搭好，数据源契约标记为 GMGN Trading API，但不会因此启用自动 live BUY 或伪造钱包余额。
+
+总览页 Champion 只展示短显示名 `YYYYMMDD-xxx`（例如 `20260810-LR`、`20260810-XGBoost`），不再显示长内部 model id 或 EARLY 小字；“实盘收益”只累计 `account_kind='live'` 且已经 `closed` 的已实现 PnL，不混入模拟盘。
+
+卖出失败口径已经显式冻结：模拟仓到 2 小时后确认 `no_route`/手续费储备耗尽，或一般卖出失败累计达到 7 次重试，转为 `closed` 的失败平仓；实盘强制退出明确返回 `NO_ROUTE`、最终 `FAILED` 或 `EXPIRED` 时也转为失败平仓。失败平仓按 `-投入本金 - 已支付入场平台费` 计入已实现 PnL，并保留 `sell_failure_reason` 审计。`submission_unknown`、缺少 token 原子数量、钱包事实缺失等无法确认是否真实成交的系统问题仍 fail-closed，不得伪造为交易亏损。
 
 “运行监控”页提供 Collector 的结构化实时终端：后端保留最近 250 条采集事件，前端约每 1.5 秒刷新，按三生命周期分别显示 returned / accepted / rejected / duplicate，并逐条展示候选二筛拒绝原因、成功入样、T+2h 标签补齐和阶段异常。该终端来自 Collector 的实际事件流，不是对静态日志文件的装饰性回放。
 
@@ -309,7 +313,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-11 当前基线：后端 `pytest -q` **90/90 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV/schema migration、特征泄漏与自选 feature schema、五模型/时序/Champion 晋级回滚、durable TrainingWorker/周训/7 日退化监控、simulation session/1m first-touch/重启恢复、持仓当前市场快照、按档位/时间筛选与真分页、三档交易审计、模拟/实盘清仓作用域隔离、monitor-only 生命周期、Agent 人工审批、非实盘 FastAPI E2E，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
+2026-08-11 当前基线：后端 `pytest -q` **93/93 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV/schema migration、特征泄漏与自选 feature schema、五模型/时序/Champion 晋级回滚、durable TrainingWorker/周训/7 日退化监控、simulation session/1m first-touch/重启恢复、持仓当前市场快照、按档位/时间筛选与真分页、三档交易审计、模拟/实盘清仓作用域隔离、no-route/重试耗尽/实盘终态卖出失败计入已实现亏损、monitor-only 生命周期、Agent 人工审批、非实盘 FastAPI E2E，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
@@ -364,5 +368,5 @@ npm run build
 
 在算法与交易策略上，他给出的建议同样带着温度，却始终落在刀刃上：守住 2 小时策略窗口与 T+2h 标签补齐；先用规则初筛挡住明显不安全的样本，再用单一 Champion 与三档阈值做二筛，而不是让一堆模型彼此打架；强调时序切分、OOS 比较、退化监控与“宁可安全拒绝、也不盲目晋级”，好让早期 Pump.fun legacy 样本不至于被夸大成全市场的幻觉；在退出与风控上，推动把 1m K 线 first-touch、仓位上限、同币唯一、日损与连亏门禁写进可测试的约束；并一次次提醒——实盘必须服从 `DRY_RUN`、幂等 journal 与二次确认，绝不能用漂亮的模拟 PnL 去绕过真实的资金事实。这些话语听起来并不华丽，却像灯塔一样，让项目在兴奋与谨慎之间始终找得到岸。
 
-截至 2026-08-11，仓库里已经能看见这条主链真正合拢：legacy CSV 迁入、持续采集与入场特征、标签回填、五候选训练、Champion 晋级与回滚、三档独立模拟账本、重启可恢复的 worker，以及 90/90 后端测试与前端构建通过。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。再次感谢 tangerinepith 的耐心、判断力，以及对细节近乎执拗的较真；正是这些看不见的坚持，让系统不只会交易，更懂得为何而交易。
+截至 2026-08-11，仓库里已经能看见这条主链真正合拢：legacy CSV 迁入、持续采集与入场特征、标签回填、五候选训练、Champion 晋级与回滚、三档独立模拟账本、重启可恢复的 worker，以及 93/93 后端测试与前端构建通过。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。再次感谢 tangerinepith 的耐心、判断力，以及对细节近乎执拗的较真；正是这些看不见的坚持，让系统不只会交易，更懂得为何而交易。
 

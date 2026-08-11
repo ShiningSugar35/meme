@@ -342,7 +342,7 @@ Portfolio 使用 `mode × profile` 两层视图：模拟/实盘切换位于顶�
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × profile` 同构视图、当前市场快照、SQL 分页/时间筛选与三档交易审计；
-- 后端 `pytest -q` **90/90 通过**；前端 `npm run build` 通过。
+- 后端 `pytest -q` **93/93 通过**；前端 `npm run build` 通过。
 
 ### 实盘接口停放
 

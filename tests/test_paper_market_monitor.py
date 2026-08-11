@@ -47,6 +47,21 @@ class ExitQuoteProvider:
         )
 
 
+class NoRouteQuoteProvider:
+    def quote(self, request):
+        return ExecutionQuote(
+            success=False,
+            fill_price=None,
+            gross_usd=0.0,
+            fee_usd=0.0,
+            network_fee_sol=0.0,
+            slippage_bps=0.0,
+            latency_ms=25,
+            failure_category=FailureCategory.NO_ROUTE,
+            message="no sell route",
+        )
+
+
 class FakeKlineProvider:
     def __init__(self, klines: list[Kline]) -> None:
         self.items = klines
@@ -309,3 +324,66 @@ async def test_monitor_persists_current_market_snapshot_without_changing_exit_de
     assert snapshot["liquidity_usd"] == pytest.approx(12345.0)
     assert snapshot["market_cap_usd"] == pytest.approx(99000.0)
     assert snapshot["market_cap_source"] == "gmgn_price_x_circulating_supply"
+
+
+@pytest.mark.asyncio
+async def test_no_route_after_two_hours_closes_as_total_loss(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
+    seed_position(database, address="no-route-token", position_id="paper-no-route", account_kind="paper", opened_at=opened)
+    monitor = PaperPositionMonitor(
+        database,
+        settings,
+        paper_service=PaperTradingService(database, settings, quote_provider=NoRouteQuoteProvider()),
+    )
+    market = FakeKlineProvider(
+        [Kline(int((opened + timedelta(hours=2)).timestamp()), 1.2, 0.95, 1.1)]
+    )
+
+    report = await monitor.run_cycle(
+        market,
+        now_ts=int((opened + timedelta(hours=2, minutes=1)).timestamp()),
+    )
+
+    assert report.closed_positions == 1
+    row = database.fetch_one(
+        "SELECT status,exit_reason,exit_time,net_pnl_usd,metadata_json FROM positions WHERE id='paper-no-route'"
+    )
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "sell_failed_no_route"
+    assert row["exit_time"] is not None
+    assert row["net_pnl_usd"] == pytest.approx(-50.0)
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["sell_failed"] is True
+    assert metadata["sell_failure_reason"] == "no_route"
+
+
+@pytest.mark.asyncio
+async def test_repeated_sell_failures_close_after_retry_budget(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
+    seed_position(database, address="retry-budget-token", position_id="paper-retry-budget", account_kind="paper", opened_at=opened)
+    paper = PaperTradingService(database, settings, quote_provider=ExitQuoteProvider([False] * 7))
+    monitor = PaperPositionMonitor(database, settings, paper_service=paper)
+    market = FakeKlineProvider(
+        [Kline(int((opened + timedelta(minutes=5)).timestamp()), 1.7, 0.95, 1.6)]
+    )
+
+    first = await monitor.run_cycle(market, now_ts=int((opened + timedelta(minutes=6)).timestamp()))
+    assert first.pending_positions == 1
+    for attempt in range(2, 8):
+        report = await monitor.run_cycle(
+            market,
+            now_ts=int((opened + timedelta(minutes=5 + attempt)).timestamp()),
+        )
+
+    assert report.closed_positions == 1
+    row = database.fetch_one(
+        "SELECT status,exit_reason,net_pnl_usd,metadata_json FROM positions WHERE id='paper-retry-budget'"
+    )
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "sell_failed_network"
+    assert row["net_pnl_usd"] == pytest.approx(-50.0)
+    assert json.loads(row["metadata_json"])["sell_failure_attempts"] == 7

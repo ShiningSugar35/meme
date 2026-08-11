@@ -100,6 +100,7 @@ export interface DatasetStats {
 export interface DashboardData {
   as_of: string;
   model: ModelVersion | null;
+  live_realized_pnl_usd: number;
   dataset: DatasetStats;
   pnl: {
     today: Record<string, number>;
@@ -180,9 +181,9 @@ export interface SimulationAuditItem {
   profile: Profile;
   account_kind: string;
   status: "active" | "closed";
-  started_at: string;
-  ended_at: string | null;
-  created_reason: string;
+  first_entry_time: string | null;
+  last_exit_time: string | null;
+  source_label: string;
   positions: number;
   open_positions: number;
   closed_positions: number;
@@ -207,6 +208,8 @@ export interface Position {
   current_liquidity_usd?: number | null;
   current_market_cap_usd?: number | null;
   market_snapshot_at?: string | null;
+  sell_failed?: boolean;
+  sell_failure_reason?: string | null;
 }
 
 export interface PortfolioView {
@@ -215,6 +218,7 @@ export interface PortfolioView {
   live_trading_enabled: boolean;
   simulation_enabled: boolean;
   provider: string;
+  model_alias: string | null;
   session: SimulationStatus["session"] | null;
   accounts: Record<Profile, Partial<SimulationAccount> & {
     positions?: number;

@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..trading.live.errors import LiveTradeError
-from ..trading.live.models import ExecutionResult, OrderStatus, SwapIntent, TradeSide
+from ..trading.live.models import ExecutionResult, FailureKind, OrderStatus, SwapIntent, TradeSide
 from .live_trading import LiveTradingService
 from .paper_trading import PaperTradingService
 
@@ -211,6 +211,14 @@ class LiquidationService:
                     client_order_id=client_order_id,
                     error_code=exc.code,
                 )
+            if exc.kind is FailureKind.NO_ROUTE:
+                return self._finalize_live_sell_failure(
+                    position,
+                    metadata,
+                    failure_reason="no_route",
+                    client_order_id=client_order_id,
+                    error_code=exc.code,
+                )
             self.database.execute(
                 "UPDATE positions SET status='open' WHERE id=? AND status='closing'",
                 (position_id,),
@@ -246,6 +254,16 @@ class LiquidationService:
                 provider_order_id=result.order_id,
             )
 
+        if result.status in {OrderStatus.FAILED, OrderStatus.EXPIRED}:
+            return self._finalize_live_sell_failure(
+                position,
+                metadata,
+                failure_reason=f"order_{result.status.value}",
+                client_order_id=client_order_id,
+                error_code=result.error_code,
+                provider_order_id=result.order_id,
+            )
+
         self.database.execute(
             "UPDATE positions SET status='open' WHERE id=? AND status='closing'",
             (position_id,),
@@ -256,6 +274,71 @@ class LiquidationService:
             client_order_id=client_order_id,
             provider_order_id=result.order_id,
             error_code=result.error_code,
+        )
+
+    def _finalize_live_sell_failure(
+        self,
+        position: dict[str, Any],
+        metadata: dict[str, Any],
+        *,
+        failure_reason: str,
+        client_order_id: str,
+        error_code: str | None = None,
+        provider_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        position_id = str(position["id"])
+        invested = float(position.get("invested_usd") or 0)
+        entry_fee = float(metadata.get("entry_fee_usd") or metadata.get("platform_fee_usd") or 0)
+        net_pnl = -invested - entry_fee
+        exit_reason = f"sell_failed_{failure_reason}"
+        final_metadata = dict(metadata)
+        final_metadata["sell_failed"] = True
+        final_metadata["sell_failure_reason"] = failure_reason
+        final_metadata["sell_failed_at"] = utc_now_iso()
+        updated = self.database.execute(
+            """
+            UPDATE positions
+            SET status='closed', exit_time=?, exit_price=0, exit_reason=?,
+                gross_pnl_usd=?, net_pnl_usd=?, metadata_json=?
+            WHERE id=? AND status='closing'
+            """,
+            (
+                utc_now_iso(),
+                exit_reason,
+                -invested,
+                net_pnl,
+                json.dumps(final_metadata, ensure_ascii=False, separators=(",", ":")),
+                position_id,
+            ),
+        )
+        if updated != 1:
+            return self._result(
+                "blocked",
+                "position_state_changed",
+                client_order_id=client_order_id,
+                provider_order_id=provider_order_id,
+                error_code=error_code,
+            )
+        self.database.audit(
+            category="trading",
+            action="live_sell_failed_closed",
+            severity="warning",
+            entity_type="position",
+            entity_id=position_id,
+            details={
+                "failure_reason": failure_reason,
+                "net_pnl_usd": net_pnl,
+                "client_order_id": client_order_id,
+                "provider_order_id": provider_order_id,
+                "error_code": error_code,
+            },
+        )
+        return self._result(
+            "closed",
+            exit_reason,
+            client_order_id=client_order_id,
+            provider_order_id=provider_order_id,
+            error_code=error_code,
         )
 
     def _build_report(self, job: dict[str, Any]) -> LiquidationReport:

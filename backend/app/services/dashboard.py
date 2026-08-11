@@ -52,6 +52,7 @@ class DashboardService:
         return {
             "as_of": now.isoformat(),
             "model": champion,
+            "live_realized_pnl_usd": self._live_realized_pnl(),
             "dataset": {
                 **stats,
                 "positive_rate": positives / mature if mature else None,
@@ -118,6 +119,7 @@ class DashboardService:
 
         runtime = RuntimeService(self.database).status()
         simulation = PaperTradingService(self.database).simulation_status()
+        champion = self.models.champion()
         account_kind = self.PROFILE_ACCOUNT[profile] if mode == "simulation" else "live"
         common_clauses = ["account_kind=?", "profile=?"]
         common_params: list[Any] = [account_kind, profile]
@@ -209,6 +211,7 @@ class DashboardService:
             "live_trading_enabled": bool(runtime.get("live_trading_enabled")),
             "simulation_enabled": bool(runtime.get("simulation_enabled")),
             "provider": "gmgn_api" if mode == "live" else "simulator",
+            "model_alias": self._model_runtime_alias(mode, champion),
             "session": simulation["session"] if mode == "simulation" else None,
             "accounts": accounts,
             "account": account_summary,
@@ -235,8 +238,34 @@ class DashboardService:
         result["current_liquidity_usd"] = snapshot.get("liquidity_usd")
         result["current_market_cap_usd"] = snapshot.get("market_cap_usd")
         result["market_snapshot_at"] = snapshot.get("as_of")
+        result["sell_failed"] = bool(metadata.get("sell_failed")) or str(result.get("exit_reason") or "").startswith("sell_failed_")
+        result["sell_failure_reason"] = metadata.get("sell_failure_reason")
         result.pop("metadata_json", None)
         return result
+
+    def _live_realized_pnl(self) -> float:
+        row = self.database.fetch_one(
+            """
+            SELECT COALESCE(SUM(net_pnl_usd),0) AS pnl
+            FROM positions
+            WHERE account_kind='live' AND status='closed' AND net_pnl_usd IS NOT NULL
+            """
+        ) or {"pnl": 0.0}
+        return float(row.get("pnl") or 0.0)
+
+    @staticmethod
+    def _model_runtime_alias(mode: str, model: dict[str, Any] | None) -> str | None:
+        if not model:
+            return None
+        try:
+            trained_at = datetime.fromisoformat(str(model.get("trained_at") or ""))
+        except ValueError:
+            return None
+        if trained_at.tzinfo is None:
+            trained_at = trained_at.replace(tzinfo=timezone.utc)
+        trained_at = trained_at.astimezone(timezone(timedelta(hours=8)))
+        prefix = "sim" if mode == "simulation" else "live"
+        return f"{prefix}_{trained_at:%Y%m%d}"
 
     def _pnl_since(self, since: str, simulation_session_id: str) -> dict[str, float]:
         rows = self.database.fetch_all(

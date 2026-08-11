@@ -21,13 +21,14 @@ const pageSizeOptions = [10, 30, 50, 100];
 
 const money = (value: number | null | undefined) => value == null
   ? "—"
-  : new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD" }).format(value);
+  : new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD", currencyDisplay: "narrowSymbol" }).format(value);
 
 const compactMoney = (value: number | null | undefined) => value == null
   ? "—"
   : new Intl.NumberFormat("zh-CN", {
       style: "currency",
       currency: "USD",
+      currencyDisplay: "narrowSymbol",
       notation: Math.abs(value) >= 10_000 ? "compact" : "standard",
       maximumFractionDigits: 2
     }).format(value);
@@ -50,6 +51,30 @@ const beijingTime = (value: string | null | undefined) => {
   const pick = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
   return `${pick("month")}/${pick("day")} ${pick("hour")}:${pick("minute")}`;
 };
+
+const failureReasonName: Record<string, string> = {
+  no_route: "无可用卖出路由",
+  quote_failed: "卖出报价失败",
+  network: "网络请求失败",
+  api: "交易 API 失败",
+  rate_limit: "接口限流",
+  chain_rejected: "链上拒绝",
+  insufficient_funds: "余额不足",
+  risk_rejected: "风控拒绝",
+  paper_sol_reserve_depleted: "SOL 手续费储备不足",
+  order_failed: "链上订单失败",
+  order_expired: "订单过期"
+};
+
+const exitReasonName: Record<string, string> = {
+  stop_loss_0_9x: "止损 0.9x",
+  take_profit_1_6x: "止盈 1.6x",
+  timeout_2h: "持仓满 2 小时",
+  liquidate_all: "一键清仓"
+};
+
+const reasonText = (exitReason: string | null, sellFailureReason?: string | null) =>
+  sellFailureReason ? (failureReasonName[sellFailureReason] ?? sellFailureReason) : (exitReason ? (exitReasonName[exitReason] ?? exitReason) : "—");
 
 const filterIso = (value: string, endOfMinute = false) => {
   if (!value) return undefined;
@@ -183,7 +208,7 @@ export function PortfolioPage() {
   };
 
   const resetSimulation = async () => {
-    if (!window.confirm("确认开始新的模拟会话？历史记录会保留，三个模拟账户会重置为 1000 USD + 0.1 SOL。")) return;
+    if (!window.confirm("确认开始新的模拟会话？历史记录会保留，三个模拟账户会重置为 $1000 + 0.1 SOL。")) return;
     setBusy(true);
     setNotice(null);
     try {
@@ -238,12 +263,12 @@ export function PortfolioPage() {
       <section className="panel simulation-session-panel">
         <div className="panel-heading">
           <div>
-            <h2>{isSimulation ? "当前模拟会话" : "当前实盘账户"}</h2>
-            <p className="mono">{isSimulation ? view.session?.id : "GMGN Trading API · live ledger"}</p>
+            <h2>{isSimulation ? "当前用于模拟盘的量化模型" : "当前用于实盘的量化模型"}</h2>
+            <p className="mono">{view.model_alias ?? (isSimulation ? "sim_未训练" : "live_未训练")}</p>
           </div>
           <StatusBadge
             tone={isSimulation || view.live_trading_enabled ? "blue" : "neutral"}
-            label={isSimulation ? `开始于 ${beijingTime(view.session?.started_at)}` : view.live_trading_enabled ? "实盘运行中" : "实盘未启动"}
+            label={isSimulation ? "模拟运行中" : view.live_trading_enabled ? "实盘运行中" : "实盘未启动"}
           />
         </div>
         <div className="simulation-account-grid">
@@ -281,16 +306,16 @@ export function PortfolioPage() {
           data.audit.items.length ? (
             <div className="table-scroll">
               <table>
-                <thead><tr><th>档位</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>交易</th><th>已实现 PnL</th><th>来源</th></tr></thead>
+                <thead><tr><th>档位</th><th>状态</th><th>买入时间</th><th>卖出时间</th><th>交易</th><th>已实现 PnL</th><th>来源</th></tr></thead>
                 <tbody>{data.audit.items.map((item) => (
                   <tr key={`${item.session_id}-${item.profile}`}>
                     <td>{profileName[item.profile]}</td>
                     <td><StatusBadge tone={item.status === "active" ? "blue" : "neutral"} label={item.status} /></td>
-                    <td>{beijingTime(item.started_at)}</td>
-                    <td>{beijingTime(item.ended_at)}</td>
+                    <td>{beijingTime(item.first_entry_time)}</td>
+                    <td>{beijingTime(item.last_exit_time)}</td>
                     <td>{item.closed_positions} / {item.positions}</td>
                     <td className={item.realized_pnl_usd < 0 ? "number-negative" : "number-positive"}>{money(item.realized_pnl_usd)}</td>
-                    <td>{item.created_reason}</td>
+                    <td>{item.source_label}</td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -342,7 +367,7 @@ export function PortfolioPage() {
           <>
             <div className="table-scroll">
               <table>
-                <thead><tr><th>Token</th><th>买入时间</th><th>投入</th><th>退出原因</th><th>净收益</th></tr></thead>
+                <thead><tr><th>Token</th><th>买入时间</th><th>平仓时间</th><th>投入</th><th>原因</th><th>净收益</th></tr></thead>
                 <tbody>{history.map((item) => (
                   <tr key={item.id}>
                     <td className="mono token-cell" title={item.token_address}>
@@ -350,8 +375,9 @@ export function PortfolioPage() {
                       <button className="token-copy-button" onClick={() => void copyToken(item.token_address)}><Copy size={11} />复制</button>
                     </td>
                     <td>{beijingTime(item.entry_time)}</td>
+                    <td>{item.sell_failed ? "卖出失败" : beijingTime(item.exit_time)}</td>
                     <td>{money(item.invested_usd)}</td>
-                    <td>{item.exit_reason ?? item.status}</td>
+                    <td>{reasonText(item.exit_reason, item.sell_failure_reason)}</td>
                     <td className={(item.net_pnl_usd ?? 0) < 0 ? "number-negative" : "number-positive"}>{money(item.net_pnl_usd)}</td>
                   </tr>
                 ))}</tbody>
