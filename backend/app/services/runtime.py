@@ -82,19 +82,37 @@ class RuntimeService:
         self.database.audit(category="runtime", action="live_trading_disabled")
         return self.status()
 
-    def _open_positions(self) -> list[dict[str, Any]]:
+    def _open_positions(self, scope: str = "all") -> list[dict[str, Any]]:
+        if scope not in {"all", "simulation", "live"}:
+            raise ValueError("liquidation scope must be all, simulation or live")
+        clauses = ["status IN ('opening','open','closing')"]
+        parameters: list[Any] = []
+        if scope == "live":
+            clauses.append("account_kind='live'")
+        elif scope == "simulation":
+            active = self.database.fetch_one(
+                "SELECT id FROM simulation_sessions WHERE status='active' ORDER BY started_at DESC LIMIT 1"
+            )
+            if not active:
+                return []
+            clauses.append("account_kind!='live'")
+            clauses.append("simulation_session_id=?")
+            parameters.append(str(active["id"]))
+        where = " AND ".join(clauses)
         return self.database.fetch_all(
-            """
+            f"""
             SELECT id, token_address, account_kind, invested_usd, status
-            FROM positions WHERE status IN ('opening','open','closing')
+            FROM positions WHERE {where}
             ORDER BY CASE account_kind WHEN 'live' THEN 0 ELSE 1 END, entry_time
-            """
+            """,
+            tuple(parameters),
         )
 
-    def prepare_liquidation(self) -> PreparedAction:
-        open_rows = self._open_positions()
+    def prepare_liquidation(self, scope: str = "all") -> PreparedAction:
+        open_rows = self._open_positions(scope)
         active_job = self.database.get_runtime_state("liquidation_job") or {}
         summary = {
+            "scope": scope,
             "position_count": len(open_rows),
             "live_position_count": sum(row["account_kind"] == "live" for row in open_rows),
             "estimated_capital_usd": round(sum(float(row["invested_usd"] or 0) for row in open_rows), 2),
@@ -104,11 +122,11 @@ class RuntimeService:
             blocker = "liquidation already in progress"
         else:
             blocker = "no open positions" if not open_rows else None
-        return self._prepare("liquidate_all", summary, blocker)
+        return self._prepare(f"liquidate_{scope}", summary, blocker)
 
-    def confirm_liquidation(self, challenge: str) -> dict[str, Any]:
-        self._consume("liquidate_all", challenge)
-        open_rows = self._open_positions()
+    def confirm_liquidation(self, challenge: str, scope: str = "all") -> dict[str, Any]:
+        self._consume(f"liquidate_{scope}", challenge)
+        open_rows = self._open_positions(scope)
         if not open_rows:
             raise ValueError("no open positions remain")
         job_id = f"liq_{uuid.uuid4().hex}"
@@ -118,30 +136,34 @@ class RuntimeService:
             "status": "queued",
             "requested_at": requested_at,
             "mode": "sequential",
+            "scope": scope,
             "position_ids": [str(row["id"]) for row in open_rows],
             "total_positions": len(open_rows),
             "results": {},
         }
-        # Emergency liquidation revokes ordinary live execution immediately.
-        # Authorized SELL exits can still proceed through LiveTradingService by
-        # presenting this liquidation job id, while all BUY paths require a new
-        # two-click live confirmation after liquidation.
-        self.database.set_runtime_state("live_trading_enabled", False)
-        self.database.set_runtime_state("new_entries_paused", True)
-        self.database.set_runtime_state("new_entries_pause_reason", "liquidation_in_progress")
+        if scope in {"all", "live"}:
+            # Live liquidation revokes ordinary live execution immediately.
+            # Authorized SELL exits can still use the frozen liquidation job id.
+            self.database.set_runtime_state("live_trading_enabled", False)
+            self.database.set_runtime_state("new_entries_paused", True)
+            self.database.set_runtime_state("new_entries_pause_reason", "liquidation_in_progress")
+        if scope in {"all", "simulation"}:
+            self.database.set_runtime_state("simulation_entries_paused", True)
+            self.database.set_runtime_state("simulation_entries_pause_reason", "liquidation_in_progress")
         self.database.set_runtime_state("liquidation_job", job)
         self.database.audit(
             category="trading",
-            action="liquidate_all_queued",
+            action="liquidation_queued",
             severity="warning",
             entity_type="liquidation_job",
             entity_id=job_id,
             details={
+                "scope": scope,
                 "position_count": len(open_rows),
                 "live_position_count": sum(row["account_kind"] == "live" for row in open_rows),
             },
         )
-        return {"id": job_id, "status": "queued", "execution": "sequential"}
+        return {"id": job_id, "status": "queued", "execution": "sequential", "scope": scope}
 
     def collector_events(self, limit: int = 200) -> list[dict[str, Any]]:
         events = self.database.get_runtime_state("collector_events", [])

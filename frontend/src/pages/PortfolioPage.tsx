@@ -40,7 +40,7 @@ const beijingTime = (value: string | null | undefined) => {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false
+    hourCycle: "h23"
   }).formatToParts(new Date(value));
   const pick = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
   return `${pick("month")}/${pick("day")} ${pick("hour")}:${pick("minute")}`;
@@ -48,10 +48,19 @@ const beijingTime = (value: string | null | undefined) => {
 
 const filterIso = (value: string, endOfMinute = false) => {
   if (!value) return undefined;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return undefined;
-  if (endOfMinute) date.setSeconds(59, 999);
-  return date.toISOString();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute] = match;
+  const utcMillis = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour) - 8,
+    Number(minute),
+    endOfMinute ? 59 : 0,
+    endOfMinute ? 999 : 0
+  );
+  return new Date(utcMillis).toISOString();
 };
 
 const initialPageSize = () => {
@@ -144,7 +153,7 @@ export function PortfolioPage() {
     setBusy(true);
     setNotice(null);
     try {
-      setPrepared(await api.prepareLiquidation());
+      setPrepared(await api.prepareLiquidation(mode));
       setDialogOpen(true);
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : "清仓预览失败");
@@ -157,7 +166,7 @@ export function PortfolioPage() {
     if (!prepared) return;
     setBusy(true);
     try {
-      await api.confirmLiquidation(prepared.challenge);
+      await api.confirmLiquidation(prepared.challenge, mode);
       setDialogOpen(false);
       setNotice("清仓任务已进入持久化队列");
       await refresh();

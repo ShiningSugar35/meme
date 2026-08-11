@@ -268,6 +268,33 @@ async def test_live_prepare_is_blocked_by_unresolved_trade(tmp_path: Path) -> No
     assert prepared.blocker == "unresolved orders require reconciliation before live trading"
 
 
+def test_liquidation_scope_keeps_simulation_and_live_actions_separate(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    session_id = PaperTradingService(database, settings).ensure_simulation_session()["id"]
+    insert_position(database, position_id="scope-paper", address="paper-scope-token", account_kind="paper")
+    database.execute(
+        "UPDATE positions SET simulation_session_id=? WHERE id='scope-paper'",
+        (session_id,),
+    )
+    insert_position(database, position_id="scope-live", address="live-scope-token", account_kind="live")
+    database.set_runtime_state("live_trading_enabled", True)
+    runtime = RuntimeService(database, settings)
+
+    prepared = runtime.prepare_liquidation("simulation")
+    queued = runtime.confirm_liquidation(prepared.challenge, "simulation")
+    job = database.get_runtime_state("liquidation_job")
+
+    assert prepared.summary["scope"] == "simulation"
+    assert prepared.summary["position_count"] == 1
+    assert prepared.summary["live_position_count"] == 0
+    assert queued["scope"] == "simulation"
+    assert job["position_ids"] == ["scope-paper"]
+    assert database.get_runtime_state("live_trading_enabled") is True
+    assert database.get_runtime_state("new_entries_paused", False) is False
+    assert database.get_runtime_state("simulation_entries_paused") is True
+
+
 @pytest.mark.asyncio
 async def test_paper_liquidation_uses_sell_quote_and_closes_position(tmp_path: Path) -> None:
     database = make_database(tmp_path)

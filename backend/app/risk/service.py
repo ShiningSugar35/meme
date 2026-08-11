@@ -39,6 +39,8 @@ class RiskService:
     ) -> RiskDecision:
         if self.database.get_runtime_state("new_entries_paused", False):
             return RiskDecision(False, "new_entries_paused")
+        if account_kind != "live" and self.database.get_runtime_state("simulation_entries_paused", False):
+            return RiskDecision(False, "simulation_entries_paused")
         if account_kind == "live" and not self.database.get_runtime_state("live_trading_enabled", False):
             return RiskDecision(False, "live_trading_disabled")
         if account_kind == "live" and sol_balance is not None and sol_balance < self.settings.wallet_sol_reserve:
@@ -87,12 +89,16 @@ class RiskService:
     def resume_new_entries(self) -> None:
         self.database.set_runtime_state("new_entries_paused", False)
         self.database.set_runtime_state("new_entries_pause_reason", None)
+        self.database.set_runtime_state("simulation_entries_paused", False)
+        self.database.set_runtime_state("simulation_entries_pause_reason", None)
         self.database.audit(category="risk", action="new_entries_resumed")
 
     def status(self) -> dict[str, Any]:
         return {
             "new_entries_paused": bool(self.database.get_runtime_state("new_entries_paused", False)),
             "pause_reason": self.database.get_runtime_state("new_entries_pause_reason"),
+            "simulation_entries_paused": bool(self.database.get_runtime_state("simulation_entries_paused", False)),
+            "simulation_pause_reason": self.database.get_runtime_state("simulation_entries_pause_reason"),
             "max_open_positions": self.settings.max_open_positions,
             "open_live_positions": self._open_live_positions(),
             "consecutive_live_losses": self._consecutive_live_losses(),

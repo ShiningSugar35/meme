@@ -318,7 +318,7 @@ Portfolio 使用 `mode × profile` 两层视图：模拟/实盘切换位于顶�
 - `D:\meme` 已重新关联 GitHub 仓库 `ShiningSugar35/meme`，当前使用 `main` 跟踪 `origin/main`；
 - 根目录没有 `AGENTS.md`；
 - 真实 `.env` 是本地秘密事实源，不应复制进文档或测试；
-- 当前部署保持单进程 FastAPI；本地开发可由 `scripts/start_runtime.py --reload` 启用仅监控 `backend/` 的 Uvicorn 热更新，实盘常驻禁止 reload。
+- 当前部署保持单进程 FastAPI；本地开发可由 `scripts/start_runtime.py --reload` 启动 Windows supervisor，仅监控 `backend/**/*.py` 并在变更后重启 Uvicorn 单 worker；实盘常驻禁止 reload。该 supervisor 已实测自动更换子进程 PID 后恢复 `/health`、Collector 与 TrainingWorker。
 
 ## 17. 早期架构基线说明
 
@@ -342,7 +342,7 @@ Portfolio 使用 `mode × profile` 两层视图：模拟/实盘切换位于顶�
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × profile` 同构视图、当前市场快照、SQL 分页/时间筛选与三档交易审计；
-- 后端 `pytest -q` **89/89 通过**；前端 `npm run build` 通过。
+- 后端 `pytest -q` **90/90 通过**；前端 `npm run build` 通过。
 
 ### 实盘接口停放
 

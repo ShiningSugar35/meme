@@ -65,9 +65,9 @@ export const api = {
       body: JSON.stringify({ challenge })
     }),
   stopLive: () => request<RuntimeStatus>("/api/runtime/live/stop", { method: "POST" }),
-  prepareLiquidation: () => request<PreparedAction>("/api/portfolio/liquidate/prepare", { method: "POST" }),
-  confirmLiquidation: (challenge: string) =>
-    request<{ status: string; execution: string }>("/api/portfolio/liquidate/confirm", {
+  prepareLiquidation: (mode: "simulation" | "live" | "all" = "all") => request<PreparedAction>(`/api/portfolio/liquidate/prepare?mode=${mode}`, { method: "POST" }),
+  confirmLiquidation: (challenge: string, mode: "simulation" | "live" | "all" = "all") =>
+    request<{ id: string; status: string; execution: string; scope: string }>(`/api/portfolio/liquidate/confirm?mode=${mode}`, {
       method: "POST",
       body: JSON.stringify({ challenge })
     }),

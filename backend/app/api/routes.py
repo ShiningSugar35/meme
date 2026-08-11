@@ -180,14 +180,22 @@ def resume_risk() -> dict:
 
 
 @router.post("/portfolio/liquidate/prepare")
-def prepare_liquidation() -> dict:
-    return asdict(RuntimeService(get_database()).prepare_liquidation())
+def prepare_liquidation(
+    mode: str = Query(default="all", pattern="^(all|simulation|live)$"),
+) -> dict:
+    try:
+        return asdict(RuntimeService(get_database()).prepare_liquidation(mode))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/portfolio/liquidate/confirm")
-def confirm_liquidation(request: ConfirmActionRequest) -> dict:
+def confirm_liquidation(
+    request: ConfirmActionRequest,
+    mode: str = Query(default="all", pattern="^(all|simulation|live)$"),
+) -> dict:
     try:
-        return RuntimeService(get_database()).confirm_liquidation(request.challenge)
+        return RuntimeService(get_database()).confirm_liquidation(request.challenge, mode)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

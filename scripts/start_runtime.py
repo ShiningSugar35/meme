@@ -26,7 +26,7 @@ def main() -> int:
     parser.add_argument(
         "--reload",
         action="store_true",
-        help="Enable uvicorn source hot reload for local development.",
+        help="Use the Windows development supervisor to restart on backend source changes.",
     )
     args = parser.parse_args()
 
@@ -44,18 +44,20 @@ def main() -> int:
     if os.name == "nt":
         creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
 
-    command = [
-        str(python),
-        "-m",
-        "uvicorn",
-        "backend.app.main:app",
-        "--host",
-        HOST,
-        "--port",
-        str(PORT),
-    ]
-    if args.reload:
-        command.extend(["--reload", "--reload-dir", str(PROJECT_ROOT / "backend")])
+    command = (
+        [str(python), str(PROJECT_ROOT / "scripts" / "runtime_supervisor.py")]
+        if args.reload
+        else [
+            str(python),
+            "-m",
+            "uvicorn",
+            "backend.app.main:app",
+            "--host",
+            HOST,
+            "--port",
+            str(PORT),
+        ]
+    )
 
     out_handle = OUT_FILE.open("ab", buffering=0)
     err_handle = ERR_FILE.open("ab", buffering=0)

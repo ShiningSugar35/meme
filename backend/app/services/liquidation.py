@@ -107,13 +107,18 @@ class LiquidationService:
             job.pop("finished_at", None)
         self.database.set_runtime_state("liquidation_job", job)
         if report.status in {"completed", "blocked"}:
-            self.database.set_runtime_state("new_entries_paused", True)
-            self.database.set_runtime_state(
-                "new_entries_pause_reason",
+            scope = str(job.get("scope") or "all")
+            reason = (
                 "liquidation_completed_manual_resume_required"
                 if report.status == "completed"
-                else "liquidation_blocked_manual_intervention",
+                else "liquidation_blocked_manual_intervention"
             )
+            if scope in {"all", "live"}:
+                self.database.set_runtime_state("new_entries_paused", True)
+                self.database.set_runtime_state("new_entries_pause_reason", reason)
+            if scope in {"all", "simulation"}:
+                self.database.set_runtime_state("simulation_entries_paused", True)
+                self.database.set_runtime_state("simulation_entries_pause_reason", reason)
             self.database.audit(
                 category="trading",
                 action="liquidation_job_finished",

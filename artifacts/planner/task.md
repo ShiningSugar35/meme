@@ -114,7 +114,7 @@
 - [x] 发现 GMGN 可能返回超过请求 limit 的候选后，已在 DiscoveryService 本地二次 `[:limit]` 截断；复验 candidates=1
 - [x] live journal crash window / pending / unknown / reconciliation mock tests
 - [x] persistent liquidation mock tests
-- [x] 后端 full `pytest -q`：**89/89 passed**（新增持仓按档位/时间筛选、三档交易审计、当前市场快照回归）
+- [x] 后端 full `pytest -q`：**90/90 passed**（新增持仓按档位/时间筛选、三档交易审计、当前市场快照、模拟/实盘清仓作用域隔离回归）
 - [x] 前端 `npm run build`：passed
 - [x] 真实 `data/meme_quant.db`：schema v6 / 2319 条 legacy 已迁移并开始持续追加新样本；2026-08-10 当前 2320 samples（2319 mature + 1 pending）/ Champion 工件存在
 
@@ -147,6 +147,7 @@
 
 ## 环境事实
 
-- `D:\meme` 已重新关联 `https://github.com/ShiningSugar35/meme.git`；2026-08-10 已将完整非实盘重构与 Collector 可观测性提交并推送到 `main`，后续改动继续按正常 Git 流程提交。
+- `D:\meme` 已重新关联 `https://github.com/ShiningSugar35/meme.git`；完整非实盘重构与后续 Portfolio/Collector 优化均按正常 Git 流程提交到 `main`。
+- 本地开发使用 `scripts/start_runtime.py --reload` 的 Windows supervisor 监控 `backend/**/*.py`；已实测源码变化后自动重启 Uvicorn 子进程并恢复 Collector/TrainingWorker。实盘常驻禁止 reload。
 - 根目录没有 `AGENTS.md`。
 - `.env` 未被复制到文档、测试或前端；真实凭据继续留在本地秘密配置。

@@ -256,7 +256,7 @@ Set-Location D:\meme
 .\.venv\Scripts\python.exe scripts\start_runtime.py --reload
 ```
 
-`--reload` 只监控 `backend/` 源码；PID 仍写入 `logs/backend.pid`，便于停止整棵 Uvicorn reload 进程树。非开发常驻运行可去掉 `--reload`。
+`--reload` 启动项目自己的 Windows 开发 supervisor，仅监控 `backend/**/*.py`。检测到源码变化后会终止旧 Uvicorn 子进程树并启动新的单 worker，PID 仍写入 `logs/backend.pid`；2026-08-11 已实测子进程可从旧 PID 自动切换到新 PID，随后 Collector/TrainingWorker 恢复运行。非开发常驻运行去掉 `--reload`。
 
 启动时会：
 
@@ -280,7 +280,7 @@ npm run dev
 
 左侧导航固定为：`总览 → 持仓 → 样本采集 → 运行监控 → 模型中心 → Agent审批`。`/signals` 路由保留，但产品名称显示为“样本采集”。
 
-“持仓”页采用两层视图：先切换 `模拟仓 / 实盘`，再点击 `平衡 / 激进 / 保守` 档位。仅模拟运行时默认进入模拟仓；实盘与模拟均运行时默认进入实盘。右上角原 `Asia / Shanghai` 位置用于 `切换至实盘 / 切换至模拟仓` 按钮。当前持仓只显示所选档位，并展示由持仓监控周期写入的当前流动性/当前市值快照；Token 支持悬浮复制。交易历史由 SQLite 真分页，默认 30 行/页，可持久记忆用户选择的每页行数，并支持页码跳转和退出时间范围筛选。交易审计按每个 simulation session 的三档分别列示，不再把三档 PnL 合并成一个 session 总数。`mode=live` 的同构视图和后端账本接口已搭好，数据源契约标记为 GMGN Trading API，但不会因此启用自动 live BUY 或伪造钱包余额。
+“持仓”页采用两层视图：先切换 `模拟仓 / 实盘`，再点击 `平衡 / 激进 / 保守` 档位。仅模拟运行时默认进入模拟仓；实盘与模拟均运行时默认进入实盘。右上角原 `Asia / Shanghai` 位置用于 `切换至实盘 / 切换至模拟仓` 按钮。当前持仓只显示所选档位，并展示由持仓监控周期写入的当前流动性/当前市值快照；Token 支持悬浮复制。交易历史由 SQLite 真分页，默认 30 行/页，可持久记忆用户选择的每页行数，并支持页码跳转和退出时间范围筛选。交易审计按每个 simulation session 的三档分别列示，不再把三档 PnL 合并成一个 session 总数。一键清仓 challenge/job 同样跟随当前 `mode`：模拟页只冻结当前模拟 session，实盘页只冻结 live 仓；兼容 API 仍保留 `all` 全局应急作用域。`mode=live` 的同构视图和后端账本接口已搭好，数据源契约标记为 GMGN Trading API，但不会因此启用自动 live BUY 或伪造钱包余额。
 
 “运行监控”页提供 Collector 的结构化实时终端：后端保留最近 250 条采集事件，前端约每 1.5 秒刷新，按三生命周期分别显示 returned / accepted / rejected / duplicate，并逐条展示候选二筛拒绝原因、成功入样、T+2h 标签补齐和阶段异常。该终端来自 Collector 的实际事件流，不是对静态日志文件的装饰性回放。
 
@@ -309,7 +309,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-11 当前基线：后端 `pytest -q` **89/89 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV/schema migration、特征泄漏与自选 feature schema、五模型/时序/Champion 晋级回滚、durable TrainingWorker/周训/7 日退化监控、simulation session/1m first-touch/重启恢复、持仓当前市场快照、按档位/时间筛选与真分页、三档交易审计、monitor-only 生命周期、Agent 人工审批、非实盘 FastAPI E2E，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
+2026-08-11 当前基线：后端 `pytest -q` **90/90 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV/schema migration、特征泄漏与自选 feature schema、五模型/时序/Champion 晋级回滚、durable TrainingWorker/周训/7 日退化监控、simulation session/1m first-touch/重启恢复、持仓当前市场快照、按档位/时间筛选与真分页、三档交易审计、模拟/实盘清仓作用域隔离、monitor-only 生命周期、Agent 人工审批、非实盘 FastAPI E2E，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
