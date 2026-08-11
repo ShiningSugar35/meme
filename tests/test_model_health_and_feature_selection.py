@@ -82,7 +82,7 @@ def seed_recent_predictions(
     repo = SampleRepository(database)
     for index, tag in enumerate(tags):
         entry = now - timedelta(hours=len(tags) - index)
-        final_close = 1.25 if tag == 2 else None
+        final_close = None
         repo.insert(
             SampleRecord(
                 address=f"health-token-{index}",
@@ -95,7 +95,7 @@ def seed_recent_predictions(
                 final_close_ratio=final_close,
                 tag=tag,
                 label_status="mature",
-                terminal_return_estimated=not utility_eligible and tag == 2,
+                terminal_return_estimated=False,
             )
         )
         sample_id = database.fetch_one(

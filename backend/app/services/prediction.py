@@ -12,6 +12,7 @@ import pandas as pd
 
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..ml.features import launchpad_feature_values
 from ..ml.registry import ModelRegistry
 from ..repositories.models import ModelRepository
 from .paper_trading import PaperTradingService
@@ -148,10 +149,10 @@ class PredictionService:
             source = json.loads(row.get("features_json") or "{}")
         except (TypeError, json.JSONDecodeError):
             source = {}
-        # Production model inputs come from the frozen README allowlist.
-        # `price` is the admission-time samples.entry_price value; launchpad and
-        # raw liquidity are deliberately not injected as model features.
+        # Production inputs come from the frozen entry-time allowlist. Price and
+        # launchpad identity are both known at admission time.
         source["price"] = row.get("entry_price")
+        source.update(launchpad_feature_values(row.get("launchpad")))
         record = {name: source.get(name, np.nan) for name in feature_names}
         return pd.DataFrame.from_records([record], columns=list(feature_names))
 

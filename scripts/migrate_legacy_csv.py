@@ -25,8 +25,7 @@ def main() -> int:
                SUM(CASE WHEN label_status='mature' THEN 1 ELSE 0 END) AS mature,
                SUM(CASE WHEN label_status='pending' THEN 1 ELSE 0 END) AS pending,
                SUM(CASE WHEN tag=0 THEN 1 ELSE 0 END) AS tag0,
-               SUM(CASE WHEN tag=1 THEN 1 ELSE 0 END) AS tag1,
-               SUM(CASE WHEN tag=2 THEN 1 ELSE 0 END) AS tag2
+               SUM(CASE WHEN tag=1 THEN 1 ELSE 0 END) AS tag1
         FROM samples
         """
     ) or {}
@@ -37,13 +36,13 @@ def main() -> int:
     print(
         "legacy_import "
         f"total={summary.total_rows} inserted={summary.inserted_rows} "
-        f"skipped={summary.skipped_rows} legacy_tag2={summary.legacy_terminal_rows}"
+        f"skipped={summary.skipped_rows} legacy_timeout_folded_to_tag0={summary.legacy_terminal_rows}"
     )
     print(
         "database "
         f"total={counts.get('total', 0)} mature={counts.get('mature', 0)} "
         f"pending={counts.get('pending', 0)} tag0={counts.get('tag0', 0)} "
-        f"tag1={counts.get('tag1', 0)} tag2={counts.get('tag2', 0)}"
+        f"tag1={counts.get('tag1', 0)}"
     )
     return 0
 

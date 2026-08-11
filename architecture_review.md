@@ -55,7 +55,7 @@ Training Queue / OOS Evaluation / Promotion / Rollback
 生产训练采用显式 allowlist，而不是“数据库新增什么列模型就自动吃什么”。当前 README 冻结的默认训练字段中：
 
 - `price` 是 admission-time `entry_price`，允许默认训练；
-- `launchpad` 持续保存但不进模型；
+- `launchpad` 持续保存，训练/预测时转换为固定 10 维 one-hot，原始字符串本身不直接进模型；
 - `ln(liquidity_usd)` 从新样本开始持续采集，当前 legacy 覆盖率为 0，因此默认关闭，但属于模型中心可选特征；
 - raw `liquidity` 单独保留给资金公式/美元效用，不直接作为默认模型输入；
 - `price_change_1h/5m` 只能使用 `T` 之前的事实。快照缺失时，应立即取 `T-1h → T` 历史 1m Kline 回补，不能等未来窗口数据参与当次评分。
@@ -68,11 +68,11 @@ Training Queue / OOS Evaluation / Promotion / Rollback
 
 - first SL 0.9x -> `tag=0`；
 - first TP 1.6x -> `tag=1`；
-- 两小时内均未触及，final close 严格 `>1.2x` -> `tag=2`；
-- 其余 -> `tag=0`；
+- 两小时内未先触及 `1.6x`，无论 final close 如何 -> `tag=0`；
+- 标签只允许 `0/1`；
 - 同一 1m candle 同时触发 TP/SL，止损优先。
 
-新 schema 持久化：`first_take_profit_at`、`first_stop_loss_at`、`exit_reason`、`same_bar_conflict`、`gross_return_rate`、`return_source`。legacy tag2 使用 +25% 已知下限并明确 `legacy_floor`，不能伪装为真实 close。
+新 schema 持久化：`first_take_profit_at`、`first_stop_loss_at`、`exit_reason`、`same_bar_conflict`、`gross_return_rate`、`return_source`。历史 timeout-positive 已统一折叠为 tag0，2h max/min/final-close 继续保留为审计事实。
 
 ## 4. 数据库与持久化
 
@@ -150,8 +150,8 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 3. 在同一当前 pre-holdout 历史上重建 incumbent evaluation bundle；
 4. candidate/incumbent 必须拥有完全相同 final OOS row indices；
 5. 在共享 OOS 上按各自 development 阶段冻结的 balanced threshold 比较；
-6. 只有真实 liquidity + 实际 tag2 close 完整时才允许美元 PnL 自动晋级；
-7. Challenger 必须满足 20% Precision、最低交易数和 5% normalized PnL lift。
+6. 只有共享 OOS 的真实 entry-time liquidity 完整时才允许美元 PnL 自动晋级；
+7. Challenger 必须满足 35% Precision、最低交易数和 5% normalized PnL lift。
 
 第一模型可 bootstrap 成 Champion，但不是“已证明真实美元超额收益”。未晋级模型终态为 `rejected`；只有曾经是 Champion 的模型才为 `retired`，用于人工回滚。
 
@@ -288,9 +288,9 @@ Portfolio 使用 `mode × profile` 两层视图：模拟/实盘切换位于顶�
 
 | 事项 | 最终决议 |
 | --- | --- |
-| legacy `>1.25x` 正类 vs 新 `>1.2x tag2` | 新数据 v2；16 条旧非 TP 正类迁 tag2、+25% legacy floor。 |
+| legacy `>1.25x` timeout 正类 vs binary-v3 | 只保留先触及 `1.6x` 的 tag1；16 条旧非 TP 正类重标 tag0，2h 价格事实仅审计。 |
 | `price` 是否泄漏 | 当前源码/README确认其为准入 `entry_price`，允许默认训练。 |
-| `launchpad` | 采集/审计但不训练；历史无区分度。 |
+| `launchpad` | 采集/审计，并以固定 10 维 one-hot 进入训练；跨平台覆盖不足时由时间外验证约束泛化结论。 |
 | `ln(liquidity_usd)` | 新样本持续采集；legacy 无法反推，当前默认关闭；模型中心可后续 opt-in。 |
 | raw liquidity | 经济 sizing/PnL 专用，不作为默认 model input。 |
 | 三档 vs 三模型 | 一个 Champion + 三 threshold。 |
@@ -324,25 +324,25 @@ Portfolio 使用 `mode × profile` 两层视图：模拟/实盘切换位于顶�
 
 本文件最初包含大量目标态 API/SSE/分布式 job/共享 limiter 设计。实际第一版没有为了“追齐设计稿”而强行引入未需要的 SSE、PostgreSQL 或公网认证；这些目标态思想仍可作为未来扩展参考，但不覆盖 README 当前本地单机产品边界。
 
-## 18. 2026-08-10 实现状态附录
+## 18. 2026-08-11 实现状态附录
 
 ### 非实盘本地版
 
 已完成：
 
-- 2319/2319 legacy CSV 迁移，2317 mature、2 pending、tag0=1892、tag1=409、tag2=16；
+- legacy CSV 与持续采集样本已统一到 binary-v3；重打标时 mature=2358、tag1=412、tag2=0，并保留全部 2h 路径审计事实；
 - SQLite schema v6，完整 label facts、durable training runs、simulation sessions、Agent proposals；
-- README 默认 31 特征 recipe；`price` 纳入，`launchpad` 排除，`ln(liquidity_usd)` 新采集/可选/默认关闭；
+- binary-v3 默认 41 特征 recipe：原 31 个入场特征 + 10 个 launchpad one-hot；`ln(liquidity_usd)` 新采集/可选/默认关闭；
 - 入场 `price_change_1h/5m` 缺失时使用 `T-1h → T` 历史 Kline 回补，不读取未来；
 - 五候选 + OOS 时间切分 + 一个 Champion/三阈值 + Occam；
-- 真实数据库首轮训练得到 Logistic Regression EARLY_STAGE Champion；第二轮完成 incumbent rebuild 并因 legacy 真实效用不完整安全拒绝 Challenger；
+- binary-v3 采用等权分类拟合 + 35% Precision hard gate；严格泛化研究与生产五候选均选择 Random Forest，新 Champion 最终时间窗 Precision 39.74%、Recall 32.98%；
 - TrainingWorker、周日 03:00/startup catch-up、有限 retry、restart recovery、7 日 model health、degraded queue、rollback；
 - simulation 三账户 session、市场驱动 1m first-touch、SELL failure/restart recovery、session history、monitor-only worker；
 - Agent durable proposal + 人工 approve/reject + 非实盘白名单执行；live/wallet/secret proposal fail-closed；
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × profile` 同构视图、当前市场快照、SQL 分页/时间筛选与三档交易审计；
-- 后端 `pytest -q` **93/93 通过**；前端 `npm run build` 通过。
+- 后端 `pytest -q` **96/96 通过**；前端 `npm run build` 通过。
 
 ### 实盘接口停放
 

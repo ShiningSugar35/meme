@@ -89,10 +89,8 @@ class LabelFinalizer:
             tag, reason = 0, "stop_loss_first"
         elif first_tp is not None:
             tag, reason = 1, "take_profit_first"
-        elif close_ratio > self.policy.final_close_positive_ratio:
-            tag, reason = 2, "window_close_above_1_2x"
         else:
-            tag, reason = 0, "window_close_not_positive"
+            tag, reason = 0, "window_timeout_negative"
 
         return PriceWindowResult(
             address=sample.address,

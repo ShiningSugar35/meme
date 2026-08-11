@@ -53,14 +53,25 @@ class FilterThresholds:
 
 @dataclass(frozen=True, slots=True)
 class LabelPolicy:
-    """Current label version: SL 0.9, TP 1.6, 2h close winner 1.2."""
+    """Binary first-touch label: SL 0.9, TP 1.6, timeout is negative."""
 
     stop_loss_ratio: float = 0.9
     take_profit_ratio: float = 1.6
-    final_close_positive_ratio: float = 1.2
     window_seconds: int = 2 * 60 * 60
     history_seconds: int = 60 * 60
-    label_version: str = "sl090_tp160_close120_h2_v1"
+    label_version: str = "sl090_tp160_h2_binary_v3"
+
+
+ALLOWED_QUOTE_SYMBOLS = frozenset({"SOL", "USDC", "USDT"})
+EXCLUDED_TARGET_SYMBOLS = frozenset({"SOL", "USDT", "USDC", "PYUSD", "WBTC", "WETH"})
+
+SOL_WRAPPED_MINT = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+PYUSD_MINT = "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo"
+
+ALLOWED_QUOTE_MINTS = frozenset({SOL_WRAPPED_MINT, USDC_MINT, USDT_MINT})
+EXCLUDED_TARGET_MINTS = frozenset({SOL_WRAPPED_MINT, USDC_MINT, USDT_MINT, PYUSD_MINT})
 
 
 TRENCH_PREFILTERS = {

@@ -121,33 +121,45 @@ class DashboardService:
         simulation = PaperTradingService(self.database).simulation_status()
         champion = self.models.champion()
         account_kind = self.PROFILE_ACCOUNT[profile] if mode == "simulation" else "live"
-        common_clauses = ["account_kind=?", "profile=?"]
+        common_clauses = ["p.account_kind=?", "p.profile=?"]
         common_params: list[Any] = [account_kind, profile]
         if mode == "simulation":
-            common_clauses.append("simulation_session_id=?")
+            common_clauses.append("p.simulation_session_id=?")
             common_params.append(str(simulation["session"]["id"]))
 
         current_where = " AND ".join(
-            common_clauses + ["status IN ('opening','open','closing','manual_intervention')"]
+            common_clauses + ["p.status IN ('opening','open','closing','manual_intervention')"]
         )
         current = self.database.fetch_all(
-            f"SELECT * FROM positions WHERE {current_where} ORDER BY entry_time DESC",
+            f"""
+            SELECT p.*, s.launchpad AS launchpad
+            FROM positions p
+            LEFT JOIN predictions pr ON pr.id=p.prediction_id
+            LEFT JOIN samples s ON s.id=pr.sample_id
+            WHERE {current_where}
+            ORDER BY p.entry_time DESC
+            """,
             tuple(common_params),
         )
 
-        history_clauses = list(common_clauses) + ["status='closed'"]
+        history_clauses = list(common_clauses) + ["p.status='closed'"]
         history_params = list(common_params)
         if start_at:
-            history_clauses.append("exit_time>=?")
+            history_clauses.append("p.exit_time>=?")
             history_params.append(start_at)
         if end_at:
-            history_clauses.append("exit_time<=?")
+            history_clauses.append("p.exit_time<=?")
             history_params.append(end_at)
         history_where = " AND ".join(history_clauses)
+        history_from = """
+            FROM positions p
+            LEFT JOIN predictions pr ON pr.id=p.prediction_id
+            LEFT JOIN samples s ON s.id=pr.sample_id
+        """
         total = int(
             (
                 self.database.fetch_one(
-                    f"SELECT COUNT(*) AS count FROM positions WHERE {history_where}",
+                    f"SELECT COUNT(*) AS count {history_from} WHERE {history_where}",
                     tuple(history_params),
                 )
                 or {"count": 0}
@@ -158,9 +170,10 @@ class DashboardService:
         offset = (resolved_page - 1) * page_size
         history = self.database.fetch_all(
             f"""
-            SELECT * FROM positions
+            SELECT p.*, s.launchpad AS launchpad
+            {history_from}
             WHERE {history_where}
-            ORDER BY exit_time DESC, entry_time DESC
+            ORDER BY p.exit_time DESC, p.entry_time DESC
             LIMIT ? OFFSET ?
             """,
             tuple(history_params + [page_size, offset]),

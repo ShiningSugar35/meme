@@ -7,6 +7,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from ..collector.constants import LAUNCHPADS
+from ..collector.filters import launchpad_key
 from .types import PreparedDataset
 
 
@@ -59,11 +61,23 @@ _RETURN_ESTIMATE_COLUMNS = (
     "terminal_return_estimated",
 )
 
+LAUNCHPAD_MODEL_FEATURES: tuple[str, ...] = tuple(
+    f"launchpad::{platform}" for platform in LAUNCHPADS
+)
+
+
+def launchpad_feature_values(value: object) -> dict[str, int]:
+    selected = launchpad_key(value)
+    return {
+        f"launchpad::{platform}": int(selected == launchpad_key(platform))
+        for platform in LAUNCHPADS
+    }
+
+
 # Frozen model-input schema from README.md §2.2. `tag` is deliberately absent:
-# it is the target, never an input feature. `price` is the entry/admission price
-# and is therefore available at prediction time. `launchpad` and raw liquidity
-# are intentionally not model inputs; liquidity is retained separately for the
-# economic sizing/evaluation layer.
+# it is the target, never an input feature. `price` and launchpad identity are
+# admission-time facts. Raw liquidity remains economic sizing/evaluation data;
+# only its optional log transform may be selected as a model input.
 AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "age",
     "price",
@@ -97,6 +111,7 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "ln(creator_open_count+1)",
     "creator_open_ratio",
     "ln(top_wallets+1)",
+    *LAUNCHPAD_MODEL_FEATURES,
 )
 
 # `ln(liquidity_usd)` is collected for new samples but intentionally excluded
@@ -114,7 +129,6 @@ MODEL_TRAINING_FEATURES = DEFAULT_MODEL_TRAINING_FEATURES
 class FeaturePolicy:
     target_column: str = "tag"
     time_column: str = "time"
-    tag2_return_floor: float = 0.20
     extra_exclusions: tuple[str, ...] = ()
     feature_allowlist: tuple[str, ...] | None = None
 
@@ -188,9 +202,9 @@ class FeatureBuilder:
         target = target.loc[complete].astype(int)
         timestamps = timestamps.loc[complete]
 
-        invalid_tags = sorted(set(target.unique()) - {0, 1, 2})
+        invalid_tags = sorted(set(target.unique()) - {0, 1})
         if invalid_tags:
-            raise ValueError(f"unsupported tag values: {invalid_tags}")
+            raise ValueError(f"unsupported binary tag values: {invalid_tags}")
         if work.empty:
             raise ValueError("no rows have both a mature tag and valid event time")
 
@@ -212,20 +226,14 @@ class FeatureBuilder:
         else:
             close_ratio = pd.to_numeric(work[close_column], errors="coerce").astype(float)
 
-        tag2 = target.eq(2)
-        estimate_column = _first_existing(work.columns, _RETURN_ESTIMATE_COLUMNS)
-        explicit_estimate = (
-            pd.Series(False, index=work.index, dtype=bool)
-            if estimate_column is None
-            else work[estimate_column].fillna(False).astype(bool)
-        )
-        return_is_estimated = tag2 & (
-            explicit_estimate
-            | ~np.isfinite(close_ratio)
-            | (close_ratio < 1.0 + self.policy.tag2_return_floor)
-        )
-        close_ratio = close_ratio.copy()
-        close_ratio.loc[return_is_estimated] = 1.0 + self.policy.tag2_return_floor
+        # Binary labels no longer use a timeout-positive class. Final close is
+        # retained only as an audit fact and never changes the target/economics.
+        return_is_estimated = pd.Series(False, index=work.index, dtype=bool)
+
+        if "launchpad" in work.columns:
+            launchpad_keys = work["launchpad"].map(launchpad_key)
+            for platform, feature_name in zip(LAUNCHPADS, LAUNCHPAD_MODEL_FEATURES, strict=True):
+                work[feature_name] = (launchpad_keys == launchpad_key(platform)).astype(int)
 
         if self.policy.feature_allowlist is not None:
             # A frozen allowlist prevents newly added DB/audit columns from
@@ -235,6 +243,7 @@ class FeatureBuilder:
             for column in self.policy.feature_allowlist:
                 if column not in work.columns:
                     work[column] = np.nan
+                work[column] = pd.to_numeric(work[column], errors="coerce")
             feature_columns = list(self.policy.feature_allowlist)
             excluded = [
                 column
@@ -253,7 +262,7 @@ class FeatureBuilder:
             raise ValueError("no usable entry-time features remain after leakage exclusions")
 
         X = work.loc[:, feature_columns].copy()
-        y = target.isin({1, 2}).astype(int)
+        y = target.eq(1).astype(int)
         return PreparedDataset(
             X=X,
             y=y,

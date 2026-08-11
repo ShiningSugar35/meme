@@ -15,10 +15,10 @@ UtilityUnit = Literal["usd", "legacy_proxy"]
 class EconomicSlice:
     """Economic inputs for one evaluation slice.
 
-    ``utility_eligible`` is deliberately strict.  It is true only when every
-    row has the real entry-time liquidity and every tag=2 row has its actual
-    two-hour close ratio.  Legacy CSV rows can still train a classifier, but
-    their equal-weight proxy must never be presented as dollar PnL.
+    ``utility_eligible`` is deliberately strict. It is true only when every
+    row has real entry-time liquidity. Legacy CSV rows can still train a
+    classifier, but their equal-weight proxy must never be presented as dollar
+    PnL.
     """
 
     capital: np.ndarray
@@ -53,15 +53,11 @@ class PreparedDataset:
 
         realized = np.full(len(positions), -0.10, dtype=float)
         realized[tags == 1] = 0.60
-        tag2 = tags == 2
-        realized[tag2] = close_ratio[tag2] - 1.0
 
         blockers: list[str] = []
         real_liquidity = np.isfinite(liquidity) & (liquidity > 0)
         if not bool(real_liquidity.all()):
             blockers.append("raw entry-time liquidity is missing for one or more rows")
-        if bool(estimated.any()):
-            blockers.append("actual two-hour close ratio is missing for one or more tag=2 rows")
 
         utility_eligible = not blockers
         if utility_eligible:

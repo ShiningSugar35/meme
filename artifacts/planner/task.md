@@ -1,23 +1,16 @@
 # Solana Meme Quant Trading System - 当前开发状态
 
-> 更新时间：2026-08-10  
+> 更新时间：2026-08-11
 > 当前范围：**除真实 live BUY 外，本地单机/单用户版本全部闭环**。实盘 provider/journal/reconciliation/liquidation 接口保留并 fail-closed，等待未来真实钱包与 GMGN 现场契约。
 
 ## Phase 1：数据与 Schema — COMPLETE
 
 - [x] 阅读并对齐 `README.md`、`开发文档.md`、`architecture_review.md`
 - [x] 根目录 `meme数据.csv` 审计：40 列、2319 行
-- [x] legacy CSV 幂等迁移到 `data/meme_quant.db`
-  - total 2319
-  - mature 2317
-  - pending 2
-  - tag0 1892
-  - tag1 409
-  - tag2 16
-  - legacy `utility_eligible=false`
-- [x] SQLite schema v6 幂等 migration；真实库升级后样本/标签数量不漂移
+- [x] legacy CSV 2319 行幂等迁移到 `data/meme_quant.db`；binary-v3 统一二分类后旧 timeout-positive 折叠为 tag0，原 2h 路径事实保留
+- [x] 2026-08-11 重打标时真实库 mature=2358、tag1=412、tag2=0；legacy `utility_eligible=false`
+- [x] SQLite schema v6 幂等 migration；真实库升级后样本数量不漂移
 - [x] 完整标签路径字段：first TP/SL、exit reason、same-bar conflict、gross return、return source
-- [x] legacy tag2 使用 +25% 已知下限并标 `legacy_floor`
 - [x] legacy pending 即使后续 K-line 补成 mature，也保留原 `utility_eligible=false`，不因缺失 raw liquidity 被误升级为真实美元效用样本
 - [x] `simulation_sessions` registry
 - [x] durable `training_runs`
@@ -26,6 +19,7 @@
 ## Phase 2：持续采集与入场特征 — COMPLETE
 
 - [x] 保留 README 指定 10 个 Launchpad / 3 生命周期 / 12 Key 角色分工
+- [x] GMGN Trenches 改用显式 launchpad allowlist；移除数字 `quote_address_type`；quote 侧仅 SOL/USDC/USDT，目标 Token 排除 SOL/USDT/USDC/PYUSD/WBTC/WETH
 - [x] 全局共享限流/429 cooldown
 - [x] 本地 safety filter + top-holder 后置过滤
 - [x] README 入场特征持续入库
@@ -40,10 +34,10 @@
 
 - [x] 显式模型 feature allowlist
 - [x] 模型中心自选 feature schema + 成熟样本 coverage
-- [x] 默认 recipe 31 个输入特征；`ln(liquidity_usd)` 可后续 opt-in
+- [x] binary-v3 默认 recipe 41 个输入特征：原 31 + 10 个 launchpad one-hot；`ln(liquidity_usd)` 可后续 opt-in
 - [x] 时序扩展窗口、2h embargo、<120d EARLY_STAGE / >=120d 120d+30d 规则
 - [x] 五候选：Logistic Regression / HistGradientBoosting / XGBoost / ExtraTrees / RandomForest；2026-08-10 当前 `.venv` 已安装 XGBoost 3.4.0，真实训练 run `0e4a4cd7-d933-45f3-8c1b-3662a566d21e` 验证五候选均实际执行，XGBoost=`ok`
-- [x] Precision 20% + min trades 硬门槛
+- [x] 分类器等权拟合；Precision 35% + min trades 硬门槛；经济收益只用于 OOS 阈值/候选评价
 - [x] 一个 Champion + aggressive/balanced/conservative 三阈值
 - [x] Occam 近似等价优先简单模型
 - [x] production refit bundle + pre-holdout evaluation bundle
@@ -60,13 +54,14 @@
 
 ### 真实数据库训练验收
 
-- [x] 首轮真实训练完成：Logistic Regression 被 Occam 选择为 Champion
-  - model id: `20260810T095656Z-logistic_regression-f9b6fb04`
+- [x] 2026-08-11 binary-v3 重打标：mature=2358、tag1=412、tag2=0；旧标签 Champion/候选全部失效
+- [x] 严格泛化研究：Random Forest robust AP 第一；最终生产预处理下 untouched final Precision=39.74%、Recall=32.98%、78 trades
+- [x] 生产五候选真实训练 run `4f68ff98-efb6-4f64-a3e1-47c3b54f17d1` 独立选择 Random Forest 为 Champion
+  - model id: `20260811T084908Z-random_forest-3ce0ea89`
   - EARLY_STAGE
-  - 31 features
-  - thresholds: aggressive≈0.385538, balanced≈0.385538, conservative=0.8
-- [x] 第二轮真实训练完成：成功 rebuild incumbent 并公平比较
-- [x] 第二轮 Challenger 因 legacy OOS 无真实 liquidity/精确 tag2 close 被安全拒绝，原 Champion 保留
+  - 41 features
+  - final Precision=39.74%、Recall=32.98%、78 trades
+  - thresholds: aggressive≈0.218198, balanced≈0.218198, conservative≈0.324966
 
 ## Phase 4：固定模拟 / Shadow 完整链 — COMPLETE
 
@@ -99,7 +94,8 @@
 - [x] Dashboard / Portfolio / Signals（产品名“样本采集”）/ Runtime / Models / Agent 六页面与固定侧栏顺序
 - [x] 模型中心 feature coverage、自选 schema、训练 queue、rollback
 - [x] Portfolio `simulation/live × balanced/aggressive/conservative` 两层视图；顶栏模式切换；只跑模拟时默认模拟，live 启用时默认实盘
-- [x] Portfolio 当前仓位缓存 GMGN 当前流动性/市值；Token 悬浮复制；交易历史 SQL 真分页、时间筛选、page size 持久记忆；simulation audit 三档独立
+- [x] Portfolio 当前仓位缓存 GMGN 当前流动性/市值；Token 悬浮复制；交易历史 SQL 真分页、时间筛选、page size 持久记忆、launch-pad 列；simulation audit 三档独立
+- [x] 样本采集页改为“样本预览”，模型短名与“模型分/入选线”语义统一；支持一键导出全部 mature/tagged `meme数据.csv`
 - [x] live Portfolio 同构前后端账本 scaffold 已标记 GMGN Trading API，自动 live BUY 仍保持停放
 - [x] Runtime 显示 TrainingWorker / model health / monitor-only / reconciliation / liquidation
 - [x] Runtime Collector 实时终端：三生命周期独立 returned/accepted/rejected/duplicate 统计 + 最近 250 条后端结构化采集事件
@@ -114,9 +110,9 @@
 - [x] 发现 GMGN 可能返回超过请求 limit 的候选后，已在 DiscoveryService 本地二次 `[:limit]` 截断；复验 candidates=1
 - [x] live journal crash window / pending / unknown / reconciliation mock tests
 - [x] persistent liquidation mock tests
-- [x] 后端 full `pytest -q`：**93/93 passed**（新增持仓按档位/时间筛选、三档交易审计、当前市场快照、模拟/实盘清仓作用域隔离，以及 no-route/重试耗尽/实盘终态卖出失败计入已实现亏损回归）
+- [x] 后端 full `pytest -q`：**96/96 passed**（新增持仓按档位/时间筛选、三档交易审计、当前市场快照、模拟/实盘清仓作用域隔离，以及 no-route/重试耗尽/实盘终态卖出失败计入已实现亏损回归）
 - [x] 前端 `npm run build`：passed
-- [x] 真实 `data/meme_quant.db`：schema v6 / 2319 条 legacy 已迁移并开始持续追加新样本；2026-08-10 当前 2320 samples（2319 mature + 1 pending）/ Champion 工件存在
+- [x] 真实 `data/meme_quant.db`：schema v6；2026-08-11 binary-v3 重打标时 2364 samples（2358 mature + 6 pending）、412 positives、0 tag2；Random Forest binary-v3 Champion 工件存在
 
 ## Phase 7：Live — PARKED BY USER SCOPE
 

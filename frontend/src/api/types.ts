@@ -193,6 +193,7 @@ export interface SimulationAuditItem {
 export interface Position {
   id: string;
   token_address: string;
+  launchpad?: string | null;
   account_kind: string;
   profile: Profile;
   status: string;

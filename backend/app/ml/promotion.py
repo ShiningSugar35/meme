@@ -11,7 +11,7 @@ from .types import ModelBundle, PreparedDataset, PromotionDecision
 
 @dataclass(frozen=True)
 class PromotionConfig:
-    min_precision: float = 0.20
+    min_precision: float = 0.35
     min_pnl_lift: float = 0.05
     profile: str = "balanced"
     minimum_baseline_usd: float = 1.0
@@ -69,8 +69,8 @@ class PromotionEvaluator:
                 )
         if not economics.utility_eligible:
             blockers.append(
-                "automatic promotion requires real liquidity and actual tag=2 close returns "
-                "for every row in the shared comparison window"
+                "automatic promotion requires real entry-time liquidity for every row "
+                "in the shared comparison window"
             )
         if candidate_metrics.precision < self.config.min_precision:
             blockers.append(

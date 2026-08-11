@@ -89,7 +89,6 @@ class DiscoveryService:
         section: dict[str, Any] = {
             "filters": ["offchain", "onchain"],
             "launchpad_platform_v2": True,
-            "quote_address_type": [4, 5, 3, 1, 13, 0],
             "limit": limit,
             "launchpad_platform": list(LAUNCHPADS),
             **TRENCH_PREFILTERS,

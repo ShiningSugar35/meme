@@ -126,9 +126,7 @@ class SqliteCollectorSink:
                         result.first_take_profit_at is not None
                         and result.first_take_profit_at == result.first_stop_loss_at
                     ),
-                    0.60 if result.tag == 1 else (
-                        -0.10 if result.tag == 0 else result.final_close_ratio - 1.0
-                    ),
+                    0.60 if result.tag == 1 else -0.10,
                     result.label_version,
                     int(bool(row["utility_eligible"])),
                     json.dumps(features, ensure_ascii=False, separators=(",", ":")),

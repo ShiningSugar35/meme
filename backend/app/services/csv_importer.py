@@ -14,7 +14,7 @@ from ..repositories.samples import SampleRecord, SampleRepository
 IDENTITY_COLUMNS = {"address", "name", "symbol", "type", "time", "price"}
 FUTURE_COLUMNS = {"price_2h_max/price", "price_2h_min/price", "tag"}
 EXCLUDED_MODEL_COLUMNS = IDENTITY_COLUMNS | FUTURE_COLUMNS
-LEGACY_LABEL_VERSION = "sl090_tp160_h2_close125_legacy"
+LEGACY_LABEL_VERSION = "sl090_tp160_h2_binary_legacy_v3"
 
 
 @dataclass(slots=True)
@@ -95,13 +95,16 @@ class CsvImporter:
                 terminal_estimated = False
                 final_close_ratio = None
                 if tag == 1 and (max_ratio is None or max_ratio < 1.6):
-                    tag = 2
-                    # Legacy rows were only tagged positive when their final close exceeded 1.25x.
-                    # The exact close is unavailable, so 1.25x is a conservative known floor.
+                    # The old script also called a >1.25x two-hour close positive.
+                    # Under the binary v3 policy, every no-TP timeout is negative.
+                    tag = 0
                     final_close_ratio = 1.25
                     terminal_estimated = True
                     legacy_terminal += 1
                 elif tag == 2:
+                    # Existing intermediate migrations used tag=2 for timeout-only
+                    # positives. Binary v3 folds that class into the negative class.
+                    tag = 0
                     final_close_ratio = 1.20
                     terminal_estimated = True
 
@@ -116,14 +119,10 @@ class CsvImporter:
                         gross_return_rate = 0.60
                         return_source = "legacy_label_rule"
                         exit_reason = "legacy_take_profit"
-                    elif tag == 2:
-                        gross_return_rate = 0.25
-                        return_source = "legacy_floor"
-                        exit_reason = "legacy_timeout_positive"
                     else:
                         gross_return_rate = -0.10
-                        return_source = "legacy_label_rule"
-                        exit_reason = "legacy_negative"
+                        return_source = "legacy_binary_rule"
+                        exit_reason = "legacy_negative_or_timeout"
                 features = {
                     key: _typed(value)
                     for key, value in row.items()
@@ -198,25 +197,26 @@ class CsvImporter:
         self.database.execute(
             """
             UPDATE samples
-            SET gross_return_rate = CASE
+            SET tag = CASE WHEN tag=2 THEN 0 ELSE tag END,
+                gross_return_rate = CASE
                     WHEN tag=1 THEN 0.60
-                    WHEN tag=2 THEN 0.25
-                    WHEN tag=0 THEN -0.10
+                    WHEN tag IN (0,2) THEN -0.10
                     ELSE gross_return_rate
                 END,
                 return_source = CASE
-                    WHEN tag=2 THEN 'legacy_floor'
-                    WHEN tag IN (0,1) THEN 'legacy_label_rule'
+                    WHEN tag=1 THEN 'legacy_label_rule'
+                    WHEN tag IN (0,2) THEN 'legacy_binary_rule'
                     ELSE return_source
                 END,
                 exit_reason = CASE
                     WHEN tag=1 THEN 'legacy_take_profit'
-                    WHEN tag=2 THEN 'legacy_timeout_positive'
-                    WHEN tag=0 THEN 'legacy_negative'
+                    WHEN tag IN (0,2) THEN 'legacy_negative_or_timeout'
                     ELSE exit_reason
-                END
+                END,
+                label_version = ?,
+                terminal_return_estimated = 0
             WHERE label_source='legacy_csv_migration'
               AND label_status='mature'
-              AND (gross_return_rate IS NULL OR return_source IS NULL OR exit_reason IS NULL)
-            """
+            """,
+            (LEGACY_LABEL_VERSION,),
         )

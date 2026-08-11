@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from .constants import FilterThresholds, LAUNCHPADS
+from .constants import ALLOWED_QUOTE_SYMBOLS, EXCLUDED_TARGET_SYMBOLS, FilterThresholds, LAUNCHPADS
 
 
 def first(mapping: Mapping[str, Any], keys: Sequence[str], default: Any = None) -> Any:
@@ -102,6 +102,8 @@ def normalize_token(raw: Mapping[str, Any], token_type: str) -> dict[str, Any]:
             ),
             "",
         ),
+        "symbol": str(first(raw, ("symbol", "token_symbol", "base_symbol"), "") or "").upper(),
+        "quote_symbol": str(first(raw, ("quote_symbol", "quote_token_symbol"), "") or "").upper(),
         "price": to_float(first(raw, ("price", "price_usd", "usd_price"))),
         "liquidity": to_float(first(raw, ("liquidity", "liquidity_usd", "pool_liquidity_usd", "reserve_usd"))),
         "holder_count": to_float(first(raw, ("holder_count", "holders", "total_holders", "holder"))),
@@ -158,6 +160,12 @@ class SafetyFilter:
         platform = str(token.get("launchpad") or "")
         if platform and launchpad_key(platform) not in ALLOWED_LAUNCHPAD_KEYS:
             fail.append("launchpad")
+        target_symbol = str(token.get("symbol") or "").strip().upper()
+        quote_symbol = str(token.get("quote_symbol") or "").strip().upper()
+        if target_symbol in EXCLUDED_TARGET_SYMBOLS:
+            fail.append("target_asset_excluded")
+        if not quote_symbol or quote_symbol not in ALLOWED_QUOTE_SYMBOLS:
+            fail.append("quote_asset_not_allowed")
         lt("rug_ratio", to_float(token.get("rug_ratio")), t.max_rug_ratio)
         lt("insider_ratio", to_float(token.get("insider_ratio")), t.max_insider_ratio)
         lt("bundler_rate", to_float(token.get("bundler_rate")), t.max_bundler_rate)

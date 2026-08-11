@@ -10,7 +10,7 @@ from .types import EconomicSlice, EvaluationMetrics, ThresholdSet
 
 @dataclass(frozen=True)
 class ThresholdSearchConfig:
-    min_precision: float = 0.20
+    min_precision: float = 0.35
     min_trades: int = 3
     min_trade_fraction: float = 0.01
     temperature: float = 0.03
@@ -63,7 +63,7 @@ def optimize_thresholds(
     ]
     if not eligible:
         raise ValueError(
-            "no threshold satisfies both the 20% precision gate and minimum trade count"
+            f"no threshold satisfies both the {cfg.min_precision:.0%} precision gate and minimum trade count"
         )
 
     aggressive = max(

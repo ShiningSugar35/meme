@@ -367,13 +367,14 @@ export function PortfolioPage() {
           <>
             <div className="table-scroll">
               <table>
-                <thead><tr><th>Token</th><th>买入时间</th><th>平仓时间</th><th>投入</th><th>原因</th><th>净收益</th></tr></thead>
+                <thead><tr><th>Token</th><th>launch-pad</th><th>买入时间</th><th>平仓时间</th><th>投入</th><th>原因</th><th>净收益</th></tr></thead>
                 <tbody>{history.map((item) => (
                   <tr key={item.id}>
                     <td className="mono token-cell" title={item.token_address}>
                       <span>{item.token_address.slice(0, 7)}…{item.token_address.slice(-5)}</span>
                       <button className="token-copy-button" onClick={() => void copyToken(item.token_address)}><Copy size={11} />复制</button>
                     </td>
+                    <td>{item.launchpad ?? "—"}</td>
                     <td>{beijingTime(item.entry_time)}</td>
                     <td>{item.sell_failed ? "卖出失败" : beijingTime(item.exit_time)}</td>
                     <td>{money(item.invested_usd)}</td>

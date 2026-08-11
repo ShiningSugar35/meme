@@ -12,21 +12,23 @@ def capital_from_liquidity(liquidity_usd: np.ndarray) -> np.ndarray:
     return np.minimum(0.01 * liquidity, 50.0)
 
 
-def economic_sample_weights(economics: EconomicSlice) -> np.ndarray:
-    """Profit-aware, smooth classification weights with mean one.
+def classification_sample_weights(economics: EconomicSlice) -> np.ndarray:
+    """Equal classifier weights; economics are reserved for OOS selection.
 
-    This does not pretend tree/logistic classifiers directly optimize trading
-    PnL.  It weights classification loss by the dollar consequence when real
-    capital is known, or by outcome magnitude for explicitly marked legacy
-    proxy data.  Model/threshold selection still happens on chronological OOS
-    utility.
+    Profit magnitude must not redefine the class prior seen by the classifier.
+    Otherwise a +60% positive and -10% negative make one positive observation
+    behave like roughly six negatives, which destroys probability calibration
+    and generalization. Trading economics remain fully active in threshold and
+    model selection after the classifier has produced out-of-sample scores.
     """
 
-    raw = economics.capital * np.maximum(np.abs(economics.realized_return), 0.01)
-    mean = float(np.mean(raw)) if len(raw) else 0.0
-    if mean <= 0 or not np.isfinite(mean):
-        return np.ones(len(raw), dtype=float)
-    return np.clip(raw / mean, 0.10, 10.0)
+    return np.ones(len(economics.capital), dtype=float)
+
+
+def economic_sample_weights(economics: EconomicSlice) -> np.ndarray:
+    """Backward-compatible alias for the classification fit weights."""
+
+    return classification_sample_weights(economics)
 
 
 def _sigmoid(values: np.ndarray) -> np.ndarray:

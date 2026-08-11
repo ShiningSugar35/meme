@@ -7,6 +7,8 @@ def valid_token() -> dict[str, object]:
     return {
         "type": "new_creation",
         "launchpad": "Pump.fun",
+        "symbol": "MEME",
+        "quote_symbol": "SOL",
         "rug_ratio": 0.1,
         "insider_ratio": 0.1,
         "bundler_rate": 0.1,
@@ -59,6 +61,20 @@ def test_only_the_ten_frozen_launchpads_are_allowed() -> None:
     token["launchpad"] = "unknown-pad"
     decision = SafetyFilter().evaluate(token)
     assert "launchpad" in decision.reasons
+
+
+def test_quote_asset_is_limited_to_sol_usdc_usdt() -> None:
+    token = valid_token()
+    token["quote_symbol"] = "WETH"
+    decision = SafetyFilter().evaluate(token)
+    assert "quote_asset_not_allowed" in decision.reasons
+
+
+def test_major_assets_cannot_be_target_tokens() -> None:
+    token = valid_token()
+    token["symbol"] = "USDC"
+    decision = SafetyFilter().evaluate(token)
+    assert "target_asset_excluded" in decision.reasons
 
 
 def test_top1_addr_type_zero_uses_strict_range() -> None:

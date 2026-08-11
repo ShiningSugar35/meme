@@ -29,7 +29,7 @@ from .types import (
 @dataclass(frozen=True)
 class TrainerConfig:
     random_state: int = 42
-    min_precision: float = 0.20
+    min_precision: float = 0.35
     min_trades: int = 3
     candidate_names: tuple[str, ...] = (
         "logistic_regression",

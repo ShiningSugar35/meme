@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     training_holdout_days: int = Field(default=30, ge=7)
     training_max_retries: int = Field(default=2, ge=0, le=10)
     training_worker_poll_seconds: int = Field(default=5, ge=1, le=300)
-    min_precision: float = Field(default=0.20, ge=0, le=1)
+    min_precision: float = Field(default=0.35, ge=0, le=1)
     promotion_min_pnl_lift: float = Field(default=0.05, ge=0)
 
     # Versioned conservative execution ladder. Values are operator-overridable.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from ..config import get_settings
 from ..database import get_database
@@ -14,6 +14,7 @@ from ..services.csv_importer import CsvImporter
 from ..services.dashboard import DashboardService
 from ..services.paper_trading import PaperTradingService
 from ..services.runtime import RuntimeService
+from ..services.sample_export import SampleExportService
 from ..services.prediction import PredictionService
 from ..services.training import TrainingService
 from .schemas import (
@@ -75,6 +76,19 @@ def rollback_model(model_id: str) -> dict:
 @router.get("/signals")
 def signals(limit: int = Query(default=100, ge=1, le=500)) -> dict:
     return {"items": DashboardService(get_database()).list_signals(limit=limit)}
+
+
+@router.get("/samples/export.csv")
+def export_samples() -> Response:
+    text, count = SampleExportService(get_database()).render_csv()
+    return Response(
+        content="\ufeff" + text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="meme-data.csv"; filename*=UTF-8\'\'meme%E6%95%B0%E6%8D%AE.csv',
+            "X-Sample-Count": str(count),
+        },
+    )
 
 
 @router.post("/signals/process")

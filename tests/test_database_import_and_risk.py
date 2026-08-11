@@ -11,6 +11,7 @@ from backend.app.repositories.samples import SampleRecord, SampleRepository
 from backend.app.risk.service import RiskService
 from backend.app.services.collector_worker import SqliteCollectorSink
 from backend.app.services.csv_importer import CsvImporter
+from backend.app.services.sample_export import SampleExportService
 
 
 def make_database(tmp_path: Path) -> Database:
@@ -42,13 +43,13 @@ def test_csv_import_is_idempotent_and_migrates_legacy_terminal(tmp_path: Path) -
     assert first.legacy_terminal_rows == 1
     assert second.inserted_rows == 0
     row = database.fetch_one("SELECT * FROM samples")
-    assert row["tag"] == 2
+    assert row["tag"] == 0
     assert row["final_close_ratio"] == 1.25
-    assert row["terminal_return_estimated"] == 1
+    assert row["terminal_return_estimated"] == 0
     assert row["utility_eligible"] == 0
-    assert row["gross_return_rate"] == 0.25
-    assert row["return_source"] == "legacy_floor"
-    assert row["exit_reason"] == "legacy_timeout_positive"
+    assert row["gross_return_rate"] == -0.10
+    assert row["return_source"] == "legacy_binary_rule"
+    assert row["exit_reason"] == "legacy_negative_or_timeout"
 
 
 def test_label_finalization_preserves_legacy_utility_ineligibility(tmp_path: Path) -> None:
@@ -70,9 +71,9 @@ def test_label_finalization_preserves_legacy_utility_ineligibility(tmp_path: Pat
     result = PriceWindowResult(
         address="fixture-mint-legacy-pending",
         entry_time=1_800_000_000,
-        label_version="sl090_tp160_h2_close120_v2",
-        tag=2,
-        exit_reason="window_close_above_1_2x",
+        label_version="sl090_tp160_h2_binary_v3",
+        tag=0,
+        exit_reason="window_timeout_negative",
         max_price_ratio=1.3,
         min_price_ratio=0.95,
         final_close_ratio=1.25,
@@ -100,6 +101,29 @@ def test_same_token_is_independent_at_different_entry_times(tmp_path: Path) -> N
     assert repository.insert(SampleRecord(entry_time=100, **base))
     assert repository.insert(SampleRecord(entry_time=100 + 2 * 60 * 60 + 1, **base))
     assert not repository.insert(SampleRecord(entry_time=100, **base))
+
+
+def test_sample_export_contains_all_and_only_mature_tagged_rows(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    repository = SampleRepository(database)
+    repository.insert(SampleRecord(
+        address="mature-token", entry_time=100, entry_price=1.0,
+        launchpad="Pump.fun", features={"age": 5.0}, tag=1, label_status="mature",
+    ))
+    repository.insert(SampleRecord(
+        address="pending-token", entry_time=200, entry_price=1.0,
+        launchpad="letsbonk", features={"age": 6.0}, tag=None, label_status="pending",
+    ))
+
+    text, count = SampleExportService(database).render_csv()
+
+    assert count == 1
+    rows = list(csv.DictReader(text.splitlines()))
+    assert len(rows) == 1
+    assert rows[0]["address"] == "mature-token"
+    assert rows[0]["launchpad"] == "Pump.fun"
+    assert rows[0]["tag"] == "1"
+    assert rows[0]["age"] == "5.0"
 
 
 def test_risk_limits_and_duplicate_live_position(tmp_path: Path) -> None:

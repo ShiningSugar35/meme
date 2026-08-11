@@ -34,6 +34,11 @@ export const api = {
   dashboard: () => request<DashboardData>("/api/dashboard"),
   models: () => request<{ champion: ModelVersion | null; items: ModelVersion[]; feature_catalog: ModelFeatureCatalog; training_runs: TrainingRun[] }>("/api/models"),
   signals: () => request<{ items: Signal[] }>("/api/signals"),
+  exportSamples: async () => {
+    const response = await fetch("/api/samples/export.csv");
+    if (!response.ok) throw new Error(`样本集导出失败: ${response.status}`);
+    return response.blob();
+  },
   portfolio: () => request<{ items: Position[] }>("/api/portfolio"),
   portfolioView: (options: { mode: "simulation" | "live"; profile: Profile; page: number; pageSize: number; startAt?: string; endAt?: string }) => {
     const params = new URLSearchParams({

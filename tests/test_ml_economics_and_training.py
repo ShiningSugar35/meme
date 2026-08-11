@@ -27,7 +27,6 @@ def _learnable_frame(rows: int = 360, *, include_liquidity: bool = True) -> pd.D
     quality = rng.normal(size=rows)
     latent = 1.6 * momentum + 0.5 * quality + rng.normal(scale=0.45, size=rows)
     tags = np.where(latent > 0.65, 1, 0)
-    tags[(latent > 0.35) & (latent <= 0.65)] = 2
     frame = pd.DataFrame(
         {
             "address": [f"token-{i}" for i in range(rows)],
@@ -38,7 +37,7 @@ def _learnable_frame(rows: int = 360, *, include_liquidity: bool = True) -> pd.D
             "price": 1.0,
             "price_2h_max/price": np.where(tags == 1, 1.7, 1.1),
             "price_2h_min/price": np.where(tags == 0, 0.85, 0.98),
-            "final_2h_close_ratio": np.where(tags == 2, 1.22, np.nan),
+            "final_2h_close_ratio": np.nan,
             "price_change_1h": momentum,
             "fresh_wallet_rate": 1 / (1 + np.exp(-quality)),
             "launchpad": np.where(np.arange(rows) % 3, "Pump.fun", "letsbonk"),
@@ -57,7 +56,7 @@ def test_realized_return_and_capital_formula_are_exact() -> None:
             "feature": [0.0, 1.0, 2.0],
             "liquidity": [1_000.0, 4_000.0, 10_000.0],
             "final_2h_close_ratio": [np.nan, np.nan, 1.27],
-            "tag": [0, 1, 2],
+            "tag": [0, 1, 0],
         }
     )
     prepared = FeatureBuilder().prepare(frame)
@@ -65,11 +64,11 @@ def test_realized_return_and_capital_formula_are_exact() -> None:
 
     assert economics.utility_eligible
     assert economics.capital.tolist() == [10.0, 40.0, 50.0]
-    assert economics.realized_return.tolist() == pytest.approx([-0.10, 0.60, 0.27])
+    assert economics.realized_return.tolist() == pytest.approx([-0.10, 0.60, -0.10])
     metrics = evaluate_probabilities(
         prepared.y.to_numpy(), np.array([0.9, 0.9, 0.9]), 0.5, economics
     )
-    assert metrics.cumulative_pnl_usd == pytest.approx(-1 + 24 + 13.5)
+    assert metrics.cumulative_pnl_usd == pytest.approx(-1 + 24 - 5)
     assert metrics.proxy_pnl is None
 
 
@@ -188,4 +187,4 @@ def test_legacy_proxy_can_score_but_cannot_auto_promote() -> None:
     assert not decision.promote
     assert decision.candidate_metrics.cumulative_pnl_usd is None
     assert decision.candidate_metrics.proxy_pnl is not None
-    assert any("real liquidity" in blocker for blocker in decision.blockers)
+    assert any("liquidity" in blocker for blocker in decision.blockers)
