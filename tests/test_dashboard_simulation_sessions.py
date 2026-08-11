@@ -107,3 +107,85 @@ def test_dashboard_excludes_previous_simulation_sessions_but_keeps_live(tmp_path
         "current-paper",
         "live-position",
     }
+
+
+def test_portfolio_view_filters_profile_time_and_exposes_market_snapshot(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    paper = PaperTradingService(database)
+    session_id = paper.ensure_simulation_session()["id"]
+    now = datetime.now(timezone.utc)
+    insert_closed(
+        database,
+        position_id="balanced-recent",
+        account_kind="paper",
+        session_id=session_id,
+        pnl=6.0,
+        now=now,
+    )
+    insert_closed(
+        database,
+        position_id="balanced-old",
+        account_kind="paper",
+        session_id=session_id,
+        pnl=-2.0,
+        now=now - timedelta(days=2),
+    )
+    insert_closed(
+        database,
+        position_id="aggressive-recent",
+        account_kind="shadow_aggressive",
+        session_id=session_id,
+        pnl=9.0,
+        now=now,
+    )
+    database.execute(
+        """
+        INSERT INTO positions(
+            id,token_address,account_kind,profile,status,simulation_session_id,
+            entry_time,expires_at,invested_usd,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "balanced-open",
+            "token-balanced-open",
+            "paper",
+            "balanced",
+            "open",
+            session_id,
+            now.isoformat(),
+            (now + timedelta(hours=2)).isoformat(),
+            40.0,
+            '{"market_snapshot":{"price":1.2,"liquidity_usd":12345.0,"market_cap_usd":98765.0,"as_of":"2026-08-11T00:00:00+00:00"}}',
+        ),
+    )
+
+    view = DashboardService(database).portfolio_view(
+        mode="simulation",
+        profile="balanced",
+        page=1,
+        page_size=10,
+        start_at=(now - timedelta(hours=12)).isoformat(),
+    )
+
+    assert view["history"]["total"] == 1
+    assert [row["id"] for row in view["history"]["items"]] == ["balanced-recent"]
+    assert [row["id"] for row in view["current"]] == ["balanced-open"]
+    assert view["current"][0]["current_liquidity_usd"] == pytest.approx(12345.0)
+    assert view["current"][0]["current_market_cap_usd"] == pytest.approx(98765.0)
+    assert view["accounts"]["balanced"]["realized_pnl_usd"] == pytest.approx(4.0)
+    assert view["accounts"]["aggressive"]["realized_pnl_usd"] == pytest.approx(9.0)
+
+
+def test_simulation_audit_has_one_row_per_profile_per_session(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    paper = PaperTradingService(database)
+    session_id = paper.ensure_simulation_session()["id"]
+    now = datetime.now(timezone.utc)
+    insert_closed(database, position_id="audit-balanced", account_kind="paper", session_id=session_id, pnl=1.0, now=now)
+    insert_closed(database, position_id="audit-aggressive", account_kind="shadow_aggressive", session_id=session_id, pnl=2.0, now=now)
+
+    rows = paper.simulation_audit(limit_sessions=1)
+
+    assert [row["profile"] for row in rows] == ["balanced", "aggressive", "conservative"]
+    pnl = {row["profile"]: row["realized_pnl_usd"] for row in rows}
+    assert pnl == {"balanced": pytest.approx(1.0), "aggressive": pytest.approx(2.0), "conservative": pytest.approx(0.0)}

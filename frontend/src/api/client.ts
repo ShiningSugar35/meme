@@ -5,12 +5,15 @@ import type {
   DashboardData,
   ModelFeatureCatalog,
   ModelVersion,
+  PortfolioView,
   Position,
+  Profile,
   TrainingRun,
   PreparedAction,
   RiskStatus,
   RuntimeStatus,
   Signal,
+  SimulationAuditItem,
   SimulationHistoryItem,
   SimulationStatus
 } from "./types";
@@ -32,8 +35,20 @@ export const api = {
   models: () => request<{ champion: ModelVersion | null; items: ModelVersion[]; feature_catalog: ModelFeatureCatalog; training_runs: TrainingRun[] }>("/api/models"),
   signals: () => request<{ items: Signal[] }>("/api/signals"),
   portfolio: () => request<{ items: Position[] }>("/api/portfolio"),
+  portfolioView: (options: { mode: "simulation" | "live"; profile: Profile; page: number; pageSize: number; startAt?: string; endAt?: string }) => {
+    const params = new URLSearchParams({
+      mode: options.mode,
+      profile: options.profile,
+      page: String(options.page),
+      page_size: String(options.pageSize)
+    });
+    if (options.startAt) params.set("start_at", options.startAt);
+    if (options.endAt) params.set("end_at", options.endAt);
+    return request<PortfolioView>(`/api/portfolio/view?${params.toString()}`);
+  },
   simulation: () => request<SimulationStatus>("/api/simulation"),
   simulationHistory: () => request<{ items: SimulationHistoryItem[] }>("/api/simulation/history"),
+  simulationAudit: () => request<{ items: SimulationAuditItem[] }>("/api/simulation/audit"),
   resetSimulation: () => request<SimulationStatus>("/api/simulation/reset", { method: "POST" }),
   agentContext: () => request<AgentContext>("/api/agent/context"),
   agentProposals: () => request<{ items: AgentProposal[] }>("/api/agent/proposals"),

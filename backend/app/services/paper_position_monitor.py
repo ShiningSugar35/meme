@@ -4,8 +4,10 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
+from ..collector.enrichment import merge_sources
+from ..collector.filters import normalize_token
 from ..collector.models import Kline
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
@@ -14,6 +16,8 @@ from .paper_trading import PaperTradingService
 
 class KlineProvider(Protocol):
     async def klines(self, address: str, from_ts: int, to_ts: int) -> Sequence[Kline]: ...
+
+    async def token_bundle(self, address: str) -> Mapping[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +135,18 @@ class PaperPositionMonitor:
                 blocked += int(result.state == "blocked")
                 open_count += int(result.state == "open")
 
+            try:
+                await self._refresh_market_snapshot(provider, address, positions, klines)
+            except Exception as exc:
+                self.database.audit(
+                    category="simulation",
+                    action="paper_market_snapshot_failed",
+                    severity="warning",
+                    entity_type="token",
+                    entity_id=address,
+                    details={"positions": len(positions), "error": f"{type(exc).__name__}: {exc}"[:300]},
+                )
+
         report = PaperMonitorCycle(
             checked_positions=checked,
             market_requests=market_requests,
@@ -143,6 +159,52 @@ class PaperPositionMonitor:
         )
         self.database.set_runtime_state("paper_monitor_status", {"state": "running", **asdict(report)})
         return report
+
+    async def _refresh_market_snapshot(
+        self,
+        provider: KlineProvider,
+        address: str,
+        positions: list[dict],
+        klines: Sequence[Kline],
+    ) -> None:
+        snapshot: dict[str, Any] = {"as_of": utc_now_iso()}
+        completed = [item for item in klines if item.close is not None]
+        if completed:
+            latest = max(completed, key=lambda item: item.timestamp)
+            snapshot["price"] = float(latest.close) if latest.close is not None else None
+
+        token_bundle = getattr(provider, "token_bundle", None)
+        if callable(token_bundle):
+            try:
+                bundle = await token_bundle(address)
+                normalized = normalize_token(merge_sources(bundle), "")
+                if normalized.get("price") is not None:
+                    snapshot["price"] = normalized["price"]
+                snapshot["liquidity_usd"] = normalized.get("liquidity")
+                snapshot["market_cap_usd"] = normalized.get("marketcap")
+            except Exception:
+                # K-line monitoring remains authoritative for exits. A failed
+                # optional token snapshot must never block or delay an exit.
+                pass
+
+        if len(snapshot) == 1:
+            return
+        for position in positions:
+            latest = self.database.fetch_one(
+                "SELECT metadata_json FROM positions WHERE id=?",
+                (position["id"],),
+            ) or {}
+            try:
+                metadata = json.loads(latest.get("metadata_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["market_snapshot"] = snapshot
+            self.database.execute(
+                "UPDATE positions SET metadata_json=? WHERE id=?",
+                (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position["id"]),
+            )
 
     @staticmethod
     def _iso_epoch(value: str) -> int:

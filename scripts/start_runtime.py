@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import os
 import socket
 import subprocess
-import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +22,14 @@ def port_is_open() -> bool:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Start the Meme Quant FastAPI runtime.")
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable uvicorn source hot reload for local development.",
+    )
+    args = parser.parse_args()
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     if port_is_open():
         print(f"runtime=already_running host={HOST} port={PORT}")
@@ -36,19 +44,23 @@ def main() -> int:
     if os.name == "nt":
         creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
 
+    command = [
+        str(python),
+        "-m",
+        "uvicorn",
+        "backend.app.main:app",
+        "--host",
+        HOST,
+        "--port",
+        str(PORT),
+    ]
+    if args.reload:
+        command.extend(["--reload", "--reload-dir", str(PROJECT_ROOT / "backend")])
+
     out_handle = OUT_FILE.open("ab", buffering=0)
     err_handle = ERR_FILE.open("ab", buffering=0)
     process = subprocess.Popen(
-        [
-            str(python),
-            "-m",
-            "uvicorn",
-            "backend.app.main:app",
-            "--host",
-            HOST,
-            "--port",
-            str(PORT),
-        ],
+        command,
         cwd=PROJECT_ROOT,
         stdin=subprocess.DEVNULL,
         stdout=out_handle,
@@ -57,7 +69,10 @@ def main() -> int:
         close_fds=True,
     )
     PID_FILE.write_text(str(process.pid), encoding="ascii")
-    print(f"runtime=started pid={process.pid} host={HOST} port={PORT}")
+    print(
+        f"runtime=started pid={process.pid} host={HOST} port={PORT} "
+        f"reload={'true' if args.reload else 'false'}"
+    )
     return 0
 
 

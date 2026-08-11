@@ -57,6 +57,18 @@ class FakeKlineProvider:
         return self.items
 
 
+class FakeMarketProvider(FakeKlineProvider):
+    async def token_bundle(self, address: str):
+        return {
+            "token_info": {
+                "address": address,
+                "price": 1.1,
+                "liquidity": 12345.0,
+                "market_cap": 98765.0,
+            }
+        }
+
+
 def make_settings(tmp_path: Path) -> Settings:
     return Settings(
         _env_file=None,
@@ -270,3 +282,27 @@ async def test_timeout_uses_last_close_at_or_before_two_hours(tmp_path: Path) ->
     assert row["status"] == "closed"
     assert row["exit_reason"] == "timeout_2h"
     assert row["exit_price"] == pytest.approx(1.12)
+
+
+@pytest.mark.asyncio
+async def test_monitor_persists_current_market_snapshot_without_changing_exit_decision(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
+    seed_position(database, address="snapshot-token", position_id="paper-snapshot", account_kind="paper", opened_at=opened)
+    monitor = PaperPositionMonitor(database, settings)
+    market = FakeMarketProvider(
+        [Kline(int((opened + timedelta(minutes=5)).timestamp()), 1.2, 0.95, 1.1)]
+    )
+
+    report = await monitor.run_cycle(
+        market, now_ts=int((opened + timedelta(minutes=6)).timestamp())
+    )
+
+    assert report.open_positions == 1
+    row = database.fetch_one("SELECT status,metadata_json FROM positions WHERE id='paper-snapshot'")
+    assert row["status"] == "open"
+    snapshot = json.loads(row["metadata_json"])["market_snapshot"]
+    assert snapshot["price"] == pytest.approx(1.1)
+    assert snapshot["liquidity_usd"] == pytest.approx(12345.0)
+    assert snapshot["market_cap_usd"] == pytest.approx(98765.0)

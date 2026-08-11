@@ -249,10 +249,14 @@ npm install
 
 ### 6.2 启动后端
 
+本地开发推荐使用项目启动器开启热更新：
+
 ```powershell
 Set-Location D:\meme
-.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+.\.venv\Scripts\python.exe scripts\start_runtime.py --reload
 ```
+
+`--reload` 只监控 `backend/` 源码；PID 仍写入 `logs/backend.pid`，便于停止整棵 Uvicorn reload 进程树。非开发常驻运行可去掉 `--reload`。
 
 启动时会：
 
@@ -272,7 +276,11 @@ Set-Location D:\meme\frontend
 npm run dev
 ```
 
-访问 `http://127.0.0.1:5173`。Vite 会把 `/api` 和 `/health` 代理到 `127.0.0.1:8000`。
+访问 `http://127.0.0.1:5173`。Vite 会把 `/api` 和 `/health` 代理到 `127.0.0.1:8000`，开发模式自带前端 HMR。
+
+左侧导航固定为：`总览 → 持仓 → 样本采集 → 运行监控 → 模型中心 → Agent审批`。`/signals` 路由保留，但产品名称显示为“样本采集”。
+
+“持仓”页采用两层视图：先切换 `模拟仓 / 实盘`，再点击 `平衡 / 激进 / 保守` 档位。仅模拟运行时默认进入模拟仓；实盘与模拟均运行时默认进入实盘。右上角原 `Asia / Shanghai` 位置用于 `切换至实盘 / 切换至模拟仓` 按钮。当前持仓只显示所选档位，并展示由持仓监控周期写入的当前流动性/当前市值快照；Token 支持悬浮复制。交易历史由 SQLite 真分页，默认 30 行/页，可持久记忆用户选择的每页行数，并支持页码跳转和退出时间范围筛选。交易审计按每个 simulation session 的三档分别列示，不再把三档 PnL 合并成一个 session 总数。`mode=live` 的同构视图和后端账本接口已搭好，数据源契约标记为 GMGN Trading API，但不会因此启用自动 live BUY 或伪造钱包余额。
 
 “运行监控”页提供 Collector 的结构化实时终端：后端保留最近 250 条采集事件，前端约每 1.5 秒刷新，按三生命周期分别显示 returned / accepted / rejected / duplicate，并逐条展示候选二筛拒绝原因、成功入样、T+2h 标签补齐和阶段异常。该终端来自 Collector 的实际事件流，不是对静态日志文件的装饰性回放。
 
@@ -301,7 +309,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-10 当前基线：后端 `pytest -q` **86/86 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV/schema migration、特征泄漏与自选 feature schema、五模型/时序/Champion 晋级回滚、durable TrainingWorker/周训/7 日退化监控、simulation session/1m first-touch/重启恢复、monitor-only 生命周期、Agent 人工审批、非实盘 FastAPI E2E，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
+2026-08-11 当前基线：后端 `pytest -q` **89/89 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV/schema migration、特征泄漏与自选 feature schema、五模型/时序/Champion 晋级回滚、durable TrainingWorker/周训/7 日退化监控、simulation session/1m first-touch/重启恢复、持仓当前市场快照、按档位/时间筛选与真分页、三档交易审计、monitor-only 生命周期、Agent 人工审批、非实盘 FastAPI E2E，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
@@ -324,7 +332,7 @@ npm run build
 
 ### 9.1 非实盘本地版
 
-截至 2026-08-10，单机/单用户/localhost 范围内的非实盘主链已经闭环：legacy CSV → SQLite → 持续采集/入场特征 → T+2h 标签 → 五候选时序训练 → 一个 Champion/三阈值 → 固定模拟/激进影子/保守影子 → 1m K 线 first-touch 退出 → 模拟 PnL/会话历史 → 周训/启动补训 → 7 日退化监控 → Challenger 公平比较 → 自动晋级或安全拒绝 → 模型回滚。训练任务、模拟会话和 Agent 提案均为持久化对象并支持重启恢复。
+截至 2026-08-11，单机/单用户/localhost 范围内的非实盘主链已经闭环：legacy CSV → SQLite → 持续采集/入场特征 → T+2h 标签 → 五候选时序训练 → 一个 Champion/三阈值 → 固定模拟/激进影子/保守影子 → 1m K 线 first-touch 退出 → 三档独立模拟 PnL/交易审计 → 周训/启动补训 → 7 日退化监控 → Challenger 公平比较 → 自动晋级或安全拒绝 → 模型回滚。训练任务、模拟会话和 Agent 提案均为持久化对象并支持重启恢复；持仓页已按档位提供当前仓位、实时市场快照与分页交易历史。
 
 历史数据本身仍有客观边界：
 

@@ -4,10 +4,10 @@ import type { MouseEvent, ReactNode } from "react";
 
 const navigation = [
   { to: "/", label: "总览", icon: LayoutDashboard },
-  { to: "/models", label: "模型中心", icon: Bot },
-  { to: "/signals", label: "信号", icon: Radio },
   { to: "/portfolio", label: "持仓", icon: WalletCards },
+  { to: "/signals", label: "样本采集", icon: Radio },
   { to: "/runtime", label: "运行监控", icon: Activity },
+  { to: "/models", label: "模型中心", icon: Bot },
   { to: "/agent", label: "Agent审批", icon: ShieldCheck }
 ];
 
@@ -47,7 +47,7 @@ export function AppShell({ children, currentPath, onNavigate }: AppShellProps) {
       </aside>
       {mobileOpen && <button className="mobile-overlay" aria-label="关闭导航" onClick={() => setMobileOpen(false)} />}
       <main className="main-panel">
-        <header className="topbar"><button className="icon-button menu-button" onClick={() => setMobileOpen(true)} aria-label="打开导航"><Menu size={21} /></button><div><span className="topbar-kicker">OPERATIONS CONSOLE</span><strong>量化交易控制台</strong></div><span className="topbar-clock">Asia / Shanghai</span></header>
+        <header className="topbar"><button className="icon-button menu-button" onClick={() => setMobileOpen(true)} aria-label="打开导航"><Menu size={21} /></button><div><span className="topbar-kicker">OPERATIONS CONSOLE</span><strong>量化交易控制台</strong></div>{currentPath === "/portfolio" ? <div id="portfolio-mode-switch" className="topbar-page-action" /> : <span className="topbar-clock">Asia / Shanghai</span>}</header>
         <div className="page-container">{children}</div>
       </main>
     </div>

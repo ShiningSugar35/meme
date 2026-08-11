@@ -96,9 +96,11 @@
 - [x] 人工 approve/reject 后才执行非实盘白名单动作
 - [x] proposal result/error/audit 持久化
 - [x] `/agent` 审批页
-- [x] Dashboard / Models / Signals / Portfolio / Runtime / Agent 六页面
+- [x] Dashboard / Portfolio / Signals（产品名“样本采集”）/ Runtime / Models / Agent 六页面与固定侧栏顺序
 - [x] 模型中心 feature coverage、自选 schema、训练 queue、rollback
-- [x] Portfolio simulation session history
+- [x] Portfolio `simulation/live × balanced/aggressive/conservative` 两层视图；顶栏模式切换；只跑模拟时默认模拟，live 启用时默认实盘
+- [x] Portfolio 当前仓位缓存 GMGN 当前流动性/市值；Token 悬浮复制；交易历史 SQL 真分页、时间筛选、page size 持久记忆；simulation audit 三档独立
+- [x] live Portfolio 同构前后端账本 scaffold 已标记 GMGN Trading API，自动 live BUY 仍保持停放
 - [x] Runtime 显示 TrainingWorker / model health / monitor-only / reconciliation / liquidation
 - [x] Runtime Collector 实时终端：三生命周期独立 returned/accepted/rejected/duplicate 统计 + 最近 250 条后端结构化采集事件
 
@@ -112,7 +114,7 @@
 - [x] 发现 GMGN 可能返回超过请求 limit 的候选后，已在 DiscoveryService 本地二次 `[:limit]` 截断；复验 candidates=1
 - [x] live journal crash window / pending / unknown / reconciliation mock tests
 - [x] persistent liquidation mock tests
-- [x] 后端 full `pytest -q`：**86/86 passed**
+- [x] 后端 full `pytest -q`：**89/89 passed**（新增持仓按档位/时间筛选、三档交易审计、当前市场快照回归）
 - [x] 前端 `npm run build`：passed
 - [x] 真实 `data/meme_quant.db`：schema v6 / 2319 条 legacy 已迁移并开始持续追加新样本；2026-08-10 当前 2320 samples（2319 mature + 1 pending）/ Champion 工件存在
 

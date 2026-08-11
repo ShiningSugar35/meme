@@ -175,6 +175,20 @@ export interface SimulationHistoryItem {
   }>;
 }
 
+export interface SimulationAuditItem {
+  session_id: string;
+  profile: Profile;
+  account_kind: string;
+  status: "active" | "closed";
+  started_at: string;
+  ended_at: string | null;
+  created_reason: string;
+  positions: number;
+  open_positions: number;
+  closed_positions: number;
+  realized_pnl_usd: number;
+}
+
 export interface Position {
   id: string;
   token_address: string;
@@ -183,11 +197,51 @@ export interface Position {
   status: string;
   entry_time: string;
   expires_at: string;
+  exit_time?: string | null;
   invested_usd: number;
   entry_price: number | null;
   exit_price: number | null;
   exit_reason: string | null;
   net_pnl_usd: number | null;
+  current_price?: number | null;
+  current_liquidity_usd?: number | null;
+  current_market_cap_usd?: number | null;
+  market_snapshot_at?: string | null;
+}
+
+export interface PortfolioView {
+  mode: "simulation" | "live";
+  profile: Profile;
+  live_trading_enabled: boolean;
+  simulation_enabled: boolean;
+  provider: string;
+  session: SimulationStatus["session"] | null;
+  accounts: Record<Profile, Partial<SimulationAccount> & {
+    positions?: number;
+    open_positions?: number;
+    closed_positions?: number;
+    realized_pnl_usd?: number;
+    cash_usd?: number | null;
+    sol_fee_reserve?: number | null;
+    source?: string;
+  }>;
+  account: Partial<SimulationAccount> & {
+    positions?: number;
+    open_positions?: number;
+    closed_positions?: number;
+    realized_pnl_usd?: number;
+    cash_usd?: number | null;
+    sol_fee_reserve?: number | null;
+    source?: string;
+  };
+  current: Position[];
+  history: {
+    items: Position[];
+    page: number;
+    page_size: number;
+    total: number;
+    total_pages: number;
+  };
 }
 
 export interface AgentProposal {

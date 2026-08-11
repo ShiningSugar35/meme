@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,6 +13,12 @@ from .runtime import RuntimeService
 
 
 class DashboardService:
+    PROFILE_ACCOUNT = {
+        "balanced": "paper",
+        "aggressive": "shadow_aggressive",
+        "conservative": "shadow_conservative",
+    }
+
     def __init__(self, database: Database) -> None:
         self.database = database
         self.samples = SampleRepository(database)
@@ -94,6 +101,143 @@ class DashboardService:
             tuple(parameters),
         )
 
+    def portfolio_view(
+        self,
+        *,
+        mode: str,
+        profile: str,
+        page: int = 1,
+        page_size: int = 30,
+        start_at: str | None = None,
+        end_at: str | None = None,
+    ) -> dict[str, Any]:
+        if mode not in {"simulation", "live"}:
+            raise ValueError("mode must be simulation or live")
+        if profile not in self.PROFILE_ACCOUNT:
+            raise ValueError("profile must be aggressive, balanced or conservative")
+
+        runtime = RuntimeService(self.database).status()
+        simulation = PaperTradingService(self.database).simulation_status()
+        account_kind = self.PROFILE_ACCOUNT[profile] if mode == "simulation" else "live"
+        common_clauses = ["account_kind=?", "profile=?"]
+        common_params: list[Any] = [account_kind, profile]
+        if mode == "simulation":
+            common_clauses.append("simulation_session_id=?")
+            common_params.append(str(simulation["session"]["id"]))
+
+        current_where = " AND ".join(
+            common_clauses + ["status IN ('opening','open','closing','manual_intervention')"]
+        )
+        current = self.database.fetch_all(
+            f"SELECT * FROM positions WHERE {current_where} ORDER BY entry_time DESC",
+            tuple(common_params),
+        )
+
+        history_clauses = list(common_clauses) + ["status='closed'"]
+        history_params = list(common_params)
+        if start_at:
+            history_clauses.append("exit_time>=?")
+            history_params.append(start_at)
+        if end_at:
+            history_clauses.append("exit_time<=?")
+            history_params.append(end_at)
+        history_where = " AND ".join(history_clauses)
+        total = int(
+            (
+                self.database.fetch_one(
+                    f"SELECT COUNT(*) AS count FROM positions WHERE {history_where}",
+                    tuple(history_params),
+                )
+                or {"count": 0}
+            )["count"]
+        )
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        resolved_page = min(max(1, page), total_pages)
+        offset = (resolved_page - 1) * page_size
+        history = self.database.fetch_all(
+            f"""
+            SELECT * FROM positions
+            WHERE {history_where}
+            ORDER BY exit_time DESC, entry_time DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(history_params + [page_size, offset]),
+        )
+
+        if mode == "simulation":
+            accounts = {
+                item_profile: simulation["accounts"].get(item_account, {})
+                for item_profile, item_account in self.PROFILE_ACCOUNT.items()
+            }
+        else:
+            live_rows = self.database.fetch_all(
+                """
+                SELECT
+                    profile,
+                    COUNT(*) AS positions,
+                    COALESCE(SUM(CASE WHEN status IN ('opening','open','closing','manual_intervention') THEN 1 ELSE 0 END),0) AS open_positions,
+                    COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+                    COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+                FROM positions WHERE account_kind='live'
+                GROUP BY profile
+                """
+            )
+            by_profile = {str(row["profile"]): row for row in live_rows}
+            accounts = {
+                item_profile: {
+                    **by_profile.get(
+                        item_profile,
+                        {
+                            "positions": 0,
+                            "open_positions": 0,
+                            "closed_positions": 0,
+                            "realized_pnl_usd": 0.0,
+                        },
+                    ),
+                    "account": "live",
+                    "cash_usd": None,
+                    "sol_fee_reserve": None,
+                    "source": "gmgn_trading_api_scaffold",
+                }
+                for item_profile in self.PROFILE_ACCOUNT
+            }
+        account_summary = accounts.get(profile, {})
+
+        return {
+            "mode": mode,
+            "profile": profile,
+            "live_trading_enabled": bool(runtime.get("live_trading_enabled")),
+            "simulation_enabled": bool(runtime.get("simulation_enabled")),
+            "provider": "gmgn_api" if mode == "live" else "simulator",
+            "session": simulation["session"] if mode == "simulation" else None,
+            "accounts": accounts,
+            "account": account_summary,
+            "current": [self._position_for_view(item) for item in current],
+            "history": {
+                "items": [self._position_for_view(item) for item in history],
+                "page": resolved_page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+            },
+        }
+
+    @staticmethod
+    def _position_for_view(item: dict[str, Any]) -> dict[str, Any]:
+        result = dict(item)
+        try:
+            metadata = json.loads(str(result.get("metadata_json") or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        snapshot = metadata.get("market_snapshot") if isinstance(metadata, dict) else None
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        result["current_price"] = snapshot.get("price")
+        result["current_liquidity_usd"] = snapshot.get("liquidity_usd")
+        result["current_market_cap_usd"] = snapshot.get("market_cap_usd")
+        result["market_snapshot_at"] = snapshot.get("as_of")
+        result.pop("metadata_json", None)
+        return result
+
     def _pnl_since(self, since: str, simulation_session_id: str) -> dict[str, float]:
         rows = self.database.fetch_all(
             """
@@ -135,4 +279,3 @@ class DashboardService:
             """,
             (since,),
         )
-

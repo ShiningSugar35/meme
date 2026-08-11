@@ -245,16 +245,16 @@ proposal 持久化到 SQLite，必须人工 approve/reject。批准后才执行�
 
 ## 11. 前端
 
-当前六个本地页面：
+当前六个本地页面按产品导航顺序为：
 
-- Dashboard
-- Models
-- Signals
-- Portfolio
-- Runtime
-- Agent Approval
+- Dashboard / 总览
+- Portfolio / 持仓
+- Signals / 样本采集
+- Runtime / 运行监控
+- Models / 模型中心
+- Agent Approval / Agent审批
 
-Models 提供 feature coverage、自选 schema、durable training runs、Champion/rejected/retired 与 rollback；Portfolio 区分当前 simulation session 和历史；Runtime 显示 TrainingWorker/model health/monitor-only/reconciliation/liquidation；Agent 页面展示 allow/block 列表与人工审批。
+Portfolio 使用 `mode × profile` 两层视图：模拟/实盘切换位于顶栏，平衡/激进/保守卡片负责档位过滤；当前仓位的流动性/市值来自持仓监控周期缓存的 GMGN 市场快照，交易历史由后端 SQL 分页和时间筛选，交易审计按 session × profile 独立展开。live 视图复用相同 UI/账本 contract，并标记 GMGN Trading API 为未来实时资金/成交来源；在钱包事实和 live BUY E2E 未完成前仍 fail-closed。Models 提供 feature coverage、自选 schema、durable training runs、Champion/rejected/retired 与 rollback；Runtime 显示 TrainingWorker/model health/monitor-only/reconciliation/liquidation；Agent 页面展示 allow/block 列表与人工审批。
 
 ## 12. 单机第一版边界
 
@@ -315,10 +315,10 @@ Models 提供 feature coverage、自选 schema、durable training runs、Champio
 
 ## 16. 开发环境事实
 
-- `D:\meme` 当前没有 `.git` 元数据，不能声称已 commit/push；
+- `D:\meme` 已重新关联 GitHub 仓库 `ShiningSugar35/meme`，当前使用 `main` 跟踪 `origin/main`；
 - 根目录没有 `AGENTS.md`；
 - 真实 `.env` 是本地秘密事实源，不应复制进文档或测试；
-- 当前部署保持单进程 FastAPI。
+- 当前部署保持单进程 FastAPI；本地开发可由 `scripts/start_runtime.py --reload` 启用仅监控 `backend/` 的 Uvicorn 热更新，实盘常驻禁止 reload。
 
 ## 17. 早期架构基线说明
 
@@ -341,12 +341,13 @@ Models 提供 feature coverage、自选 schema、durable training runs、Champio
 - Agent durable proposal + 人工 approve/reject + 非实盘白名单执行；live/wallet/secret proposal fail-closed；
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
-- 后端 `pytest -q` **86/86 通过**；前端 `npm run build` 通过。
+- Portfolio `mode × profile` 同构视图、当前市场快照、SQL 分页/时间筛选与三档交易审计；
+- 后端 `pytest -q` **89/89 通过**；前端 `npm run build` 通过。
 
 ### 实盘接口停放
 
-保留 journal/reconciliation/two-click/liquidation/provider 接口；自动 live BUY 不接通。未来只需围绕真实资金事实与 GMGN 现场契约继续：wallet/equity/SOL/USD/balance/decimals、`output_amount_raw`、ambiguous balance reconciliation、真实 day-start equity/5-loss、balanced live BUY 和小额 E2E。
+保留 journal/reconciliation/two-click/liquidation/provider 接口；`GMGNAtomicProvider` 已定义 quote → swap → query_order 的 GMGN Trading API adapter，Portfolio live view 也已接到 `account_kind='live'` 持久账本，但自动 live BUY 不接通。未来仍需围绕真实资金事实与 GMGN 现场契约继续：wallet/equity/SOL/USD/balance/decimals、`output_amount_raw`、ambiguous balance reconciliation、真实 day-start equity/5-loss、balanced live BUY 和小额 E2E。
 
 ### 环境
 
-`D:\meme` 不是 Git 工作树，因此本轮没有、也不能宣称 commit/push。
+`D:\meme` 当前是 Git 工作树并跟踪 `origin/main`；发布变更必须在测试/构建通过后 commit + push。

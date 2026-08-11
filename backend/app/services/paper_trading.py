@@ -331,6 +331,35 @@ class PaperTradingService:
             )
         return sessions
 
+    def simulation_audit(self, *, limit_sessions: int = 50) -> list[dict[str, Any]]:
+        sessions = self.simulation_history(limit=limit_sessions)
+        profile_by_account = {
+            "paper": "balanced",
+            "shadow_aggressive": "aggressive",
+            "shadow_conservative": "conservative",
+        }
+        rows: list[dict[str, Any]] = []
+        for session in sessions:
+            accounts = session.get("accounts") or {}
+            for account in PAPER_ACCOUNTS:
+                summary = accounts.get(account) or {}
+                rows.append(
+                    {
+                        "session_id": session["id"],
+                        "profile": profile_by_account[account],
+                        "account_kind": account,
+                        "status": session["status"],
+                        "started_at": session["started_at"],
+                        "ended_at": session.get("ended_at"),
+                        "created_reason": session.get("created_reason"),
+                        "positions": int(summary.get("positions") or 0),
+                        "open_positions": int(summary.get("open_positions") or 0),
+                        "closed_positions": int(summary.get("closed_positions") or 0),
+                        "realized_pnl_usd": float(summary.get("realized_pnl_usd") or 0.0),
+                    }
+                )
+        return rows
+
     def sync_shadow_accounts(self, *, cash_usd: float, sol_fee_reserve: float, snapshot_id: str) -> None:
         session = self.ensure_simulation_session()
         for account in ("shadow_aggressive", "shadow_conservative"):

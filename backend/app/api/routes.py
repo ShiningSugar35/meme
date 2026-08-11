@@ -98,6 +98,28 @@ def portfolio(
     }
 
 
+@router.get("/portfolio/view")
+def portfolio_view(
+    mode: str = Query(default="simulation", pattern="^(simulation|live)$"),
+    profile: str = Query(default="balanced", pattern="^(aggressive|balanced|conservative)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=10, le=100),
+    start_at: str | None = None,
+    end_at: str | None = None,
+) -> dict:
+    try:
+        return DashboardService(get_database()).portfolio_view(
+            mode=mode,
+            profile=profile,
+            page=page,
+            page_size=page_size,
+            start_at=start_at,
+            end_at=end_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/simulation")
 def simulation_status() -> dict:
     return PaperTradingService(get_database()).simulation_status()
@@ -114,6 +136,11 @@ def reset_simulation() -> dict:
 @router.get("/simulation/history")
 def simulation_history(limit: int = Query(default=20, ge=1, le=200)) -> dict:
     return {"items": PaperTradingService(get_database()).simulation_history(limit=limit)}
+
+
+@router.get("/simulation/audit")
+def simulation_audit(limit_sessions: int = Query(default=50, ge=1, le=200)) -> dict:
+    return {"items": PaperTradingService(get_database()).simulation_audit(limit_sessions=limit_sessions)}
 
 
 @router.get("/runtime")
