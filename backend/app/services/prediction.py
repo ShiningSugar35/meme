@@ -12,7 +12,6 @@ import pandas as pd
 
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
-from ..ml.features import launchpad_feature_values
 from ..ml.registry import ModelRegistry
 from ..repositories.models import ModelRepository
 from .paper_trading import PaperTradingService
@@ -149,10 +148,9 @@ class PredictionService:
             source = json.loads(row.get("features_json") or "{}")
         except (TypeError, json.JSONDecodeError):
             source = {}
-        # Production inputs come from the frozen entry-time allowlist. Price and
-        # launchpad identity are both known at admission time.
+        # Production inputs come from the frozen entry-time allowlist. Launchpad
+        # remains metadata and is deliberately excluded from the model schema.
         source["price"] = row.get("entry_price")
-        source.update(launchpad_feature_values(row.get("launchpad")))
         record = {name: source.get(name, np.nan) for name in feature_names}
         return pd.DataFrame.from_records([record], columns=list(feature_names))
 

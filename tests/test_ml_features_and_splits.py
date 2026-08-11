@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from backend.app.ml import FeatureBuilder, TemporalSplitConfig, TemporalSplitter
-from backend.app.ml.features import FeaturePolicy, LAUNCHPAD_MODEL_FEATURES, MODEL_TRAINING_FEATURES
+from backend.app.ml.features import FeaturePolicy, MODEL_TRAINING_FEATURES
 
 
 def _frame(days: int = 60, rows_per_day: int = 4, *, liquidity: bool = True):
@@ -42,6 +42,7 @@ def test_feature_builder_excludes_ids_time_and_future_outcomes() -> None:
         "name",
         "symbol",
         "type",
+        "launchpad",
         "time",
         "price",
         "price_2h_max/price",
@@ -50,30 +51,27 @@ def test_feature_builder_excludes_ids_time_and_future_outcomes() -> None:
         "tag",
     }
     assert forbidden.isdisjoint(prepared.feature_names)
-    assert {"feature_score", "price_change_1h", "launchpad", "liquidity"}.issubset(
-        prepared.feature_names
-    )
+    assert {"feature_score", "price_change_1h", "liquidity"}.issubset(prepared.feature_names)
     assert prepared.y.equals(prepared.tags.eq(1).astype(int))
     assert prepared.timestamps.is_monotonic_increasing
     assert prepared.economic_slice(np.arange(len(prepared))).utility_eligible
 
 
-def test_production_feature_allowlist_includes_entry_price_and_launchpad_one_hot() -> None:
+def test_production_feature_allowlist_includes_entry_price_and_excludes_launchpad() -> None:
     frame = _frame()
     prepared = FeatureBuilder(
         FeaturePolicy(feature_allowlist=MODEL_TRAINING_FEATURES)
     ).prepare(frame)
 
     assert prepared.feature_names == MODEL_TRAINING_FEATURES
+    assert len(prepared.feature_names) == 31
     assert "price" in prepared.feature_names
     assert "launchpad" not in prepared.feature_names
-    assert set(LAUNCHPAD_MODEL_FEATURES).issubset(prepared.feature_names)
+    assert not any(name.startswith("launchpad::") for name in prepared.feature_names)
     assert "liquidity" not in prepared.feature_names
     assert "liquidity_usd" not in prepared.feature_names
     assert "tag" not in prepared.feature_names
     assert prepared.X["price"].eq(1.0).all()
-    assert prepared.X["launchpad::Pump.fun"].sum() > 0
-    assert prepared.X["launchpad::letsbonk"].sum() > 0
 
 
 def test_legacy_missing_liquidity_is_proxy_not_dollar_pnl() -> None:

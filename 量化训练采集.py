@@ -52,8 +52,6 @@ LAUNCHPADS = [
     "Moonshot",
     "moonshot_app",
     "letsbonk",
-    "memoo",
-    "token_mill",
     "jup_studio",
     "bags",
     "believe",

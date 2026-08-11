@@ -39,7 +39,9 @@ def test_discovery_payload_has_all_launchpads_and_prefilters() -> None:
     assert [candidate.address for candidate in candidates] == ["mint-1"]
     assert client.calls[0][0] == 1
     section = client.calls[0][1]["near_completion"]
-    assert len(section["launchpad_platform"]) == 10
+    assert len(section["launchpad_platform"]) == 8
+    assert "memoo" not in section["launchpad_platform"]
+    assert "token_mill" not in section["launchpad_platform"]
     assert section["max_rug_ratio"] == 0.2
     assert section["launchpad_platform_v2"] is True
     assert section["filters"] == ["offchain", "onchain"]

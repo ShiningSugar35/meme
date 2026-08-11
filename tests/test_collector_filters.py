@@ -56,11 +56,12 @@ def test_completed_pool_does_not_require_renounced_flags() -> None:
     assert SafetyFilter().evaluate(token).accepted
 
 
-def test_only_the_ten_frozen_launchpads_are_allowed() -> None:
-    token = valid_token()
-    token["launchpad"] = "unknown-pad"
-    decision = SafetyFilter().evaluate(token)
-    assert "launchpad" in decision.reasons
+def test_only_the_eight_frozen_launchpads_are_allowed() -> None:
+    for blocked in ("unknown-pad", "memoo", "token_mill"):
+        token = valid_token()
+        token["launchpad"] = blocked
+        decision = SafetyFilter().evaluate(token)
+        assert "launchpad" in decision.reasons
 
 
 def test_quote_asset_is_limited_to_sol_usdc_usdt() -> None:

@@ -18,7 +18,6 @@ from ..ml.features import (
     DEFAULT_MODEL_TRAINING_FEATURES,
     FeatureBuilder,
     FeaturePolicy,
-    launchpad_feature_values,
 )
 from ..ml.promotion import PromotionConfig, PromotionEvaluator
 from ..ml.registry import ModelRegistry
@@ -312,10 +311,7 @@ class TrainingService:
         for name in AVAILABLE_MODEL_FEATURES:
             present = 0
             for row in rows:
-                if name.startswith("launchpad::"):
-                    value = launchpad_feature_values(row.get("launchpad")).get(name)
-                else:
-                    value = row.get("entry_price") if name == "price" else row.get(name)
+                value = row.get("entry_price") if name == "price" else row.get(name)
                 if value is None:
                     continue
                 if isinstance(value, str) and not value.strip():
@@ -362,15 +358,8 @@ class TrainingService:
         for row in rows:
             # Build a superset frame once; the FeatureBuilder allowlist decides
             # which entry-time columns each recipe may actually consume.
-            launchpad_features = launchpad_feature_values(row.get("launchpad"))
             features = {
-                key: (
-                    row.get("entry_price")
-                    if key == "price"
-                    else launchpad_features.get(key)
-                    if key.startswith("launchpad::")
-                    else row.get(key)
-                )
+                key: (row.get("entry_price") if key == "price" else row.get(key))
                 for key in AVAILABLE_MODEL_FEATURES
             }
             features.update(

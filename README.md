@@ -24,15 +24,17 @@ GMGN Trenches 发现
 
 ### 2.1 发现范围
 
-只采集以下 10 个 Solana Launchpad：
+只采集以下 8 个 Solana Launchpad：
 
 - `Pump.fun`
 - `Moonshot`
 - `moonshot_app`
 - `letsbonk`
-- `memoo`
-- `token_mill`
 - `jup_studio`
+
+
+
+
 - `bags`
 - `believe`
 - `heaven`
@@ -48,7 +50,7 @@ Trenches 请求尽量前置以下过滤：
 ```text
 filters = ["offchain", "onchain"]
 launchpad_platform_v2 = true
-launchpad_platform = [Pump.fun, Moonshot, moonshot_app, letsbonk, memoo, token_mill, jup_studio, bags, believe, heaven]
+launchpad_platform = [Pump.fun, Moonshot, moonshot_app, letsbonk, jup_studio, bags, believe, heaven]
 max_rug_ratio = 0.2
 max_insider_ratio = 0.2
 max_bundler_rate = 0.2
@@ -63,7 +65,7 @@ max_holder_count = 999
 min_marketcap = 5000
 ```
 
-项目不再发送旧的数字型 `quote_address_type`。GMGN 返回 pool 后按显式资产语义二次校验：quote 侧只允许 `SOL/USDC/USDT`；目标 Token 不允许 `SOL/USDT/USDC/PYUSD/WBTC/WETH`。该变化只替换接口表达方式，不改变原有风险/质量筛选阈值。
+GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USDC/USDT`；目标 Token 排除 `SOL/USDT/USDC/PYUSD/WBTC/WETH`。
 
 拉回后，本地还必须满足：
 
@@ -88,9 +90,9 @@ min_marketcap = 5000
 
 需要采集的列如下：address	name	symbol	type	time	age	launchpad	price	ln(liquidity_usd)	price_2h_max/price	price_2h_min/price	liquidity/holder_count	volume_1h/swaps_1h	has_twitter	has_website	ln(image_dup+1)	dexscr_update_link	cto_flag	ln(twitter_rename_count+1)	ln(twitter_del_post_token_count+1)	ln(twitter_create_token_count+1)	top_10_holder_rate	top_bot_degen_percentage	fresh_wallet_rate	bot_degen_rate	price/ath_price	stat.holder_count/market_cap	ln(smart_degen_count+1)	ln(renowned_count+1)	entrapment_ratio	dev_team_hold_rate	top70_sniper_hold_rate	ln(twitter_dup+1)	ln(website_dup+1)	ln(visiting_count+1)	price_change_1h	price_change_5m	ln(creator_open_count+1)	creator_open_ratio	ln(top_wallets+1)	tag
 
-当前默认训练 recipe 使用 41 个入场时特征：原有 31 个数值/布尔特征，再加 10 个 launchpad one-hot（`launchpad::Pump.fun`、`launchpad::Moonshot`、`launchpad::moonshot_app`、`launchpad::letsbonk`、`launchpad::memoo`、`launchpad::token_mill`、`launchpad::jup_studio`、`launchpad::bags`、`launchpad::believe`、`launchpad::heaven`）。`tag` 仅作为二分类 target，不是输入特征。
+当前默认训练 recipe 使用 31 个入场时数值/布尔特征。`launchpad` 仅作为样本来源元数据保存，不进入模型输入矩阵；`tag` 仅作为二分类 target。
 
-`tag` 为分类标签列，只作为 target，不进入模型输入矩阵。`price` 是样本通过准入规则时记录的入场价格，因此属于入场时已知特征并默认参与训练。`ln(liquidity_usd)` 从新样本开始持续采集并作为可选训练特征，但由于 legacy CSV 不含 raw entry liquidity，当前默认训练集先不启用它；后续新样本积累充分后可在模型中心勾选该特征重新训练。数据库仍单独保存 raw entry liquidity，供单笔资金公式和真实美元收益评价使用。`launchpad` 本身不直接送入模型，而是在训练和预测时转换为固定的 10 维 one-hot，避免不同 launchpad 的分布差异被抹平。
+`tag` 为分类标签列，只作为 target，不进入模型输入矩阵。`price` 是样本通过准入规则时记录的入场价格，因此属于入场时已知特征并默认参与训练。`ln(liquidity_usd)` 从新样本开始持续采集并作为可选训练特征，但由于 legacy CSV 不含 raw entry liquidity，当前默认训练集先不启用它；后续新样本积累充分后可在模型中心勾选该特征重新训练。数据库仍单独保存 raw entry liquidity，供单笔资金公式和真实美元收益评价使用。`launchpad` 仅用于准入、展示、审计与导出。
 
 ### 2.3 2 小时标签
 
@@ -110,7 +112,7 @@ min_marketcap = 5000
 
 - 窗口最高达到 `1.6x` 的旧正类保持 `tag=1`；
 - 16 条未达到 `1.6x` 的旧正类按 binary-v3 统一重标为 `tag=0`；
-- 这些历史 timeout 样本仍保留原有 2h max/min/final-close 审计事实，但最终收盘不再参与正负标签；
+- 历史 timeout 样本保留 2h max/min/final-close 审计事实，最终收盘仅用于审计；
 - 旧 CSV 缺少入场时原始流动性，因此全部 `utility_eligible=false`，可以参与分类训练，但不能被当作真实美元累计收益或用于 5% 自动晋级；
 - CSV 导入按文件哈希和样本键幂等，源文件不会被启动流程静默删除。
 
@@ -138,7 +140,7 @@ min_marketcap = 5000
 - 数据跨度 `<120` 天：时间排序的扩展窗口验证，最近 20% 为最终留出；模型标记 `EARLY_STAGE_MODEL`。
 - 所有训练/验证边界保留至少 2 小时标签隔离带。
 
-硬性排除标识、展示和未来字段，包括 `address`、`name`、`symbol`、`type`、`time`、原始字符串 `launchpad`、`price_2h_max/price`、`price_2h_min/price`、最终收盘、退出字段、tag 和交易结果。`launchpad` 在入场时已知，因此只以固定 10 维 one-hot 进入模型；`price` 也是准入时快照并默认参与训练。`ln(liquidity_usd)` 当前持续采集并作为可选特征，默认训练暂不启用。raw liquidity 只用于资金和收益评价，不直接作为模型输入。训练与评分必须复用同一个序列化 Pipeline 和固定列顺序。
+硬性排除标识、展示和未来字段，包括 `address`、`name`、`symbol`、`type`、`time`、`launchpad`、`price_2h_max/price`、`price_2h_min/price`、最终收盘、退出字段、tag 和交易结果。`price` 是准入时快照并默认参与训练。`ln(liquidity_usd)` 当前持续采集并作为可选特征，默认训练暂不启用。raw liquidity 只用于资金和收益评价，不直接作为模型输入。训练与评分必须复用同一个序列化 Pipeline 和固定列顺序。
 
 ### 3.3 资金与效用
 
@@ -285,7 +287,7 @@ npm run dev
 
 “持仓”页采用两层视图：先切换 `模拟仓 / 实盘`，再点击 `平衡 / 激进 / 保守` 档位。仅模拟运行时默认进入模拟仓；实盘与模拟均运行时默认进入实盘。右上角原 `Asia / Shanghai` 位置用于 `切换至实盘 / 切换至模拟仓` 按钮。当前模型在该页使用 `sim_YYYYMMDD` / `live_YYYYMMDD` 运行别名，日期取当前 Champion 的北京时间训练日期；数据库/模型工件仍保留内部唯一 ID，不用短名做主键。当前持仓只显示所选档位，并展示由持仓监控周期写入的当前流动性/市值快照，以及 `当前价格 / 买入价格` 的当前涨幅倍数（两位小数，如 `0.92x`）；Token 支持悬浮复制。市值优先使用 GMGN 直接 marketcap 字段，若当前 token-info 响应未给出，则用同一 GMGN 响应的当前价格 × circulating_supply（缺失时 total_supply）回补，不使用 migration_market_cap 冒充当前市值。交易历史由 SQLite 真分页，默认 30 行/页，可持久记忆用户选择的每页行数，并支持页码跳转和退出时间范围筛选；新增平仓时间，终态卖出失败显示“卖出失败”并给出对应失败原因。交易审计按每个 simulation session 的三档分别列示，买入/卖出时间来自该档位实际仓位的第一笔 entry 与最后一笔 exit，来源统一显示为“模型自动更新/模型手动更新”。一键清仓 challenge/job 同样跟随当前 `mode`：模拟页只冻结当前模拟 session，实盘页只冻结 live 仓；兼容 API 仍保留 `all` 全局应急作用域。`mode=live` 的同构视图和后端账本接口已搭好，数据源契约标记为 GMGN Trading API，但不会因此启用自动 live BUY 或伪造钱包余额。
 
-总览页 Champion 只展示短显示名 `YYYYMMDD-xxx`（例如 `20260810-LR`、`20260810-XGBoost`），不再显示长内部 model id 或 EARLY 小字；“实盘收益”只累计 `account_kind='live'` 且已经 `closed` 的已实现 PnL，不混入模拟盘。
+总览页 Champion 展示短显示名 `YYYYMMDD-xxx`（例如 `20260811-RF`），内部长 model id 与 EARLY 状态保留在后端模型记录中；“实盘收益”只累计 `account_kind='live'` 且已经 `closed` 的已实现 PnL，不混入模拟盘。
 
 卖出失败口径已经显式冻结：模拟仓到 2 小时后确认 `no_route`/手续费储备耗尽，或一般卖出失败累计达到 7 次重试，转为 `closed` 的失败平仓；实盘强制退出明确返回 `NO_ROUTE`、最终 `FAILED` 或 `EXPIRED` 时也转为失败平仓。失败平仓按 `-投入本金 - 已支付入场平台费` 计入已实现 PnL，并保留 `sell_failure_reason` 审计。`submission_unknown`、缺少 token 原子数量、钱包事实缺失等无法确认是否真实成交的系统问题仍 fail-closed，不得伪造为交易亏损。
 
@@ -293,7 +295,7 @@ npm run dev
 
 ### 6.4 训练、自更新与自选特征
 
-“模型中心”会列出全部可选特征及成熟样本覆盖率。binary-v3 默认 recipe 使用 41 个输入特征（原 31 个 + 10 个 launchpad one-hot）；`ln(liquidity_usd)` 从新样本开始持续采集，但默认关闭，等覆盖率足够后可直接勾选并创建新的训练 recipe。API 也支持显式提交特征列表：
+“模型中心”会列出全部可选特征及成熟样本覆盖率。binary-v3 默认 recipe 使用 31 个输入特征；`launchpad` 不属于可选模型特征。`ln(liquidity_usd)` 从新样本开始持续采集，但默认关闭，等覆盖率足够后可直接勾选并创建新的训练 recipe。API 也支持显式提交特征列表：
 
 ```powershell
 Invoke-RestMethod -Method Post `
@@ -304,7 +306,7 @@ Invoke-RestMethod -Method Post `
 
 HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。周日北京时间 03:00 自动训练，错过后下次启动补排；7 日模型健康监控只在真实 USD 经济口径可比较时触发 degraded 重训。自动训练继承当前 Champion 的 feature schema，除非用户再次手工改变 recipe。
 
-2026-08-11 binary-v3 重打标后共有 2358 条 mature、412 条正类、0 条 tag2；旧标签模型全部失效并重新训练。严格时间外泛化研究（开发折选阈值、最终 20% 完全留出、分类器等权、最终生产数值预处理）由 Random Forest 获胜：最终 Precision 39.74%、Recall 32.98%、78 次入选，robust AP 第一。随后生产 TrainingService 五候选真实训练也独立选择 Random Forest，run `4f68ff98-efb6-4f64-a3e1-47c3b54f17d1` 晋级为新 Champion，并复现相同最终 Precision/Recall/交易数，默认 41 特征。
+2026-08-11 当前 binary-v3 训练集包含 2365 条 mature 样本、414 条正类。默认 31 特征下，严格时间外泛化研究的 robust AP 排名以 ExtraTrees 略高，Random Forest 在最终留出窗口取得更高的 Precision/Recall；生产 TrainingService 按正式 OOS utility、35% Precision 门槛和稳定性规则选择 Random Forest 为 Champion。训练 run `516a103f-5d5e-4ab0-b098-26d425833bfa` 对应模型 `20260811T115504Z-random_forest-c04a0bfb`，最终窗口 Precision 39.74%、Recall 32.29%、78 次入选，使用 31 个特征。
 
 ## 7. 测试与构建
 
@@ -351,7 +353,7 @@ npm run build
 
 ### 9.2 实盘接口刻意停放
 
-实盘代码保留 quote/swap/status、幂等 journal、启动对账、二次确认和持久化清仓接口，但本轮**不继续开发自动 live BUY**。README 已冻结未来实盘使用 `balanced` profile，因此不再存在 profile 口径歧义；真正启用实盘前仍必须接入并现场验收：
+实盘代码保留 quote/swap/status、幂等 journal、启动对账、二次确认和持久化清仓接口；自动 live BUY 当前保持停放。未来实盘固定使用 `balanced` profile。真正启用实盘前仍必须接入并现场验收：
 
 - 真实 wallet snapshot：available USD、总权益、SOL balance、SOL/USD、Token balance/decimals；
 - 无 `provider_order_id` 的钱包/代币余额对账，以及影子账户与实盘共同资金闸门；

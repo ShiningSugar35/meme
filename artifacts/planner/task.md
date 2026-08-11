@@ -7,8 +7,8 @@
 
 - [x] 阅读并对齐 `README.md`、`开发文档.md`、`architecture_review.md`
 - [x] 根目录 `meme数据.csv` 审计：40 列、2319 行
-- [x] legacy CSV 2319 行幂等迁移到 `data/meme_quant.db`；binary-v3 统一二分类后旧 timeout-positive 折叠为 tag0，原 2h 路径事实保留
-- [x] 2026-08-11 重打标时真实库 mature=2358、tag1=412、tag2=0；legacy `utility_eligible=false`
+- [x] legacy CSV 2319 行幂等迁移到 `data/meme_quant.db`；binary-v3 标签只允许 tag0/tag1，2h 路径事实完整保留
+- [x] 当前真实库 2371 samples：2365 mature、6 pending、414 positives、tag2=0；legacy `utility_eligible=false`
 - [x] SQLite schema v6 幂等 migration；真实库升级后样本数量不漂移
 - [x] 完整标签路径字段：first TP/SL、exit reason、same-bar conflict、gross return、return source
 - [x] legacy pending 即使后续 K-line 补成 mature，也保留原 `utility_eligible=false`，不因缺失 raw liquidity 被误升级为真实美元效用样本
@@ -18,8 +18,8 @@
 
 ## Phase 2：持续采集与入场特征 — COMPLETE
 
-- [x] 保留 README 指定 10 个 Launchpad / 3 生命周期 / 12 Key 角色分工
-- [x] GMGN Trenches 改用显式 launchpad allowlist；移除数字 `quote_address_type`；quote 侧仅 SOL/USDC/USDT，目标 Token 排除 SOL/USDT/USDC/PYUSD/WBTC/WETH
+- [x] README 指定 8 个 Launchpad / 3 生命周期 / 12 Key 角色分工
+- [x] GMGN Trenches 使用显式 launchpad allowlist；quote 侧仅 SOL/USDC/USDT，目标 Token 排除 SOL/USDT/USDC/PYUSD/WBTC/WETH
 - [x] 全局共享限流/429 cooldown
 - [x] 本地 safety filter + top-holder 后置过滤
 - [x] README 入场特征持续入库
@@ -34,7 +34,7 @@
 
 - [x] 显式模型 feature allowlist
 - [x] 模型中心自选 feature schema + 成熟样本 coverage
-- [x] binary-v3 默认 recipe 41 个输入特征：原 31 + 10 个 launchpad one-hot；`ln(liquidity_usd)` 可后续 opt-in
+- [x] binary-v3 默认 recipe 31 个输入特征；`launchpad` 仅元数据、不进模型；`ln(liquidity_usd)` 可后续 opt-in
 - [x] 时序扩展窗口、2h embargo、<120d EARLY_STAGE / >=120d 120d+30d 规则
 - [x] 五候选：Logistic Regression / HistGradientBoosting / XGBoost / ExtraTrees / RandomForest；2026-08-10 当前 `.venv` 已安装 XGBoost 3.4.0，真实训练 run `0e4a4cd7-d933-45f3-8c1b-3662a566d21e` 验证五候选均实际执行，XGBoost=`ok`
 - [x] 分类器等权拟合；Precision 35% + min trades 硬门槛；经济收益只用于 OOS 阈值/候选评价
@@ -54,14 +54,14 @@
 
 ### 真实数据库训练验收
 
-- [x] 2026-08-11 binary-v3 重打标：mature=2358、tag1=412、tag2=0；旧标签 Champion/候选全部失效
-- [x] 严格泛化研究：Random Forest robust AP 第一；最终生产预处理下 untouched final Precision=39.74%、Recall=32.98%、78 trades
-- [x] 生产五候选真实训练 run `4f68ff98-efb6-4f64-a3e1-47c3b54f17d1` 独立选择 Random Forest 为 Champion
-  - model id: `20260811T084908Z-random_forest-3ce0ea89`
+- [x] 2026-08-11 当前 binary-v3 训练集：2365 mature、414 positives、tag2=0
+- [x] 默认 31 特征严格泛化研究：ExtraTrees robust AP 略高，Random Forest 最终留出 Precision/Recall 更高
+- [x] 生产五候选真实训练 run `516a103f-5d5e-4ab0-b098-26d425833bfa` 按正式 OOS utility/35% Precision 规则选择 Random Forest 为 Champion
+  - model id: `20260811T115504Z-random_forest-c04a0bfb`
   - EARLY_STAGE
-  - 41 features
-  - final Precision=39.74%、Recall=32.98%、78 trades
-  - thresholds: aggressive≈0.218198, balanced≈0.218198, conservative≈0.324966
+  - 31 features
+  - final Precision=39.74%、Recall=32.29%、78 trades
+  - thresholds: aggressive≈0.225469, balanced≈0.225469, conservative=0.32
 
 ## Phase 4：固定模拟 / Shadow 完整链 — COMPLETE
 
@@ -107,12 +107,12 @@
 - [x] FastAPI non-live E2E：Agent unsafe reject + human approve/reject
 - [x] GMGN trade adapter sanitized fixture contracts
 - [x] 当前部署环境只读 GMGN data smoke：`new_creation limit=1` discovery 可达，enrichment 可执行；不写库、不交易、不输出 Key
-- [x] 发现 GMGN 可能返回超过请求 limit 的候选后，已在 DiscoveryService 本地二次 `[:limit]` 截断；复验 candidates=1
+- [x] DiscoveryService 对 GMGN discovery 响应执行本地 `[:limit]` 上限截断；复验 candidates=1
 - [x] live journal crash window / pending / unknown / reconciliation mock tests
 - [x] persistent liquidation mock tests
 - [x] 后端 full `pytest -q`：**96/96 passed**（新增持仓按档位/时间筛选、三档交易审计、当前市场快照、模拟/实盘清仓作用域隔离，以及 no-route/重试耗尽/实盘终态卖出失败计入已实现亏损回归）
 - [x] 前端 `npm run build`：passed
-- [x] 真实 `data/meme_quant.db`：schema v6；2026-08-11 binary-v3 重打标时 2364 samples（2358 mature + 6 pending）、412 positives、0 tag2；Random Forest binary-v3 Champion 工件存在
+- [x] 真实 `data/meme_quant.db`：schema v6；2371 samples（2365 mature + 6 pending）、414 positives、0 tag2；31 特征 Random Forest Champion 工件存在
 
 ## Phase 7：Live — PARKED BY USER SCOPE
 

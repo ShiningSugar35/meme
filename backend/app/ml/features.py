@@ -7,8 +7,6 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from ..collector.constants import LAUNCHPADS
-from ..collector.filters import launchpad_key
 from .types import PreparedDataset
 
 
@@ -17,6 +15,7 @@ _EXACT_EXCLUSIONS = {
     "name",
     "symbol",
     "type",
+    "launchpad",
     "time",
     "timestamp",
     "created_at",
@@ -61,23 +60,11 @@ _RETURN_ESTIMATE_COLUMNS = (
     "terminal_return_estimated",
 )
 
-LAUNCHPAD_MODEL_FEATURES: tuple[str, ...] = tuple(
-    f"launchpad::{platform}" for platform in LAUNCHPADS
-)
-
-
-def launchpad_feature_values(value: object) -> dict[str, int]:
-    selected = launchpad_key(value)
-    return {
-        f"launchpad::{platform}": int(selected == launchpad_key(platform))
-        for platform in LAUNCHPADS
-    }
-
-
 # Frozen model-input schema from README.md §2.2. `tag` is deliberately absent:
-# it is the target, never an input feature. `price` and launchpad identity are
-# admission-time facts. Raw liquidity remains economic sizing/evaluation data;
-# only its optional log transform may be selected as a model input.
+# it is the target, never an input feature. `price` is an admission-time fact.
+# Launchpad remains sample metadata and is deliberately excluded from model
+# inputs. Raw liquidity remains economic sizing/evaluation data; only its
+# optional log transform may be selected as a model input.
 AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "age",
     "price",
@@ -111,7 +98,6 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "ln(creator_open_count+1)",
     "creator_open_ratio",
     "ln(top_wallets+1)",
-    *LAUNCHPAD_MODEL_FEATURES,
 )
 
 # `ln(liquidity_usd)` is collected for new samples but intentionally excluded
@@ -229,11 +215,6 @@ class FeatureBuilder:
         # Binary labels no longer use a timeout-positive class. Final close is
         # retained only as an audit fact and never changes the target/economics.
         return_is_estimated = pd.Series(False, index=work.index, dtype=bool)
-
-        if "launchpad" in work.columns:
-            launchpad_keys = work["launchpad"].map(launchpad_key)
-            for platform, feature_name in zip(LAUNCHPADS, LAUNCHPAD_MODEL_FEATURES, strict=True):
-                work[feature_name] = (launchpad_keys == launchpad_key(platform)).astype(int)
 
         if self.policy.feature_allowlist is not None:
             # A frozen allowlist prevents newly added DB/audit columns from

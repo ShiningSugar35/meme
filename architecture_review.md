@@ -55,7 +55,7 @@ Training Queue / OOS Evaluation / Promotion / Rollback
 生产训练采用显式 allowlist，而不是“数据库新增什么列模型就自动吃什么”。当前 README 冻结的默认训练字段中：
 
 - `price` 是 admission-time `entry_price`，允许默认训练；
-- `launchpad` 持续保存，训练/预测时转换为固定 10 维 one-hot，原始字符串本身不直接进模型；
+- `launchpad` 持续保存，用于准入、展示、审计与导出，不进入模型训练或预测特征；
 - `ln(liquidity_usd)` 从新样本开始持续采集，当前 legacy 覆盖率为 0，因此默认关闭，但属于模型中心可选特征；
 - raw `liquidity` 单独保留给资金公式/美元效用，不直接作为默认模型输入；
 - `price_change_1h/5m` 只能使用 `T` 之前的事实。快照缺失时，应立即取 `T-1h → T` 历史 1m Kline 回补，不能等未来窗口数据参与当次评分。
@@ -95,7 +95,7 @@ SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 s
 
 ### 5.1 Discovery / Enrichment
 
-只覆盖 README 指定的 10 个 Solana Launchpad 和三类生命周期。多个 API Key 只是角色槽位，不能把同一 IP 的吞吐按 Key 数相乘。
+只覆盖 `Pump.fun / Moonshot / moonshot_app / letsbonk / jup_studio / bags / believe / heaven` 8 个 Solana Launchpad 和三类生命周期。quote 侧只允许 `SOL/USDC/USDT`，目标 Token 排除 `SOL/USDT/USDC/PYUSD/WBTC/WETH`。多个 API Key 只是角色槽位，不能把同一 IP 的吞吐按 Key 数相乘。
 
 采集流程：
 
@@ -290,7 +290,7 @@ Portfolio 使用 `mode × profile` 两层视图：模拟/实盘切换位于顶�
 | --- | --- |
 | legacy `>1.25x` timeout 正类 vs binary-v3 | 只保留先触及 `1.6x` 的 tag1；16 条旧非 TP 正类重标 tag0，2h 价格事实仅审计。 |
 | `price` 是否泄漏 | 当前源码/README确认其为准入 `entry_price`，允许默认训练。 |
-| `launchpad` | 采集/审计，并以固定 10 维 one-hot 进入训练；跨平台覆盖不足时由时间外验证约束泛化结论。 |
+| `launchpad` | 采集、准入、展示、审计与导出；不进入训练特征。 |
 | `ln(liquidity_usd)` | 新样本持续采集；legacy 无法反推，当前默认关闭；模型中心可后续 opt-in。 |
 | raw liquidity | 经济 sizing/PnL 专用，不作为默认 model input。 |
 | 三档 vs 三模型 | 一个 Champion + 三 threshold。 |
@@ -330,12 +330,12 @@ Portfolio 使用 `mode × profile` 两层视图：模拟/实盘切换位于顶�
 
 已完成：
 
-- legacy CSV 与持续采集样本已统一到 binary-v3；重打标时 mature=2358、tag1=412、tag2=0，并保留全部 2h 路径审计事实；
+- binary-v3 样本库当前 2371 条，其中 2365 mature、6 pending、414 positives、tag2=0；全部保留 2h 路径审计事实；
 - SQLite schema v6，完整 label facts、durable training runs、simulation sessions、Agent proposals；
-- binary-v3 默认 41 特征 recipe：原 31 个入场特征 + 10 个 launchpad one-hot；`ln(liquidity_usd)` 新采集/可选/默认关闭；
+- binary-v3 默认 31 特征 recipe；`launchpad` 仅作为元数据保存；`ln(liquidity_usd)` 新采集/可选/默认关闭；
 - 入场 `price_change_1h/5m` 缺失时使用 `T-1h → T` 历史 Kline 回补，不读取未来；
 - 五候选 + OOS 时间切分 + 一个 Champion/三阈值 + Occam；
-- binary-v3 采用等权分类拟合 + 35% Precision hard gate；严格泛化研究与生产五候选均选择 Random Forest，新 Champion 最终时间窗 Precision 39.74%、Recall 32.98%；
+- binary-v3 采用等权分类拟合 + 35% Precision hard gate；生产五候选选择 Random Forest 为 Champion，最终时间窗 Precision 39.74%、Recall 32.29%、78 trades；
 - TrainingWorker、周日 03:00/startup catch-up、有限 retry、restart recovery、7 日 model health、degraded queue、rollback；
 - simulation 三账户 session、市场驱动 1m first-touch、SELL failure/restart recovery、session history、monitor-only worker；
 - Agent durable proposal + 人工 approve/reject + 非实盘白名单执行；live/wallet/secret proposal fail-closed；
