@@ -14,23 +14,32 @@ from backend.app.services.training import TrainingService
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Show recent persisted model training runs.")
+    parser = argparse.ArgumentParser(description="Show active Top-3 models and recent training runs.")
     parser.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
     database = Database(PROJECT_ROOT / "data" / "meme_quant.db")
     database.initialize()
     service = TrainingService(database)
-    champion = service.models.champion()
-    if champion:
+    active = service.models.active_models()
+    if not active:
+        print("top3=none")
+    for model in active:
         print(
-            f"champion={champion['id']} algorithm={champion['algorithm']} "
-            f"features={len(champion.get('feature_names') or [])} early_stage={champion['early_stage']}"
+            json.dumps(
+                {
+                    "slot": model.get("active_slot"),
+                    "id": model["id"],
+                    "algorithm": model["algorithm"],
+                    "features": len(model.get("feature_names") or []),
+                    "threshold": model.get("active_threshold") or model.get("thresholds", {}).get("decision"),
+                    "composite_score": model.get("active_composite_score") or model.get("metrics", {}).get("composite_score"),
+                    "early_stage": model["early_stage"],
+                },
+                ensure_ascii=False,
+            )
         )
-    else:
-        print("champion=none")
     for run in service.list_runs(limit=max(1, args.limit)):
         summary = run.get("summary") or {}
-        promotion = summary.get("promotion") or {}
         print(
             json.dumps(
                 {
@@ -39,12 +48,9 @@ def main() -> int:
                     "status": run["status"],
                     "retry_count": run.get("retry_count", 0),
                     "scheduled_for": run.get("scheduled_for"),
-                    "features": (run.get("request") or {}).get("feature_names", []),
-                    "candidate_model_id": run.get("candidate_model_id"),
-                    "promoted": run.get("promoted"),
-                    "promotion_eligible": promotion.get("eligible", promotion.get("promotion_eligible")),
-                    "promotion_blockers": promotion.get("blockers", []),
-                    "incumbent_recipe_rebuilt": promotion.get("incumbent_recipe_rebuilt", False),
+                    "requested_features": (run.get("request") or {}).get("feature_names", []),
+                    "top_models": [item.get("algorithm") for item in summary.get("top_models", [])],
+                    "top3_updated": run.get("promoted"),
                     "error": run.get("error_message"),
                 },
                 ensure_ascii=False,

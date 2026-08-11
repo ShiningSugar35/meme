@@ -1,4 +1,4 @@
-export type Profile = "aggressive" | "balanced" | "conservative";
+export type StrategyKey = "model_1" | "model_2" | "model_3" | "rules_only";
 
 export interface RuntimeStatus {
   app_env: string;
@@ -45,7 +45,7 @@ export interface RiskStatus {
 export interface ModelFeatureItem {
   name: string;
   default_enabled: boolean;
-  champion_enabled: boolean;
+  active_model_slots: number[];
   available_rows: number;
   total_mature_rows: number;
   coverage: number;
@@ -55,6 +55,7 @@ export interface ModelFeatureCatalog {
   default_features: string[];
   available_features: string[];
   total_mature_rows: number;
+  active_model_count: number;
   items: ModelFeatureItem[];
 }
 
@@ -75,6 +76,46 @@ export interface TrainingRun {
   error_message: string | null;
 }
 
+export interface EvaluationMetricPayload {
+  threshold?: number;
+  precision?: number;
+  recall?: number;
+  trade_count?: number;
+  true_positives?: number;
+  false_positives?: number;
+  positive_count?: number;
+  profit_units?: number;
+  fixed_profit_usd?: number;
+  economic_capture?: number;
+  [key: string]: unknown;
+}
+
+export interface GeneralizationPayload {
+  average_precision_mean?: number;
+  average_precision_std?: number;
+  average_precision_skill_mean?: number;
+  stability_score?: number;
+  decay_score?: number;
+  score?: number;
+}
+
+export interface ModelMetrics {
+  rank?: number;
+  precision?: number | null;
+  recall?: number | null;
+  trade_count?: number;
+  fixed_profit_usd?: number | null;
+  profit_units?: number | null;
+  economic_score?: number | null;
+  generalization_score?: number | null;
+  composite_score?: number | null;
+  final_recent_window?: EvaluationMetricPayload;
+  development?: EvaluationMetricPayload;
+  generalization?: GeneralizationPayload;
+  rule_baseline_final?: EvaluationMetricPayload;
+  [key: string]: unknown;
+}
+
 export interface ModelVersion {
   id: string;
   version: string;
@@ -82,10 +123,25 @@ export interface ModelVersion {
   status: string;
   early_stage: boolean;
   trained_at: string;
-  thresholds: Partial<Record<Profile, number>>;
-  metrics: Record<string, number | string | boolean | null>;
+  thresholds: { decision?: number };
+  metrics: ModelMetrics;
   feature_names: string[];
   rejection_reason?: string | null;
+  active_slot?: number;
+  active_threshold?: number;
+  active_composite_score?: number;
+  model_label?: string;
+}
+
+export interface StrategyInfo {
+  strategy_key: StrategyKey;
+  label: string;
+  model_id: string | null;
+  algorithm: string | null;
+  rank: number | null;
+  threshold: number | null;
+  composite_score: number | null;
+  feature_count: number;
 }
 
 export interface DatasetStats {
@@ -97,27 +153,35 @@ export interface DatasetStats {
   launchpads: Array<{ launchpad: string; count: number }>;
 }
 
+export interface StrategyPerformance {
+  strategy_key: StrategyKey;
+  positions: number;
+  open_positions: number;
+  closed_positions: number;
+  realized_pnl_usd: number;
+}
+
 export interface DashboardData {
   as_of: string;
   model: ModelVersion | null;
+  active_models: ModelVersion[];
+  strategies: StrategyInfo[];
+  strategy_performance: StrategyPerformance[];
   live_realized_pnl_usd: number;
   dataset: DatasetStats;
-  pnl: {
-    today: Record<string, number>;
-    seven_days: Record<string, number>;
-  };
-  open_positions: Array<{ account_kind: string; count: number; invested_usd: number }>;
+  pnl: { today: Record<string, number>; seven_days: Record<string, number> };
+  open_positions: Array<{ strategy_key: string; count: number; invested_usd: number }>;
   simulation: SimulationStatus;
   risk: RiskStatus;
   runtime: RuntimeStatus;
-  equity_curve: Array<{ date: string; account_kind: string; daily_pnl: number }>;
-  signal_activity: Array<{ date: string; profile: string; predictions: number; selected: number }>;
+  equity_curve: Array<{ date: string; strategy_key: string; daily_pnl: number }>;
+  signal_activity: Array<{ date: string; strategy_key: string; predictions: number; selected: number }>;
 }
 
 export interface Signal {
   id: number;
   probability: number;
-  profile: string;
+  strategy_key: StrategyKey;
   threshold: number;
   selected: number;
   predicted_at: string;
@@ -127,12 +191,16 @@ export interface Signal {
   launchpad: string | null;
   entry_time: number;
   tag: number | null;
+  model_id: string;
   model_version: string;
+  model_label: string;
+  algorithm: string;
+  active_slot: number | null;
 }
 
 export interface SimulationAccount {
   session_id: string;
-  account: string;
+  strategy_key: StrategyKey;
   cash_usd: number;
   sol_fee_reserve: number;
   initial_cash_usd: number;
@@ -155,7 +223,7 @@ export interface SimulationStatus {
     initial_cash_usd: number;
     initial_sol_fee_reserve: number;
   };
-  accounts: Record<string, SimulationAccount>;
+  accounts: Record<StrategyKey, SimulationAccount>;
 }
 
 export interface SimulationHistoryItem {
@@ -167,8 +235,8 @@ export interface SimulationHistoryItem {
   initial_sol_fee_reserve: number;
   created_reason: string;
   realized_pnl_usd: number;
-  accounts: Record<string, {
-    account_kind: string;
+  accounts: Record<StrategyKey, {
+    strategy_key: StrategyKey;
     positions: number;
     open_positions: number;
     closed_positions: number;
@@ -178,12 +246,13 @@ export interface SimulationHistoryItem {
 
 export interface SimulationAuditItem {
   session_id: string;
-  profile: Profile;
-  account_kind: string;
+  strategy_key: StrategyKey;
+  model_id: string | null;
+  algorithm: string | null;
+  model_label: string;
   status: "active" | "closed";
   first_entry_time: string | null;
   last_exit_time: string | null;
-  source_label: string;
   positions: number;
   open_positions: number;
   closed_positions: number;
@@ -194,8 +263,7 @@ export interface Position {
   id: string;
   token_address: string;
   launchpad?: string | null;
-  account_kind: string;
-  profile: Profile;
+  strategy_key?: StrategyKey | null;
   status: string;
   entry_time: string;
   expires_at: string;
@@ -215,21 +283,15 @@ export interface Position {
 
 export interface PortfolioView {
   mode: "simulation" | "live";
-  profile: Profile;
+  strategy: StrategyKey;
+  strategy_info: StrategyInfo;
+  strategies: StrategyInfo[];
   live_trading_enabled: boolean;
   simulation_enabled: boolean;
   provider: string;
   model_alias: string | null;
   session: SimulationStatus["session"] | null;
-  accounts: Record<Profile, Partial<SimulationAccount> & {
-    positions?: number;
-    open_positions?: number;
-    closed_positions?: number;
-    realized_pnl_usd?: number;
-    cash_usd?: number | null;
-    sol_fee_reserve?: number | null;
-    source?: string;
-  }>;
+  accounts: Partial<Record<StrategyKey, Partial<SimulationAccount>>>;
   account: Partial<SimulationAccount> & {
     positions?: number;
     open_positions?: number;
@@ -281,4 +343,3 @@ export interface PreparedAction {
   can_confirm: boolean;
   blocker: string | null;
 }
-

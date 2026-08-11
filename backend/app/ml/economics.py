@@ -4,6 +4,11 @@ import numpy as np
 
 from .types import EconomicSlice, EvaluationMetrics
 
+FIXED_TRADE_USD = 50.0
+WIN_UNITS = 6.0
+LOSS_UNITS = 1.0
+UNIT_USD = 5.0
+
 
 def capital_from_liquidity(liquidity_usd: np.ndarray) -> np.ndarray:
     liquidity = np.asarray(liquidity_usd, dtype=float)
@@ -13,22 +18,36 @@ def capital_from_liquidity(liquidity_usd: np.ndarray) -> np.ndarray:
 
 
 def classification_sample_weights(economics: EconomicSlice) -> np.ndarray:
-    """Equal classifier weights; economics are reserved for OOS selection.
-
-    Profit magnitude must not redefine the class prior seen by the classifier.
-    Otherwise a +60% positive and -10% negative make one positive observation
-    behave like roughly six negatives, which destroys probability calibration
-    and generalization. Trading economics remain fully active in threshold and
-    model selection after the classifier has produced out-of-sample scores.
-    """
-
+    """Keep classification loss independent from trading payoff magnitude."""
     return np.ones(len(economics.capital), dtype=float)
 
 
 def economic_sample_weights(economics: EconomicSlice) -> np.ndarray:
-    """Backward-compatible alias for the classification fit weights."""
-
     return classification_sample_weights(economics)
+
+
+def theoretical_profit_units(true_positives: int, false_positives: int) -> float:
+    """Net payoff units under +60% / -10% and fixed $50 entries.
+
+    One loss is one unit (-$5) and one win is six units (+$30).
+    """
+    return WIN_UNITS * int(true_positives) - LOSS_UNITS * int(false_positives)
+
+
+def theoretical_profit_from_precision_recall(
+    precision: float,
+    recall: float,
+    positive_count: int = 1,
+) -> float:
+    """Return normalized fixed-payoff profit units from p/r.
+
+    TP = recall * N+, FP = TP/precision - TP, therefore
+    U = N+ * recall * (7 - 1/precision). This is an evaluation identity,
+    not a differentiable training objective.
+    """
+    if precision <= 0 or recall <= 0 or positive_count <= 0:
+        return 0.0
+    return float(positive_count) * float(recall) * (7.0 - 1.0 / float(precision))
 
 
 def _sigmoid(values: np.ndarray) -> np.ndarray:
@@ -63,11 +82,12 @@ def evaluate_probabilities(
     precision = true_positive / trade_count if trade_count else 0.0
     recall = true_positive / positive_count if positive_count else 0.0
 
-    per_row_pnl = np.where(
-        selected,
-        economics.capital * economics.realized_return,
-        0.0,
-    )
+    profit_units = theoretical_profit_units(true_positive, false_positive)
+    fixed_profit_usd = profit_units * UNIT_USD
+    oracle_units = WIN_UNITS * positive_count
+    economic_capture = profit_units / oracle_units if oracle_units > 0 else 0.0
+
+    per_row_pnl = np.where(selected, economics.capital * economics.realized_return, 0.0)
     cumulative = np.cumsum(per_row_pnl)
     peaks = np.maximum.accumulate(np.concatenate(([0.0], cumulative)))
     drawdowns = np.concatenate(([0.0], cumulative)) - peaks
@@ -75,9 +95,7 @@ def evaluate_probabilities(
     discrete_pnl = float(np.sum(per_row_pnl))
 
     activation = _sigmoid((probs - threshold) / max(temperature, 1e-6))
-    smooth_utility = float(
-        np.sum(activation * economics.capital * economics.realized_return)
-    )
+    smooth_utility = float(np.sum(activation * economics.capital * economics.realized_return))
 
     if economics.utility_eligible:
         pnl_usd: float | None = discrete_pnl
@@ -97,6 +115,10 @@ def evaluate_probabilities(
         trade_count=trade_count,
         true_positives=true_positive,
         false_positives=false_positive,
+        positive_count=positive_count,
+        profit_units=float(profit_units),
+        fixed_profit_usd=float(fixed_profit_usd),
+        economic_capture=float(economic_capture),
         cumulative_pnl_usd=pnl_usd,
         proxy_pnl=proxy_pnl,
         smooth_utility=smooth_utility,
@@ -111,31 +133,27 @@ def evaluate_probabilities(
     )
 
 
+def evaluate_rule_baseline(y_true: np.ndarray, economics: EconomicSlice) -> EvaluationMetrics:
+    """Evaluate the rule-only strategy that trades every admitted sample."""
+    return evaluate_probabilities(
+        np.asarray(y_true, dtype=int),
+        np.ones(len(y_true), dtype=float),
+        0.0,
+        economics,
+    )
+
+
+def fold_economic_score(metrics: EvaluationMetrics) -> float:
+    return float(np.clip(metrics.economic_capture, -1.0, 1.0))
+
+
 def model_selection_score(
     metrics: EvaluationMetrics,
-    worst_fold_pnl_rate: float,
-    complexity_rank: int,
+    worst_fold_pnl_rate: float = 0.0,
+    complexity_rank: int = 0,
 ) -> float:
-    """Unitless score dominated by cumulative chronological utility.
+    """Compatibility helper; new ranking is implemented in ModelTrainer.
 
-    The denominator is total opportunity capital, not selected-trade capital.
-    Therefore this preserves the ranking of cumulative PnL on one shared
-    window and does not reward a model merely for taking very few trades.
-    It also permits a legacy-proxy development window and a later real-dollar
-    window to contribute without adding unlike units.
+    Returns the fixed-payoff economic capture with a tiny complexity tie-break.
     """
-
-    scale = max(metrics.opportunity_capital, 1.0)
-    pnl_rate = metrics.comparable_pnl / scale
-    smooth_rate = metrics.smooth_utility / scale
-    drawdown_rate = metrics.comparable_drawdown / scale
-    activity = metrics.trade_count / max(metrics.sample_count, 1)
-    complexity_cost = 0.001 * complexity_rank
-    return float(
-        0.55 * pnl_rate
-        + 0.25 * smooth_rate
-        + 0.15 * worst_fold_pnl_rate
-        - 0.05 * drawdown_rate
-        + 0.01 * activity
-        - complexity_cost
-    )
+    return float(fold_economic_score(metrics) - 0.001 * complexity_rank)

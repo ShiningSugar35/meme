@@ -35,7 +35,7 @@ class EntrySignal:
     reference_price: float
     liquidity_usd: float
     model_probability: float | None = None
-    profile: str = "balanced"
+    strategy_key: str = "model_1"
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,7 @@ class SimulatedPosition:
     entry_fee_usd: float
     entry_network_fee_sol: float
     model_probability: float | None
-    profile: str
+    strategy_key: str
     closed_at: datetime | None = None
     exit_reason: ExitReason | None = None
     exit_fill_price: float | None = None

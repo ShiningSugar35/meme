@@ -8,17 +8,12 @@ from ..database import Database
 from ..repositories.models import ModelRepository
 from ..repositories.samples import SampleRepository
 from ..risk.service import RiskService
+from ..strategy import MODEL_STRATEGIES, RULES_ONLY, SIMULATION_STRATEGIES, validate_strategy
 from .paper_trading import PaperTradingService
 from .runtime import RuntimeService
 
 
 class DashboardService:
-    PROFILE_ACCOUNT = {
-        "balanced": "paper",
-        "aggressive": "shadow_aggressive",
-        "conservative": "shadow_conservative",
-    }
-
     def __init__(self, database: Database) -> None:
         self.database = database
         self.samples = SampleRepository(database)
@@ -29,56 +24,60 @@ class DashboardService:
         today = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         seven_days = (now - timedelta(days=7)).isoformat()
         simulation = PaperTradingService(self.database).simulation_status()
-        simulation_session_id = str(simulation["session"]["id"])
-        pnl_today = self._pnl_since(today, simulation_session_id)
-        pnl_7d = self._pnl_since(seven_days, simulation_session_id)
-        positions = self.database.fetch_all(
-            """
-            SELECT account_kind, COUNT(*) AS count, COALESCE(SUM(invested_usd),0) AS invested_usd
-            FROM positions
-            WHERE status IN ('opening','open','closing')
-              AND (
-                    account_kind='live'
-                    OR simulation_session_id=?
-                  )
-            GROUP BY account_kind
-            """,
-            (simulation_session_id,),
-        )
-        champion = self.models.champion()
+        session_id = str(simulation["session"]["id"])
+        active_models = self.models.active_models()
         stats = self.samples.statistics()
         mature = int(stats.get("mature") or 0)
         positives = int(stats.get("positives") or 0)
         return {
             "as_of": now.isoformat(),
-            "model": champion,
+            "model": active_models[0] if active_models else None,
+            "active_models": [self._model_for_view(item) for item in active_models],
+            "strategies": self._strategy_registry(active_models),
+            "strategy_performance": self._strategy_performance(session_id),
             "live_realized_pnl_usd": self._live_realized_pnl(),
-            "dataset": {
-                **stats,
-                "positive_rate": positives / mature if mature else None,
+            "dataset": {**stats, "positive_rate": positives / mature if mature else None},
+            "pnl": {
+                "today": self._pnl_since(today, session_id),
+                "seven_days": self._pnl_since(seven_days, session_id),
             },
-            "pnl": {"today": pnl_today, "seven_days": pnl_7d},
-            "open_positions": positions,
+            "open_positions": self.database.fetch_all(
+                """
+                SELECT COALESCE(strategy_key,'live') AS strategy_key,COUNT(*) AS count,
+                       COALESCE(SUM(invested_usd),0) AS invested_usd
+                FROM positions
+                WHERE status IN ('opening','open','closing')
+                  AND (account_kind='live' OR simulation_session_id=?)
+                GROUP BY COALESCE(strategy_key,'live')
+                """,
+                (session_id,),
+            ),
             "simulation": simulation,
             "risk": RiskService(self.database).status(),
             "runtime": RuntimeService(self.database).status(),
-            "equity_curve": self._equity_curve(seven_days, simulation_session_id),
+            "equity_curve": self._equity_curve(seven_days, session_id),
             "signal_activity": self._signal_activity(seven_days),
         }
 
     def list_signals(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        return self.database.fetch_all(
+        rows = self.database.fetch_all(
             """
-            SELECT p.id, p.probability, p.profile, p.threshold, p.selected, p.predicted_at,
-                   s.address, s.name, s.symbol, s.launchpad, s.entry_time, s.tag,
-                   m.version AS model_version
+            SELECT p.id,p.probability,p.strategy_key,p.threshold,p.selected,p.predicted_at,
+                   s.address,s.name,s.symbol,s.launchpad,s.entry_time,s.tag,
+                   m.id AS model_id,m.version AS model_version,m.algorithm,m.trained_at,
+                   a.slot AS active_slot
             FROM predictions p
             JOIN samples s ON s.id=p.sample_id
             JOIN models m ON m.id=p.model_id
-            ORDER BY p.predicted_at DESC LIMIT ?
+            LEFT JOIN active_model_slots a ON a.model_id=p.model_id
+            WHERE p.strategy_key IN ('model_1','model_2','model_3')
+            ORDER BY p.predicted_at DESC,p.id DESC LIMIT ?
             """,
             (limit,),
         )
+        for row in rows:
+            row["model_label"] = self._short_model_label(row)
+        return rows
 
     def list_positions(
         self,
@@ -106,7 +105,7 @@ class DashboardService:
         self,
         *,
         mode: str,
-        profile: str,
+        strategy: str,
         page: int = 1,
         page_size: int = 30,
         start_at: str | None = None,
@@ -114,28 +113,39 @@ class DashboardService:
     ) -> dict[str, Any]:
         if mode not in {"simulation", "live"}:
             raise ValueError("mode must be simulation or live")
-        if profile not in self.PROFILE_ACCOUNT:
-            raise ValueError("profile must be aggressive, balanced or conservative")
+        validate_strategy(strategy)
 
         runtime = RuntimeService(self.database).status()
         simulation = PaperTradingService(self.database).simulation_status()
-        champion = self.models.champion()
-        account_kind = self.PROFILE_ACCOUNT[profile] if mode == "simulation" else "live"
-        common_clauses = ["p.account_kind=?", "p.profile=?"]
-        common_params: list[Any] = [account_kind, profile]
+        active_models = self.models.active_models()
+        strategy_registry = self._strategy_registry(active_models)
+        strategy_model = next(
+            (item for item in active_models if f"model_{item.get('active_slot')}" == strategy),
+            None,
+        )
+
         if mode == "simulation":
-            common_clauses.append("p.simulation_session_id=?")
-            common_params.append(str(simulation["session"]["id"]))
+            common_clauses = ["p.strategy_key=?", "p.simulation_session_id=?"]
+            common_params: list[Any] = [strategy, str(simulation["session"]["id"])]
+        else:
+            common_clauses = ["p.account_kind='live'"]
+            common_params = []
+            if strategy != RULES_ONLY:
+                common_clauses.append("COALESCE(p.strategy_key,'model_1')=?")
+                common_params.append(strategy)
 
         current_where = " AND ".join(
             common_clauses + ["p.status IN ('opening','open','closing','manual_intervention')"]
         )
-        current = self.database.fetch_all(
-            f"""
-            SELECT p.*, s.launchpad AS launchpad
+        join_from = """
             FROM positions p
             LEFT JOIN predictions pr ON pr.id=p.prediction_id
-            LEFT JOIN samples s ON s.id=pr.sample_id
+            LEFT JOIN samples s ON s.id=COALESCE(p.sample_id,pr.sample_id)
+        """
+        current = self.database.fetch_all(
+            f"""
+            SELECT p.*,s.launchpad AS launchpad
+            {join_from}
             WHERE {current_where}
             ORDER BY p.entry_time DESC
             """,
@@ -151,80 +161,58 @@ class DashboardService:
             history_clauses.append("p.exit_time<=?")
             history_params.append(end_at)
         history_where = " AND ".join(history_clauses)
-        history_from = """
-            FROM positions p
-            LEFT JOIN predictions pr ON pr.id=p.prediction_id
-            LEFT JOIN samples s ON s.id=pr.sample_id
-        """
-        total = int(
-            (
-                self.database.fetch_one(
-                    f"SELECT COUNT(*) AS count {history_from} WHERE {history_where}",
-                    tuple(history_params),
-                )
-                or {"count": 0}
-            )["count"]
-        )
+        total = int((self.database.fetch_one(
+            f"SELECT COUNT(*) AS count {join_from} WHERE {history_where}",
+            tuple(history_params),
+        ) or {"count": 0})["count"])
         total_pages = max(1, (total + page_size - 1) // page_size)
         resolved_page = min(max(1, page), total_pages)
         offset = (resolved_page - 1) * page_size
         history = self.database.fetch_all(
             f"""
-            SELECT p.*, s.launchpad AS launchpad
-            {history_from}
+            SELECT p.*,s.launchpad AS launchpad
+            {join_from}
             WHERE {history_where}
-            ORDER BY p.exit_time DESC, p.entry_time DESC
+            ORDER BY p.exit_time DESC,p.entry_time DESC
             LIMIT ? OFFSET ?
             """,
             tuple(history_params + [page_size, offset]),
         )
 
         if mode == "simulation":
-            accounts = {
-                item_profile: simulation["accounts"].get(item_account, {})
-                for item_profile, item_account in self.PROFILE_ACCOUNT.items()
-            }
+            accounts = simulation["accounts"]
+            account_summary = accounts.get(strategy, {})
         else:
-            live_rows = self.database.fetch_all(
+            summary = self.database.fetch_one(
                 """
-                SELECT
-                    profile,
-                    COUNT(*) AS positions,
-                    COALESCE(SUM(CASE WHEN status IN ('opening','open','closing','manual_intervention') THEN 1 ELSE 0 END),0) AS open_positions,
-                    COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
-                    COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+                SELECT COUNT(*) AS positions,
+                       COALESCE(SUM(CASE WHEN status IN ('opening','open','closing','manual_intervention') THEN 1 ELSE 0 END),0) AS open_positions,
+                       COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+                       COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                 FROM positions WHERE account_kind='live'
-                GROUP BY profile
                 """
-            )
-            by_profile = {str(row["profile"]): row for row in live_rows}
-            accounts = {
-                item_profile: {
-                    **by_profile.get(
-                        item_profile,
-                        {
-                            "positions": 0,
-                            "open_positions": 0,
-                            "closed_positions": 0,
-                            "realized_pnl_usd": 0.0,
-                        },
-                    ),
-                    "account": "live",
-                    "cash_usd": None,
-                    "sol_fee_reserve": None,
-                    "source": "gmgn_trading_api_scaffold",
-                }
-                for item_profile in self.PROFILE_ACCOUNT
+            ) or {}
+            accounts = {}
+            account_summary = {
+                **summary,
+                "strategy_key": strategy,
+                "cash_usd": None,
+                "sol_fee_reserve": None,
+                "source": "gmgn_trading_api_scaffold",
             }
-        account_summary = accounts.get(profile, {})
 
         return {
             "mode": mode,
-            "profile": profile,
+            "strategy": strategy,
+            "strategy_info": next(
+                (item for item in strategy_registry if item["strategy_key"] == strategy),
+                {"strategy_key": strategy, "label": strategy},
+            ),
+            "strategies": strategy_registry,
             "live_trading_enabled": bool(runtime.get("live_trading_enabled")),
             "simulation_enabled": bool(runtime.get("simulation_enabled")),
             "provider": "gmgn_api" if mode == "live" else "simulator",
-            "model_alias": self._model_runtime_alias(mode, champion),
+            "model_alias": self._model_runtime_alias(mode, strategy_model),
             "session": simulation["session"] if mode == "simulation" else None,
             "accounts": accounts,
             "account": account_summary,
@@ -256,20 +244,105 @@ class DashboardService:
         result.pop("metadata_json", None)
         return result
 
+    def _strategy_registry(self, active_models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        registry: list[dict[str, Any]] = []
+        for slot in (1, 2, 3):
+            model = next((item for item in active_models if int(item.get("active_slot") or 0) == slot), None)
+            registry.append(
+                {
+                    "strategy_key": f"model_{slot}",
+                    "label": self._short_model_label(model) if model else f"模型 {slot} 未就绪",
+                    "model_id": model.get("id") if model else None,
+                    "algorithm": model.get("algorithm") if model else None,
+                    "rank": slot,
+                    "threshold": model.get("active_threshold") if model else None,
+                    "composite_score": model.get("active_composite_score") if model else None,
+                    "feature_count": len(model.get("feature_names") or []) if model else 0,
+                }
+            )
+        registry.append(
+            {
+                "strategy_key": RULES_ONLY,
+                "label": "不用模型",
+                "model_id": None,
+                "algorithm": None,
+                "rank": None,
+                "threshold": None,
+                "composite_score": None,
+                "feature_count": 0,
+            }
+        )
+        return registry
+
+    @staticmethod
+    def _model_for_view(model: dict[str, Any]) -> dict[str, Any]:
+        result = dict(model)
+        result["model_label"] = DashboardService._short_model_label(model)
+        return result
+
+    @staticmethod
+    def _short_model_label(model: dict[str, Any] | None) -> str:
+        if not model:
+            return "模型未就绪"
+        try:
+            trained_at = datetime.fromisoformat(str(model.get("trained_at") or ""))
+        except ValueError:
+            trained_at = None
+        if trained_at is not None:
+            if trained_at.tzinfo is None:
+                trained_at = trained_at.replace(tzinfo=timezone.utc)
+            trained = trained_at.astimezone(timezone(timedelta(hours=8))).strftime("%Y%m%d")
+        else:
+            trained = "未训练"
+        short = {
+            "logistic_regression": "LR",
+            "decision_tree": "DT",
+            "hist_gradient_boosting": "HGB",
+            "gradient_boosting": "GB",
+            "ada_boost": "AdaBoost",
+            "extra_trees": "ExtraTrees",
+            "random_forest": "RF",
+            "rbf_svm": "RBF-SVM",
+            "xgboost": "XGBoost",
+            "lightgbm": "LightGBM",
+            "catboost": "CatBoost",
+            "flaml_automl": "FLAML",
+        }.get(str(model.get("algorithm")), str(model.get("algorithm") or "Model"))
+        return f"{trained}-{short}"
+
+    def _strategy_performance(self, session_id: str) -> list[dict[str, Any]]:
+        rows = self.database.fetch_all(
+            """
+            SELECT strategy_key,COUNT(*) AS positions,
+                   COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+                   COALESCE(SUM(CASE WHEN status IN ('open','opening','closing') THEN 1 ELSE 0 END),0) AS open_positions,
+                   COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+            FROM positions
+            WHERE simulation_session_id=?
+              AND strategy_key IN ('model_1','model_2','model_3','rules_only')
+            GROUP BY strategy_key
+            """,
+            (session_id,),
+        )
+        by_key = {row["strategy_key"]: row for row in rows}
+        return [
+            {
+                "strategy_key": key,
+                **by_key.get(key, {"positions": 0, "closed_positions": 0, "open_positions": 0, "realized_pnl_usd": 0.0}),
+            }
+            for key in SIMULATION_STRATEGIES
+        ]
+
     def _live_realized_pnl(self) -> float:
         row = self.database.fetch_one(
-            """
-            SELECT COALESCE(SUM(net_pnl_usd),0) AS pnl
-            FROM positions
-            WHERE account_kind='live' AND status='closed' AND net_pnl_usd IS NOT NULL
-            """
+            "SELECT COALESCE(SUM(net_pnl_usd),0) AS pnl FROM positions WHERE account_kind='live' AND status='closed' AND net_pnl_usd IS NOT NULL"
         ) or {"pnl": 0.0}
         return float(row.get("pnl") or 0.0)
 
     @staticmethod
     def _model_runtime_alias(mode: str, model: dict[str, Any] | None) -> str | None:
         if not model:
-            return None
+            return "rules_only" if mode == "simulation" else None
         try:
             trained_at = datetime.fromisoformat(str(model.get("trained_at") or ""))
         except ValueError:
@@ -280,44 +353,45 @@ class DashboardService:
         prefix = "sim" if mode == "simulation" else "live"
         return f"{prefix}_{trained_at:%Y%m%d}"
 
-    def _pnl_since(self, since: str, simulation_session_id: str) -> dict[str, float]:
+    def _pnl_since(self, since: str, session_id: str) -> dict[str, float]:
         rows = self.database.fetch_all(
             """
-            SELECT account_kind, COALESCE(SUM(net_pnl_usd),0) AS pnl
+            SELECT COALESCE(strategy_key,'live') AS strategy_key,COALESCE(SUM(net_pnl_usd),0) AS pnl
             FROM positions
-            WHERE status='closed' AND exit_time >= ?
+            WHERE status='closed' AND exit_time>=?
               AND (account_kind='live' OR simulation_session_id=?)
-            GROUP BY account_kind
+            GROUP BY COALESCE(strategy_key,'live')
             """,
-            (since, simulation_session_id),
+            (since, session_id),
         )
         result = {"total": 0.0}
         for row in rows:
             value = float(row["pnl"] or 0)
-            result[row["account_kind"]] = value
+            result[str(row["strategy_key"])] = value
             result["total"] += value
         return result
 
-    def _equity_curve(self, since: str, simulation_session_id: str) -> list[dict[str, Any]]:
+    def _equity_curve(self, since: str, session_id: str) -> list[dict[str, Any]]:
         return self.database.fetch_all(
             """
-            SELECT substr(exit_time,1,10) AS date, account_kind,
-                   ROUND(SUM(net_pnl_usd), 4) AS daily_pnl
+            SELECT substr(exit_time,1,10) AS date,COALESCE(strategy_key,'live') AS strategy_key,
+                   ROUND(SUM(net_pnl_usd),4) AS daily_pnl
             FROM positions
-            WHERE status='closed' AND exit_time >= ?
+            WHERE status='closed' AND exit_time>=?
               AND (account_kind='live' OR simulation_session_id=?)
-            GROUP BY substr(exit_time,1,10), account_kind ORDER BY date
+            GROUP BY substr(exit_time,1,10),COALESCE(strategy_key,'live') ORDER BY date
             """,
-            (since, simulation_session_id),
+            (since, session_id),
         )
 
     def _signal_activity(self, since: str) -> list[dict[str, Any]]:
         return self.database.fetch_all(
             """
-            SELECT substr(predicted_at,1,10) AS date, profile,
-                   COUNT(*) AS predictions, SUM(selected) AS selected
-            FROM predictions WHERE predicted_at >= ?
-            GROUP BY substr(predicted_at,1,10), profile ORDER BY date
+            SELECT substr(predicted_at,1,10) AS date,strategy_key,
+                   COUNT(*) AS predictions,SUM(selected) AS selected
+            FROM predictions
+            WHERE predicted_at>=? AND strategy_key IN ('model_1','model_2','model_3')
+            GROUP BY substr(predicted_at,1,10),strategy_key ORDER BY date
             """,
             (since,),
         )

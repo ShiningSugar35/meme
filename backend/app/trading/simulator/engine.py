@@ -96,7 +96,7 @@ class TradingSimulator:
             entry_fee_usd=quote.fee_usd,
             entry_network_fee_sol=quote.network_fee_sol,
             model_probability=signal.model_probability,
-            profile=signal.profile,
+            strategy_key=signal.strategy_key,
         )
         self.positions[position_id] = position
         self._record_quote_event(request, quote, "entry_filled")

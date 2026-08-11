@@ -5,7 +5,6 @@ import json
 import traceback
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,7 +18,6 @@ from ..ml.features import (
     FeatureBuilder,
     FeaturePolicy,
 )
-from ..ml.promotion import PromotionConfig, PromotionEvaluator
 from ..ml.registry import ModelRegistry
 from ..ml.trainer import ModelTrainer, TrainerConfig
 from ..repositories.models import ModelRepository
@@ -28,37 +26,9 @@ from ..repositories.samples import SampleRepository
 
 TrainingTrigger = Literal["manual", "weekly", "startup_catchup", "degraded"]
 
-_SAMPLE_METADATA = {
-    "id",
-    "sample_key",
-    "chain",
-    "address",
-    "name",
-    "symbol",
-    "token_type",
-    "entry_time",
-    "age_minutes",
-    "launchpad",
-    "entry_price",
-    "liquidity",
-    "liquidity_estimated",
-    "utility_eligible",
-    "holder_count",
-    "price_2h_max_ratio",
-    "price_2h_min_ratio",
-    "final_close_ratio",
-    "tag",
-    "label_status",
-    "label_version",
-    "label_source",
-    "terminal_return_estimated",
-    "collected_at",
-    "updated_at",
-}
-
 
 class TrainingService:
-    """Persistent model-training orchestration around the pure ML package."""
+    """Persistent Top-3 model training and atomic active-set installation."""
 
     def __init__(self, database: Database, settings: Settings | None = None) -> None:
         self.database = database
@@ -127,12 +97,10 @@ class TrainingService:
             raise ValueError("training run not found")
         with self.database.transaction(immediate=True) as connection:
             running = connection.execute(
-                "SELECT id FROM training_runs WHERE status='running' AND id<>? LIMIT 1", (run_id,)
+                "SELECT id FROM training_runs WHERE status='running' AND id<>? LIMIT 1",
+                (run_id,),
             ).fetchone()
             if running:
-                # Keep the durable request queued. The single training worker will
-                # return to it after the active run completes; a transient overlap
-                # must not permanently discard a manual/weekly/degraded request.
                 return
             cursor = connection.execute(
                 """
@@ -145,110 +113,120 @@ class TrainingService:
             if cursor.rowcount != 1:
                 return
 
-        champion_before = self.models.champion()
+        active_before = self.models.active_models()
+        rank1_before = active_before[0] if active_before else self.models.champion()
         try:
             try:
                 request_payload = json.loads(row.get("request_json") or "{}")
             except (TypeError, json.JSONDecodeError):
                 request_payload = {}
-            selected_features = self.normalize_feature_selection(
-                request_payload.get("feature_names")
-            )
+            selected_features = self.normalize_feature_selection(request_payload.get("feature_names"))
             rows = self.samples.list_mature()
             frame, data_hash = self._training_frame(rows)
             dataset = FeatureBuilder(
-                FeaturePolicy(
-                    feature_allowlist=selected_features,
-                )
+                FeaturePolicy(feature_allowlist=selected_features)
             ).prepare(frame)
-            result = ModelTrainer(
-                TrainerConfig(min_precision=self.settings.min_precision)
-            ).train(dataset)
+            result = ModelTrainer(TrainerConfig()).train(dataset)
 
-            production_path = self.registry.save(result.bundle)
-            evaluation_path = self.registry.save(result.evaluation_bundle)
-            metrics = self._metrics_payload(result, evaluation_path)
-            self.models.register(
-                {
-                    "id": result.bundle.model_id,
-                    "version": result.bundle.model_id,
-                    "algorithm": result.selected_algorithm,
-                    "status": "candidate",
-                    "early_stage": result.bundle.early_stage,
-                    "trained_at": result.bundle.created_at.isoformat(),
-                    "training_window_start": int(result.bundle.training_start.timestamp()),
-                    "training_window_end": int(result.bundle.training_end.timestamp()),
-                    "validation_window_start": int(dataset.timestamps.iloc[result.plan.final_split.test_indices[0]].timestamp()),
-                    "validation_window_end": int(dataset.timestamps.iloc[result.plan.final_split.test_indices[-1]].timestamp()),
-                    "feature_names": list(result.bundle.feature_names),
-                    "parameters": {
-                        "candidate_pool": list(TrainerConfig().candidate_names),
-                        "selection": "chronological_oos_utility_with_occam_tiebreak",
-                        "gap_hours": result.plan.gap_hours,
-                        "feature_names": list(selected_features),
-                    },
-                    "thresholds": result.bundle.thresholds.as_dict(),
-                    "metrics": metrics,
-                    "artifact_path": str(production_path.relative_to(PROJECT_ROOT)),
-                    "training_data_hash": data_hash,
-                    "parent_model_id": champion_before["id"] if champion_before else None,
+            registered: list[dict[str, Any]] = []
+            candidate_map = result.candidates_by_algorithm
+            for rank, (bundle, evaluation_bundle) in enumerate(
+                zip(result.bundles, result.evaluation_bundles, strict=True), start=1
+            ):
+                production_path = self.registry.save(bundle)
+                evaluation_path = self.registry.save(evaluation_bundle)
+                candidate = candidate_map[bundle.algorithm]
+                metrics = {
+                    **dict(bundle.metrics),
+                    "precision": candidate.final_metrics.precision if candidate.final_metrics else None,
+                    "recall": candidate.final_metrics.recall if candidate.final_metrics else None,
+                    "trade_count": candidate.final_metrics.trade_count if candidate.final_metrics else 0,
+                    "fixed_profit_usd": candidate.final_metrics.fixed_profit_usd if candidate.final_metrics else None,
+                    "profit_units": candidate.final_metrics.profit_units if candidate.final_metrics else None,
+                    "economic_score": candidate.economic_score,
+                    "generalization_score": candidate.generalization.score if candidate.generalization else None,
+                    "composite_score": candidate.composite_score,
+                    "evaluation_artifact_path": str(evaluation_path.relative_to(PROJECT_ROOT)),
+                    "rule_baseline_final": asdict(result.rule_baseline),
+                    "warnings": list(result.warnings),
                 }
-            )
-
-            promoted = False
-            promotion_summary: dict[str, Any]
-            if champion_before is None:
-                # Bootstrap is allowed so the user can start shadow/simulation/live
-                # validation before 120 days. It is not a claim of dollar-utility superiority.
-                self.models.promote(result.bundle.model_id)
-                promoted = True
-                promotion_summary = {
-                    "bootstrap": True,
-                    "promotion_eligible": False,
-                    "reason": "first validated model; no incumbent exists",
-                }
-            else:
-                promotion_summary = self._compare_for_promotion(
-                    result,
-                    dataset,
-                    frame,
-                    champion_before,
+                self.models.register(
+                    {
+                        "id": bundle.model_id,
+                        "version": bundle.model_id,
+                        "algorithm": bundle.algorithm,
+                        "status": "candidate",
+                        "early_stage": bundle.early_stage,
+                        "trained_at": bundle.created_at.isoformat(),
+                        "training_window_start": int(bundle.training_start.timestamp()),
+                        "training_window_end": int(bundle.training_end.timestamp()),
+                        "validation_window_start": int(
+                            dataset.timestamps.iloc[result.plan.final_split.test_indices[0]].timestamp()
+                        ),
+                        "validation_window_end": int(
+                            dataset.timestamps.iloc[result.plan.final_split.test_indices[-1]].timestamp()
+                        ),
+                        "feature_names": list(bundle.feature_names),
+                        "parameters": {
+                            "candidate_pool": list(TrainerConfig().candidate_names),
+                            "selection": "top3_oos_fixed_payoff_decay_occam",
+                            "economic_weight": TrainerConfig().economic_weight,
+                            "generalization_weight": TrainerConfig().generalization_weight,
+                            "gap_hours": result.plan.gap_hours,
+                            "feature_names": list(bundle.feature_names),
+                            "requested_feature_pool": list(selected_features),
+                        },
+                        "thresholds": bundle.thresholds.as_dict(),
+                        "metrics": metrics,
+                        "artifact_path": str(production_path.relative_to(PROJECT_ROOT)),
+                        "training_data_hash": data_hash,
+                        "parent_model_id": rank1_before["id"] if rank1_before else None,
+                    }
                 )
-                if promotion_summary.get("promote"):
-                    self.models.promote(result.bundle.model_id)
-                    promoted = True
-                else:
-                    self.database.execute(
-                        """
-                        UPDATE models
-                        SET status='rejected', rejection_reason=?
-                        WHERE id=? AND status='candidate'
-                        """,
-                        ("; ".join(promotion_summary.get("blockers", []))[:2000], result.bundle.model_id),
-                    )
+                registered.append(
+                    {
+                        "id": bundle.model_id,
+                        "rank": rank,
+                        "algorithm": bundle.algorithm,
+                        "threshold": bundle.threshold,
+                        "feature_names": list(bundle.feature_names),
+                        "composite_score": float(candidate.composite_score or 0.0),
+                        "economic_score": float(candidate.economic_score or 0.0),
+                        "generalization_score": float(
+                            candidate.generalization.score if candidate.generalization else 0.0
+                        ),
+                        "metrics": metrics,
+                    }
+                )
 
+            self.models.set_active_models(registered)
             summary = {
-                "selected_algorithm": result.selected_algorithm,
-                "candidate_model_id": result.bundle.model_id,
                 "rows": len(dataset),
-                "early_stage": result.bundle.early_stage,
+                "early_stage": result.plan.early_stage,
                 "data_hash": data_hash,
-                "feature_names": list(selected_features),
+                "requested_feature_names": list(selected_features),
+                "top_models": registered,
+                "rule_baseline_final": asdict(result.rule_baseline),
+                "candidates": [asdict(candidate) for candidate in result.candidates],
                 "warnings": list(result.warnings),
-                "promotion": promotion_summary,
+                "selection_formula": {
+                    "economic": "mean_clip((6*TP-FP)/(6*N_positive),-1,1)",
+                    "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",
+                    "composite": "0.60*economic + 0.40*generalization",
+                    "occam": "smallest feature subset within one standard error of algorithm best",
+                },
             }
             self.database.execute(
                 """
                 UPDATE training_runs
                 SET status='completed', completed_at=?, candidate_model_id=?, champion_before_id=?,
-                    promoted=?, summary_json=?
+                    promoted=1, summary_json=?
                 WHERE id=?
                 """,
                 (
                     utc_now_iso(),
-                    result.bundle.model_id,
-                    champion_before["id"] if champion_before else None,
-                    int(promoted),
+                    registered[0]["id"],
+                    rank1_before["id"] if rank1_before else None,
                     json.dumps(summary, ensure_ascii=False),
                     run_id,
                 ),
@@ -256,13 +234,16 @@ class TrainingService:
             self.database.set_runtime_state("last_training_completed_at", utc_now_iso())
             self.database.audit(
                 category="model",
-                action="training_completed",
+                action="top3_training_completed",
                 entity_type="training_run",
                 entity_id=run_id,
-                details={"model_id": result.bundle.model_id, "promoted": promoted, "rows": len(dataset)},
+                details={
+                    "model_ids": [item["id"] for item in registered],
+                    "algorithms": [item["algorithm"] for item in registered],
+                    "rows": len(dataset),
+                },
             )
         except Exception as exc:
-            # Store a concise diagnostic, never a full environment or secret-bearing response.
             message = f"{type(exc).__name__}: {exc}"[:2000]
             self.database.execute(
                 "UPDATE training_runs SET status='failed', completed_at=?, error_message=? WHERE id=?",
@@ -282,7 +263,7 @@ class TrainingService:
         if not target:
             raise ValueError("model not found")
         if target["status"] != "retired":
-            raise ValueError("only a retired model can be rolled back")
+            raise ValueError("only a retired rank-1 model can be rolled back")
         artifact = Path(str(target["artifact_path"]))
         artifact = artifact if artifact.is_absolute() else PROJECT_ROOT / artifact
         if not artifact.exists():
@@ -296,7 +277,7 @@ class TrainingService:
             severity="warning",
             entity_type="model",
             entity_id=model_id,
-            details={"previous_champion_id": previous["id"] if previous else None},
+            details={"previous_rank1_id": previous["id"] if previous else None},
         )
         champion = self.models.champion()
         assert champion is not None
@@ -305,8 +286,8 @@ class TrainingService:
     def feature_catalog(self) -> dict[str, Any]:
         rows = self.samples.list_mature()
         total = len(rows)
-        champion = self.models.champion()
-        champion_features = set(champion.get("feature_names", [])) if champion else set()
+        active = self.models.active_models()
+        active_features = [set(model.get("feature_names", [])) for model in active]
         items: list[dict[str, Any]] = []
         for name in AVAILABLE_MODEL_FEATURES:
             present = 0
@@ -326,7 +307,9 @@ class TrainingService:
                 {
                     "name": name,
                     "default_enabled": name in DEFAULT_MODEL_TRAINING_FEATURES,
-                    "champion_enabled": name in champion_features,
+                    "active_model_slots": [
+                        index + 1 for index, features in enumerate(active_features) if name in features
+                    ],
                     "available_rows": present,
                     "total_mature_rows": total,
                     "coverage": (present / total) if total else 0.0,
@@ -336,6 +319,7 @@ class TrainingService:
             "default_features": list(DEFAULT_MODEL_TRAINING_FEATURES),
             "available_features": list(AVAILABLE_MODEL_FEATURES),
             "total_mature_rows": total,
+            "active_model_count": len(active),
             "items": items,
         }
 
@@ -356,8 +340,6 @@ class TrainingService:
         records: list[dict[str, Any]] = []
         digest = hashlib.sha256()
         for row in rows:
-            # Build a superset frame once; the FeatureBuilder allowlist decides
-            # which entry-time columns each recipe may actually consume.
             features = {
                 key: (row.get("entry_price") if key == "price" else row.get(key))
                 for key in AVAILABLE_MODEL_FEATURES
@@ -375,91 +357,3 @@ class TrainingService:
             records.append(features)
             digest.update(f"{row['sample_key']}|{row['tag']}|{row.get('updated_at')}\n".encode())
         return pd.DataFrame.from_records(records), digest.hexdigest()
-
-    @staticmethod
-    def _metrics_payload(result: Any, evaluation_path: Path) -> dict[str, Any]:
-        final = asdict(result.final_metrics)
-        return {
-            "precision": result.final_metrics.precision,
-            "recall": result.final_metrics.recall,
-            "trade_count": result.final_metrics.trade_count,
-            "cumulative_pnl_usd": result.final_metrics.cumulative_pnl_usd,
-            "proxy_pnl": result.final_metrics.proxy_pnl,
-            "max_drawdown_usd": result.final_metrics.max_drawdown_usd,
-            "promotion_eligible": result.final_metrics.utility_eligible,
-            "utility_unit": result.final_metrics.utility_unit,
-            "final_recent_window": final,
-            "candidates": [asdict(candidate) for candidate in result.candidates],
-            "warnings": list(result.warnings),
-            "evaluation_artifact_path": str(evaluation_path.relative_to(PROJECT_ROOT)),
-        }
-
-    def _compare_for_promotion(
-        self,
-        result: Any,
-        dataset: Any,
-        frame: pd.DataFrame,
-        champion: dict[str, Any],
-    ) -> dict[str, Any]:
-        try:
-            incumbent_features = tuple(champion.get("feature_names") or ())
-            if not incumbent_features:
-                raise ValueError("incumbent feature schema is missing")
-
-            # Rebuild the incumbent recipe on the *same current pre-holdout
-            # training history*. Loading its old production refit artifact would
-            # make the comparison unfair and, because it is not evaluation-only,
-            # would also permanently block automatic updates after bootstrap.
-            incumbent_dataset = FeatureBuilder(
-                FeaturePolicy(
-                    feature_allowlist=incumbent_features,
-                )
-            ).prepare(frame)
-            incumbent_bundle, incumbent_plan, _ = ModelTrainer(
-                TrainerConfig(
-                    min_precision=self.settings.min_precision,
-                    candidate_names=(str(champion["algorithm"]),),
-                )
-            ).rebuild_evaluation_bundle(
-                incumbent_dataset,
-                str(champion["algorithm"]),
-            )
-
-            candidate_test = result.plan.final_split.test_indices.tolist()
-            incumbent_test = incumbent_plan.final_split.test_indices.tolist()
-            if candidate_test != incumbent_test:
-                raise ValueError("candidate/incumbent final comparison rows differ")
-
-            union_features = tuple(
-                dict.fromkeys((*dataset.feature_names, *incumbent_features))
-            )
-            comparison_dataset = FeatureBuilder(
-                FeaturePolicy(
-                    feature_allowlist=union_features,
-                )
-            ).prepare(frame)
-            decision = PromotionEvaluator(
-                PromotionConfig(
-                    min_precision=self.settings.min_precision,
-                    min_pnl_lift=self.settings.promotion_min_pnl_lift,
-                )
-            ).compare(
-                result.evaluation_bundle,
-                incumbent_bundle,
-                comparison_dataset,
-                result.plan.final_split.test_indices,
-            )
-            payload = asdict(decision)
-            payload["incumbent_recipe_rebuilt"] = True
-            payload["incumbent_algorithm"] = champion["algorithm"]
-            payload["incumbent_feature_names"] = list(incumbent_features)
-            return payload
-        except Exception as exc:
-            return {
-                "eligible": False,
-                "promote": False,
-                "pnl_lift": None,
-                "blockers": [f"fair shared-window comparison failed: {type(exc).__name__}: {exc}"],
-                "comparison_rows": len(result.plan.final_split.test_indices),
-            }
-

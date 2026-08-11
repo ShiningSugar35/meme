@@ -14,23 +14,18 @@ from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..ml.registry import ModelRegistry
 from ..repositories.models import ModelRepository
+from ..strategy import MODEL_STRATEGIES, RULES_ONLY, model_strategy
 from .paper_trading import PaperTradingService
-
-
-_PROFILE_ACCOUNTS = {
-    "aggressive": "shadow_aggressive",
-    "balanced": "paper",
-    "conservative": "shadow_conservative",
-}
 
 
 @dataclass(frozen=True, slots=True)
 class PredictionCycleResult:
-    model_id: str | None
+    model_ids: tuple[str, ...] = ()
     samples_scored: int = 0
     predictions_written: int = 0
     signals_selected: int = 0
-    paper_positions_opened: int = 0
+    model_positions_opened: int = 0
+    rule_positions_opened: int = 0
     paper_positions_settled: int = 0
     stale_signals: int = 0
     blocked_signals: int = 0
@@ -38,12 +33,7 @@ class PredictionCycleResult:
 
 
 class PredictionService:
-    """Score post-training samples and persist the three threshold profiles.
-
-    Scoring is allowed for historical rows so OOS monitoring can be rebuilt,
-    but a simulated/live action may only be created while the signal is fresh.
-    This prevents a restart from retroactively inventing fills hours later.
-    """
+    """Score new admitted samples with all three active models plus rules-only baseline."""
 
     def __init__(self, database: Database, settings: Settings | None = None) -> None:
         self.database = database
@@ -58,88 +48,80 @@ class PredictionService:
         now: datetime | None = None,
     ) -> PredictionCycleResult:
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        champion = self.models.champion()
-        if not champion:
-            settled = (
-                0
-                if self.settings.paper_market_monitor_enabled
-                else self.paper.settle_mature_positions()
-            )
+        active = self.models.active_models()
+        if len(active) != 3:
+            settled = 0 if self.settings.paper_market_monitor_enabled else self.paper.settle_mature_positions()
             return PredictionCycleResult(
-                model_id=None,
+                model_ids=tuple(item.get("id") for item in active),
                 paper_positions_settled=settled,
-                reason="no_champion_model",
+                reason="active_top3_not_ready",
             )
 
-        bundle = self._load_bundle(champion)
-        rows = self.database.fetch_all(
-            """
-            SELECT s.*
-            FROM samples s
-            WHERE s.entry_time > COALESCE(?, 0)
-              AND NOT EXISTS(
-                  SELECT 1 FROM predictions p
-                  WHERE p.sample_id=s.id AND p.model_id=?
-              )
-            ORDER BY s.entry_time, s.id
-            LIMIT ?
-            """,
-            (champion.get("training_window_end"), champion["id"], limit),
-        )
-
-        predictions_written = 0
-        selected = 0
-        for row in rows:
-            frame = self._prediction_frame(row, bundle.feature_names)
-            probability = float(bundle.predict_probabilities(frame)[0])
-            probability = float(np.clip(probability, 0.0, 1.0))
-            with self.database.transaction(immediate=True) as connection:
-                for profile in ("aggressive", "balanced", "conservative"):
-                    threshold = bundle.thresholds.for_profile(profile)
-                    chosen = probability >= threshold
+        predictions_written = selected = scored = 0
+        active_ids: list[str] = []
+        for slot, model in enumerate(active, start=1):
+            bundle = self._load_bundle(model)
+            active_ids.append(str(model["id"]))
+            rows = self.database.fetch_all(
+                """
+                SELECT s.*
+                FROM samples s
+                WHERE s.entry_time > COALESCE(?,0)
+                  AND NOT EXISTS(
+                      SELECT 1 FROM predictions p
+                      WHERE p.sample_id=s.id AND p.model_id=?
+                  )
+                ORDER BY s.entry_time,s.id
+                LIMIT ?
+                """,
+                (model.get("training_window_end"), model["id"], limit),
+            )
+            strategy = model_strategy(slot)
+            for row in rows:
+                frame = self._prediction_frame(row, bundle.feature_names)
+                probability = float(np.clip(bundle.predict_probabilities(frame)[0], 0.0, 1.0))
+                threshold = float(bundle.threshold)
+                chosen = probability >= threshold
+                with self.database.transaction(immediate=True) as connection:
                     cursor = connection.execute(
                         """
                         INSERT INTO predictions(
-                            sample_id, model_id, probability, profile, threshold,
-                            selected, predicted_at
+                            sample_id,model_id,probability,strategy_key,threshold,selected,predicted_at
                         ) VALUES(?,?,?,?,?,?,?)
-                        ON CONFLICT(sample_id, model_id, profile) DO NOTHING
+                        ON CONFLICT(sample_id,model_id,strategy_key) DO NOTHING
                         """,
                         (
-                            row["id"], champion["id"], probability, profile,
-                            threshold, int(chosen), moment.isoformat(),
+                            row["id"], model["id"], probability, strategy, threshold,
+                            int(chosen), moment.isoformat(),
                         ),
                     )
                     if cursor.rowcount == 1:
                         predictions_written += 1
                         selected += int(chosen)
+                        scored += 1
 
-        opened, stale, blocked = self._reconcile_paper_signals(
-            champion["id"], moment=moment
-        )
-        settled = (
-            0
-            if self.settings.paper_market_monitor_enabled
-            else self.paper.settle_mature_positions()
-        )
+        opened, stale, blocked = self._reconcile_model_signals(moment=moment)
+        rule_opened, rule_stale, rule_blocked = self._reconcile_rule_only(moment=moment, limit=limit)
+        settled = 0 if self.settings.paper_market_monitor_enabled else self.paper.settle_mature_positions()
         result = PredictionCycleResult(
-            model_id=champion["id"],
-            samples_scored=len(rows),
+            model_ids=tuple(active_ids),
+            samples_scored=scored,
             predictions_written=predictions_written,
             signals_selected=selected,
-            paper_positions_opened=opened,
+            model_positions_opened=opened,
+            rule_positions_opened=rule_opened,
             paper_positions_settled=settled,
-            stale_signals=stale,
-            blocked_signals=blocked,
+            stale_signals=stale + rule_stale,
+            blocked_signals=blocked + rule_blocked,
         )
         self.database.set_runtime_state("prediction_worker_last_cycle", asdict(result))
         return result
 
-    def _load_bundle(self, champion: dict[str, Any]) -> Any:
-        artifact = Path(champion["artifact_path"])
+    def _load_bundle(self, model: dict[str, Any]) -> Any:
+        artifact = Path(model["artifact_path"])
         artifact = artifact if artifact.is_absolute() else PROJECT_ROOT / artifact
         if not artifact.exists():
-            raise FileNotFoundError(f"champion artifact is missing: {artifact.name}")
+            raise FileNotFoundError(f"active model artifact is missing: {artifact.name}")
         return ModelRegistry(artifact.parent).load(artifact.stem)
 
     @staticmethod
@@ -148,40 +130,27 @@ class PredictionService:
             source = json.loads(row.get("features_json") or "{}")
         except (TypeError, json.JSONDecodeError):
             source = {}
-        # Production inputs come from the frozen entry-time allowlist. Launchpad
-        # remains metadata and is deliberately excluded from the model schema.
         source["price"] = row.get("entry_price")
         record = {name: source.get(name, np.nan) for name in feature_names}
         return pd.DataFrame.from_records([record], columns=list(feature_names))
 
-    def _reconcile_paper_signals(
-        self,
-        model_id: str,
-        *,
-        moment: datetime,
-    ) -> tuple[int, int, int]:
+    def _reconcile_model_signals(self, *, moment: datetime) -> tuple[int, int, int]:
         if not self.settings.simulation_enabled:
             return 0, 0, 0
         rows = self.database.fetch_all(
             """
-            SELECT p.id AS prediction_id, p.sample_id, p.profile, p.model_id,
-                   s.entry_time
+            SELECT p.id AS prediction_id,p.sample_id,p.strategy_key,p.model_id,s.entry_time
             FROM predictions p
             JOIN samples s ON s.id=p.sample_id
-            WHERE p.model_id=? AND p.selected=1
-              AND p.profile IN ('aggressive','balanced','conservative')
+            JOIN active_model_slots a ON a.model_id=p.model_id
+            WHERE p.selected=1
+              AND p.strategy_key IN ('model_1','model_2','model_3')
               AND NOT EXISTS(
                   SELECT 1 FROM positions pos
-                  WHERE pos.prediction_id=p.id
-                    AND pos.account_kind=CASE p.profile
-                        WHEN 'aggressive' THEN 'shadow_aggressive'
-                        WHEN 'balanced' THEN 'paper'
-                        ELSE 'shadow_conservative'
-                    END
+                  WHERE pos.prediction_id=p.id AND pos.strategy_key=p.strategy_key
               )
-            ORDER BY s.entry_time, p.id
-            """,
-            (model_id,),
+            ORDER BY s.entry_time,p.id
+            """
         )
         opened = stale = blocked = 0
         now_epoch = int(moment.timestamp())
@@ -189,14 +158,52 @@ class PredictionService:
             if now_epoch - int(row["entry_time"]) > self.settings.signal_max_age_seconds:
                 stale += 1
                 continue
-            account = _PROFILE_ACCOUNTS[row["profile"]]
             result = self.paper.open_from_prediction(
                 sample_id=int(row["sample_id"]),
                 prediction_id=int(row["prediction_id"]),
-                model_id=row["model_id"],
-                profile=row["profile"],
-                account=account,
+                model_id=str(row["model_id"]),
+                strategy_key=str(row["strategy_key"]),
             )
+            if result.opened:
+                opened += 1
+            elif result.reason != "already_opened":
+                blocked += 1
+        return opened, stale, blocked
+
+    def _reconcile_rule_only(self, *, moment: datetime, limit: int) -> tuple[int, int, int]:
+        if not self.settings.simulation_enabled:
+            return 0, 0, 0
+        session = self.paper.ensure_simulation_session()
+        try:
+            session_start = int(datetime.fromisoformat(str(session["started_at"])).timestamp())
+        except (TypeError, ValueError):
+            session_start = 0
+        now_epoch = int(moment.timestamp())
+        admission_cutoff = max(
+            session_start - int(self.settings.signal_max_age_seconds),
+            now_epoch - int(self.settings.signal_max_age_seconds),
+        )
+        rows = self.database.fetch_all(
+            """
+            SELECT s.id,s.entry_time
+            FROM samples s
+            WHERE s.entry_time>=?
+              AND NOT EXISTS(
+                  SELECT 1 FROM positions pos
+                  WHERE pos.sample_id=s.id AND pos.simulation_session_id=?
+                    AND pos.strategy_key='rules_only'
+              )
+            ORDER BY s.entry_time,s.id
+            LIMIT ?
+            """,
+            (admission_cutoff, session["id"], limit),
+        )
+        opened = stale = blocked = 0
+        for row in rows:
+            if now_epoch - int(row["entry_time"]) > self.settings.signal_max_age_seconds:
+                stale += 1
+                continue
+            result = self.paper.open_rule_only(sample_id=int(row["id"]))
             if result.opened:
                 opened += 1
             elif result.reason != "already_opened":

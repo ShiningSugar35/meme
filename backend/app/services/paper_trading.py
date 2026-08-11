@@ -5,21 +5,18 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, Sequence
+from typing import Any, Sequence
 
 from ..collector.models import Kline
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..strategy import RULES_ONLY, SIMULATION_STRATEGIES, validate_strategy
 from ..trading.simulator.quote import SimulatedQuoteProvider
 from ..trading.simulator.types import QuoteRequest, Side
 
 
-PaperAccount = Literal["paper", "shadow_aggressive", "shadow_conservative"]
-PAPER_ACCOUNTS: tuple[PaperAccount, ...] = (
-    "paper",
-    "shadow_aggressive",
-    "shadow_conservative",
-)
+PaperAccount = str
+PAPER_ACCOUNTS: tuple[str, ...] = SIMULATION_STRATEGIES
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +42,7 @@ class PaperMonitorResult:
 
 
 class PaperTradingService:
-    """SQLite-backed paper ledger using the high-fidelity quote model."""
+    """SQLite-backed four-strategy simulation ledger."""
 
     EXIT_MAX_ATTEMPTS = 7
 
@@ -58,6 +55,14 @@ class PaperTradingService:
         self.database = database
         self.settings = settings or get_settings()
         self.quote_provider = quote_provider or SimulatedQuoteProvider()
+
+    @staticmethod
+    def _state_key(strategy_key: str) -> str:
+        return f"portfolio_strategy:{validate_strategy(strategy_key)}"
+
+    @staticmethod
+    def _strategy_for_row(row: dict[str, Any]) -> str:
+        return validate_strategy(str(row.get("strategy_key") or ""))
 
     def ensure_simulation_session(self) -> dict[str, Any]:
         existing = self.database.get_runtime_state("simulation_session")
@@ -123,36 +128,12 @@ class PaperTradingService:
                 ),
             )
             self._write_runtime_state(connection, "simulation_session", session)
-            for account in PAPER_ACCOUNTS:
-                key = f"portfolio_account:{account}"
-                row = connection.execute(
-                    "SELECT value_json FROM runtime_state WHERE key=?", (key,)
-                ).fetchone()
-                if row:
-                    try:
-                        state = json.loads(row["value_json"] or "{}")
-                    except (TypeError, json.JSONDecodeError):
-                        state = {}
-                    if not isinstance(state, dict):
-                        state = {}
-                    state.setdefault("cash_usd", 1_000.0)
-                    state.setdefault("sol_fee_reserve", 0.1)
-                    state.setdefault("initial_cash_usd", 1_000.0)
-                    state.setdefault("initial_sol_fee_reserve", 0.1)
-                    state.setdefault("source", "simulation_fixed")
-                    state["session_id"] = session["id"]
-                    state["updated_at"] = utc_now_iso()
-                else:
-                    state = self._new_account_state(account, session["id"])
-                self._write_runtime_state(connection, key, state)
-            connection.execute(
-                """
-                UPDATE positions SET simulation_session_id=?
-                WHERE simulation_session_id IS NULL
-                  AND account_kind IN ('paper','shadow_aggressive','shadow_conservative')
-                """,
-                (session["id"],),
-            )
+            for strategy in PAPER_ACCOUNTS:
+                self._write_runtime_state(
+                    connection,
+                    self._state_key(strategy),
+                    self._new_account_state(strategy, session["id"]),
+                )
         return session
 
     @staticmethod
@@ -166,7 +147,7 @@ class PaperTradingService:
     ) -> dict[str, Any]:
         return {
             "session_id": session_id,
-            "account": account,
+            "strategy_key": account,
             "cash_usd": float(cash_usd),
             "sol_fee_reserve": float(sol_fee_reserve),
             "initial_cash_usd": float(cash_usd),
@@ -199,13 +180,14 @@ class PaperTradingService:
         sol_fee_reserve: float = 0.1,
         source: str = "simulation_fixed",
     ) -> dict[str, Any]:
+        strategy = validate_strategy(account)
         session = self.ensure_simulation_session()
-        key = f"portfolio_account:{account}"
+        key = self._state_key(strategy)
         existing = self.database.get_runtime_state(key)
         if isinstance(existing, dict) and existing.get("session_id") == session["id"]:
             return existing
         state = self._new_account_state(
-            account,
+            strategy,
             str(session["id"]),
             cash_usd=cash_usd,
             sol_fee_reserve=sol_fee_reserve,
@@ -218,12 +200,13 @@ class PaperTradingService:
         open_count = int((self.database.fetch_one(
             """
             SELECT COUNT(*) AS count FROM positions
-            WHERE account_kind IN ('paper','shadow_aggressive','shadow_conservative')
+            WHERE account_kind='simulation'
+              AND strategy_key IN ('model_1','model_2','model_3','rules_only')
               AND status IN ('opening','open','closing')
             """
         ) or {"count": 0})["count"])
         if open_count:
-            raise ValueError("simulation cannot reset while paper/shadow positions are open")
+            raise ValueError("simulation cannot reset while strategy positions are open")
         session = {
             "id": f"sim_{uuid.uuid4().hex}",
             "started_at": utc_now_iso(),
@@ -251,11 +234,11 @@ class PaperTradingService:
                 ),
             )
             self._write_runtime_state(connection, "simulation_session", session)
-            for account in PAPER_ACCOUNTS:
+            for strategy in PAPER_ACCOUNTS:
                 self._write_runtime_state(
                     connection,
-                    f"portfolio_account:{account}",
-                    self._new_account_state(account, session["id"]),
+                    self._state_key(strategy),
+                    self._new_account_state(strategy, session["id"]),
                 )
         self.database.audit(
             category="simulation",
@@ -269,8 +252,8 @@ class PaperTradingService:
         session = self.ensure_simulation_session()
         session_id = str(session["id"])
         accounts: dict[str, Any] = {}
-        for account in PAPER_ACCOUNTS:
-            state = self.ensure_account(account)
+        for strategy in PAPER_ACCOUNTS:
+            state = self.ensure_account(strategy)
             summary = self.database.fetch_one(
                 """
                 SELECT COUNT(*) AS positions,
@@ -278,11 +261,11 @@ class PaperTradingService:
                        COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
                        COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                 FROM positions
-                WHERE account_kind=? AND simulation_session_id=?
+                WHERE strategy_key=? AND simulation_session_id=?
                 """,
-                (account, session_id),
+                (strategy, session_id),
             ) or {}
-            accounts[account] = {**state, **summary}
+            accounts[strategy] = {**state, **summary}
         registry = self.database.fetch_one(
             "SELECT status,ended_at,created_reason FROM simulation_sessions WHERE id=?",
             (session_id,),
@@ -291,41 +274,37 @@ class PaperTradingService:
 
     def simulation_history(self, *, limit: int = 20) -> list[dict[str, Any]]:
         sessions = self.database.fetch_all(
-            """
-            SELECT * FROM simulation_sessions
-            ORDER BY started_at DESC
-            LIMIT ?
-            """,
+            "SELECT * FROM simulation_sessions ORDER BY started_at DESC LIMIT ?",
             (limit,),
         )
         for session in sessions:
             summaries = self.database.fetch_all(
                 """
-                SELECT account_kind,
+                SELECT strategy_key,
                        COUNT(*) AS positions,
                        COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
                        COALESCE(SUM(CASE WHEN status IN ('opening','open','closing') THEN 1 ELSE 0 END),0) AS open_positions,
                        COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                 FROM positions
                 WHERE simulation_session_id=?
-                  AND account_kind IN ('paper','shadow_aggressive','shadow_conservative')
-                GROUP BY account_kind
+                  AND strategy_key IN ('model_1','model_2','model_3','rules_only')
+                GROUP BY strategy_key
                 """,
                 (session["id"],),
             )
-            by_account = {row["account_kind"]: row for row in summaries}
+            by_strategy = {row["strategy_key"]: row for row in summaries}
             session["accounts"] = {
-                account: by_account.get(
-                    account,
+                strategy: by_strategy.get(
+                    strategy,
                     {
-                        "account_kind": account,
+                        "strategy_key": strategy,
                         "positions": 0,
                         "closed_positions": 0,
                         "open_positions": 0,
                         "realized_pnl_usd": 0.0,
                     },
                 )
-                for account in PAPER_ACCOUNTS
+                for strategy in PAPER_ACCOUNTS
             }
             session["realized_pnl_usd"] = sum(
                 float(item.get("realized_pnl_usd") or 0.0)
@@ -335,45 +314,39 @@ class PaperTradingService:
 
     def simulation_audit(self, *, limit_sessions: int = 50) -> list[dict[str, Any]]:
         sessions = self.simulation_history(limit=limit_sessions)
-        profile_by_account = {
-            "paper": "balanced",
-            "shadow_aggressive": "aggressive",
-            "shadow_conservative": "conservative",
+        active_models = {
+            f"model_{row['active_slot']}": row
+            for row in self.database.fetch_all(
+                """
+                SELECT s.slot AS active_slot,m.id,m.algorithm,m.trained_at
+                FROM active_model_slots s JOIN models m ON m.id=s.model_id
+                ORDER BY s.slot
+                """
+            )
         }
         rows: list[dict[str, Any]] = []
         for session in sessions:
             accounts = session.get("accounts") or {}
-            for account in PAPER_ACCOUNTS:
-                summary = accounts.get(account) or {}
+            for strategy in PAPER_ACCOUNTS:
+                summary = accounts.get(strategy) or {}
                 timing = self.database.fetch_one(
                     """
-                    SELECT MIN(entry_time) AS first_entry_time,
-                           MAX(exit_time) AS last_exit_time
-                    FROM positions
-                    WHERE simulation_session_id=? AND account_kind=?
+                    SELECT MIN(entry_time) AS first_entry_time, MAX(exit_time) AS last_exit_time
+                    FROM positions WHERE simulation_session_id=? AND strategy_key=?
                     """,
-                    (session["id"], account),
+                    (session["id"], strategy),
                 ) or {}
-                latest_model = self.database.fetch_one(
-                    """
-                    SELECT model_id FROM positions
-                    WHERE simulation_session_id=? AND account_kind=? AND model_id IS NOT NULL
-                    ORDER BY entry_time DESC LIMIT 1
-                    """,
-                    (session["id"], account),
-                ) or {}
+                model = active_models.get(strategy)
                 rows.append(
                     {
                         "session_id": session["id"],
-                        "profile": profile_by_account[account],
-                        "account_kind": account,
+                        "strategy_key": strategy,
+                        "model_id": model.get("id") if model else None,
+                        "algorithm": model.get("algorithm") if model else None,
+                        "model_label": "不用模型" if strategy == RULES_ONLY else self._short_model_label(model),
                         "status": session["status"],
                         "first_entry_time": timing.get("first_entry_time"),
                         "last_exit_time": timing.get("last_exit_time"),
-                        "source_label": self._model_update_source(
-                            latest_model.get("model_id"),
-                            str(session.get("created_reason") or ""),
-                        ),
                         "positions": int(summary.get("positions") or 0),
                         "open_positions": int(summary.get("open_positions") or 0),
                         "closed_positions": int(summary.get("closed_positions") or 0),
@@ -382,46 +355,30 @@ class PaperTradingService:
                 )
         return rows
 
-    def _model_update_source(self, model_id: str | None, fallback_reason: str) -> str:
-        if model_id:
-            run = self.database.fetch_one(
-                """
-                SELECT trigger FROM training_runs
-                WHERE candidate_model_id=? AND status='completed'
-                ORDER BY completed_at DESC LIMIT 1
-                """,
-                (model_id,),
-            ) or {}
-            trigger = str(run.get("trigger") or "")
-            if trigger == "manual":
-                return "模型手动更新"
-            if trigger:
-                return "模型自动更新"
-        return "模型手动更新" if fallback_reason == "manual_reset" else "模型自动更新"
+    @staticmethod
+    def _short_model_label(model: dict[str, Any] | None) -> str:
+        if not model:
+            return "模型未就绪"
+        trained = str(model.get("trained_at") or "").replace("-", "")[:8]
+        names = {
+            "logistic_regression": "LR",
+            "decision_tree": "DT",
+            "hist_gradient_boosting": "HGB",
+            "gradient_boosting": "GB",
+            "ada_boost": "AdaBoost",
+            "extra_trees": "ExtraTrees",
+            "random_forest": "RF",
+            "rbf_svm": "RBF-SVM",
+            "xgboost": "XGBoost",
+            "lightgbm": "LightGBM",
+            "catboost": "CatBoost",
+            "flaml_automl": "FLAML",
+        }
+        return f"{trained}-{names.get(str(model.get('algorithm')), str(model.get('algorithm') or 'Model'))}"
 
     def sync_shadow_accounts(self, *, cash_usd: float, sol_fee_reserve: float, snapshot_id: str) -> None:
-        session = self.ensure_simulation_session()
-        for account in ("shadow_aggressive", "shadow_conservative"):
-            open_count = self.database.fetch_one(
-                "SELECT COUNT(*) AS count FROM positions WHERE account_kind=? AND status IN ('opening','open','closing')",
-                (account,),
-            )["count"]
-            if open_count:
-                continue
-            self.database.set_runtime_state(
-                f"portfolio_account:{account}",
-                {
-                    "session_id": session["id"],
-                    "account": account,
-                    "cash_usd": cash_usd,
-                    "sol_fee_reserve": sol_fee_reserve,
-                    "initial_cash_usd": cash_usd,
-                    "initial_sol_fee_reserve": sol_fee_reserve,
-                    "source": "live_wallet_snapshot",
-                    "snapshot_id": snapshot_id,
-                    "updated_at": utc_now_iso(),
-                },
-            )
+        # Shadow-wallet mirroring is no longer part of the four-strategy design.
+        return None
 
     def open_from_prediction(
         self,
@@ -429,16 +386,50 @@ class PaperTradingService:
         sample_id: int,
         prediction_id: int,
         model_id: str,
-        profile: str,
-        account: PaperAccount,
+        strategy_key: str,
     ) -> PaperOpenResult:
+        return self._open_sample(
+            sample_id=sample_id,
+            prediction_id=prediction_id,
+            model_id=model_id,
+            strategy_key=strategy_key,
+        )
+
+    def open_rule_only(self, *, sample_id: int) -> PaperOpenResult:
+        return self._open_sample(
+            sample_id=sample_id,
+            prediction_id=None,
+            model_id=None,
+            strategy_key=RULES_ONLY,
+        )
+
+    def _open_sample(
+        self,
+        *,
+        sample_id: int,
+        prediction_id: int | None,
+        model_id: str | None,
+        strategy_key: str,
+    ) -> PaperOpenResult:
+        strategy = validate_strategy(strategy_key)
         liquidation = self.database.get_runtime_state("liquidation_job") or {}
         if isinstance(liquidation, dict) and liquidation.get("status") in {"queued", "running"}:
             return PaperOpenResult(False, "liquidation_in_progress")
-        existing = self.database.fetch_one(
-            "SELECT id FROM positions WHERE prediction_id=? AND account_kind=? LIMIT 1",
-            (prediction_id, account),
-        )
+        session = self.ensure_simulation_session()
+        if prediction_id is not None:
+            existing = self.database.fetch_one(
+                "SELECT id FROM positions WHERE prediction_id=? AND strategy_key=? LIMIT 1",
+                (prediction_id, strategy),
+            )
+        else:
+            existing = self.database.fetch_one(
+                """
+                SELECT id FROM positions
+                WHERE sample_id=? AND simulation_session_id=? AND strategy_key='rules_only'
+                LIMIT 1
+                """,
+                (sample_id, session["id"]),
+            )
         if existing:
             return PaperOpenResult(False, "already_opened", existing["id"])
         sample = self.database.fetch_one("SELECT * FROM samples WHERE id=?", (sample_id,))
@@ -448,20 +439,24 @@ class PaperTradingService:
         if liquidity <= 0:
             return PaperOpenResult(False, "real_entry_liquidity_missing")
         open_count = int((self.database.fetch_one(
-            "SELECT COUNT(*) AS count FROM positions WHERE account_kind=? AND status IN ('opening','open','closing')",
-            (account,),
+            """
+            SELECT COUNT(*) AS count FROM positions
+            WHERE strategy_key=? AND simulation_session_id=?
+              AND status IN ('opening','open','closing')
+            """,
+            (strategy, session["id"]),
         ) or {"count": 0})["count"])
         if open_count >= self.settings.max_open_positions:
             return PaperOpenResult(False, "max_open_positions")
 
-        state = self.ensure_account(account)
+        state = self.ensure_account(strategy)
         capital = min(0.01 * liquidity, 50.0)
         if float(state["cash_usd"]) < capital:
             return PaperOpenResult(False, "insufficient_paper_cash")
         if float(state["sol_fee_reserve"]) <= 0:
             return PaperOpenResult(False, "paper_sol_reserve_depleted")
 
-        position_id = f"{account}-{uuid.uuid4().hex[:16]}"
+        position_id = f"{strategy}-{uuid.uuid4().hex[:16]}"
         observed_at = datetime.fromtimestamp(int(sample["entry_time"]), timezone.utc)
         quote = self.quote_provider.quote(
             QuoteRequest(
@@ -475,7 +470,7 @@ class PaperTradingService:
             )
         )
         if not quote.success or quote.fill_price is None:
-            self._record_failed_trade(position_id, sample, account, "buy", capital, quote)
+            self._record_failed_trade(position_id, sample, strategy, "buy", capital, quote)
             return PaperOpenResult(False, quote.failure_category.value if quote.failure_category else "quote_failed")
         if float(state["cash_usd"]) < capital + quote.fee_usd:
             return PaperOpenResult(False, "insufficient_paper_cash")
@@ -486,6 +481,7 @@ class PaperTradingService:
         quantity = capital / quote.fill_price
         metadata = {
             "sample_id": sample_id,
+            "strategy_key": strategy,
             "simulation_session_id": state["session_id"],
             "entry_fee_usd": quote.fee_usd,
             "entry_network_fee_sol": quote.network_fee_sol,
@@ -501,31 +497,41 @@ class PaperTradingService:
             connection.execute(
                 """
                 INSERT INTO positions(
-                    id, token_address, account_kind, profile, status, simulation_session_id,
-                    prediction_id, model_id, entry_time, expires_at, invested_usd, token_amount,
-                    entry_price, stop_loss_price, take_profit_price, metadata_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    id,token_address,account_kind,strategy_key,status,simulation_session_id,
+                    sample_id,prediction_id,model_id,entry_time,expires_at,invested_usd,token_amount,
+                    entry_price,stop_loss_price,take_profit_price,metadata_json
+                ) VALUES(?,?,'simulation',?,'open',?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    position_id, sample["address"], account, profile, "open", state["session_id"],
-                    prediction_id, model_id, observed_at.isoformat(), expires_at.isoformat(), capital,
-                    quantity, quote.fill_price, quote.fill_price * 0.9, quote.fill_price * 1.6,
+                    position_id,
+                    sample["address"],
+                    strategy,
+                    state["session_id"],
+                    sample_id,
+                    prediction_id,
+                    model_id,
+                    observed_at.isoformat(),
+                    expires_at.isoformat(),
+                    capital,
+                    quantity,
+                    quote.fill_price,
+                    quote.fill_price * 0.9,
+                    quote.fill_price * 1.6,
                     json.dumps(metadata, separators=(",", ":")),
                 ),
             )
-            self._insert_paper_trade(connection, position_id, sample, account, "buy", capital, quote)
-            self._write_runtime_state(connection, f"portfolio_account:{account}", next_state)
+            self._insert_paper_trade(connection, position_id, sample, strategy, "buy", capital, quote)
+            self._write_runtime_state(connection, self._state_key(strategy), next_state)
         return PaperOpenResult(True, "opened", position_id)
 
     def settle_mature_positions(self) -> int:
         rows = self.database.fetch_all(
             """
-            SELECT p.*, s.tag, s.entry_price AS reference_entry_price, s.liquidity,
-                   s.final_close_ratio, s.price_2h_min_ratio
+            SELECT p.*,s.tag,s.entry_price AS reference_entry_price,s.liquidity,
+                   s.final_close_ratio,s.price_2h_min_ratio
             FROM positions p
-            JOIN predictions pr ON pr.id=p.prediction_id
-            JOIN samples s ON s.id=pr.sample_id
-            WHERE p.account_kind IN ('paper','shadow_aggressive','shadow_conservative')
+            JOIN samples s ON s.id=p.sample_id
+            WHERE p.strategy_key IN ('model_1','model_2','model_3','rules_only')
               AND p.status='open' AND s.label_status='mature'
             ORDER BY p.entry_time
             """
@@ -545,18 +551,21 @@ class PaperTradingService:
     ) -> PaperMonitorResult:
         row = self.database.fetch_one(
             """
-            SELECT p.*, s.liquidity AS sample_liquidity
+            SELECT p.*,s.liquidity AS sample_liquidity
             FROM positions p
             LEFT JOIN predictions pr ON pr.id=p.prediction_id
-            LEFT JOIN samples s ON s.id=pr.sample_id
+            LEFT JOIN samples s ON s.id=COALESCE(p.sample_id,pr.sample_id)
             WHERE p.id=?
             """,
             (position_id,),
         )
         if not row:
             return PaperMonitorResult(position_id, "blocked", "position_not_found")
-        if row["account_kind"] not in {"paper", "shadow_aggressive", "shadow_conservative"}:
-            return PaperMonitorResult(position_id, "blocked", "not_paper_position")
+        if (
+            str(row.get("account_kind") or "") != "simulation"
+            or str(row.get("strategy_key") or "") not in SIMULATION_STRATEGIES
+        ):
+            return PaperMonitorResult(position_id, "blocked", "not_strategy_position")
         if row["status"] == "closed":
             return PaperMonitorResult(position_id, "closed", "already_closed")
 
@@ -581,11 +590,7 @@ class PaperTradingService:
         expires_ts = int(expires_at.timestamp())
         end_ts = min(current_ts, expires_ts)
         ordered = sorted(
-            (
-                line
-                for line in klines
-                if opened_ts <= int(line.timestamp) <= end_ts
-            ),
+            (line for line in klines if opened_ts <= int(line.timestamp) <= end_ts),
             key=lambda line: line.timestamp,
         )
 
@@ -595,7 +600,6 @@ class PaperTradingService:
         for line in ordered:
             low = line.low if line.low is not None else line.close
             high = line.high if line.high is not None else line.close
-            # Conservative same-bar ordering is identical to label generation.
             if low is not None and stop_price > 0 and low <= stop_price:
                 decision = ("stop_loss_0_9x", stop_price, int(line.timestamp))
                 break
@@ -634,11 +638,7 @@ class PaperTradingService:
         metadata["last_market_check_at"] = utc_now_iso()
         metadata["last_kline_timestamp"] = int(ordered[-1].timestamp) if ordered else trigger_at
         self.database.execute(
-            """
-            UPDATE positions
-            SET status='closing', metadata_json=?
-            WHERE id=? AND status='open'
-            """,
+            "UPDATE positions SET status='closing',metadata_json=? WHERE id=? AND status='open'",
             (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
         )
         row["status"] = "closing"
@@ -654,6 +654,7 @@ class PaperTradingService:
         now_ts: int,
     ) -> PaperMonitorResult:
         position_id = str(row["id"])
+        strategy = self._strategy_for_row(row)
         quantity = float(row.get("token_amount") or 0)
         reference_price = float(pending_exit.get("reference_price") or 0)
         liquidity = float(pending_exit.get("liquidity_usd") or 0)
@@ -677,47 +678,33 @@ class PaperTradingService:
         )
         if not quote.success or quote.fill_price is None:
             pending_exit["attempt_count"] = int(pending_exit.get("attempt_count") or 0) + 1
-            pending_exit["last_failure"] = (
-                quote.failure_category.value if quote.failure_category else "quote_failed"
-            )
+            pending_exit["last_failure"] = quote.failure_category.value if quote.failure_category else "quote_failed"
             pending_exit["last_attempt_at"] = utc_now_iso()
             metadata["paper_exit_pending"] = pending_exit
-            state = self.ensure_account(row["account_kind"])
+            state = self.ensure_account(strategy)
             charged_network_fee, next_state = self._failed_network_fee_state(state, quote)
-            pending_exit["network_fee_sol_charged"] = (
-                float(pending_exit.get("network_fee_sol_charged") or 0) + charged_network_fee
-            )
+            pending_exit["network_fee_sol_charged"] = float(pending_exit.get("network_fee_sol_charged") or 0) + charged_network_fee
             metadata["paper_exit_pending"] = pending_exit
             if charged_network_fee:
-                self.database.set_runtime_state(f"portfolio_account:{row['account_kind']}", next_state)
+                self.database.set_runtime_state(self._state_key(strategy), next_state)
             if self._sell_failure_is_terminal(row, pending_exit, now_ts=now_ts):
-                return self._finalize_failed_exit(
-                    row,
-                    metadata,
-                    failure_reason=str(pending_exit["last_failure"]),
-                    failed_at=now_ts,
-                )
+                return self._finalize_failed_exit(row, metadata, failure_reason=str(pending_exit["last_failure"]), failed_at=now_ts)
             self.database.execute(
-                "UPDATE positions SET status='closing', metadata_json=? WHERE id=?",
+                "UPDATE positions SET status='closing',metadata_json=? WHERE id=?",
                 (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
             )
             return PaperMonitorResult(position_id, "pending", pending_exit["last_failure"], trigger_at)
 
-        state = self.ensure_account(row["account_kind"])
+        state = self.ensure_account(strategy)
         if float(state["sol_fee_reserve"]) < quote.network_fee_sol:
             pending_exit["attempt_count"] = int(pending_exit.get("attempt_count") or 0) + 1
             pending_exit["last_failure"] = "paper_sol_reserve_depleted"
             pending_exit["last_attempt_at"] = utc_now_iso()
             metadata["paper_exit_pending"] = pending_exit
             if self._sell_failure_is_terminal(row, pending_exit, now_ts=now_ts):
-                return self._finalize_failed_exit(
-                    row,
-                    metadata,
-                    failure_reason="paper_sol_reserve_depleted",
-                    failed_at=now_ts,
-                )
+                return self._finalize_failed_exit(row, metadata, failure_reason="paper_sol_reserve_depleted", failed_at=now_ts)
             self.database.execute(
-                "UPDATE positions SET status='closing', metadata_json=? WHERE id=?",
+                "UPDATE positions SET status='closing',metadata_json=? WHERE id=?",
                 (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
             )
             return PaperMonitorResult(position_id, "pending", "paper_sol_reserve_depleted", trigger_at)
@@ -730,58 +717,39 @@ class PaperTradingService:
         net_pnl = proceeds - invested - entry_fee
         final_metadata = dict(metadata)
         final_metadata.pop("paper_exit_pending", None)
-        final_metadata["exit_trigger_at"] = trigger_at
-        final_metadata["exit_quote_source"] = "seeded_local_execution_model"
-        final_metadata["exit_fee_usd"] = quote.fee_usd
-        final_metadata["exit_network_fee_sol"] = quote.network_fee_sol
-        final_metadata["exit_slippage_bps"] = quote.slippage_bps
+        final_metadata.update({
+            "exit_trigger_at": trigger_at,
+            "exit_quote_source": "seeded_local_execution_model",
+            "exit_fee_usd": quote.fee_usd,
+            "exit_network_fee_sol": quote.network_fee_sol,
+            "exit_slippage_bps": quote.slippage_bps,
+        })
         next_state = dict(state)
         next_state["cash_usd"] = float(state["cash_usd"]) + proceeds
         next_state["sol_fee_reserve"] = float(state["sol_fee_reserve"]) - quote.network_fee_sol
         next_state["updated_at"] = utc_now_iso()
-
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
                 """
-                UPDATE positions
-                SET status='closed', exit_time=?, exit_price=?, exit_reason=?,
-                    gross_pnl_usd=?, net_pnl_usd=?, metadata_json=?
+                UPDATE positions SET status='closed',exit_time=?,exit_price=?,exit_reason=?,
+                    gross_pnl_usd=?,net_pnl_usd=?,metadata_json=?
                 WHERE id=? AND status='closing'
                 """,
                 (
-                    observed_at.isoformat(),
-                    quote.fill_price,
-                    reason,
-                    gross_pnl,
-                    net_pnl,
-                    json.dumps(final_metadata, ensure_ascii=False, separators=(",", ":")),
-                    position_id,
+                    observed_at.isoformat(), quote.fill_price, reason, gross_pnl, net_pnl,
+                    json.dumps(final_metadata, ensure_ascii=False, separators=(",", ":")), position_id,
                 ),
             )
             if cursor.rowcount != 1:
                 return PaperMonitorResult(position_id, "pending", "position_state_changed", trigger_at)
-            self._insert_paper_trade(
-                connection,
-                position_id,
-                row,
-                row["account_kind"],
-                "sell",
-                gross_reference,
-                quote,
-                client_order_id=f"{position_id}:market_exit",
-            )
-            self._write_runtime_state(
-                connection,
-                f"portfolio_account:{row['account_kind']}",
-                next_state,
-            )
-
+            self._insert_paper_trade(connection, position_id, row, strategy, "sell", gross_reference, quote, client_order_id=f"{position_id}:market_exit")
+            self._write_runtime_state(connection, self._state_key(strategy), next_state)
         self.database.audit(
             category="simulation",
             action="paper_position_closed",
             entity_type="position",
             entity_id=position_id,
-            details={"account_kind": row["account_kind"], "exit_reason": reason},
+            details={"strategy_key": strategy, "exit_reason": reason},
         )
         return PaperMonitorResult(position_id, "closed", reason, trigger_at)
 
@@ -815,6 +783,7 @@ class PaperTradingService:
         failed_at: int,
     ) -> PaperMonitorResult:
         position_id = str(row["id"])
+        strategy = self._strategy_for_row(row)
         pending_exit = metadata.get("paper_exit_pending")
         pending_exit = pending_exit if isinstance(pending_exit, dict) else {}
         trigger_at = int(pending_exit.get("trigger_at") or 0)
@@ -832,18 +801,14 @@ class PaperTradingService:
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
                 """
-                UPDATE positions
-                SET status='closed', exit_time=?, exit_price=0, exit_reason=?,
-                    gross_pnl_usd=?, net_pnl_usd=?, metadata_json=?
+                UPDATE positions SET status='closed',exit_time=?,exit_price=0,exit_reason=?,
+                    gross_pnl_usd=?,net_pnl_usd=?,metadata_json=?
                 WHERE id=? AND status='closing'
                 """,
                 (
-                    datetime.fromtimestamp(failed_at, timezone.utc).isoformat(),
-                    exit_reason,
-                    gross_pnl,
-                    net_pnl,
-                    json.dumps(final_metadata, ensure_ascii=False, separators=(",", ":")),
-                    position_id,
+                    datetime.fromtimestamp(failed_at, timezone.utc).isoformat(), exit_reason,
+                    gross_pnl, net_pnl,
+                    json.dumps(final_metadata, ensure_ascii=False, separators=(",", ":")), position_id,
                 ),
             )
             if cursor.rowcount != 1:
@@ -857,19 +822,9 @@ class PaperTradingService:
                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    str(uuid.uuid4()),
-                    position_id,
-                    client_order_id,
-                    hashlib.sha256(client_order_id.encode()).hexdigest(),
-                    "terminal",
-                    "sell",
-                    row["account_kind"],
-                    "failed",
-                    invested,
-                    failure_reason,
-                    failure_reason,
-                    utc_now_iso(),
-                    utc_now_iso(),
+                    str(uuid.uuid4()), position_id, client_order_id,
+                    hashlib.sha256(client_order_id.encode()).hexdigest(), "terminal", "sell", strategy,
+                    "failed", invested, failure_reason, failure_reason, utc_now_iso(), utc_now_iso(),
                 ),
             )
         self.database.audit(
@@ -879,7 +834,7 @@ class PaperTradingService:
             entity_type="position",
             entity_id=position_id,
             details={
-                "account_kind": row["account_kind"],
+                "strategy_key": strategy,
                 "failure_reason": failure_reason,
                 "attempts": int(pending_exit.get("attempt_count") or 0),
                 "net_pnl_usd": net_pnl,
@@ -893,31 +848,27 @@ class PaperTradingService:
         *,
         now: datetime | None = None,
     ) -> PaperLiquidationResult:
-        """Close one paper/shadow position using a fresh observable market snapshot.
-
-        Emergency liquidation must not invent a current price. If no recent sample
-        exists for the token, the position remains open and the caller can surface a
-        blocked liquidation job instead of fabricating a zero-PnL close.
-        """
         row = self.database.fetch_one("SELECT * FROM positions WHERE id=?", (position_id,))
         if not row:
             return PaperLiquidationResult(False, "position_not_found", position_id)
-        if row["account_kind"] not in {"paper", "shadow_aggressive", "shadow_conservative"}:
-            return PaperLiquidationResult(False, "not_paper_position", position_id)
+        if (
+            str(row.get("account_kind") or "") != "simulation"
+            or str(row.get("strategy_key") or "") not in SIMULATION_STRATEGIES
+        ):
+            return PaperLiquidationResult(False, "not_strategy_position", position_id)
         if row["status"] == "closed":
             return PaperLiquidationResult(True, "already_closed", position_id)
         if row["status"] not in {"opening", "open", "closing"}:
             return PaperLiquidationResult(False, f"position_{row['status']}", position_id)
 
+        strategy = self._strategy_for_row(row)
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         now_epoch = int(moment.timestamp())
         market = self.database.fetch_one(
             """
-            SELECT entry_price, liquidity, entry_time
-            FROM samples
+            SELECT entry_price,liquidity,entry_time FROM samples
             WHERE chain='sol' AND address=? AND entry_time<=?
-            ORDER BY entry_time DESC, id DESC
-            LIMIT 1
+            ORDER BY entry_time DESC,id DESC LIMIT 1
             """,
             (row["token_address"], now_epoch),
         )
@@ -925,45 +876,28 @@ class PaperTradingService:
             return PaperLiquidationResult(False, "market_reference_missing", position_id)
         if now_epoch - int(market["entry_time"]) > self.settings.signal_max_age_seconds:
             return PaperLiquidationResult(False, "market_reference_stale", position_id)
-
         reference_price = float(market.get("entry_price") or 0)
         liquidity = float(market.get("liquidity") or 0)
         quantity = float(row.get("token_amount") or 0)
         if reference_price <= 0 or liquidity <= 0 or quantity <= 0:
             return PaperLiquidationResult(False, "market_reference_incomplete", position_id)
-
         gross_reference = quantity * reference_price
         quote = self.quote_provider.quote(
             QuoteRequest(
-                token_address=row["token_address"],
-                side=Side.SELL,
-                amount_usd=gross_reference,
-                reference_price=reference_price,
-                liquidity_usd=liquidity,
-                requested_at=moment,
-                position_id=position_id,
+                token_address=row["token_address"], side=Side.SELL, amount_usd=gross_reference,
+                reference_price=reference_price, liquidity_usd=liquidity,
+                requested_at=moment, position_id=position_id,
             )
         )
         if not quote.success or quote.fill_price is None:
-            state = self.ensure_account(row["account_kind"])
+            state = self.ensure_account(strategy)
             charged_network_fee, next_state = self._failed_network_fee_state(state, quote)
             if charged_network_fee:
-                with self.database.transaction(immediate=True) as connection:
-                    self._write_runtime_state(
-                        connection,
-                        f"portfolio_account:{row['account_kind']}",
-                        next_state,
-                    )
-            return PaperLiquidationResult(
-                False,
-                quote.failure_category.value if quote.failure_category else "quote_failed",
-                position_id,
-            )
-
-        state = self.ensure_account(row["account_kind"])
+                self.database.set_runtime_state(self._state_key(strategy), next_state)
+            return PaperLiquidationResult(False, quote.failure_category.value if quote.failure_category else "quote_failed", position_id)
+        state = self.ensure_account(strategy)
         if float(state["sol_fee_reserve"]) < quote.network_fee_sol:
             return PaperLiquidationResult(False, "paper_sol_reserve_depleted", position_id)
-
         gross_sale = quantity * quote.fill_price
         proceeds = gross_sale - quote.fee_usd
         metadata = json.loads(row["metadata_json"] or "{}")
@@ -977,37 +911,15 @@ class PaperTradingService:
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
                 """
-                UPDATE positions
-                SET status='closed', exit_time=?, exit_price=?, exit_reason='liquidate_all',
-                    gross_pnl_usd=?, net_pnl_usd=?
-                WHERE id=? AND status IN ('opening','open','closing')
+                UPDATE positions SET status='closed',exit_time=?,exit_price=?,exit_reason='liquidate_all',
+                    gross_pnl_usd=?,net_pnl_usd=? WHERE id=? AND status IN ('opening','open','closing')
                 """,
-                (
-                    moment.isoformat(),
-                    quote.fill_price,
-                    gross_pnl,
-                    pnl,
-                    position_id,
-                ),
+                (moment.isoformat(), quote.fill_price, gross_pnl, pnl, position_id),
             )
             if cursor.rowcount != 1:
                 return PaperLiquidationResult(False, "position_state_changed", position_id)
-            self._insert_paper_trade(
-                connection,
-                position_id,
-                row,
-                row["account_kind"],
-                "sell",
-                gross_reference,
-                quote,
-                client_order_id=f"{position_id}:liquidate_all",
-            )
-            self._write_runtime_state(
-                connection,
-                f"portfolio_account:{row['account_kind']}",
-                next_state,
-            )
-
+            self._insert_paper_trade(connection, position_id, row, strategy, "sell", gross_reference, quote, client_order_id=f"{position_id}:liquidate_all")
+            self._write_runtime_state(connection, self._state_key(strategy), next_state)
         return PaperLiquidationResult(True, "closed", position_id)
 
     def _settle(self, row: dict[str, Any]) -> bool:
@@ -1020,33 +932,20 @@ class PaperTradingService:
         else:
             ratio = float(row.get("final_close_ratio") or 1.0)
             exit_reason, reference_price = "timeout_2h", reference_entry * ratio
-
         quantity = float(row["token_amount"] or 0)
         gross_reference = quantity * reference_price
         observed_at = datetime.fromisoformat(row["expires_at"])
+        strategy = self._strategy_for_row(row)
         quote = self.quote_provider.quote(
             QuoteRequest(
-                token_address=row["token_address"],
-                side=Side.SELL,
-                amount_usd=gross_reference,
-                reference_price=reference_price,
-                liquidity_usd=float(row.get("liquidity") or 0),
-                requested_at=observed_at,
-                position_id=row["id"],
+                token_address=row["token_address"], side=Side.SELL, amount_usd=gross_reference,
+                reference_price=reference_price, liquidity_usd=float(row.get("liquidity") or 0),
+                requested_at=observed_at, position_id=row["id"],
             )
         )
         if not quote.success or quote.fill_price is None:
-            state = self.ensure_account(row["account_kind"])
-            charged_network_fee, next_state = self._failed_network_fee_state(state, quote)
-            if charged_network_fee:
-                with self.database.transaction(immediate=True) as connection:
-                    self._write_runtime_state(
-                        connection,
-                        f"portfolio_account:{row['account_kind']}",
-                        next_state,
-                    )
             return False
-        state = self.ensure_account(row["account_kind"])
+        state = self.ensure_account(strategy)
         if float(state["sol_fee_reserve"]) < quote.network_fee_sol:
             return False
         gross_sale = quantity * quote.fill_price
@@ -1062,25 +961,19 @@ class PaperTradingService:
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
                 """
-                UPDATE positions SET status='closed', exit_time=?, exit_price=?, exit_reason=?,
-                    gross_pnl_usd=?, net_pnl_usd=? WHERE id=? AND status='open'
+                UPDATE positions SET status='closed',exit_time=?,exit_price=?,exit_reason=?,
+                    gross_pnl_usd=?,net_pnl_usd=? WHERE id=? AND status='open'
                 """,
                 (observed_at.isoformat(), quote.fill_price, exit_reason, gross_pnl, pnl, row["id"]),
             )
             if cursor.rowcount != 1:
                 return False
-            self._insert_paper_trade(connection, row["id"], row, row["account_kind"], "sell", gross_reference, quote)
-            self._write_runtime_state(
-                connection,
-                f"portfolio_account:{row['account_kind']}",
-                next_state,
-            )
+            self._insert_paper_trade(connection, row["id"], row, strategy, "sell", gross_reference, quote)
+            self._write_runtime_state(connection, self._state_key(strategy), next_state)
         return True
 
     @staticmethod
-    def _failed_network_fee_state(
-        state: dict[str, Any], quote: Any
-    ) -> tuple[float, dict[str, Any]]:
+    def _failed_network_fee_state(state: dict[str, Any], quote: Any) -> tuple[float, dict[str, Any]]:
         fee = float(quote.network_fee_sol or 0)
         charged = fee if 0 < fee <= float(state["sol_fee_reserve"]) else 0.0
         next_state = dict(state)
@@ -1111,11 +1004,7 @@ class PaperTradingService:
                 ),
             )
             if charged_network_fee:
-                self._write_runtime_state(
-                    connection,
-                    f"portfolio_account:{account}",
-                    next_state,
-                )
+                self._write_runtime_state(connection, self._state_key(account), next_state)
 
     @staticmethod
     def _insert_paper_trade(

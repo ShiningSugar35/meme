@@ -69,23 +69,27 @@ async def test_startup_catchup_is_unique_for_same_schedule(monkeypatch, tmp_path
 async def test_scheduled_training_inherits_champion_feature_schema(monkeypatch, tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
-    model_id = "champion-schedule"
-    ModelRepository(database).register(
-        {
-            "id": model_id,
-            "version": model_id,
-            "algorithm": "logistic_regression",
-            "status": "candidate",
-            "early_stage": True,
-            "trained_at": "2026-08-01T00:00:00+00:00",
-            "feature_names": ["price", "price_change_1h", "ln(liquidity_usd)"],
-            "parameters": {},
-            "thresholds": {"aggressive": 0.2, "balanced": 0.4, "conservative": 0.8},
-            "metrics": {},
-            "artifact_path": "ml_models/not-needed.joblib",
-        }
-    )
-    ModelRepository(database).promote(model_id)
+    repository = ModelRepository(database)
+    active = []
+    for slot in (1, 2, 3):
+        model_id = f"schedule-model-{slot}"
+        repository.register(
+            {
+                "id": model_id,
+                "version": model_id,
+                "algorithm": "logistic_regression",
+                "status": "candidate",
+                "early_stage": True,
+                "trained_at": "2026-08-01T00:00:00+00:00",
+                "feature_names": ["price", "price_change_1h", "ln(liquidity_usd)"],
+                "parameters": {},
+                "thresholds": {"decision": 0.4},
+                "metrics": {},
+                "artifact_path": "ml_models/not-needed.joblib",
+            }
+        )
+        active.append({"id": model_id, "composite_score": 1.0 - slot * 0.1, "threshold": 0.4, "metrics": {}})
+    repository.set_active_models(active)
 
     def complete(self, run_id: str) -> None:
         self.database.execute(

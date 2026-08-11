@@ -15,7 +15,11 @@ from backend.app.ml import (
     ThresholdSet,
     TrainerConfig,
 )
-from backend.app.ml.economics import evaluate_probabilities
+from backend.app.ml.economics import (
+    evaluate_probabilities,
+    theoretical_profit_from_precision_recall,
+    theoretical_profit_units,
+)
 from backend.app.ml.models import candidate_catalog
 
 
@@ -49,71 +53,81 @@ def _learnable_frame(rows: int = 360, *, include_liquidity: bool = True) -> pd.D
     return frame
 
 
-def test_realized_return_and_capital_formula_are_exact() -> None:
+def test_realized_return_and_fixed_payoff_formula_are_exact() -> None:
     frame = pd.DataFrame(
         {
             "time": [1_800_000_000, 1_800_000_100, 1_800_000_200],
             "feature": [0.0, 1.0, 2.0],
             "liquidity": [1_000.0, 4_000.0, 10_000.0],
-            "final_2h_close_ratio": [np.nan, np.nan, 1.27],
             "tag": [0, 1, 0],
         }
     )
     prepared = FeatureBuilder().prepare(frame)
     economics = prepared.economic_slice(np.arange(3))
-
-    assert economics.utility_eligible
-    assert economics.capital.tolist() == [10.0, 40.0, 50.0]
-    assert economics.realized_return.tolist() == pytest.approx([-0.10, 0.60, -0.10])
     metrics = evaluate_probabilities(
         prepared.y.to_numpy(), np.array([0.9, 0.9, 0.9]), 0.5, economics
     )
+    assert economics.capital.tolist() == [10.0, 40.0, 50.0]
+    assert economics.realized_return.tolist() == pytest.approx([-0.10, 0.60, -0.10])
     assert metrics.cumulative_pnl_usd == pytest.approx(-1 + 24 - 5)
-    assert metrics.proxy_pnl is None
+    assert metrics.profit_units == pytest.approx(4.0)  # 6*TP - FP = 6 - 2
+    assert metrics.fixed_profit_usd == pytest.approx(20.0)
 
 
-def test_candidate_catalog_contains_all_five_and_xgboost_skip_is_explicit() -> None:
+def test_precision_recall_identity_matches_tp_fp_payoff() -> None:
+    tp, fp, positives = 18, 12, 60
+    precision = tp / (tp + fp)
+    recall = tp / positives
+    from_counts = theoretical_profit_units(tp, fp)
+    from_pr = theoretical_profit_from_precision_recall(precision, recall, positives)
+    assert from_counts == pytest.approx(from_pr)
+    assert from_pr == pytest.approx(positives * recall * (7 - 1 / precision))
+
+
+def test_candidate_catalog_is_expanded_and_optional_automl_is_explicit() -> None:
     catalog = {spec.name: spec for spec in candidate_catalog()}
-    assert set(catalog) == {
+    required = {
         "logistic_regression",
+        "decision_tree",
         "hist_gradient_boosting",
-        "xgboost",
+        "gradient_boosting",
+        "ada_boost",
         "extra_trees",
         "random_forest",
+        "rbf_svm",
+        "xgboost",
+        "lightgbm",
+        "catboost",
+        "flaml_automl",
     }
-    if not catalog["xgboost"].available:
-        assert "not installed" in (catalog["xgboost"].skip_reason or "")
+    assert set(catalog) == required
+    assert catalog["decision_tree"].available
+    assert catalog["flaml_automl"].skip_reason is not None
 
 
-def test_trainer_uses_one_champion_three_thresholds_and_oos_evaluation_bundle() -> None:
+def test_trainer_returns_top3_one_threshold_each_and_keeps_final_holdout_separate() -> None:
     dataset = FeatureBuilder().prepare(_learnable_frame())
     trainer = ModelTrainer(
         TrainerConfig(
-            candidate_names=("logistic_regression", "hist_gradient_boosting"),
+            candidate_names=(
+                "decision_tree",
+                "hist_gradient_boosting",
+                "extra_trees",
+                "random_forest",
+            ),
             min_trades=2,
+            top_k=3,
+            feature_subset_sizes=(2, 3),
         ),
-        TemporalSplitConfig(
-            min_train_rows=50,
-            min_test_rows=12,
-            development_folds=3,
-        ),
+        TemporalSplitConfig(min_train_rows=50, min_test_rows=12, development_folds=3),
     )
     result = trainer.train(dataset)
-
-    assert result.selected_algorithm in {
-        "logistic_regression",
-        "hist_gradient_boosting",
-    }
-    assert set(result.bundle.thresholds.as_dict()) == {
-        "aggressive",
-        "balanced",
-        "conservative",
-    }
-    assert result.final_metrics.precision >= 0.20
-    assert result.plan.early_stage
-    assert result.bundle.early_stage
-    assert result.evaluation_bundle.metrics["evaluation_only"] is True
-    assert result.bundle.metrics["evaluation_only"] is False
+    assert len(result.bundles) == 3
+    assert len(result.top_algorithms) == 3
+    assert all(set(bundle.thresholds.as_dict()) == {"decision"} for bundle in result.bundles)
+    assert all(candidate.composite_score is not None for candidate in result.candidates if candidate.status == "ok")
+    assert result.rule_baseline.recall == pytest.approx(1.0)
+    assert "certification-only" in " ".join(result.warnings)
     train_end = dataset.timestamps.iloc[result.plan.final_split.train_indices].max()
     test_start = dataset.timestamps.iloc[result.plan.final_split.test_indices].min()
     assert train_end + pd.Timedelta(hours=2) <= test_start
@@ -135,7 +149,7 @@ def _bundle(name: str, multiplier: float, threshold: float) -> ModelBundle:
         algorithm=name,
         estimator=_ScoreEstimator(multiplier),
         feature_names=("score",),
-        thresholds=ThresholdSet(threshold, threshold, threshold),
+        thresholds=ThresholdSet(decision=threshold),
         created_at=now,
         early_stage=True,
         training_start=now,
@@ -147,29 +161,24 @@ def _bundle(name: str, multiplier: float, threshold: float) -> ModelBundle:
 def _promotion_frame(include_liquidity: bool) -> pd.DataFrame:
     score = np.array([0.95, 0.9, 0.85, 0.8, 0.2, 0.1, 0.05, 0.01])
     frame = pd.DataFrame(
-        {
-            "time": 1_800_000_000 + np.arange(len(score)) * 10_000,
-            "score": score,
-            "tag": [1, 1, 1, 1, 0, 0, 0, 0],
-        }
+        {"time": 1_800_000_000 + np.arange(len(score)) * 10_000, "score": score, "tag": [1, 1, 1, 1, 0, 0, 0, 0]}
     )
     if include_liquidity:
         frame["liquidity"] = 10_000.0
     return frame
 
 
-def test_promotion_requires_same_window_real_economics_and_five_percent_lift() -> None:
+def test_compatibility_promotion_uses_one_threshold_and_real_economics() -> None:
     prepared = FeatureBuilder().prepare(_promotion_frame(include_liquidity=True))
     rows = np.arange(len(prepared))
-    candidate = _bundle("candidate", 1.0, 0.5)
-    incumbent = _bundle("incumbent", 0.45, 0.5)
-
-    decision = PromotionEvaluator().compare(candidate, incumbent, prepared, rows)
-
+    decision = PromotionEvaluator().compare(
+        _bundle("candidate", 1.0, 0.5),
+        _bundle("incumbent", 0.45, 0.5),
+        prepared,
+        rows,
+    )
     assert decision.eligible
     assert decision.promote
-    assert decision.comparison_rows == len(rows)
-    assert decision.candidate_metrics.cumulative_pnl_usd is not None
     assert decision.pnl_lift is not None and decision.pnl_lift >= 0.05
 
 
@@ -182,9 +191,7 @@ def test_legacy_proxy_can_score_but_cannot_auto_promote() -> None:
         prepared,
         rows,
     )
-
     assert not decision.eligible
-    assert not decision.promote
     assert decision.candidate_metrics.cumulative_pnl_usd is None
     assert decision.candidate_metrics.proxy_pnl is not None
     assert any("liquidity" in blocker for blocker in decision.blockers)

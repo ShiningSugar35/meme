@@ -31,10 +31,11 @@ def main() -> int:
     schema = database.fetch_one("SELECT value FROM schema_meta WHERE key='schema_version'") or {}
     samples = SampleRepository(database).statistics()
     models = ModelRepository(database)
-    champion = models.champion()
+    active_models = models.active_models()
     training = TrainingService(database)
-    simulation = PaperTradingService(database).simulation_status()
-    sessions = PaperTradingService(database).simulation_history(limit=5)
+    paper = PaperTradingService(database)
+    simulation = paper.simulation_status()
+    sessions = paper.simulation_history(limit=5)
     proposal_counts = database.fetch_all(
         "SELECT status,COUNT(*) AS count FROM agent_proposals GROUP BY status ORDER BY status"
     )
@@ -50,20 +51,27 @@ def main() -> int:
             "pending": samples.get("pending"),
             "positives": samples.get("positives"),
         },
-        "champion": None if champion is None else {
-            "id": champion["id"],
-            "algorithm": champion["algorithm"],
-            "early_stage": champion["early_stage"],
-            "features": len(champion.get("feature_names") or []),
-            "thresholds": champion.get("thresholds"),
-        },
+        "active_models": [
+            {
+                "slot": model.get("active_slot"),
+                "id": model["id"],
+                "algorithm": model["algorithm"],
+                "early_stage": model["early_stage"],
+                "features": len(model.get("feature_names") or []),
+                "threshold": model.get("active_threshold")
+                or model.get("thresholds", {}).get("decision"),
+                "composite_score": model.get("active_composite_score")
+                or model.get("metrics", {}).get("composite_score"),
+            }
+            for model in active_models
+        ],
         "model_counts": model_counts,
         "recent_training_runs": [
             {
                 "id": item["id"],
                 "trigger": item["trigger"],
                 "status": item["status"],
-                "promoted": item["promoted"],
+                "top3_updated": item["promoted"],
             }
             for item in training.list_runs(limit=5)
         ],
@@ -84,9 +92,13 @@ def main() -> int:
         "agent_proposals": proposal_counts,
         "runtime": {
             "training_worker": database.get_runtime_state("training_worker_status", {"state": "stopped"}),
+            "prediction_worker": database.get_runtime_state("prediction_worker_status", {"state": "stopped"}),
             "scheduler": database.get_runtime_state("scheduler_status", {"state": "stopped"}),
             "model_health": database.get_runtime_state("model_health_status", {"state": "not_evaluated"}),
+            "model_health_worker": database.get_runtime_state("model_health_worker_status", {"state": "stopped"}),
             "collector": database.get_runtime_state("collector_status", {"state": "stopped"}),
+            "paper_monitor": database.get_runtime_state("paper_monitor_status", {"state": "stopped"}),
+            "live_trading_enabled": bool(database.get_runtime_state("live_trading_enabled", False)),
         },
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))

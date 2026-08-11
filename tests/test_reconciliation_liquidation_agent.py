@@ -121,13 +121,11 @@ def insert_position(
     metadata_json: str = "{}",
 ) -> None:
     now = datetime.now(timezone.utc)
-    profile = "balanced" if account_kind in {"paper", "live"} else (
-        "aggressive" if account_kind == "shadow_aggressive" else "conservative"
-    )
+    strategy_key = "model_1" if account_kind == "simulation" else None
     database.execute(
         """
         INSERT INTO positions(
-            id, token_address, account_kind, profile, status, entry_time, expires_at,
+            id, token_address, account_kind, strategy_key, status, entry_time, expires_at,
             invested_usd, token_amount, entry_price, stop_loss_price, take_profit_price,
             metadata_json
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -136,7 +134,7 @@ def insert_position(
             position_id,
             address,
             account_kind,
-            profile,
+            strategy_key,
             "open",
             now.isoformat(),
             (now + timedelta(hours=2)).isoformat(),
@@ -273,7 +271,7 @@ def test_liquidation_scope_keeps_simulation_and_live_actions_separate(tmp_path: 
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     session_id = PaperTradingService(database, settings).ensure_simulation_session()["id"]
-    insert_position(database, position_id="scope-paper", address="paper-scope-token", account_kind="paper")
+    insert_position(database, position_id="scope-paper", address="paper-scope-token", account_kind="simulation")
     database.execute(
         "UPDATE positions SET simulation_session_id=? WHERE id='scope-paper'",
         (session_id,),
@@ -303,7 +301,7 @@ async def test_paper_liquidation_uses_sell_quote_and_closes_position(tmp_path: P
     address = "paper-token"
     now = datetime.now(timezone.utc)
     insert_sample(database, address=address, entry_time=int(now.timestamp()) - 1, price=1.10)
-    insert_position(database, position_id="paper-1", address=address, account_kind="paper")
+    insert_position(database, position_id="paper-1", address=address, account_kind="simulation")
     database.set_runtime_state(
         "portfolio_account:paper",
         {

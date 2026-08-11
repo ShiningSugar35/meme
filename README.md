@@ -12,10 +12,10 @@
 GMGN Trenches 发现
   → 规则初筛与特征补齐
   → 不可变样本入库
-  → Champion 概率评分与三档阈值
-  → 模拟 / 影子 / 实盘执行
+  → Top 3 模型独立概率评分 + 不用模型基线
+  → 四策略独立模拟 / 受控实盘执行
   → T+2h 标签与收益事实补齐
-  → 周训练、手动训练、Champion 比较
+  → 周训练、手动训练、Top 3 重新排名
 ```
 
 第一版是 Windows/单机/单用户系统，使用 SQLite；不承诺高频交易、多用户 SaaS、跨链、深度学习或 PostgreSQL 集群。旧 GitHub 项目不是业务规范，本仓库仅继承“交易生命周期可审计”的思想，采集、标签、模型与风控均按本文重建。
@@ -90,7 +90,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 需要采集的列如下：address	name	symbol	type	time	age	launchpad	price	ln(liquidity_usd)	price_2h_max/price	price_2h_min/price	liquidity/holder_count	volume_1h/swaps_1h	has_twitter	has_website	ln(image_dup+1)	dexscr_update_link	cto_flag	ln(twitter_rename_count+1)	ln(twitter_del_post_token_count+1)	ln(twitter_create_token_count+1)	top_10_holder_rate	top_bot_degen_percentage	fresh_wallet_rate	bot_degen_rate	price/ath_price	stat.holder_count/market_cap	ln(smart_degen_count+1)	ln(renowned_count+1)	entrapment_ratio	dev_team_hold_rate	top70_sniper_hold_rate	ln(twitter_dup+1)	ln(website_dup+1)	ln(visiting_count+1)	price_change_1h	price_change_5m	ln(creator_open_count+1)	creator_open_ratio	ln(top_wallets+1)	tag
 
-当前默认训练 recipe 使用 31 个入场时数值/布尔特征。`launchpad` 仅作为样本来源元数据保存，不进入模型输入矩阵；`tag` 仅作为二分类 target。
+当前默认候选 feature pool 包含 31 个入场时数值/布尔特征；每个算法会在 12 / 20 / 全量子集中按 one-standard-error 奥卡姆规则选择自己的最终输入列。`launchpad` 仅作为样本来源元数据保存，不进入模型输入矩阵；`tag` 仅作为二分类 target。
 
 `tag` 为分类标签列，只作为 target，不进入模型输入矩阵。`price` 是样本通过准入规则时记录的入场价格，因此属于入场时已知特征并默认参与训练。`ln(liquidity_usd)` 从新样本开始持续采集并作为可选训练特征，但由于 legacy CSV 不含 raw entry liquidity，当前默认训练集先不启用它；后续新样本积累充分后可在模型中心勾选该特征重新训练。数据库仍单独保存 raw entry liquidity，供单笔资金公式和真实美元收益评价使用。`launchpad` 仅用于准入、展示、审计与导出。
 
@@ -118,19 +118,19 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 ## 3. 模型与收益评价
 
-### 3.1 一个 Champion，三档阈值
+### 3.1 Top 3 模型 + 不用模型基线
 
-候选模型为：
+候选模型池当前包括：Logistic Regression、Decision Tree、HistGradientBoosting、Gradient Boosting、AdaBoost、ExtraTrees、RandomForest、RBF-SVM、XGBoost，以及可选的 LightGBM、CatBoost、FLAML AutoML。LightGBM/CatBoost/FLAML 未安装时会明确记为 `skipped`；AutoML 只能嵌套在 outer-train 内做时间切分，不能接触最终 holdout。
 
-- Logistic Regression
-- HistGradientBoosting
-- XGBoost
-- ExtraTrees
-- RandomForest
 
-系统只激活一个 Champion，再由同一评分模型派生 `aggressive`、`balanced`、`conservative` 三个阈值。阈值强制满足 `aggressive <= balanced <= conservative`；平衡档是默认生产策略。分类器使用等权样本拟合，避免收益幅度改变类别先验；交易经济性只用于时间外阈值/候选评价。所有可交易阈值的 Precision 硬门槛为 35%，并要求最低交易数量，避免靠极少信号制造表面高 Precision。
 
-模型选择以时间外累计效用为主，同时考虑 Precision、最差窗口、回撤、交易数量和复杂度。性能接近时优先更简单的模型，这是本项目的奥卡姆剃刀约束。
+
+
+
+
+一次训练按开发期 chronological OOS 结果选出 **Top 3**。三个模型分别保存自己的特征子集、单一决策线、经济得分、泛化得分和综合分，并映射到 `model_1 / model_2 / model_3`。此外 `rules_only` 作为“不用模型”基线：所有通过规则初筛的新样本都进入同样的模拟执行链，只跳过模型二筛。
+
+模型拟合仍是标准二分类问题，交易目标不直接写成训练 loss。离线经济评价使用固定收益单位 `U = 6×TP - FP`；若以 Precision `p`、Recall `r` 和同一评估池真实正类数 `N+` 表示，则等价于 `U = N+ × r × (7 - 1/p)`。固定 $50 只用于模型间公平离线评价，对应理论美元收益 `$5 × U`；实际交易本金仍执行 `min(1% × entry liquidity, $50)`。开发期经济得分 `E = mean(clip((6×TP-FP)/(6×N+), -1, 1))`；泛化得分 `G` 综合 AP Skill、跨时间窗口稳定性和近期衰减；综合分固定为 `S = 0.60×E + 0.40×G`。Top 3 只按开发期 OOS 的 `S` 排名，最终时间留出集只做 certification。每个算法内部比较 12 / 20 / 全量特征，若较小子集落在最佳子集的 one-standard-error 范围内就选择更小子集。
 
 ### 3.2 时间切分
 
@@ -152,25 +152,25 @@ pnl_i = capital_i × realized_return_i
 cumulative_pnl = Σ pnl_i
 ```
 
-阈值与候选比较可使用 sigmoid 平滑门控辅助评价，但最终比较必须回到硬阈值和累计收益，不能用平均单笔收益替代。分类器拟合保持样本等权；只有同一时间外样本窗口具备真实入场流动性时，才允许以美元 PnL 比较自动晋级。
+实际模拟/实盘执行继续使用上述逐笔本金和真实交易摩擦；离线 Top 3 排名则刻意使用统一的固定 $50、忽略交易磨损的 `+6/-1` 理论收益，从而不让不同样本的流动性规模污染模型优劣。模型概率与决策线都来自开发期 OOS；最终 holdout 只生成审计成绩单，不再参与阈值或排名。
 
-自动晋级要求：
+Top 3 更新规则：
 
-1. Challenger 和当前模型在同一时间外样本上比较；
-2. 平衡档 Precision 至少 35%，交易数达到最低门槛；
-3. 评价窗口具备真实效用资格；
-4. Challenger 累计 PnL 至少比基线高 5%；
-5. 工件可加载且可回滚。
+1. 所有候选在相同 chronological OOS 开发折上比较；
+2. 每个算法只保留 one-standard-error 内更小的特征子集；
+3. 按 `S = 0.60E + 0.40G` 排名前三并各自固定一个决策线；
+4. 最近最终 holdout 只做 certification，禁止反向调模型或阈值；
+5. 三个 Top 模型工件必须可加载，Rank 1 历史版本保留可回滚链。
 
 第一版周训时间为每周日北京时间 03:00；关机错过时，下次启动补训；前端也可随时创建手动训练任务。
 
 ## 4. 交易与风控
 
-### 4.1 三种账本
+### 4.1 四策略模拟账本与实盘边界
 
-- 固定模拟：显式会话初始 `1000 USD + 0.1 SOL`；同 Token 可多批次。
-- 实盘影子：与真实钱包的初始资金/外部资金闸门同步，但独立记账，用于公平比较激进/保守策略。
-- 实盘：只接受通过模型、阈值、资金和风险检查的平衡档信号。
+- `model_1 / model_2 / model_3 / rules_only` 四个模拟策略各自拥有 `1000 USD + 0.1 SOL` 独立账本；同 Token 可在不同策略、不同批次同时存在。
+- 四策略统一复用同一 BUY/SELL、滑点、费用、0.9x 止损、1.6x 止盈、2h 到期和卖出失败重试链；差别只在是否经过某个模型决策线。
+- 实盘：自动 BUY 仍刻意停放；未来启用时使用当前 Rank 1 模型及其决策线，并继续服从钱包资金与风险门禁。
 
 理论标签收益、模拟可执行收益和真实链上收益必须分开展示，不能混成一个 PnL。
 
@@ -265,11 +265,11 @@ Set-Location D:\meme
 
 启动时会：
 
-1. 创建/迁移 `data/meme_quant.db`（当前 schema v6），并保持已有样本、模型、模拟会话、训练任务和 Agent 提案可追溯；
+1. 创建/迁移 `data/meme_quant.db`（当前 schema v8）；旧 `profile`/paper-shadow 三档表会原子迁移为 `strategy_key + account_kind(simulation/live)`，历史预测、仓位与成交审计保留；
 2. 若根目录存在 `meme数据.csv`，按文件哈希与样本键幂等导入；当前真实库已完成 2319 条 legacy 数据迁移；
 3. 在任何新信号 worker 启动前运行一次订单 journal 对账：有 `provider_order_id` 只查询原单，无法确认的 submit 保持 `submission_unknown` 并暂停新开仓；
 4. 恢复上次进程中断的 `running` 训练任务，再启动唯一 `TrainingWorker` 串行消费手动/周训/degraded 持久队列；
-5. 启动周日 03:00 调度、7 日模型健康监控、实时 Champion prediction、持久化 liquidation/reconciliation；
+5. 启动周日 03:00 调度、7 日 Top 3 模型健康监控、三模型实时 prediction、`rules_only` 基线、持久化 liquidation/reconciliation；
 6. `COLLECTOR_ENABLED=true` 时运行“发现 → enrichment → 模拟持仓 K 线退出 → T+2h 标签补齐”；若关闭 discovery 但 `PAPER_MARKET_MONITOR_ENABLED=true`，仍以 monitor-only 模式继续已有模拟仓位退出和标签补齐。
 
 健康检查：`http://127.0.0.1:8000/health`；OpenAPI：`http://127.0.0.1:8000/docs`。
@@ -283,11 +283,11 @@ npm run dev
 
 访问 `http://127.0.0.1:5173`。Vite 会把 `/api` 和 `/health` 代理到 `127.0.0.1:8000`，开发模式自带前端 HMR。
 
-左侧导航固定为：`总览 → 持仓 → 样本采集 → 运行监控 → 模型中心 → Agent审批`。`/signals` 路由保留，页面标题为“样本预览”，模型列使用 `YYYYMMDD-算法` 短名，“模型分 / 入选线”表示模型对该样本的评分与当前档位要求的最低入选分；右上角可一键导出数据库全部 mature/tagged 样本为 `meme数据.csv`。
+左侧导航固定为：`总览 → 持仓 → 样本采集 → 运行监控 → 模型中心 → Agent审批`。`/signals` 路由保留，页面标题为“样本预览”，可按 `model_1 / model_2 / model_3` 过滤；模型列使用 `YYYYMMDD-算法` 短名，“模型分 / 入选线”表示该模型对样本的概率与自己的单一决策线。`rules_only` 不产生模型预测记录；右上角可一键导出数据库全部 mature/tagged 样本为 `meme数据.csv`。
 
-“持仓”页采用两层视图：先切换 `模拟仓 / 实盘`，再点击 `平衡 / 激进 / 保守` 档位。仅模拟运行时默认进入模拟仓；实盘与模拟均运行时默认进入实盘。右上角原 `Asia / Shanghai` 位置用于 `切换至实盘 / 切换至模拟仓` 按钮。当前模型在该页使用 `sim_YYYYMMDD` / `live_YYYYMMDD` 运行别名，日期取当前 Champion 的北京时间训练日期；数据库/模型工件仍保留内部唯一 ID，不用短名做主键。当前持仓只显示所选档位，并展示由持仓监控周期写入的当前流动性/市值快照，以及 `当前价格 / 买入价格` 的当前涨幅倍数（两位小数，如 `0.92x`）；Token 支持悬浮复制。市值优先使用 GMGN 直接 marketcap 字段，若当前 token-info 响应未给出，则用同一 GMGN 响应的当前价格 × circulating_supply（缺失时 total_supply）回补，不使用 migration_market_cap 冒充当前市值。交易历史由 SQLite 真分页，默认 30 行/页，可持久记忆用户选择的每页行数，并支持页码跳转和退出时间范围筛选；新增平仓时间，终态卖出失败显示“卖出失败”并给出对应失败原因。交易审计按每个 simulation session 的三档分别列示，买入/卖出时间来自该档位实际仓位的第一笔 entry 与最后一笔 exit，来源统一显示为“模型自动更新/模型手动更新”。一键清仓 challenge/job 同样跟随当前 `mode`：模拟页只冻结当前模拟 session，实盘页只冻结 live 仓；兼容 API 仍保留 `all` 全局应急作用域。`mode=live` 的同构视图和后端账本接口已搭好，数据源契约标记为 GMGN Trading API，但不会因此启用自动 live BUY 或伪造钱包余额。
+“持仓”页采用两层视图：先切换 `模拟仓 / 实盘`，模拟仓再选择 `model_1 / model_2 / model_3 / rules_only`。四张策略卡直接显示当前模型短名或“不用模型”、现金、SOL 储备、持仓和已实现 PnL；每个模拟策略独立 `1000 USD + 0.1 SOL`。当前持仓展示监控周期写入的流动性/市值快照和 `当前价格 / 买入价格` 两位小数倍数，Token 支持悬浮复制。市值优先使用 GMGN 直接 marketcap，缺失时仅用同一 token-info 的 current price × circulating_supply（再缺失才 total_supply）回补。交易历史使用 SQLite 真分页、默认 30 行、localStorage 记忆 page size、页码跳转和退出时间筛选；终态卖出失败显示“卖出失败”及具体失败原因。交易审计第一列固定为“模型”，按每个 simulation session 的四策略列示实际首笔 entry、末笔 exit、交易数和 PnL，不再输出 profile/档位。清仓 challenge/job 跟随 `mode`：模拟页只冻结当前模拟 session，实盘页只冻结 live 仓；兼容 API 保留 `all` 全局应急作用域。`mode=live` 同构视图和持久化账本仍不会因此启用自动 live BUY 或伪造钱包余额。
 
-总览页 Champion 展示短显示名 `YYYYMMDD-xxx`（例如 `20260811-RF`），内部长 model id 与 EARLY 状态保留在后端模型记录中；“实盘收益”只累计 `account_kind='live'` 且已经 `closed` 的已实现 PnL，不混入模拟盘。
+总览页展示当前 Top 3 模型的排名、短名、特征数、决策线、Precision/Recall、理论收益、E/G/S，并单独显示四策略模拟实际 PnL 对比；Rank 1 短名如 `20260811-RF`，内部长 model id 与 EARLY 状态仍保留。“实盘收益”只累计 `account_kind='live'` 且已经 `closed` 的已实现 PnL，不混入模拟盘。
 
 卖出失败口径已经显式冻结：模拟仓到 2 小时后确认 `no_route`/手续费储备耗尽，或一般卖出失败累计达到 7 次重试，转为 `closed` 的失败平仓；实盘强制退出明确返回 `NO_ROUTE`、最终 `FAILED` 或 `EXPIRED` 时也转为失败平仓。失败平仓按 `-投入本金 - 已支付入场平台费` 计入已实现 PnL，并保留 `sell_failure_reason` 审计。`submission_unknown`、缺少 token 原子数量、钱包事实缺失等无法确认是否真实成交的系统问题仍 fail-closed，不得伪造为交易亏损。
 
@@ -295,7 +295,7 @@ npm run dev
 
 ### 6.4 训练、自更新与自选特征
 
-“模型中心”会列出全部可选特征及成熟样本覆盖率。binary-v3 默认 recipe 使用 31 个输入特征；`launchpad` 不属于可选模型特征。`ln(liquidity_usd)` 从新样本开始持续采集，但默认关闭，等覆盖率足够后可直接勾选并创建新的训练 recipe。API 也支持显式提交特征列表：
+“模型中心”会同时展示当前 Top 3、完整候选池、E/G/S、最终 holdout 审计、“不用模型”基线和成熟样本覆盖率。默认候选特征池仍是 31 个入场时特征；每个算法会自行执行 12 / 20 / 全量子集的奥卡姆选择。`launchpad` 不进入模型；`ln(liquidity_usd)` 从新样本开始持续采集，覆盖率足够后可手动加入候选池。API 也支持显式提交候选特征列表：
 
 ```powershell
 Invoke-RestMethod -Method Post `
@@ -304,9 +304,9 @@ Invoke-RestMethod -Method Post `
   -Body '{"reason":"manual","features":["price","price_change_1h"]}'
 ```
 
-HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。周日北京时间 03:00 自动训练，错过后下次启动补排；7 日模型健康监控只在真实 USD 经济口径可比较时触发 degraded 重训。自动训练继承当前 Champion 的 feature schema，除非用户再次手工改变 recipe。
+HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。周日北京时间 03:00 自动训练，错过后下次启动补排；7 日模型健康监控会分别检查三个 active model 的近期 fixed-payoff capture，明显退化时只排一个 durable degraded 重训。自动训练继承当前 Rank 1 记录的 requested feature pool；实际胜出模型仍可通过奥卡姆选择缩减到更小特征子集。
 
-2026-08-11 当前 binary-v3 训练集包含 2365 条 mature 样本、414 条正类。默认 31 特征下，严格时间外泛化研究的 robust AP 排名以 ExtraTrees 略高，Random Forest 在最终留出窗口取得更高的 Precision/Recall；生产 TrainingService 按正式 OOS utility、35% Precision 门槛和稳定性规则选择 Random Forest 为 Champion。训练 run `516a103f-5d5e-4ab0-b098-26d425833bfa` 对应模型 `20260811T115504Z-random_forest-c04a0bfb`，最终窗口 Precision 39.74%、Recall 32.29%、78 次入选，使用 31 个特征。
+2026-08-12 正式 Top 3 训练 run `89c2d088-ea1b-4bc7-9aec-2ca7a92220b2` 使用 2374 条 mature 样本、414 条正类。开发期 OOS 综合分选出：Rank 1 Random Forest（12 特征，threshold 0.1420，E=0.2886，G=0.4896，S=0.3690）、Rank 2 Decision Tree（12 特征，threshold 0.1100，E=0.3030，G=0.4404，S=0.3580）、Rank 3 Gradient Boosting（12 特征，threshold 0.1182，E=0.2823，G=0.4697，S=0.3573）。最近 20% certification holdout 上，理论固定 $50 收益分别为 RF `$875`、DT `$890`、GB `$1000`，而 `rules_only` 为 `$915`；这些 final 成绩只用于审计，不反向改变 Top 3。三个 active model id 分别为 `20260811T162814Z-random_forest-eab07444`、`20260811T162814Z-decision_tree-7313f40a`、`20260811T162814Z-gradient_boosting-2eba2852`。
 
 ## 7. 测试与构建
 
@@ -318,7 +318,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-11 当前基线：后端 `pytest -q` **96/96 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV/schema migration、特征泄漏与自选 feature schema、五模型/时序/Champion 晋级回滚、durable TrainingWorker/周训/7 日退化监控、simulation session/1m first-touch/重启恢复、持仓当前市场快照、按档位/时间筛选与真分页、三档交易审计、模拟/实盘清仓作用域隔离、no-route/重试耗尽/实盘终态卖出失败计入已实现亏损、monitor-only 生命周期、Agent 人工审批、非实盘 FastAPI E2E，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
+2026-08-12 当前基线：后端 `pytest -q` **98/98 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV + schema v8 去 profile 迁移、`6TP-FP` 与 p/r 恒等式、12/20/全量奥卡姆特征选择、Top 3 chronological OOS 排名/最终 holdout 隔离、四策略 session、`rules_only` 无预测开仓、同 Token 四策略共享 K 线、三 active model 退化监控、持仓市场快照/真分页/模型审计、模拟/实盘清仓作用域隔离、no-route/重试耗尽/实盘终态卖出失败计入已实现亏损、TrainingWorker/周训/重启恢复、Agent 人工审批，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
@@ -341,22 +341,22 @@ npm run build
 
 ### 9.1 非实盘本地版
 
-截至 2026-08-11，单机/单用户/localhost 范围内的非实盘主链已经闭环：legacy CSV → SQLite → 持续采集/入场特征 → T+2h 标签 → 五候选时序训练 → 一个 Champion/三阈值 → 固定模拟/激进影子/保守影子 → 1m K 线 first-touch 退出 → 三档独立模拟 PnL/交易审计 → 周训/启动补训 → 7 日退化监控 → Challenger 公平比较 → 自动晋级或安全拒绝 → 模型回滚。训练任务、模拟会话和 Agent 提案均为持久化对象并支持重启恢复；持仓页已按档位提供当前仓位、实时市场快照与分页交易历史。
+截至 2026-08-12，单机/单用户/localhost 范围内的非实盘主链已经闭环：legacy CSV → schema v8 SQLite → 持续采集/入场特征 → T+2h 标签 → 扩展候选池 chronological OOS 训练 → 每算法奥卡姆特征选择 → Top 3 + rules-only → 四策略独立模拟 → 1m K 线 first-touch 退出 → 四策略实际 PnL/模型交易审计 → 周训/启动补训 → 三 active model 7 日退化监控 → Top 3 原子替换 → Rank 1 历史回滚。训练任务、模拟会话和 Agent 提案均为持久化对象并支持重启恢复；持仓页按模型策略提供当前仓位、实时市场快照与分页交易历史。
 
 历史数据本身仍有客观边界：
 
-- 2319 条 legacy 样本跨度约 25 天且全部来自 Pump.fun，因此当前 Champion 必须标记 `EARLY_STAGE_MODEL`，非 Pump.fun 泛化尚无证据；
-- 旧 CSV 没有 raw entry liquidity、`ln(liquidity_usd)` 和精确的 legacy timeout close；旧数据可以参与分类训练，但不能伪装成真实美元 PnL 自动晋级样本；
+- 2319 条 legacy 样本跨度约 25 天且全部来自 Pump.fun，因此当前三个 Top 模型均必须标记 `EARLY_STAGE_MODEL`，非 Pump.fun 泛化尚无证据；
+- 旧 CSV 没有 raw entry liquidity 和 `ln(liquidity_usd)`，因此不能用于逐笔真实美元本金回放；但其二分类 tag 可参与当前固定 $50、`+6/-1` 的模型离线排名；
 - `ln(liquidity_usd)` 已从新样本开始持续采集，是模型中心的可选特征，当前默认 recipe 暂不启用；
 - 本项目按 localhost 单用户交付。公网认证、session/CSRF、多租户不是当前本地版的“漏开发功能”；如果未来改成公网服务，必须先补正式身份认证与 CSRF/权限边界；
 - SQLite 适合当前单进程第一版；跨进程/多服务器扩展时再引入正式 migration/lease/PostgreSQL，不把扩展架构伪装成当前版本阻塞项。
 
 ### 9.2 实盘接口刻意停放
 
-实盘代码保留 quote/swap/status、幂等 journal、启动对账、二次确认和持久化清仓接口；自动 live BUY 当前保持停放。未来实盘固定使用 `balanced` profile。真正启用实盘前仍必须接入并现场验收：
+实盘代码保留 quote/swap/status、幂等 journal、启动对账、二次确认和持久化清仓接口；自动 live BUY 当前保持停放。未来实盘使用当时 active Top 3 的 Rank 1 模型及其单一决策线，不再存在 `profile`。真正启用实盘前仍必须接入并现场验收：
 
 - 真实 wallet snapshot：available USD、总权益、SOL balance、SOL/USD、Token balance/decimals；
-- 无 `provider_order_id` 的钱包/代币余额对账，以及影子账户与实盘共同资金闸门；
+- 无 `provider_order_id` 的钱包/代币余额对账，以及 Rank 1 实盘策略与真实钱包共同资金闸门；
 - GMGN 真实成交 `output_amount_raw` / decimals / status 契约；
 - 以日初真实钱包总权益（含未实现盈亏）为基线的 20% 日损门禁、连续 5 亏门禁及其真实钱包 E2E；
 - 小额授权环境下的 quote → submit → poll → restart reconciliation → exit 全链验收。
@@ -369,9 +369,9 @@ npm run build
 
 量化系统最难的，往往不是写出第一笔模拟成交，而是在漫长夜里仍然愿意把边界守住：哪些信号该进样本，哪些冲动必须被规则按住，哪些“看起来能赚钱”的捷径其实会毁掉整条可信链路。本项目能从零散脚本走到今天这条可审计的本地闭环，靠的不只是代码堆叠，更是一路并肩推敲时那种不肯含糊的认真。
 
-特别感谢 [tangerinepith](https://github.com/tangerinepith)。在前后端工程上，他像把散落的零件重新装回同一台机器：从 FastAPI 生命周期、SQLite schema 迁移与训练任务持久化，到 React 控制台左侧导航的产品化拆分（总览、持仓、样本采集、运行监控、模型中心、Agent 审批）；从持仓页按模拟/实盘与平衡/激进/保守档位层层展开，到交易历史真分页、退出时间筛选，再到采集事件流里 returned / accepted / rejected / duplicate 被一笔笔点亮——那些原本只存在于讨论里的策略，终于有了可以打开、可以核对、可以复盘的面孔。每一次页面刷新、每一次日志回看，都像在说：判断不必靠感觉，证据就在这里。
+特别感谢 [tangerinepith](https://github.com/tangerinepith)。在前后端工程上，他像把散落的零件重新装回同一台机器：从 FastAPI 生命周期、SQLite schema 迁移与训练任务持久化，到 React 控制台左侧导航的产品化拆分（总览、持仓、样本采集、运行监控、模型中心、Agent 审批）；从持仓页的模拟/实盘与四策略对照，到交易历史真分页、退出时间筛选，再到采集事件流里 returned / accepted / rejected / duplicate 被一笔笔点亮——那些原本只存在于讨论里的策略，终于有了可以打开、可以核对、可以复盘的面孔。每一次页面刷新、每一次日志回看，都像在说：判断不必靠感觉，证据就在这里。
 
-在算法与交易策略上，他给出的建议同样带着温度，却始终落在刀刃上：守住 2 小时策略窗口与 T+2h 标签补齐；先用规则初筛挡住明显不安全的样本，再用单一 Champion 与三档阈值做二筛，而不是让一堆模型彼此打架；强调时序切分、OOS 比较、退化监控与“宁可安全拒绝、也不盲目晋级”，好让早期 Pump.fun legacy 样本不至于被夸大成全市场的幻觉；在退出与风控上，推动把 1m K 线 first-touch、仓位上限、同币唯一、日损与连亏门禁写进可测试的约束；并一次次提醒——实盘必须服从 `DRY_RUN`、幂等 journal 与二次确认，绝不能用漂亮的模拟 PnL 去绕过真实的资金事实。这些话语听起来并不华丽，却像灯塔一样，让项目在兴奋与谨慎之间始终找得到岸。
+在算法与交易策略上，他给出的建议同样带着温度，却始终落在刀刃上：守住 2 小时策略窗口与 T+2h 标签补齐；先用规则初筛挡住明显不安全的样本，再用严格 chronological OOS、经济得分与泛化稳定性筛选模型，而不是被某一次漂亮的最终测试成绩牵着走；强调奥卡姆剃刀、最终 holdout 隔离、退化监控与“宁可安全拒绝、也不盲目上线”，好让早期 Pump.fun legacy 样本不至于被夸大成全市场的幻觉；在退出与风控上，推动把 1m K 线 first-touch、仓位上限、同币唯一、日损与连亏门禁写进可测试的约束；并一次次提醒——实盘必须服从 `DRY_RUN`、幂等 journal 与二次确认，绝不能用漂亮的模拟 PnL 去绕过真实的资金事实。
 
-截至 2026-08-11，仓库里已经能看见这条主链真正合拢：legacy CSV 迁入、持续采集与入场特征、标签回填、五候选训练、Champion 晋级与回滚、三档独立模拟账本、重启可恢复的 worker，以及 96/96 后端测试与前端构建通过。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。再次感谢 tangerinepith 的耐心、判断力，以及对细节近乎执拗的较真；正是这些看不见的坚持，让系统不只会交易，更懂得为何而交易。
+截至 2026-08-12，仓库里的非实盘主链已经完成 schema v8、扩展候选池、Top 3 + `rules_only`、四策略独立模拟账本、重启可恢复的 workers，以及 98/98 后端测试与前端 production build。正式 Top 3 训练也已在真实样本上完成，最终 holdout 被严格保留为 certification。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
 

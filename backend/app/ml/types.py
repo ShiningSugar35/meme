@@ -13,14 +13,6 @@ UtilityUnit = Literal["usd", "legacy_proxy"]
 
 @dataclass(frozen=True)
 class EconomicSlice:
-    """Economic inputs for one evaluation slice.
-
-    ``utility_eligible`` is deliberately strict. It is true only when every
-    row has real entry-time liquidity. Legacy CSV rows can still train a
-    classifier, but their equal-weight proxy must never be presented as dollar
-    PnL.
-    """
-
     capital: np.ndarray
     realized_return: np.ndarray
     utility_eligible: bool
@@ -47,9 +39,7 @@ class PreparedDataset:
     def economic_slice(self, indices: np.ndarray | list[int]) -> EconomicSlice:
         positions = np.asarray(indices, dtype=int)
         tags = self.tags.iloc[positions].to_numpy(dtype=int)
-        close_ratio = self.final_close_ratio.iloc[positions].to_numpy(dtype=float)
         liquidity = self.liquidity_usd.iloc[positions].to_numpy(dtype=float)
-        estimated = self.return_is_estimated.iloc[positions].to_numpy(dtype=bool)
 
         realized = np.full(len(positions), -0.10, dtype=float)
         realized[tags == 1] = 0.60
@@ -64,8 +54,6 @@ class PreparedDataset:
             capital = np.minimum(0.01 * liquidity, 50.0)
             unit: UtilityUnit = "usd"
         else:
-            # Equal-weight proxy is useful for threshold/model diagnostics but
-            # has no currency interpretation and cannot authorize promotion.
             capital = np.ones(len(positions), dtype=float)
             unit = "legacy_proxy"
 
@@ -109,6 +97,10 @@ class EvaluationMetrics:
     trade_count: int
     true_positives: int
     false_positives: int
+    positive_count: int
+    profit_units: float
+    fixed_profit_usd: float
+    economic_capture: float
     cumulative_pnl_usd: float | None
     proxy_pnl: float | None
     smooth_utility: float
@@ -140,21 +132,26 @@ class EvaluationMetrics:
 
 @dataclass(frozen=True)
 class ThresholdSet:
-    aggressive: float
-    balanced: float
-    conservative: float
+    """One decision threshold per model.
 
-    def for_profile(self, profile: str) -> float:
-        if profile not in {"aggressive", "balanced", "conservative"}:
-            raise ValueError(f"unknown threshold profile: {profile}")
-        return float(getattr(self, profile))
+    The historical three-profile threshold design is intentionally gone. The
+    name is retained only to keep old registry imports stable.
+    """
+
+    decision: float
 
     def as_dict(self) -> dict[str, float]:
-        return {
-            "aggressive": self.aggressive,
-            "balanced": self.balanced,
-            "conservative": self.conservative,
-        }
+        return {"decision": float(self.decision)}
+
+
+@dataclass(frozen=True)
+class GeneralizationMetrics:
+    average_precision_mean: float
+    average_precision_std: float
+    average_precision_skill_mean: float
+    stability_score: float
+    decay_score: float
+    score: float
 
 
 @dataclass(frozen=True)
@@ -163,10 +160,15 @@ class CandidateEvaluation:
     complexity_rank: int
     status: Literal["ok", "skipped", "failed"]
     skip_reason: str | None = None
-    thresholds: ThresholdSet | None = None
+    threshold: float | None = None
+    feature_names: tuple[str, ...] = ()
     development_metrics: EvaluationMetrics | None = None
     final_metrics: EvaluationMetrics | None = None
     fold_metrics: tuple[EvaluationMetrics, ...] = ()
+    generalization: GeneralizationMetrics | None = None
+    economic_score: float | None = None
+    composite_score: float | None = None
+    score_standard_error: float | None = None
     selection_score: float | None = None
 
 
@@ -183,6 +185,10 @@ class ModelBundle:
     training_end: datetime
     metrics: Mapping[str, Any] = field(default_factory=dict)
 
+    @property
+    def threshold(self) -> float:
+        return float(self.thresholds.decision)
+
     def predict_probabilities(self, frame: pd.DataFrame) -> np.ndarray:
         missing = [name for name in self.feature_names if name not in frame.columns]
         if missing:
@@ -197,13 +203,35 @@ class ModelBundle:
 
 @dataclass(frozen=True)
 class TrainingResult:
-    bundle: ModelBundle
-    evaluation_bundle: ModelBundle
+    bundles: tuple[ModelBundle, ...]
+    evaluation_bundles: tuple[ModelBundle, ...]
     plan: TemporalPlan
     candidates: tuple[CandidateEvaluation, ...]
-    selected_algorithm: str
-    final_metrics: EvaluationMetrics
+    top_algorithms: tuple[str, ...]
+    rule_baseline: EvaluationMetrics
     warnings: tuple[str, ...] = ()
+
+    @property
+    def bundle(self) -> ModelBundle:
+        return self.bundles[0]
+
+    @property
+    def evaluation_bundle(self) -> ModelBundle:
+        return self.evaluation_bundles[0]
+
+    @property
+    def selected_algorithm(self) -> str:
+        return self.top_algorithms[0]
+
+    @property
+    def final_metrics(self) -> EvaluationMetrics:
+        final = self.candidates_by_algorithm[self.top_algorithms[0]].final_metrics
+        assert final is not None
+        return final
+
+    @property
+    def candidates_by_algorithm(self) -> dict[str, CandidateEvaluation]:
+        return {item.algorithm: item for item in self.candidates if item.status == "ok"}
 
 
 @dataclass(frozen=True)

@@ -35,7 +35,7 @@ class PaperMonitorCycle:
 class PaperPositionMonitor:
     """Restorable market-driven exit monitor for paper/shadow positions."""
 
-    ACCOUNT_KINDS = ("paper", "shadow_aggressive", "shadow_conservative")
+    STRATEGY_KEYS = ("model_1", "model_2", "model_3", "rules_only")
 
     def __init__(
         self,
@@ -64,7 +64,8 @@ class PaperPositionMonitor:
             """
             SELECT id, token_address, status, entry_time, expires_at, metadata_json
             FROM positions
-            WHERE account_kind IN ('paper','shadow_aggressive','shadow_conservative')
+            WHERE strategy_key IN ('model_1','model_2','model_3','rules_only')
+              AND account_kind='simulation'
               AND status IN ('open','closing')
             ORDER BY entry_time, id
             """

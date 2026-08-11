@@ -138,8 +138,8 @@ def test_risk_limits_and_duplicate_live_position(tmp_path: Path) -> None:
     database.set_runtime_state("live_trading_enabled", True)
     database.execute(
         """
-        INSERT INTO positions(id,token_address,account_kind,profile,status,entry_time,expires_at,invested_usd)
-        VALUES('p1','token-a','live','balanced','open','2026-01-01T00:00:00+00:00','2026-01-01T02:00:00+00:00',50)
+        INSERT INTO positions(id,token_address,account_kind,status,entry_time,expires_at,invested_usd)
+        VALUES('p1','token-a','live','open','2026-01-01T00:00:00+00:00','2026-01-01T02:00:00+00:00',50)
         """
     )
     service = RiskService(database, settings)

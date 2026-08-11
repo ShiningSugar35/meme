@@ -7,7 +7,7 @@ import type {
   ModelVersion,
   PortfolioView,
   Position,
-  Profile,
+  StrategyKey,
   TrainingRun,
   PreparedAction,
   RiskStatus,
@@ -32,7 +32,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   dashboard: () => request<DashboardData>("/api/dashboard"),
-  models: () => request<{ champion: ModelVersion | null; items: ModelVersion[]; feature_catalog: ModelFeatureCatalog; training_runs: TrainingRun[] }>("/api/models"),
+  models: () => request<{ champion: ModelVersion | null; active_models: ModelVersion[]; items: ModelVersion[]; feature_catalog: ModelFeatureCatalog; training_runs: TrainingRun[] }>("/api/models"),
   signals: () => request<{ items: Signal[] }>("/api/signals"),
   exportSamples: async () => {
     const response = await fetch("/api/samples/export.csv");
@@ -40,10 +40,10 @@ export const api = {
     return response.blob();
   },
   portfolio: () => request<{ items: Position[] }>("/api/portfolio"),
-  portfolioView: (options: { mode: "simulation" | "live"; profile: Profile; page: number; pageSize: number; startAt?: string; endAt?: string }) => {
+  portfolioView: (options: { mode: "simulation" | "live"; strategy: StrategyKey; page: number; pageSize: number; startAt?: string; endAt?: string }) => {
     const params = new URLSearchParams({
       mode: options.mode,
-      profile: options.profile,
+      strategy: options.strategy,
       page: String(options.page),
       page_size: String(options.pageSize)
     });

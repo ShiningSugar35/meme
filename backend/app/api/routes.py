@@ -41,6 +41,7 @@ def models(limit: int = Query(default=50, ge=1, le=200)) -> dict:
     training = TrainingService(database)
     return {
         "champion": repository.champion(),
+        "active_models": repository.active_models(),
         "items": repository.list(limit=limit),
         "feature_catalog": training.feature_catalog(),
         "training_runs": training.list_runs(limit=min(limit, 20)),
@@ -115,7 +116,7 @@ def portfolio(
 @router.get("/portfolio/view")
 def portfolio_view(
     mode: str = Query(default="simulation", pattern="^(simulation|live)$"),
-    profile: str = Query(default="balanced", pattern="^(aggressive|balanced|conservative)$"),
+    strategy: str = Query(default="model_1", pattern="^(model_1|model_2|model_3|rules_only)$"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=10, le=100),
     start_at: str | None = None,
@@ -124,7 +125,7 @@ def portfolio_view(
     try:
         return DashboardService(get_database()).portfolio_view(
             mode=mode,
-            profile=profile,
+            strategy=strategy,
             page=page,
             page_size=page_size,
             start_at=start_at,

@@ -108,7 +108,7 @@ def seed_position(
     *,
     address: str,
     position_id: str,
-    account_kind: str,
+    strategy_key: str,
     opened_at: datetime,
     entry_price: float = 1.0,
     liquidity: float = 10_000.0,
@@ -137,41 +137,35 @@ def seed_position(
             "trained_at": opened_at.isoformat(),
             "feature_names": ["age"],
             "parameters": {},
-            "thresholds": {"aggressive": 0.2, "balanced": 0.4, "conservative": 0.8},
+            "thresholds": {"decision": 0.4},
             "metrics": {},
             "artifact_path": "ml_models/fake.joblib",
         }
-    )
-    profile = (
-        "aggressive"
-        if account_kind == "shadow_aggressive"
-        else "conservative"
-        if account_kind == "shadow_conservative"
-        else "balanced"
     )
     cursor = database.fetch_one("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM predictions")
     prediction_id = int(cursor["id"])
     database.execute(
         """
-        INSERT INTO predictions(id,sample_id,model_id,probability,profile,threshold,selected,predicted_at)
-        VALUES(?,?,?,?,?,?,1,?)
+        INSERT INTO predictions(id,sample_id,model_id,probability,strategy_key,threshold,selected,predicted_at)
+        VALUES(?,?,?,?,?,0.4,1,?)
         """,
-        (prediction_id, sample_id, model_id, 0.9, profile, 0.4, opened_at.isoformat()),
+        (prediction_id, sample_id, model_id, 0.9, strategy_key, opened_at.isoformat()),
     )
     database.execute(
         """
         INSERT INTO positions(
-            id,token_address,account_kind,profile,status,prediction_id,model_id,
+            id,token_address,account_kind,strategy_key,status,sample_id,prediction_id,model_id,
             entry_time,expires_at,invested_usd,token_amount,entry_price,
             stop_loss_price,take_profit_price,metadata_json
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             position_id,
             address,
-            account_kind,
-            profile,
+            "simulation",
+            strategy_key,
             "open",
+            sample_id,
             prediction_id,
             model_id,
             opened_at.isoformat(),
@@ -185,8 +179,10 @@ def seed_position(
         ),
     )
     database.set_runtime_state(
-        f"portfolio_account:{account_kind}",
+        f"portfolio_strategy:{strategy_key}",
         {
+            "session_id": PaperTradingService(database).ensure_simulation_session()["id"],
+            "strategy_key": strategy_key,
             "cash_usd": 950.0,
             "sol_fee_reserve": 0.1,
             "initial_cash_usd": 1000.0,
@@ -202,12 +198,12 @@ async def test_monitor_groups_same_token_and_same_bar_stop_loss_wins(tmp_path: P
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
-    seed_position(database, address="same-token", position_id="paper-1", account_kind="paper", opened_at=opened)
+    seed_position(database, address="same-token", position_id="paper-1", strategy_key="model_1", opened_at=opened)
     seed_position(
         database,
         address="same-token",
         position_id="shadow-1",
-        account_kind="shadow_aggressive",
+        strategy_key="model_2",
         opened_at=opened,
     )
     quote_provider = ExitQuoteProvider()
@@ -239,7 +235,7 @@ async def test_failed_exit_persists_trigger_and_retries_without_new_market_decis
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
-    seed_position(database, address="retry-token", position_id="paper-retry", account_kind="paper", opened_at=opened)
+    seed_position(database, address="retry-token", position_id="paper-retry", strategy_key="model_1", opened_at=opened)
     quote_provider = ExitQuoteProvider([False, True])
     paper = PaperTradingService(database, settings, quote_provider=quote_provider)
     monitor = PaperPositionMonitor(database, settings, paper_service=paper)
@@ -257,7 +253,7 @@ async def test_failed_exit_persists_trigger_and_retries_without_new_market_decis
     assert pending["reason"] == "take_profit_1_6x"
     assert pending["attempt_count"] == 1
     assert pending["network_fee_sol_charged"] == pytest.approx(0.001)
-    assert database.get_runtime_state("portfolio_account:paper")["sol_fee_reserve"] == pytest.approx(0.099)
+    assert database.get_runtime_state("portfolio_strategy:model_1")["sol_fee_reserve"] == pytest.approx(0.099)
 
     restarted_monitor = PaperPositionMonitor(database, settings, paper_service=paper)
     second = await restarted_monitor.run_cycle(
@@ -274,7 +270,7 @@ async def test_timeout_uses_last_close_at_or_before_two_hours(tmp_path: Path) ->
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
-    seed_position(database, address="timeout-token", position_id="paper-timeout", account_kind="paper", opened_at=opened)
+    seed_position(database, address="timeout-token", position_id="paper-timeout", strategy_key="model_1", opened_at=opened)
     quote_provider = ExitQuoteProvider()
     monitor = PaperPositionMonitor(
         database,
@@ -306,7 +302,7 @@ async def test_monitor_persists_current_market_snapshot_without_changing_exit_de
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
-    seed_position(database, address="snapshot-token", position_id="paper-snapshot", account_kind="paper", opened_at=opened)
+    seed_position(database, address="snapshot-token", position_id="paper-snapshot", strategy_key="model_1", opened_at=opened)
     monitor = PaperPositionMonitor(database, settings)
     market = FakeMarketProvider(
         [Kline(int((opened + timedelta(minutes=5)).timestamp()), 1.2, 0.95, 1.1)]
@@ -331,7 +327,7 @@ async def test_no_route_after_two_hours_closes_as_total_loss(tmp_path: Path) -> 
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
-    seed_position(database, address="no-route-token", position_id="paper-no-route", account_kind="paper", opened_at=opened)
+    seed_position(database, address="no-route-token", position_id="paper-no-route", strategy_key="model_1", opened_at=opened)
     monitor = PaperPositionMonitor(
         database,
         settings,
@@ -364,7 +360,7 @@ async def test_repeated_sell_failures_close_after_retry_budget(tmp_path: Path) -
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
-    seed_position(database, address="retry-budget-token", position_id="paper-retry-budget", account_kind="paper", opened_at=opened)
+    seed_position(database, address="retry-budget-token", position_id="paper-retry-budget", strategy_key="model_1", opened_at=opened)
     paper = PaperTradingService(database, settings, quote_provider=ExitQuoteProvider([False] * 7))
     monitor = PaperPositionMonitor(database, settings, paper_service=paper)
     market = FakeKlineProvider(

@@ -10,7 +10,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .config import get_settings
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 
 def utc_now_iso() -> str:
@@ -123,8 +123,7 @@ class Database:
             "ON positions(simulation_session_id, account_kind, status)"
         )
 
-        # v5: promote simulation sessions from an ephemeral runtime pointer into
-        # a durable registry so resets keep auditable historical sessions.
+        # v5: durable simulation-session registry.
         current_session: dict[str, Any] = {}
         current_row = connection.execute(
             "SELECT value_json FROM runtime_state WHERE key='simulation_session'"
@@ -190,9 +189,7 @@ class Database:
                 ),
             )
 
-        # v6: migrate the old bounded runtime-state proposal list into a durable
-        # approval registry. Runtime data remains untouched for forensic safety;
-        # the service reads only this table after migration.
+        # v6: durable Agent approval registry.
         proposal_row = connection.execute(
             "SELECT value_json FROM runtime_state WHERE key='agent_proposals'"
         ).fetchone()
@@ -230,19 +227,232 @@ class Database:
                         ),
                     )
 
-        # Completed non-promoted model runs are terminal rejected candidates, not
-        # models still awaiting a decision. Preserve artifacts for audit, while
-        # keeping `retired` reserved for models that were once Champion.
+        # v7/v8: Top-3 strategy registry and final removal of the historical
+        # three-profile schema. Existing rows are retained under neutral legacy
+        # strategy keys; all new simulation rows use account_kind='simulation'.
+        cls._migrate_strategy_tables(connection)
+
+        # Non-promoted candidates are terminal unless they are currently active.
         connection.execute(
             """
             UPDATE models
             SET status='rejected'
             WHERE status='candidate'
+              AND id NOT IN (SELECT model_id FROM active_model_slots)
               AND id IN (
                     SELECT candidate_model_id FROM training_runs
                     WHERE status='completed' AND promoted=0
                       AND candidate_model_id IS NOT NULL
               )
+            """
+        )
+
+    @classmethod
+    def _migrate_strategy_tables(cls, connection: sqlite3.Connection) -> None:
+        prediction_columns = cls._column_names(connection, "predictions")
+        position_columns = cls._column_names(connection, "positions")
+        needs_rebuild = (
+            "profile" in prediction_columns
+            or "profile" in position_columns
+            or "strategy_key" not in prediction_columns
+            or "strategy_key" not in position_columns
+            or "sample_id" not in position_columns
+            or "simulation" not in str(
+                connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'").fetchone()[0]
+            )
+        )
+        if not needs_rebuild:
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_predictions_strategy_time ON predictions(strategy_key,predicted_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_positions_strategy_status ON positions(simulation_session_id,strategy_key,status)"
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS one_position_per_prediction_strategy
+                ON positions(prediction_id,strategy_key) WHERE prediction_id IS NOT NULL
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS one_rule_position_per_sample_session
+                ON positions(sample_id,simulation_session_id,strategy_key)
+                WHERE prediction_id IS NULL AND sample_id IS NOT NULL AND strategy_key='rules_only'
+                """
+            )
+            return
+
+        connection.execute("ALTER TABLE trades RENAME TO trades_pre_strategy_v8")
+        connection.execute("ALTER TABLE positions RENAME TO positions_pre_strategy_v8")
+        connection.execute("ALTER TABLE predictions RENAME TO predictions_pre_strategy_v8")
+        connection.executescript(
+            """
+            CREATE TABLE predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sample_id INTEGER NOT NULL REFERENCES samples(id) ON DELETE CASCADE,
+                model_id TEXT NOT NULL REFERENCES models(id),
+                probability REAL NOT NULL CHECK(probability>=0 AND probability<=1),
+                strategy_key TEXT NOT NULL,
+                threshold REAL NOT NULL CHECK(threshold>=0 AND threshold<=1),
+                selected INTEGER NOT NULL CHECK(selected IN (0,1)),
+                predicted_at TEXT NOT NULL,
+                UNIQUE(sample_id,model_id,strategy_key)
+            );
+            CREATE TABLE positions (
+                id TEXT PRIMARY KEY,
+                token_address TEXT NOT NULL,
+                account_kind TEXT NOT NULL CHECK(account_kind IN ('simulation','live')),
+                strategy_key TEXT,
+                status TEXT NOT NULL CHECK(status IN ('opening','open','closing','closed','manual_intervention','failed')),
+                simulation_session_id TEXT REFERENCES simulation_sessions(id),
+                sample_id INTEGER REFERENCES samples(id),
+                prediction_id INTEGER REFERENCES predictions(id),
+                model_id TEXT REFERENCES models(id),
+                entry_time TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                invested_usd REAL NOT NULL CHECK(invested_usd>=0),
+                token_amount REAL,
+                entry_price REAL,
+                stop_loss_price REAL,
+                take_profit_price REAL,
+                exit_time TEXT,
+                exit_price REAL,
+                exit_reason TEXT,
+                gross_pnl_usd REAL,
+                net_pnl_usd REAL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE trades (
+                id TEXT PRIMARY KEY,
+                position_id TEXT REFERENCES positions(id),
+                client_order_id TEXT NOT NULL UNIQUE,
+                intent_fingerprint TEXT NOT NULL,
+                journal_state TEXT NOT NULL DEFAULT 'reserved',
+                provider_order_id TEXT,
+                transaction_hash TEXT,
+                side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+                account_kind TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('created','quoting','submitted','pending','processed','confirmed','failed','expired','cancelled')),
+                requested_amount REAL NOT NULL,
+                filled_amount REAL,
+                expected_output REAL,
+                actual_output REAL,
+                slippage_bps INTEGER,
+                priority_fee_sol REAL,
+                tip_fee_sol REAL,
+                network_fee_sol REAL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                failure_category TEXT,
+                failure_code TEXT,
+                failure_message TEXT,
+                request_json TEXT NOT NULL DEFAULT '{}',
+                response_json TEXT NOT NULL DEFAULT '{}',
+                result_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+        old_prediction_columns = cls._column_names(connection, "predictions_pre_strategy_v8")
+        if "strategy_key" in old_prediction_columns:
+            prediction_strategy = (
+                "COALESCE(strategy_key,CASE profile "
+                "WHEN 'balanced' THEN 'legacy_model_1' "
+                "WHEN 'aggressive' THEN 'legacy_model_2' "
+                "WHEN 'conservative' THEN 'legacy_model_3' ELSE 'legacy_model' END)"
+            )
+        else:
+            prediction_strategy = (
+                "CASE profile WHEN 'balanced' THEN 'legacy_model_1' "
+                "WHEN 'aggressive' THEN 'legacy_model_2' "
+                "WHEN 'conservative' THEN 'legacy_model_3' ELSE 'legacy_model' END"
+            )
+        connection.execute(
+            f"""
+            INSERT INTO predictions(id,sample_id,model_id,probability,strategy_key,threshold,selected,predicted_at)
+            SELECT id,sample_id,model_id,probability,{prediction_strategy},threshold,selected,predicted_at
+            FROM predictions_pre_strategy_v8
+            """
+        )
+
+        old_position_columns = cls._column_names(connection, "positions_pre_strategy_v8")
+        if "strategy_key" in old_position_columns:
+            position_strategy = (
+                "COALESCE(strategy_key,CASE account_kind "
+                "WHEN 'paper' THEN 'legacy_model_1' "
+                "WHEN 'shadow_aggressive' THEN 'legacy_model_2' "
+                "WHEN 'shadow_conservative' THEN 'legacy_model_3' ELSE NULL END)"
+            )
+        else:
+            position_strategy = (
+                "CASE account_kind WHEN 'paper' THEN 'legacy_model_1' "
+                "WHEN 'shadow_aggressive' THEN 'legacy_model_2' "
+                "WHEN 'shadow_conservative' THEN 'legacy_model_3' ELSE NULL END"
+            )
+        if "sample_id" in old_position_columns:
+            sample_expression = (
+                "COALESCE(sample_id,(SELECT p.sample_id FROM predictions_pre_strategy_v8 p "
+                "WHERE p.id=positions_pre_strategy_v8.prediction_id))"
+            )
+        else:
+            sample_expression = (
+                "(SELECT p.sample_id FROM predictions_pre_strategy_v8 p "
+                "WHERE p.id=positions_pre_strategy_v8.prediction_id)"
+            )
+        connection.execute(
+            f"""
+            INSERT INTO positions(
+                id,token_address,account_kind,strategy_key,status,simulation_session_id,
+                sample_id,prediction_id,model_id,entry_time,expires_at,invested_usd,
+                token_amount,entry_price,stop_loss_price,take_profit_price,exit_time,
+                exit_price,exit_reason,gross_pnl_usd,net_pnl_usd,metadata_json
+            )
+            SELECT id,token_address,CASE WHEN account_kind='live' THEN 'live' ELSE 'simulation' END,
+                   {position_strategy},status,simulation_session_id,{sample_expression},prediction_id,
+                   model_id,entry_time,expires_at,invested_usd,token_amount,entry_price,
+                   stop_loss_price,take_profit_price,exit_time,exit_price,exit_reason,
+                   gross_pnl_usd,net_pnl_usd,metadata_json
+            FROM positions_pre_strategy_v8
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO trades(
+                id,position_id,client_order_id,intent_fingerprint,journal_state,
+                provider_order_id,transaction_hash,side,account_kind,status,
+                requested_amount,filled_amount,expected_output,actual_output,slippage_bps,
+                priority_fee_sol,tip_fee_sol,network_fee_sol,attempt_count,failure_category,
+                failure_code,failure_message,request_json,response_json,result_json,created_at,updated_at
+            )
+            SELECT id,position_id,client_order_id,intent_fingerprint,journal_state,
+                   provider_order_id,transaction_hash,side,
+                   CASE WHEN account_kind='live' THEN 'live' ELSE 'simulation' END,status,
+                   requested_amount,filled_amount,expected_output,actual_output,slippage_bps,
+                   priority_fee_sol,tip_fee_sol,network_fee_sol,attempt_count,failure_category,
+                   failure_code,failure_message,request_json,response_json,result_json,created_at,updated_at
+            FROM trades_pre_strategy_v8
+            """
+        )
+        connection.execute("DROP TABLE trades_pre_strategy_v8")
+        connection.execute("DROP TABLE positions_pre_strategy_v8")
+        connection.execute("DROP TABLE predictions_pre_strategy_v8")
+        connection.executescript(
+            """
+            CREATE INDEX idx_predictions_time ON predictions(predicted_at DESC);
+            CREATE INDEX idx_predictions_strategy_time ON predictions(strategy_key,predicted_at DESC);
+            CREATE INDEX idx_positions_status_kind ON positions(status,account_kind);
+            CREATE INDEX idx_positions_strategy_status ON positions(simulation_session_id,strategy_key,status);
+            CREATE UNIQUE INDEX one_position_per_prediction_strategy
+                ON positions(prediction_id,strategy_key) WHERE prediction_id IS NOT NULL;
+            CREATE UNIQUE INDEX one_rule_position_per_sample_session
+                ON positions(sample_id,simulation_session_id,strategy_key)
+                WHERE prediction_id IS NULL AND sample_id IS NOT NULL AND strategy_key='rules_only';
+            CREATE UNIQUE INDEX one_live_position_per_token
+                ON positions(token_address) WHERE account_kind='live' AND status IN ('opening','open','closing');
+            CREATE INDEX idx_trades_position ON trades(position_id,created_at);
+            CREATE INDEX idx_trades_status ON trades(status,updated_at);
             """
         )
 
@@ -327,9 +537,9 @@ CREATE TABLE IF NOT EXISTS samples (
     same_bar_conflict INTEGER NOT NULL DEFAULT 0 CHECK(same_bar_conflict IN (0,1)),
     gross_return_rate REAL,
     return_source TEXT,
-    tag INTEGER CHECK(tag IN (0, 1, 2) OR tag IS NULL),
+    tag INTEGER CHECK(tag IN (0,1) OR tag IS NULL),
     label_status TEXT NOT NULL DEFAULT 'pending' CHECK(label_status IN ('pending','mature','failed')),
-    label_version TEXT NOT NULL DEFAULT 'sl090_tp160_h2_close120_v2',
+    label_version TEXT NOT NULL DEFAULT 'sl090_tp160_h2_binary_v3',
     label_source TEXT NOT NULL DEFAULT 'collector',
     terminal_return_estimated INTEGER NOT NULL DEFAULT 0 CHECK(terminal_return_estimated IN (0,1)),
     raw_json TEXT,
@@ -362,18 +572,27 @@ CREATE TABLE IF NOT EXISTS models (
     rejection_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_models_status_trained ON models(status, trained_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS only_one_champion ON models(status) WHERE status = 'champion';
+CREATE UNIQUE INDEX IF NOT EXISTS only_one_champion ON models(status) WHERE status='champion';
+
+CREATE TABLE IF NOT EXISTS active_model_slots (
+    slot INTEGER PRIMARY KEY CHECK(slot BETWEEN 1 AND 3),
+    model_id TEXT NOT NULL UNIQUE REFERENCES models(id),
+    composite_score REAL NOT NULL,
+    threshold REAL NOT NULL CHECK(threshold>=0 AND threshold<=1),
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    selected_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sample_id INTEGER NOT NULL REFERENCES samples(id) ON DELETE CASCADE,
     model_id TEXT NOT NULL REFERENCES models(id),
-    probability REAL NOT NULL CHECK(probability >= 0 AND probability <= 1),
-    profile TEXT NOT NULL CHECK(profile IN ('aggressive','balanced','conservative','shadow')),
-    threshold REAL NOT NULL CHECK(threshold >= 0 AND threshold <= 1),
+    probability REAL NOT NULL CHECK(probability>=0 AND probability<=1),
+    strategy_key TEXT NOT NULL,
+    threshold REAL NOT NULL CHECK(threshold>=0 AND threshold<=1),
     selected INTEGER NOT NULL CHECK(selected IN (0,1)),
     predicted_at TEXT NOT NULL,
-    UNIQUE(sample_id, model_id, profile)
+    UNIQUE(sample_id,model_id,strategy_key)
 );
 CREATE INDEX IF NOT EXISTS idx_predictions_time ON predictions(predicted_at DESC);
 
@@ -382,8 +601,8 @@ CREATE TABLE IF NOT EXISTS simulation_sessions (
     started_at TEXT NOT NULL,
     ended_at TEXT,
     status TEXT NOT NULL CHECK(status IN ('active','closed')),
-    initial_cash_usd REAL NOT NULL CHECK(initial_cash_usd >= 0),
-    initial_sol_fee_reserve REAL NOT NULL CHECK(initial_sol_fee_reserve >= 0),
+    initial_cash_usd REAL NOT NULL CHECK(initial_cash_usd>=0),
+    initial_sol_fee_reserve REAL NOT NULL CHECK(initial_sol_fee_reserve>=0),
     created_reason TEXT NOT NULL DEFAULT 'automatic'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS only_one_active_simulation_session
@@ -394,15 +613,16 @@ CREATE INDEX IF NOT EXISTS idx_simulation_sessions_started
 CREATE TABLE IF NOT EXISTS positions (
     id TEXT PRIMARY KEY,
     token_address TEXT NOT NULL,
-    account_kind TEXT NOT NULL CHECK(account_kind IN ('paper','shadow_aggressive','shadow_conservative','live')),
-    profile TEXT NOT NULL CHECK(profile IN ('aggressive','balanced','conservative')),
+    account_kind TEXT NOT NULL CHECK(account_kind IN ('simulation','live')),
+    strategy_key TEXT,
     status TEXT NOT NULL CHECK(status IN ('opening','open','closing','closed','manual_intervention','failed')),
     simulation_session_id TEXT REFERENCES simulation_sessions(id),
+    sample_id INTEGER REFERENCES samples(id),
     prediction_id INTEGER REFERENCES predictions(id),
     model_id TEXT REFERENCES models(id),
     entry_time TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    invested_usd REAL NOT NULL CHECK(invested_usd >= 0),
+    invested_usd REAL NOT NULL CHECK(invested_usd>=0),
     token_amount REAL,
     entry_price REAL,
     stop_loss_price REAL,
@@ -414,11 +634,9 @@ CREATE TABLE IF NOT EXISTS positions (
     net_pnl_usd REAL,
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
-CREATE INDEX IF NOT EXISTS idx_positions_status_kind ON positions(status, account_kind);
-CREATE UNIQUE INDEX IF NOT EXISTS one_position_per_prediction_account
-    ON positions(prediction_id, account_kind) WHERE prediction_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_positions_status_kind ON positions(status,account_kind);
 CREATE UNIQUE INDEX IF NOT EXISTS one_live_position_per_token
-    ON positions(token_address) WHERE account_kind = 'live' AND status IN ('opening','open','closing');
+    ON positions(token_address) WHERE account_kind='live' AND status IN ('opening','open','closing');
 
 CREATE TABLE IF NOT EXISTS trades (
     id TEXT PRIMARY KEY,
@@ -449,8 +667,8 @@ CREATE TABLE IF NOT EXISTS trades (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_trades_position ON trades(position_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_trades_position ON trades(position_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status,updated_at);
 
 CREATE TABLE IF NOT EXISTS training_runs (
     id TEXT PRIMARY KEY,
@@ -482,7 +700,7 @@ CREATE TABLE IF NOT EXISTS agent_proposals (
     error_message TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_proposals_status_created
-    ON agent_proposals(status, created_at DESC);
+    ON agent_proposals(status,created_at DESC);
 
 CREATE TABLE IF NOT EXISTS runtime_state (
     key TEXT PRIMARY KEY,
@@ -501,7 +719,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     details_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_category ON audit_logs(category, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_category ON audit_logs(category,created_at DESC);
 """
 
 
