@@ -61,10 +61,12 @@ class FakeMarketProvider(FakeKlineProvider):
     async def token_bundle(self, address: str):
         return {
             "token_info": {
-                "address": address,
-                "price": 1.1,
-                "liquidity": 12345.0,
-                "market_cap": 98765.0,
+                "data": {
+                    "address": address,
+                    "price": 1.1,
+                    "liquidity": 12345.0,
+                    "circulating_supply": 90000.0,
+                }
             }
         }
 
@@ -305,4 +307,5 @@ async def test_monitor_persists_current_market_snapshot_without_changing_exit_de
     snapshot = json.loads(row["metadata_json"])["market_snapshot"]
     assert snapshot["price"] == pytest.approx(1.1)
     assert snapshot["liquidity_usd"] == pytest.approx(12345.0)
-    assert snapshot["market_cap_usd"] == pytest.approx(98765.0)
+    assert snapshot["market_cap_usd"] == pytest.approx(99000.0)
+    assert snapshot["market_cap_source"] == "gmgn_price_x_circulating_supply"

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol, Sequence
 
 from ..collector.enrichment import merge_sources
-from ..collector.filters import normalize_token
+from ..collector.filters import first, normalize_token, to_float
 from ..collector.models import Kline
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
@@ -177,11 +177,28 @@ class PaperPositionMonitor:
         if callable(token_bundle):
             try:
                 bundle = await token_bundle(address)
-                normalized = normalize_token(merge_sources(bundle), "")
-                if normalized.get("price") is not None:
-                    snapshot["price"] = normalized["price"]
+                merged = merge_sources(bundle)
+                normalized = normalize_token(merged, "")
+                current_price = to_float(normalized.get("price"))
+                if current_price is not None:
+                    snapshot["price"] = current_price
                 snapshot["liquidity_usd"] = normalized.get("liquidity")
-                snapshot["market_cap_usd"] = normalized.get("marketcap")
+
+                market_cap = to_float(normalized.get("marketcap"))
+                market_cap_source = "gmgn_direct" if market_cap is not None else None
+                if market_cap is None and current_price is not None:
+                    circulating_supply = to_float(first(merged, ("circulating_supply",)))
+                    total_supply = to_float(first(merged, ("total_supply",)))
+                    supply = circulating_supply if circulating_supply is not None else total_supply
+                    if supply is not None and supply > 0:
+                        market_cap = current_price * supply
+                        market_cap_source = (
+                            "gmgn_price_x_circulating_supply"
+                            if circulating_supply is not None
+                            else "gmgn_price_x_total_supply"
+                        )
+                snapshot["market_cap_usd"] = market_cap
+                snapshot["market_cap_source"] = market_cap_source
             except Exception:
                 # K-line monitoring remains authoritative for exits. A failed
                 # optional token snapshot must never block or delay an exit.

@@ -32,6 +32,11 @@ const compactMoney = (value: number | null | undefined) => value == null
       maximumFractionDigits: 2
     }).format(value);
 
+const priceMultiple = (currentPrice: number | null | undefined, entryPrice: number | null | undefined) => {
+  if (currentPrice == null || entryPrice == null || entryPrice <= 0) return "—";
+  return `${(currentPrice / entryPrice).toFixed(2)}x`;
+};
+
 const beijingTime = (value: string | null | undefined) => {
   if (!value) return "—";
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -299,7 +304,7 @@ export function PortfolioPage() {
         {current.length ? (
           <div className="table-scroll">
             <table>
-              <thead><tr><th>Token</th><th>状态</th><th>投入</th><th>入场</th><th>当前流动性</th><th>当前市值</th><th>到期</th></tr></thead>
+              <thead><tr><th>Token</th><th>状态</th><th>投入</th><th>入场</th><th>当前流动性</th><th>市值</th><th>当前涨幅</th><th>到期</th></tr></thead>
               <tbody>{current.map((item) => (
                 <tr key={item.id}>
                   <td className="mono token-cell" title={item.token_address}>
@@ -311,6 +316,7 @@ export function PortfolioPage() {
                   <td>{beijingTime(item.entry_time)}</td>
                   <td>{compactMoney(item.current_liquidity_usd)}</td>
                   <td>{compactMoney(item.current_market_cap_usd)}</td>
+                  <td>{priceMultiple(item.current_price, item.entry_price)}</td>
                   <td>{beijingTime(item.expires_at)}</td>
                 </tr>
               ))}</tbody>
