@@ -23,7 +23,8 @@ async def no_sleep(_: float) -> None:
 
 def test_twelve_key_role_layout_is_stable_and_redacted() -> None:
     roles = ApiKeyRoles.from_secrets([f"secret-{i}" for i in range(12)])
-    assert [slot.index for slot in roles.discovery] == [0, 1, 2]
+    assert [slot.index for slot in roles.discovery] == [0, 1]
+    assert roles.position_monitor.index == 2
     assert roles.discovery_fallback.index == 3
     assert [slot.index for slot in roles.realtime] == [4, 5, 6, 7]
     assert [slot.index for slot in roles.realtime_fallback] == [8, 9]

@@ -29,7 +29,7 @@ Top-3 Predictions + rules_only Baseline
   ↓
 Simulation Accounts / parked Live Interface
   ↓
-1m Kline Position Monitor + T+1h Label Finalizer
+4s Current-Price Position Monitor + T+1h Kline Label Finalizer
   ↓
 Training Queue / OOS E-G-S Ranking / Top-3 Publish / Rollback
 ```
@@ -190,35 +190,23 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 每个显式 simulation session 创建四策略账本：`model_1 / model_2 / model_3 / rules_only`，各自 1000 USD 单一 USD 账本。schema v9 的 `account_kind` 只分 `simulation/live`；策略完全由 `strategy_key` 表达。模拟盘不维护 SOL reserve，应用重启恢复，不自动重置。
 
-`simulation_sessions` registry 持久保存历史。reset 只有在无模拟开放仓时才允许：关闭旧 session，创建唯一 active session，重置四策略账本，不删除历史 position/trade/PnL。
+`simulation_sessions` registry 持久保存代际。人工 reset、重大 model generation activation 或 rollback 只有在四策略全部无 `opening/open/closing/manual_intervention` 仓位时才允许；换代先冻结四策略新开仓，全部平仓后关闭旧 session、创建带 `model_generation_upgrade`/`model_generation_rollback` 原因的新 active session，四账本统一回到 1000 USD。
 
 ### 8.2 成交模型
 
-BUY/SELL 经 seeded local quote model，包含：
+BUY 仍经 seeded local quote model，包含流动性 price impact、随机滑点、1% platform fee、按手续费发生时 SOL/USD 冻结的 network fee、latency 与 injectable failures。失败不得伪造持仓或零 PnL 平仓。
 
-- 流动性占比 price impact；
-- 随机滑点；
-- 1% platform fee；
-- network fee：保留 `network_fee_sol` 原始交易事实，同时冻结手续费发生时 `sol_usd_price` 并写入 `network_fee_usd`；模拟现金与 PnL 只按 USD 扣减；
-- latency；
-- injectable failures。
-
-失败不得伪造持仓或零 PnL 平仓。
+SELL runtime 由 `PositionMonitorWorker` 驱动：专用 GMGN Key 3 调用 `/v1/token/info`，目标 cadence 4 秒；同 Token 的 simulation/live 仓位合并一次 current-market 请求，多个 Token 并发启动并通过 15 req/s limiter 约束。0.9x SL、1.6x TP、1h timeout 都以本轮 current price 判定，而不是回看历史 1m Kline first-touch。
 
 ### 8.3 市场驱动退出
 
-Prediction 只负责评分/开仓，不能在样本成熟后用 tag 事后“代替模拟成交”。`PaperPositionMonitor` 使用 1m Kline：
+Prediction 只负责评分/开仓，不能在样本成熟后用 tag 事后“代替模拟成交”。模拟仓命中 current-price 条件后立即冻结 reason/reference/trigger，position -> closing，并在同轮调用 Jupiter Token→USDC `/swap/v2/order` quote-only route probe；真实 `outAmount` 决定模拟 SELL fill。SELL quote 失败时持久化 `paper_exit_pending`，后续周期/重启只重试原退出，不因行情变化改写原因。旧 `PaperPositionMonitor` 1m Kline 路径仅为兼容/离线测试保留，不在生产 runtime 调用。
 
-- 0.9x SL；
-- 1.6x TP；
-- 1h timeout close；
-- same bar SL first。
-
-触发后冻结 reason/reference/trigger，position -> closing。SELL quote 失败时持久化 `paper_exit_pending`，后续周期/重启只重试原退出，不因行情变化改写原因。同 token 多仓共享 Kline fetch。
+2026-08-13 已删除所有非 `h1_route_aware_v1` 的已平仓 simulation position/trade；卡片、history 与 audit 只基于保留的 H1 执行事实。样本、预测、模型工件与 live 数据不随该清理删除。
 
 ## 9. Live 接口与 fail-closed
 
-当前 live 自动 BUY **刻意未接通**。保留：
+当前 live 自动 BUY **刻意未接通**。已存在 live 持仓由同一个 `PositionMonitorWorker` 以约 4s current-price cadence 监控；只有 `DRY_RUN=false` 且 runtime live gate 已武装时，触发退出才进入既有 `LiveTradingService` 幂等执行链，否则 fail-closed。保留：
 
 - GMGN CLI/HTTP provider adapters；
 - quote/swap/status 类型；
@@ -256,7 +244,7 @@ proposal 持久化到 SQLite，必须人工 approve/reject。批准后才执行�
 - Models / 模型中心
 - Agent Approval / Agent审批
 
-Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡以两列布局展示 8 项指标；`current balance` 是不含持仓本金的可用 USD 现金，`realized PnL` 使用 closed position 的净 PnL。模型卡 Precision/Recall 同时受当前 `model_id`、`selected_at`、sample `entry_time` 与 mature tag 约束，防止上线前 backlog 污染；`rules_only` 等价于全预测为正，因此 Precision 为当前 session 成熟样本正类率、存在正类时 Recall=100%。当前仓位市场快照来自持仓监控，交易历史由 SQL 真分页/时间筛选。live 视图复用同构 UI/账本 contract，在钱包事实和 live BUY E2E 未完成前保持 fail-closed。Models 使用算法全称并展示 Top 3、E/G/S、final certification、rules-only 基线、候选池、feature coverage、durable training/待空仓 activation 和 Rank 1 rollback；Runtime 显示 TrainingWorker/model health/health-aware scheduler/monitor-only/reconciliation/liquidation。
+Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡以两列布局展示 8 项指标；`current balance` 是不含持仓本金的可用 USD 现金，`realized PnL` 使用 closed position 的净 PnL。模型卡 Precision/Recall 同时受当前 `model_id`、`selected_at`、sample `entry_time` 与 mature tag 约束，防止上线前 backlog 污染；`rules_only` 等价于全预测为正，因此 Precision 为当前 session 成熟样本正类率、存在正类时 Recall=100%。当前仓位市场快照来自持仓监控，交易历史由 SQL 真分页/时间筛选。live 视图复用同构 UI/账本 contract，在钱包事实和 live BUY E2E 未完成前保持 fail-closed。Models 使用算法全称并展示 Top 3、E/G/S、final certification、rules-only 基线、候选池、feature coverage、durable training/待空仓 activation 和 Rank 1 rollback；Runtime 显示 TrainingWorker/model health/health-aware scheduler/4s position-monitor/reconciliation/liquidation。
 
 ## 12. 单机第一版边界
 
@@ -279,8 +267,8 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - 时序 split/扩展候选池/单一决策线/`6TP-FP`/E-G-S/one-standard-error Occam/final 隔离；
 - Top 3 原子发布/三 active model degraded/Rank 1 rollback；
 - durable training queue/restart/scheduler retry；
-- 四策略 simulation session、rules-only 无预测开仓、同币四策略共享 Kline、ledger/first-touch/closing recovery；
-- monitor-only collector lifecycle；
+- 四策略 simulation session、rules-only 无预测开仓、同 Token current-market 请求合并、4s current-price trigger、Jupiter executable quote、ledger/closing recovery；
+- collector 与独立 4s position-monitor lifecycle；
 - Agent approval；
 - FastAPI non-live workflows；
 - live journal/reconciliation/liquidation mock/contract fixtures；
@@ -339,12 +327,12 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - 扩展候选池 + chronological OOS + 单一决策线 + `6TP-FP`/E-G-S + one-standard-error Occam + final 隔离；
 - H1/no-completed 迁移后正式 run `ca922c9b-a835-486b-ba61-e94c04978399` 当前发布 Extra Trees / AdaBoost / Random Forest；其工件保留原训练时的冻结特征/阈值，新的自适应特征选择从后续 run 生效；
 - TrainingWorker、`insufficient_data` 每日 17:00 / 其他状态周 17:00、16:00 model-entry freeze、startup catch-up、有限 retry、candidate waiting-for-flat/restart recovery、7 日 model health、rollback；
-- 四策略 USD-only simulation session、Top 3 prediction + rules-only、手续费发生时 SOL/USD 冻结折算并保留原始 SOL 事实、市场驱动 1m first-touch、SELL failure/restart recovery、8 项 generation 卡片指标、rules-only Precision/Recall、session history、monitor-only worker；
+- 四策略 USD-only simulation session、Top 3 prediction + rules-only、手续费发生时 SOL/USD 冻结折算并保留原始 SOL 事实、约 4s current-price 持仓触发、Jupiter executable quote、SELL failure/restart recovery、8 项卡片指标、重大模型换代新 session、H1-only history、独立 position-monitor worker；
 - Agent durable proposal + 人工 approve/reject + 非实盘白名单执行；live/wallet/secret proposal fail-closed；
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × strategy` 同构视图、当前市场快照、SQL 分页/时间筛选与四策略“模型”交易审计；
-- 后端 `pytest -q` **115/115 通过**；前端 `npm run build` 通过；新增覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态以及 current-generation 历史隔离。
+- 后端 `pytest -q` **119/119 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、4s current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
 
 ### 实盘接口停放
 

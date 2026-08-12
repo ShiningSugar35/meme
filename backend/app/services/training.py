@@ -227,7 +227,7 @@ class TrainingService:
                 "warnings": list(result.warnings),
                 "activation": {
                     "status": "waiting_for_flat",
-                    "required_flat_strategies": ["model_1", "model_2", "model_3"],
+                    "required_flat_strategies": ["model_1", "model_2", "model_3", "rules_only"],
                 },
                 "selection_formula": {
                     "economic": "mean_clip((6*TP-FP)/(6*N_positive),-1,1) [unchanged E_proxy]",
@@ -328,12 +328,16 @@ class TrainingService:
         if pending is None:
             return None
 
+        # Close the race between the flat check and session rollover: no
+        # strategy may open a new position after we decide this generation is
+        # ready to activate. Any failure after this point remains fail-closed.
+        self.database.set_runtime_state("model_entries_paused_for_rollover", True)
         open_count = int((self.database.fetch_one(
             """
             SELECT COUNT(*) AS count
             FROM positions
             WHERE account_kind='simulation'
-              AND strategy_key IN ('model_1','model_2','model_3')
+              AND strategy_key IN ('model_1','model_2','model_3','rules_only')
               AND status IN ('opening','open','closing','manual_intervention')
             """
         ) or {"count": 0})["count"])
@@ -346,7 +350,7 @@ class TrainingService:
                     "paused": True,
                     "scheduled_for": pending.get("scheduled_for"),
                     "schedule_mode": "manual" if not pending.get("scheduled_for") else str(pending.get("trigger") or "scheduled"),
-                    "reason": "candidate_models_waiting_for_all_model_positions_to_close",
+                    "reason": "candidate_models_waiting_for_all_simulation_positions_to_close",
                     "updated_at": now,
                 },
             )
@@ -369,9 +373,8 @@ class TrainingService:
         # implementation details during module import.
         from .paper_trading import PaperTradingService
 
-        PaperTradingService(self.database, self.settings).reset_model_accounts_for_activation(
-            top_models,
-            activated_at=activated_at,
+        simulation = PaperTradingService(self.database, self.settings).reset_simulation(
+            created_reason="model_generation_upgrade"
         )
         try:
             summary = json.loads(pending.get("summary_json") or "{}")
@@ -380,7 +383,8 @@ class TrainingService:
         summary["activation"] = {
             "status": "activated",
             "activated_at": activated_at,
-            "required_flat_strategies": ["model_1", "model_2", "model_3"],
+            "required_flat_strategies": ["model_1", "model_2", "model_3", "rules_only"],
+            "simulation_session_id": simulation["session"]["id"],
         }
         self.database.execute(
             "UPDATE training_runs SET promoted=1, summary_json=? WHERE id=? AND promoted=0",
@@ -406,6 +410,7 @@ class TrainingService:
                 "activated_at": activated_at,
                 "model_ids": [str(item["id"]) for item in top_models],
                 "open_model_positions": 0,
+                "simulation_session_id": simulation["session"]["id"],
             },
         )
         self.database.audit(
@@ -426,16 +431,17 @@ class TrainingService:
             raise ValueError("model not found")
         if target["status"] != "retired":
             raise ValueError("only a retired rank-1 model can be rolled back")
+        self.database.set_runtime_state("model_entries_paused_for_rollover", True)
         open_count = int((self.database.fetch_one(
             """
             SELECT COUNT(*) AS count FROM positions
             WHERE account_kind='simulation'
-              AND strategy_key IN ('model_1','model_2','model_3')
+              AND strategy_key IN ('model_1','model_2','model_3','rules_only')
               AND status IN ('opening','open','closing','manual_intervention')
             """
         ) or {"count": 0})["count"])
         if open_count:
-            raise ValueError("model rollback requires model_1/model_2/model_3 to be fully flat")
+            raise ValueError("model rollback requires all four simulation strategies to be fully flat")
         artifact = Path(str(target["artifact_path"]))
         artifact = artifact if artifact.is_absolute() else PROJECT_ROOT / artifact
         if not artifact.exists():
@@ -444,12 +450,10 @@ class TrainingService:
         previous = self.models.champion()
         self.models.rollback(model_id)
         activated_at = utc_now_iso()
-        active = self.models.active_models()
         from .paper_trading import PaperTradingService
 
-        PaperTradingService(self.database, self.settings).reset_model_accounts_for_activation(
-            active,
-            activated_at=activated_at,
+        simulation = PaperTradingService(self.database, self.settings).reset_simulation(
+            created_reason="model_generation_rollback"
         )
         self.database.set_runtime_state("last_model_activation_at", activated_at)
         self.database.audit(
@@ -462,8 +466,10 @@ class TrainingService:
                 "previous_rank1_id": previous["id"] if previous else None,
                 "statistics_reset": True,
                 "activated_at": activated_at,
+                "simulation_session_id": simulation["session"]["id"],
             },
         )
+        self.database.set_runtime_state("model_entries_paused_for_rollover", False)
         champion = self.models.champion()
         assert champion is not None
         return champion

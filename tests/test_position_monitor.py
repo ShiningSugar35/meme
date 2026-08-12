@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from backend.app.config import Settings
+from backend.app.database import Database
+from backend.app.services.paper_position_monitor import PaperPositionMonitor
+from backend.app.services.paper_trading import PaperTradingService
+from backend.app.services.position_monitor import PositionMonitorService
+from backend.app.trading.live.models import ExecutionResult, OrderStatus
+from backend.app.trading.simulator.jupiter_probe import RouteProbeResult
+
+
+class CurrentMarketProvider:
+    def __init__(self, price: float, *, liquidity: float = 10_000.0) -> None:
+        self.price = price
+        self.liquidity = liquidity
+        self.calls: list[str] = []
+
+    async def token_bundle(self, address: str):
+        self.calls.append(address)
+        return {
+            "token_info": {
+                "data": {
+                    "address": address,
+                    "price": self.price,
+                    "liquidity": self.liquidity,
+                    "decimals": 6,
+                    "circulating_supply": 100_000.0,
+                }
+            }
+        }
+
+
+class FixedRouteProbe:
+    def __init__(self, out_amount_raw: int = 44_000_000) -> None:
+        self.out_amount_raw = out_amount_raw
+        self.calls: list[dict] = []
+
+    async def quote_sell(self, **kwargs):
+        self.calls.append(kwargs)
+        return RouteProbeResult(
+            "quoted",
+            "jupiter-test",
+            out_amount_raw=self.out_amount_raw,
+            route_count=1,
+        )
+
+
+class FixedSolPrice:
+    def price_at(self, occurred_at):
+        return SimpleNamespace(
+            price_usd=180.0,
+            observed_at=int(occurred_at.timestamp()),
+            source="test",
+        )
+
+
+class FakeLiveService:
+    def __init__(self) -> None:
+        self.intents = []
+
+    async def execute(self, intent):
+        self.intents.append(intent)
+        return ExecutionResult(
+            client_order_id=intent.client_order_id,
+            order_id="order-1",
+            status=OrderStatus.CONFIRMED,
+            attempts=1,
+            tx_hash="tx-1",
+        )
+
+
+def make_settings(tmp_path: Path, *, dry_run: bool = True) -> Settings:
+    return Settings(
+        _env_file=None,
+        app_env="test",
+        sqlite_path=str(tmp_path / "unused.db"),
+        background_workers_enabled=False,
+        simulation_enabled=True,
+        paper_market_monitor_enabled=True,
+        position_monitor_enabled=True,
+        position_monitor_poll_seconds=4.0,
+        dry_run=dry_run,
+        wallet_public_key="wallet-test",
+    )
+
+
+def make_database(tmp_path: Path) -> Database:
+    database = Database(tmp_path / "monitor.db")
+    database.initialize()
+    return database
+
+
+def seed_paper(database: Database, *, position_id: str, address: str, opened: datetime) -> None:
+    session_id = PaperTradingService(database).ensure_simulation_session()["id"]
+    database.execute(
+        """
+        INSERT INTO positions(
+            id,token_address,account_kind,strategy_key,status,simulation_session_id,
+            entry_time,expires_at,invested_usd,token_amount,entry_price,
+            stop_loss_price,take_profit_price,metadata_json
+        ) VALUES(?,?, 'simulation','model_1','open',?,?,?,?,?,?,?,?, '{}')
+        """,
+        (
+            position_id,
+            address,
+            session_id,
+            opened.isoformat(),
+            (opened + timedelta(hours=1)).isoformat(),
+            50.0,
+            50.0,
+            1.0,
+            0.9,
+            1.6,
+        ),
+    )
+
+
+def seed_live(database: Database, *, position_id: str, address: str, opened: datetime) -> None:
+    metadata = {
+        "token_amount_raw": "50000000",
+        "exit_output_token": "usdc-test",
+    }
+    database.execute(
+        """
+        INSERT INTO positions(
+            id,token_address,account_kind,strategy_key,status,
+            entry_time,expires_at,invested_usd,token_amount,entry_price,
+            stop_loss_price,take_profit_price,metadata_json
+        ) VALUES(?,?, 'live',NULL,'open',?,?,?,?,?,?,?,?)
+        """,
+        (
+            position_id,
+            address,
+            opened.isoformat(),
+            (opened + timedelta(hours=1)).isoformat(),
+            50.0,
+            50.0,
+            1.0,
+            0.9,
+            1.6,
+            json.dumps(metadata),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_price_above_stop_stays_open_without_kline_lookup(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_paper(database, position_id="paper-open", address="same-token", opened=opened)
+    provider = CurrentMarketProvider(0.95)
+    paper = PaperTradingService(database, settings, sol_price_service=FixedSolPrice())
+    service = PositionMonitorService(
+        database,
+        settings,
+        paper_service=paper,
+        paper_monitor=PaperPositionMonitor(database, settings, paper_service=paper),
+    )
+
+    report = await service.run_cycle(provider)
+
+    assert report.checked_positions == 1
+    assert report.market_requests == 1
+    assert provider.calls == ["same-token"]
+    row = database.fetch_one("SELECT status,exit_reason FROM positions WHERE id='paper-open'")
+    assert row == {"status": "open", "exit_reason": None}
+
+
+@pytest.mark.asyncio
+async def test_current_price_stop_triggers_same_cycle_executable_quote(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_paper(database, position_id="paper-stop", address="stop-token", opened=opened)
+    provider = CurrentMarketProvider(0.89)
+    route_probe = FixedRouteProbe(out_amount_raw=44_000_000)
+    paper = PaperTradingService(database, settings, sol_price_service=FixedSolPrice())
+    paper_monitor = PaperPositionMonitor(
+        database,
+        settings,
+        paper_service=paper,
+        route_probe=route_probe,
+    )
+    service = PositionMonitorService(
+        database,
+        settings,
+        paper_service=paper,
+        paper_monitor=paper_monitor,
+    )
+
+    report = await service.run_cycle(provider)
+
+    assert report.paper_closed == 1
+    assert len(route_probe.calls) == 1
+    row = database.fetch_one(
+        "SELECT status,exit_reason,exit_price,metadata_json FROM positions WHERE id='paper-stop'"
+    )
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "stop_loss_0_9x"
+    assert row["exit_price"] == pytest.approx(0.88)
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["execution_policy_version"] == "h1_route_aware_v1"
+    assert metadata["exit_route_probe"]["state"] == "quoted"
+    assert metadata["exit_trigger_at"] >= int(opened.timestamp())
+
+
+@pytest.mark.asyncio
+async def test_live_current_price_trigger_respects_dry_run_gate(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path, dry_run=True)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_live(database, position_id="live-gated", address="live-token", opened=opened)
+    database.set_runtime_state("live_trading_enabled", True)
+    live = FakeLiveService()
+    service = PositionMonitorService(database, settings, live_service=live)
+
+    report = await service.run_cycle(CurrentMarketProvider(0.89))
+
+    assert report.blocked_positions == 1
+    assert live.intents == []
+    row = database.fetch_one("SELECT status,metadata_json FROM positions WHERE id='live-gated'")
+    assert row["status"] == "open"
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["last_live_exit_signal"]["blocked_reason"] == "live_execution_not_armed"
+
+
+@pytest.mark.asyncio
+async def test_armed_live_trigger_executes_asynchronously_without_blocking_cycle(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path, dry_run=False)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_live(database, position_id="live-exit", address="live-token", opened=opened)
+    database.set_runtime_state("live_trading_enabled", True)
+    live = FakeLiveService()
+    service = PositionMonitorService(database, settings, live_service=live)
+
+    report = await service.run_cycle(CurrentMarketProvider(0.89))
+    assert report.live_triggered == 1
+    await service.shutdown()
+
+    assert len(live.intents) == 1
+    row = database.fetch_one("SELECT status,exit_reason,metadata_json FROM positions WHERE id='live-exit'")
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "stop_loss_0_9x"
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["live_exit_execution"]["status"] == "confirmed"

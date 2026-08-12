@@ -216,9 +216,15 @@ class PredictionService:
             (admission_cutoff, session["id"], limit),
         )
         opened = stale = blocked = 0
+        rollover_paused = bool(
+            self.database.get_runtime_state("model_entries_paused_for_rollover", False)
+        )
         for row in rows:
             if now_epoch - int(row["entry_time"]) > self.settings.signal_max_age_seconds:
                 stale += 1
+                continue
+            if rollover_paused:
+                blocked += 1
                 continue
             result = self.paper.open_rule_only(sample_id=int(row["id"]))
             if result.opened:

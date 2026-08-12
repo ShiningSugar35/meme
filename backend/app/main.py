@@ -14,6 +14,7 @@ from .services.collector_worker import CollectorWorker
 from .services.csv_importer import CsvImporter
 from .services.liquidation import LiquidationWorker
 from .services.model_health import ModelHealthWorker
+from .services.position_monitor import PositionMonitorWorker
 from .services.prediction import PredictionWorker
 from .services.reconciliation import ReconciliationWorker
 from .services.training_worker import TrainingWorker
@@ -34,6 +35,7 @@ async def lifespan(_: FastAPI):
     reconciliation_worker: ReconciliationWorker | None = None
     liquidation_worker: LiquidationWorker | None = None
     model_health_worker: ModelHealthWorker | None = None
+    position_monitor_worker: PositionMonitorWorker | None = None
     training_worker: TrainingWorker | None = None
 
     if settings.app_env != "test":
@@ -97,18 +99,22 @@ async def lifespan(_: FastAPI):
         model_health_worker = ModelHealthWorker(database, settings)
         tasks.append(asyncio.create_task(model_health_worker.run_forever(), name="model-health-worker"))
 
+        if settings.position_monitor_enabled:
+            position_monitor_worker = PositionMonitorWorker(database, settings)
+            tasks.append(
+                asyncio.create_task(
+                    position_monitor_worker.run_forever(), name="position-monitor-worker"
+                )
+            )
+
         prediction_worker = PredictionWorker(database, settings)
         tasks.append(asyncio.create_task(prediction_worker.run_forever(), name="prediction-worker"))
-        if settings.collector_enabled or settings.paper_market_monitor_enabled:
-            collector = CollectorWorker(
-                database,
-                settings,
-                monitor_only=not settings.collector_enabled,
-            )
+        if settings.collector_enabled:
+            collector = CollectorWorker(database, settings, monitor_only=False)
             tasks.append(
                 asyncio.create_task(
                     collector.run_forever(),
-                    name="gmgn-collector" if settings.collector_enabled else "paper-market-monitor",
+                    name="gmgn-collector",
                 )
             )
 
@@ -127,6 +133,8 @@ async def lifespan(_: FastAPI):
             liquidation_worker.stop()
         if model_health_worker:
             model_health_worker.stop()
+        if position_monitor_worker:
+            position_monitor_worker.stop()
         if training_worker:
             training_worker.stop()
         if tasks:

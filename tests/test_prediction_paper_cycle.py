@@ -156,7 +156,7 @@ def test_stale_oos_signals_and_rule_baseline_are_not_retroactively_filled(tmp_pa
     assert database.fetch_one("SELECT COUNT(*) AS n FROM positions")["n"] == 0
 
 
-def test_rollover_gate_blocks_model_buys_but_keeps_rules_only_running(tmp_path):
+def test_rollover_gate_blocks_all_four_simulation_strategies(tmp_path):
     database = Database(tmp_path / "rollover.db")
     database.initialize()
     settings = Settings(
@@ -185,9 +185,9 @@ def test_rollover_gate_blocks_model_buys_but_keeps_rules_only_running(tmp_path):
 
     assert result.predictions_written == 3
     assert result.model_positions_opened == 0
-    assert result.blocked_signals == 3
-    assert result.rule_positions_opened == 1
-    assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key='rules_only'")["n"] == 1
+    assert result.blocked_signals == 4
+    assert result.rule_positions_opened == 0
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key='rules_only'")["n"] == 0
     assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key LIKE 'model_%'")["n"] == 0
 
 

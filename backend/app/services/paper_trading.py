@@ -389,13 +389,13 @@ class PaperTradingService:
             },
         )
 
-    def reset_simulation(self) -> dict[str, Any]:
+    def reset_simulation(self, *, created_reason: str = "manual_reset") -> dict[str, Any]:
         open_count = int((self.database.fetch_one(
             """
             SELECT COUNT(*) AS count FROM positions
             WHERE account_kind='simulation'
               AND strategy_key IN ('model_1','model_2','model_3','rules_only')
-              AND status IN ('opening','open','closing')
+              AND status IN ('opening','open','closing','manual_intervention')
             """
         ) or {"count": 0})["count"])
         if open_count:
@@ -423,7 +423,7 @@ class PaperTradingService:
                     session["started_at"],
                     session["initial_cash_usd"],
                     session["initial_sol_fee_reserve"],
-                    "manual_reset",
+                    created_reason,
                 ),
             )
             self._write_runtime_state(connection, "simulation_session", session)
@@ -438,6 +438,7 @@ class PaperTradingService:
             action="simulation_session_reset",
             entity_type="simulation_session",
             entity_id=session["id"],
+            details={"created_reason": created_reason},
         )
         return self.simulation_status()
 
@@ -913,6 +914,106 @@ class PaperTradingService:
             if self._settle(row):
                 settled += 1
         return settled
+
+    def monitor_position_realtime(
+        self,
+        position_id: str,
+        current_price: float,
+        *,
+        now_ts: int | None = None,
+        execution_quote: ExecutionQuote | None = None,
+        defer_execution: bool = False,
+    ) -> PaperMonitorResult:
+        """Evaluate an open paper position from the current market price only."""
+        row = self.database.fetch_one(
+            """
+            SELECT p.*,s.liquidity AS sample_liquidity
+            FROM positions p
+            LEFT JOIN predictions pr ON pr.id=p.prediction_id
+            LEFT JOIN samples s ON s.id=COALESCE(p.sample_id,pr.sample_id)
+            WHERE p.id=?
+            """,
+            (position_id,),
+        )
+        if not row:
+            return PaperMonitorResult(position_id, "blocked", "position_not_found")
+        if (
+            str(row.get("account_kind") or "") != "simulation"
+            or str(row.get("strategy_key") or "") not in SIMULATION_STRATEGIES
+        ):
+            return PaperMonitorResult(position_id, "blocked", "not_strategy_position")
+        if row["status"] == "closed":
+            return PaperMonitorResult(position_id, "closed", "already_closed")
+
+        current_ts = int(now_ts or datetime.now(timezone.utc).timestamp())
+        try:
+            metadata = json.loads(row.get("metadata_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        pending_exit = metadata.get("paper_exit_pending")
+        if isinstance(pending_exit, dict):
+            if defer_execution and execution_quote is None:
+                return PaperMonitorResult(
+                    position_id,
+                    "pending",
+                    "execution_route_probe_required",
+                    int(pending_exit.get("trigger_at") or 0) or None,
+                )
+            return self._execute_monitored_exit(
+                row, metadata, pending_exit, now_ts=current_ts, execution_quote=execution_quote
+            )
+        if row["status"] != "open":
+            return PaperMonitorResult(position_id, "pending", f"position_{row['status']}")
+
+        price = float(current_price or 0.0)
+        if price <= 0:
+            return PaperMonitorResult(position_id, "blocked", "current_price_unavailable")
+        expires_at = datetime.fromisoformat(str(row["expires_at"]))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        stop_price = float(row.get("stop_loss_price") or 0.0)
+        take_price = float(row.get("take_profit_price") or 0.0)
+        reason: str | None = None
+        if stop_price > 0 and price <= stop_price:
+            reason = "stop_loss_0_9x"
+        elif take_price > 0 and price >= take_price:
+            reason = "take_profit_1_6x"
+        elif current_ts >= int(expires_at.timestamp()):
+            reason = "timeout_1h"
+        if reason is None:
+            metadata["last_market_check_at"] = utc_now_iso()
+            metadata["last_market_price"] = price
+            self.database.execute(
+                "UPDATE positions SET metadata_json=? WHERE id=? AND status='open'",
+                (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
+            )
+            return PaperMonitorResult(position_id, "open", "no_exit_trigger")
+
+        market_snapshot = metadata.get("market_snapshot") if isinstance(metadata.get("market_snapshot"), dict) else {}
+        live_liquidity = market_snapshot.get("liquidity_usd")
+        liquidity = float(live_liquidity) if live_liquidity is not None else float(row.get("sample_liquidity") or 0)
+        pending_exit = {
+            "reason": reason,
+            "reference_price": price,
+            "trigger_at": current_ts,
+            "liquidity_usd": liquidity,
+            "liquidity_source": "current_market_snapshot" if live_liquidity is not None else "entry_sample_fallback",
+            "attempt_count": 0,
+        }
+        metadata["paper_exit_pending"] = pending_exit
+        metadata["last_market_check_at"] = utc_now_iso()
+        metadata["last_market_price"] = price
+        self.database.execute(
+            "UPDATE positions SET status='closing',metadata_json=? WHERE id=? AND status='open'",
+            (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
+        )
+        row["status"] = "closing"
+        row["metadata_json"] = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        if defer_execution and execution_quote is None:
+            return PaperMonitorResult(position_id, "pending", "execution_route_probe_required", current_ts)
+        return self._execute_monitored_exit(
+            row, metadata, pending_exit, now_ts=current_ts, execution_quote=execution_quote
+        )
 
     def monitor_position(
         self,

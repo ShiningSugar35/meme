@@ -27,7 +27,6 @@ from ..collector import (
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..repositories.samples import SampleRecord, SampleRepository
-from .paper_position_monitor import PaperPositionMonitor
 from .sol_price import SolUsdPriceService
 
 
@@ -165,7 +164,6 @@ class CollectorWorker:
         self._stop = asyncio.Event()
         self._transport: HttpxTransport | None = None
         self._service: CollectorService | None = None
-        self._paper_monitor = PaperPositionMonitor(database, self.settings)
         self._sol_price = SolUsdPriceService(database)
         existing_events = database.get_runtime_state("collector_events", [])
         seed = existing_events[-250:] if isinstance(existing_events, list) else []
@@ -309,12 +307,6 @@ class CollectorWorker:
                 "rejection_reasons": {},
                 "type_stats": {},
             }
-            monitor_stats = {
-                "paper_positions_checked": 0,
-                "paper_positions_closed": 0,
-                "paper_positions_pending_exit": 0,
-                "paper_positions_blocked": 0,
-            }
             finalized = 0
 
             # Freeze a recent SOL/USD observation before any simulated execution.
@@ -331,36 +323,8 @@ class CollectorWorker:
                     details={"error": f"{type(exc).__name__}: {exc}"[:300]},
                 )
 
-            # Existing position exits have operational priority over discovering
-            # new tokens. Failure in any stage is isolated so a broken Trenches
-            # request can never stop paper TP/SL/timeout handling.
-            try:
-                monitor = await self._paper_monitor.run_cycle(self._service.provider)
-                monitor_stats = {
-                    "paper_positions_checked": monitor.checked_positions,
-                    "paper_positions_closed": monitor.closed_positions,
-                    "paper_positions_pending_exit": monitor.pending_positions,
-                    "paper_positions_blocked": monitor.blocked_positions,
-                }
-                if monitor.checked_positions or monitor.closed_positions or monitor.pending_positions:
-                    self._record_event(
-                        "paper_monitor",
-                        {
-                            "checked": monitor.checked_positions,
-                            "closed": monitor.closed_positions,
-                            "pending": monitor.pending_positions,
-                        },
-                    )
-            except Exception as exc:
-                message = f"{type(exc).__name__}: {exc}"[:500]
-                cycle_errors.append({"stage": "paper_monitor", "error": message})
-                self._record_event("stage_error", {"stage": "paper_monitor", "error": message})
-                self.database.audit(
-                    category="simulation",
-                    action="paper_monitor_cycle_failed",
-                    severity="error",
-                    details={"error": message},
-                )
+            # Position exits are handled by PositionMonitorWorker on its own
+            # current-market cadence. Collector remains discovery/label-only.
 
             try:
                 finalization = await self._service.finalize_due()
@@ -425,7 +389,6 @@ class CollectorWorker:
                     "requested_limit_per_type": requested_limit,
                     **collection_stats,
                     "finalized": finalized,
-                    **monitor_stats,
                     "errors": cycle_errors,
                 },
             )

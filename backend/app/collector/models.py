@@ -25,7 +25,8 @@ class ApiSlot:
 class ApiKeyRoles:
     """The 12-key allocation frozen by the source collector."""
 
-    discovery: tuple[ApiSlot, ApiSlot, ApiSlot]
+    discovery: tuple[ApiSlot, ApiSlot]
+    position_monitor: ApiSlot
     discovery_fallback: ApiSlot
     realtime: tuple[ApiSlot, ApiSlot, ApiSlot, ApiSlot]
     realtime_fallback: tuple[ApiSlot, ApiSlot]
@@ -40,7 +41,8 @@ class ApiKeyRoles:
             )
         slots = tuple(ApiSlot(index, secret) for index, secret in enumerate(clean[:12]))
         return cls(
-            discovery=(slots[0], slots[1], slots[2]),
+            discovery=(slots[0], slots[1]),
+            position_monitor=slots[2],
             discovery_fallback=slots[3],
             realtime=(slots[4], slots[5], slots[6], slots[7]),
             realtime_fallback=(slots[8], slots[9]),
@@ -55,6 +57,7 @@ class ApiKeyRoles:
     def all_slots(self) -> tuple[ApiSlot, ...]:
         return (
             *self.discovery,
+            self.position_monitor,
             self.discovery_fallback,
             *self.realtime,
             *self.realtime_fallback,

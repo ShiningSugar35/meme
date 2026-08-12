@@ -186,6 +186,19 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
             (now + timedelta(hours=2)).isoformat(),
         ),
     )
+    database.execute(
+        """
+        INSERT INTO positions(
+            id,token_address,account_kind,strategy_key,status,simulation_session_id,
+            entry_time,expires_at,invested_usd,net_pnl_usd
+        ) VALUES('rules-open','rules-token','simulation','rules_only','open',?,?,?,50,NULL)
+        """,
+        (
+            session_id,
+            now.isoformat(),
+            (now + timedelta(hours=2)).isoformat(),
+        ),
+    )
     candidate = _register_generation(database, "candidate", activate=False)
     run_id = "pending-generation"
     database.execute(
@@ -212,13 +225,21 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
     assert database.get_runtime_state("model_rollover_status")["state"] == "waiting_for_flat"
     assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 0
 
-    # Simulate the old generation closing while the process is down. A fresh
-    # TrainingWorker instance must recover the durable candidate and activate it.
+    # A model generation rollover now owns the whole four-strategy experiment.
+    # Closing only the model position is insufficient while rules_only is open.
     database.execute(
         "UPDATE positions SET status='closed',exit_time=?,net_pnl_usd=-50 WHERE id='old-open'",
         (utc_now_iso(),),
     )
     restarted_worker = TrainingWorker(database, settings)
+    assert await restarted_worker.run_once() is None
+    assert [model["id"] for model in ModelRepository(database).active_models()] == [item["id"] for item in current]
+    assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 0
+
+    database.execute(
+        "UPDATE positions SET status='closed',exit_time=?,net_pnl_usd=-50 WHERE id='rules-open'",
+        (utc_now_iso(),),
+    )
     assert await restarted_worker.run_once() is None
 
     active = ModelRepository(database).active_models()
@@ -226,6 +247,14 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
     assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 1
     assert database.get_runtime_state("model_entries_paused_for_rollover") is False
     status = PaperTradingService(database, settings).simulation_status()
+    assert status["session"]["id"] != session_id
+    session_row = database.fetch_one(
+        "SELECT created_reason FROM simulation_sessions WHERE id=?",
+        (status["session"]["id"],),
+    )
+    assert session_row["created_reason"] == "model_generation_upgrade"
+    assert status["accounts"]["rules_only"]["cash_usd"] == pytest.approx(1000.0)
+    assert status["accounts"]["rules_only"]["trade_count"] == 0
     for slot in (1, 2, 3):
         account = status["accounts"][f"model_{slot}"]
         assert account["cash_usd"] == pytest.approx(1000.0)
