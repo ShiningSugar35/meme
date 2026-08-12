@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     wallet_public_key: str | None = None
     # Read-only route verification for paper exits. Jupiter quote requests never
     # sign or submit a transaction; API keys are secret-wrapped and never exposed.
-    jupiter_api_base_url: str = "https://api.jup.ag/swap/v1"
+    paper_jupiter_quote_url: str = "https://api.jup.ag/swap/v2/order"
     jupiter_api_key_1: SecretStr | None = None
     jupiter_api_key_2: SecretStr | None = None
     jupiter_api_key_3: SecretStr | None = None

@@ -46,11 +46,11 @@ class JupiterReadOnlyQuoteProbe:
         slippage_bps: int,
     ) -> RouteProbeResult:
         if not self.settings.paper_read_only_quote_enabled:
-            return RouteProbeResult("disabled", "jupiter_quote")
+            return RouteProbeResult("disabled", "jupiter_v2_order_quote")
         if amount_raw <= 0:
             return RouteProbeResult(
                 "unavailable",
-                "jupiter_quote",
+                "jupiter_v2_order_quote",
                 error_kind="invalid_amount",
                 message="token amount is not positive",
             )
@@ -58,18 +58,17 @@ class JupiterReadOnlyQuoteProbe:
         if not keys:
             return RouteProbeResult(
                 "unavailable",
-                "jupiter_quote",
+                "jupiter_v2_order_quote",
                 error_kind="missing_api_key",
                 message="no Jupiter API key is configured",
             )
 
-        url = self.settings.jupiter_api_base_url.rstrip("/") + "/quote"
+        url = self.settings.paper_jupiter_quote_url
         params = {
             "inputMint": token_address,
             "outputMint": USDC_MINT,
             "amount": str(int(amount_raw)),
             "slippageBps": str(max(1, int(slippage_bps))),
-            "restrictIntermediateTokens": "true",
         }
         last_error: RouteProbeResult | None = None
         async with httpx.AsyncClient(
@@ -83,7 +82,7 @@ class JupiterReadOnlyQuoteProbe:
                 except (httpx.TimeoutException, httpx.NetworkError) as exc:
                     last_error = RouteProbeResult(
                         "unavailable",
-                        "jupiter_quote",
+                        "jupiter_v2_order_quote",
                         error_kind="network",
                         message=f"{type(exc).__name__}: {exc}"[:240],
                     )
@@ -113,14 +112,14 @@ class JupiterReadOnlyQuoteProbe:
                     self._key_index = (self._key_index + offset + 1) % len(keys)
                     return RouteProbeResult(
                         "no_route",
-                        "jupiter_quote",
+                        "jupiter_v2_order_quote",
                         error_kind="no_route",
                         message=message[:240] or "Jupiter returned no route",
                     )
                 if response.status_code == 429:
                     last_error = RouteProbeResult(
                         "unavailable",
-                        "jupiter_quote",
+                        "jupiter_v2_order_quote",
                         error_kind="rate_limit",
                         message=message[:240] or "Jupiter rate limit",
                     )
@@ -128,7 +127,7 @@ class JupiterReadOnlyQuoteProbe:
                 if response.status_code >= 400:
                     last_error = RouteProbeResult(
                         "unavailable",
-                        "jupiter_quote",
+                        "jupiter_v2_order_quote",
                         error_kind="api",
                         message=(message or f"HTTP {response.status_code}")[:240],
                     )
@@ -143,7 +142,7 @@ class JupiterReadOnlyQuoteProbe:
                 if out_amount_raw <= 0 or not isinstance(route_plan, list) or not route_plan:
                     return RouteProbeResult(
                         "no_route",
-                        "jupiter_quote",
+                        "jupiter_v2_order_quote",
                         error_kind="empty_route",
                         message="Jupiter returned no executable route plan",
                     )
@@ -154,7 +153,7 @@ class JupiterReadOnlyQuoteProbe:
                 self._key_index = (self._key_index + offset + 1) % len(keys)
                 return RouteProbeResult(
                     "quoted",
-                    "jupiter_quote",
+                    "jupiter_v2_order_quote",
                     out_amount_raw=out_amount_raw,
                     price_impact_pct=impact,
                     route_count=len(route_plan),
@@ -162,7 +161,7 @@ class JupiterReadOnlyQuoteProbe:
 
         return last_error or RouteProbeResult(
             "unavailable",
-            "jupiter_quote",
+            "jupiter_v2_order_quote",
             error_kind="unknown",
             message="Jupiter quote probe did not return a result",
         )

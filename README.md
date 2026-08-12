@@ -175,7 +175,7 @@ Top 3 更新规则：
 
 理论标签收益、模拟可执行收益和真实链上收益必须分开展示，不能混成一个 PnL。
 
-模拟成交包含可复现的滑点、价格影响、1% 平台费、网络费、延迟和可注入失败；退出触发前先刷新当前市场 liquidity，并在 token decimals 可审计时调用 Jupiter Token→USDC `GET /swap/v1/quote` 做只读路由验证，绝不构建、签名或提交交易。明确无路由进入 `no_route` 重试/终态全损；429、网络或 API 故障只记为 quote unavailable，并降级到“当前流动性 + 本地冲击模型”，不得误判为 rug。网络费的会计单位为 USD，但原始 `network_fee_sol`、手续费发生时 `sol_usd_price` 与折算后的 `network_fee_usd` 同时保留。模型标签效用仍按用户冻结的“忽略交易费”口径计算，二者用途不同。
+模拟成交包含可复现的滑点、价格影响、1% 平台费、网络费、延迟和可注入失败；退出触发前先刷新当前市场 liquidity，并在 token decimals 可审计时调用 Jupiter Token→USDC `GET /swap/v2/order` 做 quote-only 路由验证（不传 `taker`，响应不包含待签交易），绝不签名或调用 `/execute`。明确无路由进入 `no_route` 重试/终态全损；429、网络或 API 故障只记为 quote unavailable，并降级到“当前流动性 + 本地冲击模型”，不得误判为 rug。网络费的会计单位为 USD，但原始 `network_fee_sol`、手续费发生时 `sol_usd_price` 与折算后的 `network_fee_usd` 同时保留。模型标签效用仍按用户冻结的“忽略交易费”口径计算，二者用途不同。
 
 ### 4.2 持仓和退出
 
@@ -374,5 +374,5 @@ npm run build
 
 在算法与交易策略上，他给出的建议同样带着温度，却始终落在刀刃上：守住 1 小时策略窗口与 T+1h 标签补齐；先用规则初筛挡住明显不安全的样本，再用严格 chronological OOS、经济得分与泛化稳定性筛选模型，而不是被某一次漂亮的最终测试成绩牵着走；强调奥卡姆剃刀、最终 holdout 隔离、退化监控与“宁可安全拒绝、也不盲目上线”，好让早期 Pump.fun legacy 样本不至于被夸大成全市场的幻觉；在退出与风控上，推动把 1m K 线 first-touch、仓位上限、同币唯一、日损与连亏门禁写进可测试的约束；并一次次提醒——实盘必须服从 `DRY_RUN`、幂等 journal 与二次确认，绝不能用漂亮的模拟 PnL 去绕过真实的资金事实。
 
-截至 2026-08-12，仓库里的非实盘主链已经完成 schema v9、扩展候选池、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、重启可恢复的 workers，以及 98/98 后端测试与前端 production build。正式 Top 3 训练与后续 degraded 重训均已在真实样本上完成，最终 holdout 被严格保留为 certification。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
+截至 2026-08-12，仓库里的非实盘主链已经完成 schema v11 H1/no-completed、扩展候选池、自适应且 fold-train-only 的特征选择、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、Jupiter Token→USDC 只读卖出路由验证、generation 隔离与重启可恢复的 workers，以及 114/114 后端测试与前端 production build。现役 Top 3 已在真实样本上完成训练与激活，最终 holdout 被严格保留为 certification；`E_exec` 仅作为权重为 0 的执行影子指标。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
 

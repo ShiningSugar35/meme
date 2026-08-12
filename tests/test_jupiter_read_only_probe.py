@@ -12,7 +12,7 @@ def settings(tmp_path, **overrides) -> Settings:
         _env_file=None,
         app_env="test",
         sqlite_path=str(tmp_path / "unused.db"),
-        jupiter_api_base_url="https://api.jup.ag/swap/v1",
+        paper_jupiter_quote_url="https://api.jup.ag/swap/v2/order",
         jupiter_api_key_1="secret-key",
         paper_read_only_quote_enabled=True,
     )
@@ -34,6 +34,8 @@ async def test_read_only_quote_returns_executable_route_without_submit(tmp_path)
                 "outAmount": "698078629",
                 "priceImpactPct": "0.02029",
                 "routePlan": [{"swapInfo": {"label": "Pump.fun Amm"}}],
+                "router": "metis",
+                "transaction": None,
             },
         )
 
@@ -49,6 +51,8 @@ async def test_read_only_quote_returns_executable_route_without_submit(tmp_path)
     assert result.route_count == 1
     assert result.price_impact_pct == pytest.approx(0.02029)
     assert seen["method"] == "GET"
+    assert "/swap/v2/order" in seen["url"]
+    assert "taker=" not in seen["url"]
     assert seen["api_key"] == "secret-key"
     assert "secret-key" not in seen["url"]
 
