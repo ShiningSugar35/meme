@@ -13,7 +13,7 @@ from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..strategy import RULES_ONLY, SIMULATION_STRATEGIES, algorithm_display_name, validate_strategy
 from ..trading.simulator.quote import SimulatedQuoteProvider
-from ..trading.simulator.types import QuoteRequest, Side
+from ..trading.simulator.types import ExecutionQuote, QuoteRequest, Side
 from .sol_price import SolUsdPriceService
 
 
@@ -624,7 +624,7 @@ class PaperTradingService:
             f"model_{row['active_slot']}": row
             for row in self.database.fetch_all(
                 """
-                SELECT s.slot AS active_slot,m.id,m.algorithm,m.trained_at
+                SELECT s.slot AS active_slot,s.selected_at,m.id,m.algorithm,m.trained_at
                 FROM active_model_slots s JOIN models m ON m.id=s.model_id
                 ORDER BY s.slot
                 """
@@ -634,15 +634,33 @@ class PaperTradingService:
         for session in sessions:
             accounts = session.get("accounts") or {}
             for strategy in PAPER_ACCOUNTS:
-                summary = accounts.get(strategy) or {}
-                timing = self.database.fetch_one(
-                    """
-                    SELECT MIN(entry_time) AS first_entry_time, MAX(exit_time) AS last_exit_time
-                    FROM positions WHERE simulation_session_id=? AND strategy_key=?
-                    """,
-                    (session["id"], strategy),
-                ) or {}
                 model = active_models.get(strategy)
+                summary = accounts.get(strategy) or {}
+                scope_clauses = ["simulation_session_id=?", "strategy_key=?"]
+                scope_params: list[Any] = [session["id"], strategy]
+                if session.get("status") == "active" and model is not None:
+                    scope_clauses.extend(["model_id=?", "entry_time>=?"])
+                    scope_params.extend([str(model["id"]), str(model.get("selected_at") or "")])
+                    scope_where = " AND ".join(scope_clauses)
+                    summary = self.database.fetch_one(
+                        f"""
+                        SELECT strategy_key,
+                               COUNT(*) AS positions,
+                               COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+                               COALESCE(SUM(CASE WHEN status IN ('opening','open','closing') THEN 1 ELSE 0 END),0) AS open_positions,
+                               COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+                        FROM positions WHERE {scope_where}
+                        """,
+                        tuple(scope_params),
+                    ) or {}
+                scope_where = " AND ".join(scope_clauses)
+                timing = self.database.fetch_one(
+                    f"""
+                    SELECT MIN(entry_time) AS first_entry_time, MAX(exit_time) AS last_exit_time
+                    FROM positions WHERE {scope_where}
+                    """,
+                    tuple(scope_params),
+                ) or {}
                 rows.append(
                     {
                         "session_id": session["id"],
@@ -820,6 +838,7 @@ class PaperTradingService:
         metadata = {
             "sample_id": sample_id,
             "strategy_key": strategy,
+            "execution_policy_version": "h1_route_aware_v1",
             "simulation_session_id": state["session_id"],
             "entry_fee_usd": quote.fee_usd,
             "entry_network_fee_sol": quote.network_fee_sol,
@@ -901,6 +920,8 @@ class PaperTradingService:
         klines: Sequence[Kline],
         *,
         now_ts: int | None = None,
+        execution_quote: ExecutionQuote | None = None,
+        defer_execution: bool = False,
     ) -> PaperMonitorResult:
         row = self.database.fetch_one(
             """
@@ -929,7 +950,15 @@ class PaperTradingService:
             metadata = {}
         pending_exit = metadata.get("paper_exit_pending")
         if isinstance(pending_exit, dict):
-            return self._execute_monitored_exit(row, metadata, pending_exit, now_ts=current_ts)
+            if defer_execution and execution_quote is None:
+                return PaperMonitorResult(position_id, "pending", "execution_route_probe_required", int(pending_exit.get("trigger_at") or 0) or None)
+            return self._execute_monitored_exit(
+                row,
+                metadata,
+                pending_exit,
+                now_ts=current_ts,
+                execution_quote=execution_quote,
+            )
         if row["status"] != "open":
             return PaperMonitorResult(position_id, "pending", f"position_{row['status']}")
 
@@ -979,12 +1008,15 @@ class PaperTradingService:
             return PaperMonitorResult(position_id, "open", "no_exit_trigger")
 
         reason, reference_price, trigger_at = decision
-        liquidity = float(row.get("sample_liquidity") or 0)
+        market_snapshot = metadata.get("market_snapshot") if isinstance(metadata.get("market_snapshot"), dict) else {}
+        live_liquidity = market_snapshot.get("liquidity_usd")
+        liquidity = float(live_liquidity) if live_liquidity is not None else float(row.get("sample_liquidity") or 0)
         pending_exit = {
             "reason": reason,
             "reference_price": reference_price,
             "trigger_at": trigger_at,
             "liquidity_usd": liquidity,
+            "liquidity_source": "current_market_snapshot" if live_liquidity is not None else "entry_sample_fallback",
             "attempt_count": 0,
         }
         metadata["paper_exit_pending"] = pending_exit
@@ -996,7 +1028,15 @@ class PaperTradingService:
         )
         row["status"] = "closing"
         row["metadata_json"] = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
-        return self._execute_monitored_exit(row, metadata, pending_exit, now_ts=current_ts)
+        if defer_execution and execution_quote is None:
+            return PaperMonitorResult(position_id, "pending", "execution_route_probe_required", trigger_at)
+        return self._execute_monitored_exit(
+            row,
+            metadata,
+            pending_exit,
+            now_ts=current_ts,
+            execution_quote=execution_quote,
+        )
 
     def _execute_monitored_exit(
         self,
@@ -1005,6 +1045,7 @@ class PaperTradingService:
         pending_exit: dict[str, Any],
         *,
         now_ts: int,
+        execution_quote: ExecutionQuote | None = None,
     ) -> PaperMonitorResult:
         position_id = str(row["id"])
         strategy = self._strategy_for_row(row)
@@ -1013,12 +1054,12 @@ class PaperTradingService:
         liquidity = float(pending_exit.get("liquidity_usd") or 0)
         trigger_at = int(pending_exit.get("trigger_at") or 0)
         reason = str(pending_exit.get("reason") or "market_exit")
-        if quantity <= 0 or reference_price <= 0 or liquidity <= 0 or trigger_at <= 0:
+        if quantity <= 0 or reference_price <= 0 or trigger_at <= 0:
             return PaperMonitorResult(position_id, "blocked", "pending_exit_facts_incomplete", trigger_at or None)
 
         gross_reference = quantity * reference_price
         execution_at = datetime.fromtimestamp(now_ts, timezone.utc)
-        quote = self.quote_provider.quote(
+        quote = execution_quote or self.quote_provider.quote(
             QuoteRequest(
                 token_address=row["token_address"],
                 side=Side.SELL,
@@ -1071,10 +1112,13 @@ class PaperTradingService:
         prior_costs = self._position_paid_costs(position_id)
         net_pnl = proceeds - invested - prior_costs
         final_metadata = dict(metadata)
+        route_probe = pending_exit.get("route_probe") if isinstance(pending_exit.get("route_probe"), dict) else {}
         final_metadata.pop("paper_exit_pending", None)
         final_metadata.update({
+            "execution_policy_version": "h1_route_aware_v1",
+            "exit_route_probe": route_probe,
             "exit_trigger_at": trigger_at,
-            "exit_quote_source": "seeded_local_execution_model",
+            "exit_quote_source": "jupiter_read_only_quote" if execution_quote is not None and route_probe.get("state") == "quoted" else "seeded_local_execution_model",
             "exit_fee_usd": quote.fee_usd,
             "exit_network_fee_sol": quote.network_fee_sol,
             "exit_network_fee_usd": network_fee_usd,
@@ -1157,7 +1201,10 @@ class PaperTradingService:
         invested = float(row.get("invested_usd") or 0)
         paid_costs = self._position_paid_costs(position_id)
         final_metadata = dict(metadata)
+        route_probe = pending_exit.get("route_probe") if isinstance(pending_exit.get("route_probe"), dict) else {}
         final_metadata.pop("paper_exit_pending", None)
+        final_metadata["execution_policy_version"] = "h1_route_aware_v1"
+        final_metadata["exit_route_probe"] = route_probe
         final_metadata["sell_failed"] = True
         final_metadata["sell_failure_reason"] = failure_reason
         final_metadata["sell_failure_attempts"] = int(pending_exit.get("attempt_count") or 0)

@@ -105,6 +105,59 @@ def test_candidate_catalog_is_expanded_and_optional_automl_is_explicit() -> None
     assert catalog["flaml_automl"].skip_reason is not None
 
 
+
+
+def test_default_feature_count_search_is_adaptive_and_explicit_override_is_preserved() -> None:
+    adaptive = ModelTrainer(TrainerConfig())
+    assert adaptive._feature_subset_sizes(8) == (4, 5, 6, 7, 8)
+
+    overridden = ModelTrainer(TrainerConfig(feature_subset_sizes=(2, 5)))
+    assert overridden._feature_subset_sizes(8) == (2, 5, 8)
+
+
+def test_execution_score_is_shadow_only_and_never_changes_ranking_weight() -> None:
+    trainer = ModelTrainer(
+        TrainerConfig(
+            execution_min_observations=100,
+            execution_full_observations=500,
+            execution_max_weight=0.0,
+        )
+    )
+    assert trainer._execution_weight(99, 0.8) == pytest.approx(0.0)
+    assert trainer._execution_weight(100, 0.8) == pytest.approx(0.0)
+    assert trainer._execution_weight(300, 0.8) == pytest.approx(0.0)
+    assert trainer._execution_weight(500, 0.8) == pytest.approx(0.0)
+    assert trainer._execution_weight(1000, 0.8) == pytest.approx(0.0)
+    assert trainer._execution_weight(500, None) == pytest.approx(0.0)
+
+
+def test_execution_score_uses_route_validated_net_pnl_but_remains_shadow_metric() -> None:
+    frame = _learnable_frame(rows=8)
+    frame["execution_observed"] = False
+    frame["execution_invested_usd"] = np.nan
+    frame["execution_net_pnl_usd"] = np.nan
+    frame.loc[:2, "execution_observed"] = True
+    frame.loc[:2, "execution_invested_usd"] = 50.0
+    frame.loc[:2, "execution_net_pnl_usd"] = [10.0, -5.0, 20.0]
+    dataset = FeatureBuilder().prepare(frame)
+
+    trainer = ModelTrainer(TrainerConfig())
+    score, observations, selected, pnl = trainer._execution_score(
+        dataset,
+        np.array([0, 1, 2]),
+        np.array([0.9, 0.8, 0.1]),
+        0.5,
+    )
+
+    # Selected actual PnL is +10-5=+5; the observed profitable-opportunity pool
+    # is +10+20=+30. E_exec is 1/6 but has zero influence on E/G/S ranking.
+    assert score == pytest.approx(1 / 6)
+    assert observations == 3
+    assert selected == 2
+    assert pnl == pytest.approx(5.0)
+    assert trainer.config.execution_max_weight == pytest.approx(0.0)
+
+
 def test_trainer_returns_top3_one_threshold_each_and_keeps_final_holdout_separate() -> None:
     dataset = FeatureBuilder().prepare(_learnable_frame())
     trainer = ModelTrainer(

@@ -118,6 +118,7 @@ def test_portfolio_view_filters_strategy_time_and_exposes_market_snapshot(tmp_pa
     now = datetime.now(timezone.utc)
     insert_closed(database, position_id="model1-recent", strategy_key="model_1", session_id=session_id, pnl=6.0, now=now, model_id="model-1")
     insert_closed(database, position_id="model1-old", strategy_key="model_1", session_id=session_id, pnl=-2.0, now=now - timedelta(days=2), model_id="model-1")
+    insert_closed(database, position_id="model1-wrong-generation", strategy_key="model_1", session_id=session_id, pnl=99.0, now=now, model_id="model-2")
     insert_closed(database, position_id="model2-recent", strategy_key="model_2", session_id=session_id, pnl=9.0, now=now, model_id="model-2")
     database.execute(
         """
@@ -246,7 +247,8 @@ def test_simulation_audit_has_four_rows_per_session(tmp_path: Path) -> None:
     paper = PaperTradingService(database)
     session_id = paper.ensure_simulation_session()["id"]
     now = datetime.now(timezone.utc)
-    insert_closed(database, position_id="audit-model1", strategy_key="model_1", session_id=session_id, pnl=1.0, now=now)
+    insert_closed(database, position_id="audit-model1", strategy_key="model_1", session_id=session_id, pnl=1.0, now=now, model_id="model-1")
+    insert_closed(database, position_id="audit-model1-wrong-generation", strategy_key="model_1", session_id=session_id, pnl=99.0, now=now, model_id="model-2")
     insert_closed(database, position_id="audit-rules", strategy_key="rules_only", session_id=session_id, pnl=2.0, now=now)
 
     rows = paper.simulation_audit(limit_sessions=1)

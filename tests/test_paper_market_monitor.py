@@ -14,6 +14,7 @@ from backend.app.repositories.models import ModelRepository
 from backend.app.repositories.samples import SampleRecord, SampleRepository
 from backend.app.services.paper_position_monitor import PaperPositionMonitor
 from backend.app.services.paper_trading import PaperTradingService
+from backend.app.trading.simulator.jupiter_probe import RouteProbeResult
 from backend.app.trading.simulator.types import ExecutionQuote, FailureCategory
 
 
@@ -69,6 +70,16 @@ class NoRouteQuoteProvider:
             failure_category=FailureCategory.NO_ROUTE,
             message="no sell route",
         )
+
+
+class FakeRouteProbe:
+    def __init__(self, result: RouteProbeResult) -> None:
+        self.result = result
+        self.calls = []
+
+    async def quote_sell(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.result
 
 
 class FakeKlineProvider:
@@ -135,6 +146,10 @@ def seed_position(
     sample_id = database.fetch_one(
         "SELECT id FROM samples WHERE address=? ORDER BY id DESC LIMIT 1", (address,)
     )["id"]
+    database.execute(
+        "UPDATE samples SET raw_json=? WHERE id=?",
+        (json.dumps({"decimals": 6}), sample_id),
+    )
     model_id = f"model-{position_id}"
     ModelRepository(database).register(
         {
@@ -405,3 +420,142 @@ async def test_repeated_sell_failures_close_after_retry_budget(tmp_path: Path) -
     assert row["exit_reason"] == "sell_failed_network"
     assert row["net_pnl_usd"] == pytest.approx(-51.26)
     assert json.loads(row["metadata_json"])["sell_failure_attempts"] == 7
+
+@pytest.mark.asyncio
+async def test_read_only_no_route_becomes_terminal_total_loss_at_timeout(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
+    seed_position(
+        database,
+        address="rug-token",
+        position_id="paper-rug-route",
+        strategy_key="model_1",
+        opened_at=opened,
+    )
+    route_probe = FakeRouteProbe(
+        RouteProbeResult("no_route", "jupiter_quote", error_kind="no_route")
+    )
+    paper = PaperTradingService(database, settings, sol_price_service=FixedSolPrice())
+    monitor = PaperPositionMonitor(
+        database, settings, paper_service=paper, route_probe=route_probe
+    )
+    market = FakeMarketProvider(
+        [Kline(int((opened + timedelta(hours=1)).timestamp()), 1.1, 0.95, 1.05)]
+    )
+
+    report = await monitor.run_cycle(
+        market, now_ts=int((opened + timedelta(hours=1, minutes=1)).timestamp())
+    )
+
+    assert report.closed_positions == 1
+    row = database.fetch_one(
+        "SELECT status,exit_reason,net_pnl_usd,metadata_json FROM positions WHERE id='paper-rug-route'"
+    )
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "sell_failed_no_route"
+    assert row["net_pnl_usd"] == pytest.approx(-50.0)
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["execution_policy_version"] == "h1_route_aware_v1"
+    assert metadata["exit_route_probe"]["state"] == "no_route"
+    assert len(route_probe.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_route_api_unavailable_falls_back_to_fresh_liquidity_not_rug(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
+    seed_position(
+        database,
+        address="fallback-token",
+        position_id="paper-route-fallback",
+        strategy_key="model_1",
+        opened_at=opened,
+        liquidity=10_000.0,
+    )
+    local_quotes = ExitQuoteProvider()
+    route_probe = FakeRouteProbe(
+        RouteProbeResult("unavailable", "jupiter_quote", error_kind="rate_limit")
+    )
+    paper = PaperTradingService(
+        database,
+        settings,
+        quote_provider=local_quotes,
+        sol_price_service=FixedSolPrice(),
+    )
+    monitor = PaperPositionMonitor(
+        database, settings, paper_service=paper, route_probe=route_probe
+    )
+    market = FakeMarketProvider(
+        [Kline(int((opened + timedelta(minutes=5)).timestamp()), 1.7, 0.95, 1.6)]
+    )
+
+    report = await monitor.run_cycle(
+        market, now_ts=int((opened + timedelta(minutes=6)).timestamp())
+    )
+
+    assert report.closed_positions == 1
+    sell_request = local_quotes.requests[-1]
+    assert sell_request.liquidity_usd == pytest.approx(12345.0)
+    row = database.fetch_one(
+        "SELECT exit_reason,metadata_json FROM positions WHERE id='paper-route-fallback'"
+    )
+    assert row["exit_reason"] == "take_profit_1_6x"
+    metadata = json.loads(row["metadata_json"])
+    assert metadata.get("sell_failed") is not True
+    assert metadata["exit_route_probe"]["state"] == "unavailable"
+    assert metadata["exit_quote_source"] == "seeded_local_execution_model"
+
+
+@pytest.mark.asyncio
+async def test_quoted_route_uses_usdc_output_as_paper_fill(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
+    seed_position(
+        database,
+        address="quoted-token",
+        position_id="paper-route-quoted",
+        strategy_key="model_1",
+        opened_at=opened,
+        entry_price=1.0,
+        liquidity=10_000.0,
+    )
+    # 75 USDC for 50 tokens => a route-validated $1.50/token fill even though
+    # the K-line trigger itself touched 1.60x.
+    route_probe = FakeRouteProbe(
+        RouteProbeResult(
+            "quoted",
+            "jupiter_quote",
+            out_amount_raw=75_000_000,
+            price_impact_pct=0.0625,
+            route_count=1,
+        )
+    )
+    paper = PaperTradingService(database, settings, sol_price_service=FixedSolPrice())
+    monitor = PaperPositionMonitor(
+        database, settings, paper_service=paper, route_probe=route_probe
+    )
+    market = FakeMarketProvider(
+        [Kline(int((opened + timedelta(minutes=5)).timestamp()), 1.7, 0.95, 1.6)]
+    )
+
+    report = await monitor.run_cycle(
+        market, now_ts=int((opened + timedelta(minutes=6)).timestamp())
+    )
+
+    assert report.closed_positions == 1
+    row = database.fetch_one(
+        "SELECT status,exit_reason,exit_price,net_pnl_usd,metadata_json "
+        "FROM positions WHERE id='paper-route-quoted'"
+    )
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "take_profit_1_6x"
+    assert row["exit_price"] == pytest.approx(1.5)
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["exit_quote_source"] == "jupiter_read_only_quote"
+    assert metadata["exit_route_probe"]["state"] == "quoted"
+    assert metadata["exit_route_probe"]["output_asset"] == "USDC"
+    assert metadata["exit_route_probe"]["output_decimals"] == 6
+    assert len(route_probe.calls) == 1

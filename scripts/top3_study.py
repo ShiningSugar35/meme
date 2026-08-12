@@ -19,7 +19,7 @@ from backend.app.services.training import TrainingService
 def main() -> int:
     database = Database(PROJECT_ROOT / "data" / "meme_quant.db")
     rows = SampleRepository(database).list_mature()
-    frame, data_hash = TrainingService._training_frame(rows)
+    frame, data_hash = TrainingService(database)._training_frame(rows)
     dataset = FeatureBuilder(
         FeaturePolicy(feature_allowlist=DEFAULT_MODEL_TRAINING_FEATURES)
     ).prepare(frame)
@@ -64,7 +64,7 @@ def main() -> int:
             "economic": "mean_clip((6*TP-FP)/(6*N_positive),-1,1)",
             "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",
             "composite": "0.60*economic + 0.40*generalization",
-            "occam": "smallest 12/20/full feature subset within one standard error of algorithm best",
+            "occam": "adaptive feature-count search; fold-train-only ranking; smallest subset within one standard error of algorithm best",
         },
         "warnings": list(result.warnings),
     }

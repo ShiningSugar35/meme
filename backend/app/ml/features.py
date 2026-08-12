@@ -27,6 +27,9 @@ _EXACT_EXCLUSIONS = {
     "return_is_estimated",
     "terminal_return_estimated",
     "utility_eligible",
+    "execution_invested_usd",
+    "execution_net_pnl_usd",
+    "execution_observed",
 }
 
 _FUTURE_PATTERNS = (
@@ -218,6 +221,17 @@ class FeatureBuilder:
         # Binary labels no longer use a timeout-positive class. Final close is
         # retained only as an audit fact and never changes the target/economics.
         return_is_estimated = pd.Series(False, index=work.index, dtype=bool)
+        execution_invested = pd.to_numeric(
+            work.get("execution_invested_usd", pd.Series(np.nan, index=work.index)),
+            errors="coerce",
+        ).astype(float)
+        execution_net_pnl = pd.to_numeric(
+            work.get("execution_net_pnl_usd", pd.Series(np.nan, index=work.index)),
+            errors="coerce",
+        ).astype(float)
+        observed_raw = work.get("execution_observed", pd.Series(False, index=work.index))
+        execution_observed = observed_raw.fillna(False).astype(bool)
+        execution_observed &= execution_invested.gt(0) & execution_net_pnl.notna()
 
         if self.policy.feature_allowlist is not None:
             # A frozen allowlist prevents newly added DB/audit columns from
@@ -255,6 +269,9 @@ class FeatureBuilder:
             liquidity_usd=liquidity.reset_index(drop=True),
             final_close_ratio=close_ratio.reset_index(drop=True),
             return_is_estimated=return_is_estimated.reset_index(drop=True),
+            execution_invested_usd=execution_invested.reset_index(drop=True),
+            execution_net_pnl_usd=execution_net_pnl.reset_index(drop=True),
+            execution_observed=execution_observed.reset_index(drop=True),
             feature_names=tuple(feature_columns),
             dropped_columns=tuple(dict.fromkeys(excluded)),
             source_rows=pd.Index(work["_source_row"].to_numpy()),

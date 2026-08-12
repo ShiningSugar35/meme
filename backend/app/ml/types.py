@@ -29,6 +29,9 @@ class PreparedDataset:
     liquidity_usd: pd.Series
     final_close_ratio: pd.Series
     return_is_estimated: pd.Series
+    execution_invested_usd: pd.Series
+    execution_net_pnl_usd: pd.Series
+    execution_observed: pd.Series
     feature_names: tuple[str, ...]
     dropped_columns: tuple[str, ...]
     source_rows: pd.Index
@@ -170,6 +173,12 @@ class CandidateEvaluation:
     composite_score: float | None = None
     score_standard_error: float | None = None
     selection_score: float | None = None
+    execution_score: float | None = None
+    execution_observations: int = 0
+    execution_selected: int = 0
+    execution_net_pnl_usd: float | None = None
+    execution_weight: float = 0.0
+    ranking_economic_score: float | None = None
 
 
 @dataclass

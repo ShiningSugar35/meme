@@ -133,6 +133,14 @@ class DashboardService:
         if mode == "simulation":
             common_clauses = ["p.strategy_key=?", "p.simulation_session_id=?"]
             common_params: list[Any] = [strategy, str(simulation["session"]["id"])]
+            if strategy != RULES_ONLY and strategy_model is not None:
+                common_clauses.extend(["p.model_id=?", "p.entry_time>=?"])
+                common_params.extend(
+                    [
+                        str(strategy_model["id"]),
+                        str(strategy_model.get("active_selected_at") or ""),
+                    ]
+                )
         else:
             common_clauses = ["p.account_kind='live'"]
             common_params = []

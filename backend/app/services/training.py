@@ -144,6 +144,18 @@ class TrainingService:
                     "fixed_profit_usd": candidate.final_metrics.fixed_profit_usd if candidate.final_metrics else None,
                     "profit_units": candidate.final_metrics.profit_units if candidate.final_metrics else None,
                     "economic_score": candidate.economic_score,
+                    "execution_score": candidate.execution_score,
+                    "e_exec": candidate.execution_score,
+                    "execution_observations": candidate.execution_observations,
+                    "execution_coverage": (
+                        candidate.execution_observations / candidate.development_metrics.sample_count
+                        if candidate.development_metrics and candidate.development_metrics.sample_count
+                        else 0.0
+                    ),
+                    "execution_selected": candidate.execution_selected,
+                    "execution_net_pnl_usd": candidate.execution_net_pnl_usd,
+                    "execution_weight": candidate.execution_weight,
+                    "ranking_economic_score": candidate.ranking_economic_score,
                     "generalization_score": candidate.generalization.score if candidate.generalization else None,
                     "composite_score": candidate.composite_score,
                     "evaluation_artifact_path": str(evaluation_path.relative_to(PROJECT_ROOT)),
@@ -173,6 +185,10 @@ class TrainingService:
                             "economic_weight": TrainerConfig().economic_weight,
                             "generalization_weight": TrainerConfig().generalization_weight,
                             "gap_hours": result.plan.gap_hours,
+                            "feature_selection": "adaptive_train_fold_rank_one_se",
+                            "execution_min_observations": TrainerConfig().execution_min_observations,
+                            "execution_full_observations": TrainerConfig().execution_full_observations,
+                            "execution_max_weight": TrainerConfig().execution_max_weight,
                             "feature_names": list(bundle.feature_names),
                             "requested_feature_pool": list(selected_features),
                         },
@@ -214,10 +230,12 @@ class TrainingService:
                     "required_flat_strategies": ["model_1", "model_2", "model_3"],
                 },
                 "selection_formula": {
-                    "economic": "mean_clip((6*TP-FP)/(6*N_positive),-1,1)",
+                    "economic": "mean_clip((6*TP-FP)/(6*N_positive),-1,1) [unchanged E_proxy]",
+                    "execution": "E_exec shadow metric from route-validated rules-only net PnL; never used for ranking",
+                    "ranking_economic": "E_proxy only; E_exec is shadow/audit-only and has zero ranking weight",
                     "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",
-                    "composite": "0.60*economic + 0.40*generalization",
-                    "occam": "smallest feature subset within one standard error of algorithm best",
+                    "composite": "0.60*ranking_economic + 0.40*generalization",
+                    "occam": "adaptive feature count; smallest subset within one standard error of algorithm best",
                 },
             }
             self.database.execute(
@@ -500,12 +518,12 @@ class TrainingService:
             row["promoted"] = bool(row["promoted"])
         return rows
 
-    @staticmethod
-    def _training_frame(rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, str]:
+    def _training_frame(self, rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, str]:
         if not rows:
             raise ValueError("no mature samples are available")
         records: list[dict[str, Any]] = []
         digest = hashlib.sha256()
+        execution = self._execution_observations()
         for row in rows:
             features = {
                 key: (row.get("entry_price") if key == "price" else row.get(key))
@@ -519,8 +537,51 @@ class TrainingService:
                     "liquidity_usd": row.get("liquidity"),
                     "final_close_ratio": row.get("final_close_ratio"),
                     "return_is_estimated": bool(row.get("terminal_return_estimated")),
+                    "execution_invested_usd": (execution.get(int(row["id"])) or {}).get("invested_usd"),
+                    "execution_net_pnl_usd": (execution.get(int(row["id"])) or {}).get("net_pnl_usd"),
+                    "execution_observed": int(row["id"]) in execution,
                 }
             )
             records.append(features)
             digest.update(f"{row['sample_key']}|{row['tag']}|{row.get('updated_at')}\n".encode())
         return pd.DataFrame.from_records(records), digest.hexdigest()
+    def _execution_observations(self) -> dict[int, dict[str, float]]:
+        """Latest route-validated rules-only execution per sample.
+
+        Model-account executions are intentionally excluded to avoid selection
+        bias. Local-fallback fills after quote/API outages are also excluded.
+        """
+        rows = self.database.fetch_all(
+            """
+            SELECT sample_id,invested_usd,net_pnl_usd,metadata_json,exit_time,id
+            FROM positions
+            WHERE account_kind='simulation'
+              AND strategy_key='rules_only'
+              AND status='closed'
+              AND sample_id IS NOT NULL
+            ORDER BY exit_time DESC,id DESC
+            """
+        )
+        result: dict[int, dict[str, float]] = {}
+        for row in rows:
+            sample_id = int(row["sample_id"])
+            if sample_id in result:
+                continue
+            try:
+                metadata = json.loads(row.get("metadata_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if metadata.get("execution_policy_version") != "h1_route_aware_v1":
+                continue
+            probe = metadata.get("exit_route_probe")
+            if not isinstance(probe, dict) or probe.get("state") not in {"quoted", "no_route"}:
+                continue
+            invested = row.get("invested_usd")
+            pnl = row.get("net_pnl_usd")
+            if invested is None or pnl is None or float(invested) <= 0:
+                continue
+            result[sample_id] = {
+                "invested_usd": float(invested),
+                "net_pnl_usd": float(pnl),
+            }
+        return result

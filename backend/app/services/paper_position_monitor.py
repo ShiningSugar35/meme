@@ -11,6 +11,9 @@ from ..collector.filters import first, normalize_token, to_float
 from ..collector.models import Kline
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..trading.simulator.jupiter_probe import JupiterReadOnlyQuoteProbe
+from ..trading.simulator.quote import QuoteModelConfig
+from ..trading.simulator.types import ExecutionQuote, FailureCategory
 from .paper_trading import PaperTradingService
 
 
@@ -43,10 +46,12 @@ class PaperPositionMonitor:
         settings: Settings | None = None,
         *,
         paper_service: PaperTradingService | None = None,
+        route_probe: JupiterReadOnlyQuoteProbe | None = None,
     ) -> None:
         self.database = database
         self.settings = settings or get_settings()
         self.paper = paper_service or PaperTradingService(database, self.settings)
+        self.route_probe = route_probe or JupiterReadOnlyQuoteProbe(self.settings)
 
     async def run_cycle(
         self,
@@ -62,12 +67,14 @@ class PaperPositionMonitor:
 
         rows = self.database.fetch_all(
             """
-            SELECT id, token_address, status, entry_time, expires_at, metadata_json
-            FROM positions
-            WHERE strategy_key IN ('model_1','model_2','model_3','rules_only')
-              AND account_kind='simulation'
-              AND status IN ('open','closing')
-            ORDER BY entry_time, id
+            SELECT p.id,p.token_address,p.status,p.entry_time,p.expires_at,p.metadata_json,
+                   p.token_amount,p.sample_id,s.raw_json
+            FROM positions p
+            LEFT JOIN samples s ON s.id=p.sample_id
+            WHERE p.strategy_key IN ('model_1','model_2','model_3','rules_only')
+              AND p.account_kind='simulation'
+              AND p.status IN ('open','closing')
+            ORDER BY p.entry_time,p.id
             """
         )
         liquidation = self.database.get_runtime_state("liquidation_job") or {}
@@ -96,7 +103,10 @@ class PaperPositionMonitor:
         market_requests = 0
 
         for row in direct_retry:
-            result = self.paper.monitor_position(str(row["id"]), (), now_ts=current_ts)
+            execution_quote = await self._prime_exit_route(row, now_ts=current_ts)
+            result = self.paper.monitor_position(
+                str(row["id"]), (), now_ts=current_ts, execution_quote=execution_quote
+            )
             checked += 1
             closed += int(result.state == "closed")
             pending += int(result.state == "pending")
@@ -128,15 +138,8 @@ class PaperPositionMonitor:
                 )
                 continue
 
-            for row in positions:
-                result = self.paper.monitor_position(str(row["id"]), klines, now_ts=current_ts)
-                checked += 1
-                closed += int(result.state == "closed")
-                pending += int(result.state == "pending")
-                blocked += int(result.state == "blocked")
-                open_count += int(result.state == "open")
-
             try:
+                # Exit execution must use current liquidity, not entry-time liquidity.
                 await self._refresh_market_snapshot(provider, address, positions, klines)
             except Exception as exc:
                 self.database.audit(
@@ -147,6 +150,22 @@ class PaperPositionMonitor:
                     entity_id=address,
                     details={"positions": len(positions), "error": f"{type(exc).__name__}: {exc}"[:300]},
                 )
+
+            for row in positions:
+                result = self.paper.monitor_position(
+                    str(row["id"]), klines, now_ts=current_ts, defer_execution=True
+                )
+                if result.state == "pending" and result.reason == "execution_route_probe_required":
+                    execution_quote = await self._prime_exit_route(row, now_ts=current_ts)
+                    result = self.paper.monitor_position(
+                        str(row["id"]), (), now_ts=current_ts, execution_quote=execution_quote
+                    )
+                checked += 1
+                closed += int(result.state == "closed")
+                pending += int(result.state == "pending")
+                blocked += int(result.state == "blocked")
+                open_count += int(result.state == "open")
+
 
         report = PaperMonitorCycle(
             checked_positions=checked,
@@ -160,6 +179,122 @@ class PaperPositionMonitor:
         )
         self.database.set_runtime_state("paper_monitor_status", {"state": "running", **asdict(report)})
         return report
+
+    async def _prime_exit_route(
+        self,
+        row: dict[str, Any],
+        *,
+        now_ts: int,
+    ) -> ExecutionQuote | None:
+        latest = self.database.fetch_one(
+            """
+            SELECT p.metadata_json,p.token_amount,p.token_address,s.raw_json
+            FROM positions p LEFT JOIN samples s ON s.id=p.sample_id
+            WHERE p.id=?
+            """,
+            (row["id"],),
+        ) or {}
+        try:
+            metadata = json.loads(latest.get("metadata_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        pending_exit = metadata.get("paper_exit_pending")
+        if not isinstance(pending_exit, dict):
+            return None
+
+        decimals = None
+        snapshot = metadata.get("market_snapshot")
+        if isinstance(snapshot, dict):
+            decimals = snapshot.get("token_decimals")
+        if decimals is None:
+            try:
+                raw = json.loads(latest.get("raw_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                raw = {}
+            if isinstance(raw, dict):
+                decimals = raw.get("decimals") or raw.get("decimal")
+        try:
+            decimals_int = int(decimals)
+        except (TypeError, ValueError):
+            # Never guess decimals: a wrong raw amount can manufacture a false no-route.
+            return None
+        decimals_int = min(18, max(0, decimals_int))
+        quantity = float(latest.get("token_amount") or 0.0)
+        amount_raw = max(0, int(quantity * (10**decimals_int)))
+        slippage_bps = max(1, int(round(self.settings.trade_slippage_high * 10_000)))
+        result = await self.route_probe.quote_sell(
+            token_address=str(latest.get("token_address") or row.get("token_address") or ""),
+            amount_raw=amount_raw,
+            slippage_bps=slippage_bps,
+        )
+        route_fact = result.as_dict()
+        route_fact["token_decimals"] = decimals_int
+        route_fact["amount_raw"] = amount_raw
+        route_fact["output_asset"] = "USDC"
+        route_fact["output_decimals"] = 6
+        route_fact["probed_at"] = utc_now_iso()
+        pending_exit["route_probe"] = route_fact
+        metadata["paper_exit_pending"] = pending_exit
+        self.database.execute(
+            "UPDATE positions SET metadata_json=? WHERE id=? AND status='closing'",
+            (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), row["id"]),
+        )
+
+        if result.state == "no_route":
+            self.database.audit(
+                category="simulation",
+                action="paper_read_only_route_probe",
+                severity="error",
+                entity_type="position",
+                entity_id=str(row["id"]),
+                details={"state": result.state, "source": result.source, "error_kind": result.error_kind},
+            )
+            return ExecutionQuote(
+                success=False,
+                fill_price=None,
+                gross_usd=0.0,
+                fee_usd=0.0,
+                network_fee_sol=0.0,
+                slippage_bps=0.0,
+                latency_ms=0,
+                failure_category=FailureCategory.NO_ROUTE,
+                message=result.message or "Jupiter returned no sell route",
+            )
+
+        if result.state == "quoted" and result.out_amount_raw and quantity > 0:
+            gross_usd = float(result.out_amount_raw) / 1_000_000.0
+            if gross_usd > 0:
+                # USDC uses six decimal places on Solana.
+                fill_price = gross_usd / quantity
+                reference_price = float(pending_exit.get("reference_price") or 0.0)
+                slippage = (
+                    max(0.0, (reference_price - fill_price) / reference_price * 10_000.0)
+                    if reference_price > 0
+                    else 0.0
+                )
+                return ExecutionQuote(
+                    success=True,
+                    fill_price=fill_price,
+                    gross_usd=gross_usd,
+                    fee_usd=gross_usd * QuoteModelConfig().platform_fee_rate,
+                    network_fee_sol=QuoteModelConfig().network_fee_sol,
+                    slippage_bps=slippage,
+                    latency_ms=0,
+                    message="jupiter_read_only_quote",
+                )
+
+        if result.state == "unavailable":
+            self.database.audit(
+                category="simulation",
+                action="paper_read_only_route_probe",
+                severity="warning",
+                entity_type="position",
+                entity_id=str(row["id"]),
+                details={"state": result.state, "source": result.source, "error_kind": result.error_kind},
+            )
+        # API/rate-limit/network failure is not evidence of a rug. Returning None
+        # deliberately falls back to the local impact model using current liquidity.
+        return None
 
     async def _refresh_market_snapshot(
         self,
@@ -184,6 +319,19 @@ class PaperPositionMonitor:
                 if current_price is not None:
                     snapshot["price"] = current_price
                 snapshot["liquidity_usd"] = normalized.get("liquidity")
+                for risk_key in (
+                    "rug_ratio",
+                    "sell_tax",
+                    "buy_tax",
+                    "is_wash_trading",
+                    "renounced_mint",
+                    "renounced_freeze_account",
+                ):
+                    if normalized.get(risk_key) is not None:
+                        snapshot[risk_key] = normalized.get(risk_key)
+                decimals = to_float(first(merged, ("decimals", "decimal")))
+                if decimals is not None and 0 <= decimals <= 18:
+                    snapshot["token_decimals"] = int(decimals)
 
                 market_cap = to_float(normalized.get("marketcap"))
                 market_cap_source = "gmgn_direct" if market_cap is not None else None

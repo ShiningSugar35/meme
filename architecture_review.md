@@ -135,7 +135,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 候选池覆盖 LogisticRegression、DecisionTree、HistGradientBoosting、GradientBoosting、AdaBoost、ExtraTrees、RandomForest、RBF-SVM、XGBoost，并登记 LightGBM/CatBoost/FLAML optional candidates。缺依赖必须显式 `skipped`；AutoML 只能嵌套在 outer train 内部时间切分。
 
-模型拟合与交易评价分离：训练仍做二分类；开发期经济单位 `U=6TP-FP`，Precision/Recall 恒等式为 `U=N+×r×(7-1/p)`。经济得分 E 为各 chronological OOS fold 的归一化 capture，泛化得分 G 综合 AP Skill、稳定性、衰减，综合 `S=0.60E+0.40G`。每个算法比较 12/20/全量特征，one-standard-error 内优先更小子集。
+模型拟合与交易评价分离：训练仍做二分类；开发期经济单位 `U=6TP-FP`，Precision/Recall 恒等式为 `U=N+×r×(7-1/p)`。经济得分 E 为各 chronological OOS fold 的归一化 capture，泛化得分 G 综合 AP Skill、稳定性、衰减，综合 `S=0.60E+0.40G`。当前 E/G/S 排名公式保持冻结不变。特征数默认从 4 到可用全量逐维搜索；每个 chronological fold 的特征排序只读取本 fold train slice，最终再用 final-train 确定生产特征名，one-standard-error 内优先更小维度。
 
 ### 6.3 Top 3 单一决策线
 
@@ -148,14 +148,14 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 正确实现：
 
 1. 每个算法只在 development folds 上拟合、预测并搜索单一决策线；
-2. 每个算法比较 12/20/全量特征，并在 one-standard-error 内选最小子集；
+2. 每个算法在 fold-train-only 特征排序下自适应扫描 4..N 的特征数，并在 one-standard-error 内选最小维度；
 3. 对每个保留候选计算 E、G、`S=0.60E+0.40G`；
 4. 仅按 development S 排序并冻结 Top 3 次序、特征和 threshold；
 5. Top 3 候选冻结后才在最终 holdout 上计算 certification Precision/Recall/固定 $50 理论收益；
 6. 三个 artifact 成功持久化后，training run 先 `completed/promoted=0`；训练与激活解耦，16:00 起旧模型停止新买入，17:00 可先训练，候选等待旧 `model_1/2/3` 全部空仓；
 7. 空仓后 `active_model_slots` 在同一事务内写入 slot 1..3，Rank 1 标为 champion，同时重置三个模型策略 generation 账本/统计；可选候选缺依赖显式 skipped；final 只审计，不回写排名。
 
-2026-08-12 正式 run `89c2d088-ea1b-4bc7-9aec-2ca7a92220b2` 的开发期 Top 3 为 RF / DecisionTree / GradientBoosting，三者都由 one-standard-error 规则选择 12 特征。最终 holdout 理论固定 $50 收益分别为 $875 / $890 / $1000，`rules_only` 为 $915；这些 final 数值不参与 Top 3 排序。历史 `retired` Rank 1 保留人工回滚能力。
+2026-08-12 H1/no-completed 迁移后的正式 run `ca922c9b-a835-486b-ba61-e94c04978399` 激活了 ExtraTrees / AdaBoost / RandomForest。该 generation 仍由当时的旧 12/20/full 搜索策略产出；本轮新增的自适应 4..N、fold-train-only 特征选择只从后续训练 run 生效，不追溯改写现役工件。最终 holdout 始终不参与 Top 3 排名；历史 `retired` Rank 1 保留人工回滚能力。
 
 ## 7. Durable Training 与模型健康
 
@@ -169,9 +169,9 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 - 达上限 -> `failed`；
 - 不能让残留 running 永久占锁。
 
-### 7.2 周日 03:00
+### 7.2 16:00 冻结 / 17:00 训练
 
-每个 BJT 周日 03:00 有唯一 `scheduled_for`。重复启动不能重复创建。同计划 run 失败只重排同一行，有限 retry。自动训练继承当前 Rank 1 的 requested feature pool，再由各算法内部奥卡姆选择决定实际 12/20/全量子集。
+正常模型健康状态按每周约定日（当前周日）BJT 16:00 冻结三个模型策略新买入、17:00 创建唯一 `scheduled_for` 训练；`insufficient_data` 时同样时刻改为每日执行。重复启动不能重复创建。同计划 run 失败只重排同一行，有限 retry。自动训练继承当前 Rank 1 的 requested feature pool，再由各算法执行 fold-train-only 的自适应特征维度选择。
 
 ### 7.3 7 日退化
 
@@ -353,3 +353,11 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 ### 环境
 
 `D:\meme` 当前是 Git 工作树并跟踪 `origin/main`；发布变更必须在测试/构建通过后 commit + push。
+
+## 2026-08-12 增量架构决议：adaptive features + route-aware paper execution
+
+1. **评分边界不变**：现有 E/G/S 继续作为唯一模型排名口径；route-validated `E_exec` 仅做 shadow 指标，权重为 0，避免执行数据刚起步时改变已冻结模型选择语义。
+2. **特征选择改为自适应且时序安全**：不再使用固定 12/20/full 档位。每个 development fold 仅在自己的 train slice 上做特征排序，候选维度逐维比较，one-standard-error 选择最小近优维度；final holdout 仍完全隔离。
+3. **模拟退出引入真实可执行性证据**：先刷新市场 liquidity，再按可审计 decimals 请求 Jupiter Token→USDC read-only quote。明确 no-route 与 API/rate-limit/network unavailable 分流；前者属于市场可执行性失败，后者不得伪装为 rug。
+4. **执行数据抗选择偏差**：只有持续覆盖所有规则准入样本的 `rules_only` route-validated closed positions 进入 `E_exec` 数据集；模型账户结果不作为该指标的唯一来源。
+5. **generation 隔离**：模型卡片的持仓/历史/审计必须同时绑定 current model id 与 selected_at；strategy slot 不是 model generation identity。

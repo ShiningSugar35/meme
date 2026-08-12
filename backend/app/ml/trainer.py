@@ -53,9 +53,17 @@ class TrainerConfig:
         "catboost",
         "flaml_automl",
     )
-    feature_subset_sizes: tuple[int, ...] = (12, 20, 31)
+    # None means adaptive search over every feasible feature count. A tuple is
+    # retained as an explicit test/operator override, not production policy.
+    feature_subset_sizes: tuple[int, ...] | None = None
+    min_features_to_select: int = 4
     economic_weight: float = 0.60
     generalization_weight: float = 0.40
+    # E remains the current fixed-payoff proxy. E_exec is collected and reported
+    # as a shadow metric only; it never changes the established E/G/S ranking.
+    execution_min_observations: int = 100
+    execution_full_observations: int = 500
+    execution_max_weight: float = 0.0  # shadow-only; E_exec never changes current E/G/S ranking
     top_k: int = 3
 
 
@@ -83,8 +91,7 @@ class ModelTrainer:
         if unknown:
             raise ValueError(f"unknown model candidates: {unknown}")
 
-        feature_order = self._rank_features(dataset, plan.final_split.train_indices)
-        subset_sizes = self._feature_subset_sizes(len(feature_order))
+        subset_sizes = self._feature_subset_sizes(len(dataset.feature_names))
         evaluations: list[CandidateEvaluation] = []
         final_estimators: dict[str, object] = {}
         successful_specs: dict[str, CandidateSpec] = {}
@@ -104,10 +111,9 @@ class ModelTrainer:
 
             subset_evaluations: list[CandidateEvaluation] = []
             for size in subset_sizes:
-                features = tuple(feature_order[:size])
                 try:
                     subset_evaluations.append(
-                        self._evaluate_development_candidate(dataset, plan, spec, features)
+                        self._evaluate_development_candidate(dataset, plan, spec, size)
                     )
                 except Exception:
                     # A smaller subset may be degenerate while a larger one is valid.
@@ -124,6 +130,9 @@ class ModelTrainer:
                 continue
 
             chosen = self._occam_feature_choice(subset_evaluations)
+            selected_count = len(chosen.feature_names)
+            final_feature_order = self._rank_features(dataset, plan.final_split.train_indices)
+            chosen = replace(chosen, feature_names=tuple(final_feature_order[:selected_count]))
             try:
                 chosen, estimator = self._attach_final_holdout(dataset, plan, spec, chosen)
             except Exception as exc:
@@ -320,16 +329,21 @@ class ModelTrainer:
         )
 
     def _feature_subset_sizes(self, total: int) -> tuple[int, ...]:
-        sizes = {min(total, max(1, int(size))) for size in self.config.feature_subset_sizes}
-        sizes.add(total)
-        return tuple(sorted(sizes))
+        if total <= 0:
+            return ()
+        if self.config.feature_subset_sizes:
+            sizes = {min(total, max(1, int(size))) for size in self.config.feature_subset_sizes}
+            sizes.add(total)
+            return tuple(sorted(sizes))
+        minimum = min(total, max(1, int(self.config.min_features_to_select)))
+        return tuple(range(minimum, total + 1))
 
     def _evaluate_development_candidate(
         self,
         dataset: PreparedDataset,
         plan,
         spec: CandidateSpec,
-        feature_names: tuple[str, ...],
+        feature_count: int,
     ) -> CandidateEvaluation:
         oos_positions: list[np.ndarray] = []
         oos_probabilities: list[np.ndarray] = []
@@ -337,16 +351,21 @@ class ModelTrainer:
             y_train = dataset.y.iloc[fold.train_indices]
             if y_train.nunique() < 2:
                 raise ValueError(f"{fold.name} training slice has only one class")
-            estimator = build_pipeline(spec, dataset.X.loc[fold.train_indices, feature_names])
+            # Feature selection is part of model fitting, so rank features only
+            # on this fold's chronological training slice. The OOS block never
+            # participates in feature selection.
+            fold_order = self._rank_features(dataset, fold.train_indices)
+            fold_features = tuple(fold_order[:feature_count])
+            estimator = build_pipeline(spec, dataset.X.loc[fold.train_indices, fold_features])
             fit_pipeline(
                 estimator,
-                dataset.X.loc[fold.train_indices, feature_names],
+                dataset.X.loc[fold.train_indices, fold_features],
                 y_train,
                 economic_sample_weights(dataset.economic_slice(fold.train_indices)),
             )
             oos_positions.append(fold.test_indices)
             oos_probabilities.append(
-                positive_probabilities(estimator, dataset.X.loc[fold.test_indices, feature_names])
+                positive_probabilities(estimator, dataset.X.loc[fold.test_indices, fold_features])
             )
 
         positions = np.concatenate(oos_positions)
@@ -400,8 +419,16 @@ class ModelTrainer:
             0.60 * mean_skill + 0.20 * stability + 0.20 * decay_score
         )
         economic_score = float(np.mean([fold_economic_score(metric) for metric in fold_metrics]))
+        execution_score, execution_observations, execution_selected, execution_net_pnl = (
+            self._execution_score(dataset, positions, probabilities, threshold)
+        )
+        execution_weight = 0.0  # E_exec is reported only; ranking remains the established E proxy.
+        ranking_economic_score = float(
+            (1.0 - execution_weight) * economic_score
+            + execution_weight * (execution_score if execution_score is not None else economic_score)
+        )
         composite = float(
-            self.config.economic_weight * economic_score
+            self.config.economic_weight * ranking_economic_score
             + self.config.generalization_weight * generalization_score
         )
         composites = np.asarray(fold_composites, dtype=float)
@@ -418,6 +445,10 @@ class ModelTrainer:
             decay_score=decay_score,
             score=generalization_score,
         )
+        # Convert the selected feature-count hyperparameter into concrete names
+        # using final-train data only. The recent holdout is untouched.
+        final_feature_order = self._rank_features(dataset, plan.final_split.train_indices)
+        feature_names = tuple(final_feature_order[:feature_count])
         return CandidateEvaluation(
             algorithm=spec.name,
             complexity_rank=spec.complexity_rank,
@@ -431,7 +462,44 @@ class ModelTrainer:
             composite_score=composite,
             score_standard_error=standard_error,
             selection_score=composite,
+            execution_score=execution_score,
+            execution_observations=execution_observations,
+            execution_selected=execution_selected,
+            execution_net_pnl_usd=execution_net_pnl,
+            execution_weight=execution_weight,
+            ranking_economic_score=ranking_economic_score,
         )
+
+    def _execution_score(
+        self,
+        dataset: PreparedDataset,
+        positions: np.ndarray,
+        probabilities: np.ndarray,
+        threshold: float,
+    ) -> tuple[float | None, int, int, float | None]:
+        observed = dataset.execution_observed.iloc[positions].to_numpy(dtype=bool)
+        if not observed.any():
+            return None, 0, 0, None
+        selected = probabilities >= threshold
+        pnl = dataset.execution_net_pnl_usd.iloc[positions].to_numpy(dtype=float)
+        observed_pnl = pnl[observed]
+        denominator = float(np.sum(np.maximum(observed_pnl, 0.0)))
+        selected_observed = observed & selected
+        selected_pnl = float(np.sum(pnl[selected_observed])) if selected_observed.any() else 0.0
+        score = (
+            float(np.clip(selected_pnl / denominator, -1.0, 1.0))
+            if denominator > 0
+            else None
+        )
+        return score, int(np.sum(observed)), int(np.sum(selected_observed)), selected_pnl
+
+    def _execution_weight(self, observations: int, score: float | None) -> float:
+        if score is None or observations < self.config.execution_min_observations:
+            return 0.0
+        start = max(0, int(self.config.execution_min_observations))
+        full = max(start + 1, int(self.config.execution_full_observations))
+        progress = min(1.0, max(0.0, (observations - start) / (full - start)))
+        return float(np.clip(progress * self.config.execution_max_weight, 0.0, 1.0))
 
     def _attach_final_holdout(
         self,

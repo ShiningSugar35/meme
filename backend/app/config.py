@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     trading_provider: Literal["gmgn_cli", "gmgn_http", "disabled"] = "gmgn_cli"
     gmgn_cli_path: str = "gmgn-cli"
     wallet_public_key: str | None = None
+    # Read-only route verification for paper exits. Jupiter quote requests never
+    # sign or submit a transaction; API keys are secret-wrapped and never exposed.
+    jupiter_api_base_url: str = "https://api.jup.ag/swap/v1"
+    jupiter_api_key_1: SecretStr | None = None
+    jupiter_api_key_2: SecretStr | None = None
+    jupiter_api_key_3: SecretStr | None = None
+    paper_read_only_quote_enabled: bool = True
+    paper_quote_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
 
     live_confirmation_ttl_seconds: int = Field(default=60, ge=15, le=300)
     wallet_sol_reserve: float = Field(default=0.1, ge=0)
@@ -103,6 +111,15 @@ class Settings(BaseSettings):
         if any(p + t > self.trade_total_fee_cap_sol + 1e-12 for p, t in zip(priority, tips, strict=True)):
             raise ValueError("a priority+tip tier exceeds TRADE_TOTAL_FEE_CAP_SOL")
         return self
+
+    @property
+    def jupiter_api_keys(self) -> tuple[str, ...]:
+        values = (self.jupiter_api_key_1, self.jupiter_api_key_2, self.jupiter_api_key_3)
+        return tuple(
+            value.get_secret_value()
+            for value in values
+            if value is not None and value.get_secret_value()
+        )
 
     @property
     def database_path(self) -> Path:
