@@ -108,11 +108,6 @@ def _data(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return nested if isinstance(nested, Mapping) else value
 
 
-def _cli_slippage(fraction: float) -> str:
-    """Convert the internal 0..1 fraction to gmgn-cli's 0..100 percentage."""
-    return f"{float(fraction) * 100.0:g}"
-
-
 class GmgnCliProvider:
     name = "gmgn_cli"
 
@@ -174,7 +169,7 @@ class GmgnCliProvider:
             "--amount",
             intent.input_amount_raw,
             "--slippage",
-            _cli_slippage(step.slippage),
+            str(step.slippage),
             "--raw",
         ))
         data = self._ensure_success(result)
@@ -223,7 +218,7 @@ class GmgnCliProvider:
             "--amount",
             intent.input_amount_raw,
             "--slippage",
-            _cli_slippage(step.slippage),
+            str(step.slippage),
             "--min-output",
             quote.min_output_amount_raw,
             "--priority-fee",
