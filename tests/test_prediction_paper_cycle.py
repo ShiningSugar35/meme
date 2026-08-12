@@ -6,13 +6,20 @@ import numpy as np
 
 from backend.app.collector.models import Kline
 from backend.app.config import Settings
-from backend.app.database import Database
+from backend.app.database import Database, utc_now_iso
 from backend.app.ml.registry import ModelRegistry
 from backend.app.ml.types import ModelBundle, ThresholdSet
 from backend.app.repositories.models import ModelRepository
 from backend.app.repositories.samples import SampleRecord, SampleRepository
 from backend.app.services.paper_position_monitor import PaperPositionMonitor
 from backend.app.services.prediction import PredictionService
+
+
+def seed_sol_price(database: Database, at: datetime, price: float = 180.0) -> None:
+    database.execute(
+        "INSERT OR REPLACE INTO asset_usd_prices(asset,observed_at,price_usd,source,recorded_at) VALUES('SOL',?,?,?,?)",
+        (int(at.timestamp()), price, "test", utc_now_iso()),
+    )
 
 
 class ConstantEstimator:
@@ -25,7 +32,7 @@ class ConstantEstimator:
         return np.asarray([[1.0 - self.probability, self.probability] for _ in range(len(frame))])
 
 
-def seed_top3(database: Database, model_dir, now: datetime, *, probability: float = 0.60, training_end: datetime | None = None, feature_names=("feature_a",)) -> None:
+def seed_top3(database: Database, model_dir, now: datetime, *, probability: float = 0.60, training_end: datetime | None = None, activation_at: datetime | None = None, feature_names=("feature_a",)) -> None:
     registry = ModelRegistry(model_dir)
     models = ModelRepository(database)
     thresholds = (0.20, 0.50, 0.80)
@@ -65,6 +72,8 @@ def seed_top3(database: Database, model_dir, now: datetime, *, probability: floa
         )
         active.append({"id": model_id, "composite_score": 0.8 - slot * 0.1, "threshold": thresholds[slot - 1], "metrics": {}})
     models.set_active_models(active)
+    selected_at = (activation_at or (now - timedelta(seconds=30))).isoformat()
+    database.execute("UPDATE active_model_slots SET selected_at=?", (selected_at,))
 
 
 def test_prediction_cycle_scores_top3_opens_models_and_rule_baseline_idempotently(tmp_path):
@@ -78,6 +87,8 @@ def test_prediction_cycle_scores_top3_opens_models_and_rule_baseline_idempotentl
         paper_market_monitor_enabled=False,
     )
     now = datetime.now(timezone.utc).replace(microsecond=0)
+    seed_sol_price(database, now - timedelta(seconds=10))
+    seed_sol_price(database, now + timedelta(hours=2) - timedelta(seconds=10))
     seed_top3(database, tmp_path / "models", now)
     repository = SampleRepository(database)
     repository.insert(
@@ -120,7 +131,14 @@ def test_stale_oos_signals_and_rule_baseline_are_not_retroactively_filled(tmp_pa
     database.initialize()
     settings = Settings(_env_file=None, sqlite_path=str(tmp_path / "test.db"), background_workers_enabled=False, signal_max_age_seconds=60)
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    seed_top3(database, tmp_path / "models", now, probability=0.99, training_end=now - timedelta(hours=3))
+    seed_top3(
+        database,
+        tmp_path / "models",
+        now,
+        probability=0.99,
+        training_end=now - timedelta(hours=3),
+        activation_at=now - timedelta(hours=3),
+    )
     SampleRepository(database).insert(
         SampleRecord(
             address="Token222222222222222222222222222222222222",
@@ -134,6 +152,40 @@ def test_stale_oos_signals_and_rule_baseline_are_not_retroactively_filled(tmp_pa
     assert result.predictions_written == 3
     assert result.stale_signals == 3  # rules-only only considers the current fresh-admission window
     assert database.fetch_one("SELECT COUNT(*) AS n FROM positions")["n"] == 0
+
+
+def test_rollover_gate_blocks_model_buys_but_keeps_rules_only_running(tmp_path):
+    database = Database(tmp_path / "rollover.db")
+    database.initialize()
+    settings = Settings(
+        _env_file=None,
+        sqlite_path=str(tmp_path / "rollover.db"),
+        background_workers_enabled=False,
+        signal_max_age_seconds=300,
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    seed_top3(database, tmp_path / "models", now, probability=0.99)
+    sample_at = now - timedelta(seconds=10)
+    seed_sol_price(database, sample_at)
+    SampleRepository(database).insert(
+        SampleRecord(
+            address="TokenRollover11111111111111111111111111111111",
+            entry_time=int(sample_at.timestamp()),
+            entry_price=1.0,
+            liquidity=10_000.0,
+            features={"feature_a": 1.0},
+        )
+    )
+    database.set_runtime_state("model_entries_paused_for_rollover", True)
+
+    result = PredictionService(database, settings).run_cycle(now=now)
+
+    assert result.predictions_written == 3
+    assert result.model_positions_opened == 0
+    assert result.blocked_signals == 3
+    assert result.rule_positions_opened == 1
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key='rules_only'")["n"] == 1
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key LIKE 'model_%'")["n"] == 0
 
 
 class _OneCycleMarket:
@@ -181,6 +233,8 @@ def test_prediction_to_four_strategy_market_exit_e2e(tmp_path):
     models.set_active_models(active)
 
     entry = now - timedelta(seconds=10)
+    database.execute("UPDATE active_model_slots SET selected_at=?", ((entry - timedelta(seconds=1)).isoformat(),))
+    seed_sol_price(database, entry)
     SampleRepository(database).insert(
         SampleRecord(
             address="Asset333333333333333333333333333333333333",

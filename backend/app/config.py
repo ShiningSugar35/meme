@@ -44,7 +44,9 @@ class Settings(BaseSettings):
 
     training_timezone: str = "Asia/Shanghai"
     training_weekday: int = Field(default=6, ge=0, le=6)
-    training_hour: int = Field(default=3, ge=0, le=23)
+    # Automatic training is staged at 17:00 Beijing time. Model strategies stop
+    # opening new positions one hour earlier so the old generation can drain.
+    training_hour: int = Field(default=17, ge=0, le=23)
     training_minute: int = Field(default=0, ge=0, le=59)
     training_lookback_days: int = Field(default=120, ge=30)
     training_holdout_days: int = Field(default=30, ge=7)

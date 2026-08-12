@@ -77,11 +77,16 @@ class TrainingWorker:
             LIMIT 1
             """
         )
-        if not row:
-            return None
-        run_id = str(row["id"])
-        await asyncio.to_thread(self.service.run, run_id)
-        return run_id
+        if row:
+            run_id = str(row["id"])
+            await asyncio.to_thread(self.service.run, run_id)
+            await asyncio.to_thread(self.service.promote_pending_if_flat)
+            return run_id
+        # Candidate training may have finished while old positions were still open.
+        # Keep polling activation separately so the new Top-3 switches on within
+        # one worker interval of model_1/2/3 becoming fully flat.
+        await asyncio.to_thread(self.service.promote_pending_if_flat)
+        return None
 
     async def run_forever(
         self,

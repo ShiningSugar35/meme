@@ -10,7 +10,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .config import get_settings
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 
 def utc_now_iso() -> str:
@@ -232,20 +232,101 @@ class Database:
         # strategy keys; all new simulation rows use account_kind='simulation'.
         cls._migrate_strategy_tables(connection)
 
-        # Non-promoted candidates are terminal unless they are currently active.
+        # v9: simulation is a single-USD accounting ledger. SOL remains an
+        # immutable execution fact on each trade, while its fee-time USD value
+        # is frozen explicitly. Legacy rows are never repriced with today's SOL
+        # price; their new USD fields intentionally remain NULL when no original
+        # fee-time FX fact exists.
+        for column, definition in (
+            ("strategy_key", "TEXT"),
+            ("simulation_session_id", "TEXT"),
+            ("platform_fee_usd", "REAL"),
+            ("sol_usd_price", "REAL"),
+            ("sol_usd_observed_at", "INTEGER"),
+            ("network_fee_usd", "REAL"),
+            ("slippage_cost_usd", "REAL"),
+            ("fee_occurred_at", "TEXT"),
+        ):
+            cls._ensure_column(connection, "trades", column, definition)
         connection.execute(
             """
-            UPDATE models
-            SET status='rejected'
-            WHERE status='candidate'
-              AND id NOT IN (SELECT model_id FROM active_model_slots)
-              AND id IN (
-                    SELECT candidate_model_id FROM training_runs
-                    WHERE status='completed' AND promoted=0
-                      AND candidate_model_id IS NOT NULL
-              )
+            UPDATE trades
+            SET strategy_key=COALESCE(strategy_key,(SELECT p.strategy_key FROM positions p WHERE p.id=trades.position_id)),
+                simulation_session_id=COALESCE(simulation_session_id,(SELECT p.simulation_session_id FROM positions p WHERE p.id=trades.position_id)),
+                account_kind=COALESCE((SELECT p.account_kind FROM positions p WHERE p.id=trades.position_id),account_kind)
+            WHERE position_id IS NOT NULL
             """
         )
+        connection.execute(
+            """
+            UPDATE trades
+            SET strategy_key=COALESCE(strategy_key,account_kind), account_kind='simulation'
+            WHERE account_kind IN ('model_1','model_2','model_3','rules_only')
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_simulation_strategy "
+            "ON trades(simulation_session_id,strategy_key,created_at)"
+        )
+        # The column is retained only for backward-compatible session history.
+        # Active/new simulation sessions use a single USD ledger and therefore
+        # never carry an artificial SOL fee reserve.
+        connection.execute(
+            "UPDATE simulation_sessions SET initial_sol_fee_reserve=0 WHERE status='active'"
+        )
+
+        # v10: completed Top-3 candidates may intentionally remain unpromoted
+        # while the old model generation drains its positions. Preserve those
+        # candidate rows across restart and widen the durable trigger enum for
+        # insufficient-data daily training.
+        cls._migrate_training_runs_v10(connection)
+
+    @classmethod
+    def _migrate_training_runs_v10(cls, connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='training_runs'"
+        ).fetchone()
+        sql = str(row[0] or "") if row else ""
+        if "'daily'" in sql:
+            return
+        connection.execute("DROP INDEX IF EXISTS one_training_run_per_schedule")
+        connection.execute("ALTER TABLE training_runs RENAME TO training_runs_pre_v10")
+        connection.executescript(
+            """
+            CREATE TABLE training_runs (
+                id TEXT PRIMARY KEY,
+                trigger TEXT NOT NULL CHECK(trigger IN ('manual','weekly','daily','startup_catchup','degraded')),
+                status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','skipped')),
+                requested_at TEXT NOT NULL,
+                request_json TEXT NOT NULL DEFAULT '{}',
+                scheduled_for TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT,
+                completed_at TEXT,
+                candidate_model_id TEXT REFERENCES models(id),
+                champion_before_id TEXT REFERENCES models(id),
+                promoted INTEGER NOT NULL DEFAULT 0 CHECK(promoted IN (0,1)),
+                summary_json TEXT NOT NULL DEFAULT '{}',
+                error_message TEXT
+            );
+            CREATE UNIQUE INDEX one_training_run_per_schedule
+                ON training_runs(scheduled_for) WHERE scheduled_for IS NOT NULL;
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO training_runs(
+                id,trigger,status,requested_at,request_json,scheduled_for,retry_count,
+                started_at,completed_at,candidate_model_id,champion_before_id,promoted,
+                summary_json,error_message
+            )
+            SELECT id,trigger,status,requested_at,request_json,scheduled_for,retry_count,
+                   started_at,completed_at,candidate_model_id,champion_before_id,promoted,
+                   summary_json,error_message
+            FROM training_runs_pre_v10
+            """
+        )
+        connection.execute("DROP TABLE training_runs_pre_v10")
 
     @classmethod
     def _migrate_strategy_tables(cls, connection: sqlite3.Connection) -> None:
@@ -610,6 +691,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS only_one_active_simulation_session
 CREATE INDEX IF NOT EXISTS idx_simulation_sessions_started
     ON simulation_sessions(started_at DESC);
 
+CREATE TABLE IF NOT EXISTS asset_usd_prices (
+    asset TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    price_usd REAL NOT NULL CHECK(price_usd>0),
+    source TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY(asset,observed_at)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_usd_prices_latest
+    ON asset_usd_prices(asset,observed_at DESC);
+
 CREATE TABLE IF NOT EXISTS positions (
     id TEXT PRIMARY KEY,
     token_address TEXT NOT NULL,
@@ -648,6 +740,8 @@ CREATE TABLE IF NOT EXISTS trades (
     transaction_hash TEXT,
     side TEXT NOT NULL CHECK(side IN ('buy','sell')),
     account_kind TEXT NOT NULL,
+    strategy_key TEXT,
+    simulation_session_id TEXT,
     status TEXT NOT NULL CHECK(status IN ('created','quoting','submitted','pending','processed','confirmed','failed','expired','cancelled')),
     requested_amount REAL NOT NULL,
     filled_amount REAL,
@@ -657,6 +751,12 @@ CREATE TABLE IF NOT EXISTS trades (
     priority_fee_sol REAL,
     tip_fee_sol REAL,
     network_fee_sol REAL,
+    platform_fee_usd REAL,
+    sol_usd_price REAL,
+    sol_usd_observed_at INTEGER,
+    network_fee_usd REAL,
+    slippage_cost_usd REAL,
+    fee_occurred_at TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     failure_category TEXT,
     failure_code TEXT,
@@ -672,7 +772,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status,updated_at);
 
 CREATE TABLE IF NOT EXISTS training_runs (
     id TEXT PRIMARY KEY,
-    trigger TEXT NOT NULL CHECK(trigger IN ('manual','weekly','startup_catchup','degraded')),
+    trigger TEXT NOT NULL CHECK(trigger IN ('manual','weekly','daily','startup_catchup','degraded')),
     status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','skipped')),
     requested_at TEXT NOT NULL,
     request_json TEXT NOT NULL DEFAULT '{}',

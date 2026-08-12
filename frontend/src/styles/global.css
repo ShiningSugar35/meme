@@ -127,14 +127,14 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .feature-meta { color: var(--muted); font-size: 9px; line-height: 1.45; }
 
 .simulation-session-panel { overflow: hidden; }
-.simulation-account-grid { padding: 16px 20px 20px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.simulation-account-grid { padding: 16px 20px 20px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .simulation-account { border: 1px solid #e1e6eb; border-radius: 10px; padding: 14px; background: #fafbfc; }
 .simulation-account-button { width: 100%; color: inherit; text-align: left; transition: 140ms ease; }
 .simulation-account-button:hover { border-color: #bfcbd9; background: #f5f8fb; }
 .simulation-account-selected { border-color: #9fb8d8; background: #eef4fb; box-shadow: inset 0 0 0 1px rgba(54,104,178,0.08); }
 .simulation-account-title { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .simulation-account-title .status-badge { margin-left: auto; }
-.simulation-account-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.simulation-account-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 12px; }
 .simulation-account-stats div { display: flex; flex-direction: column; gap: 3px; }
 .simulation-account-stats span { color: var(--muted); font-size: 10px; }
 .simulation-account-stats strong { font-size: 13px; }
@@ -250,6 +250,7 @@ select { height: 36px; padding: 0 31px 0 10px; color: #465263; border: 1px solid
 .mobile-overlay { display: none; }
 @media (max-width: 1180px) {
   .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .simulation-account-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .chart-grid { grid-template-columns: 1fr 1fr; }
   .panel-wide { grid-column: 1 / -1; grid-row: auto; }
 }

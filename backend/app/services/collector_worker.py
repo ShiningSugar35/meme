@@ -27,6 +27,7 @@ from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..repositories.samples import SampleRecord, SampleRepository
 from .paper_position_monitor import PaperPositionMonitor
+from .sol_price import SolUsdPriceService
 
 
 class SqliteCollectorSink:
@@ -164,6 +165,7 @@ class CollectorWorker:
         self._transport: HttpxTransport | None = None
         self._service: CollectorService | None = None
         self._paper_monitor = PaperPositionMonitor(database, self.settings)
+        self._sol_price = SolUsdPriceService(database)
         existing_events = database.get_runtime_state("collector_events", [])
         seed = existing_events[-250:] if isinstance(existing_events, list) else []
         self._events: deque[dict[str, Any]] = deque(seed, maxlen=250)
@@ -314,6 +316,20 @@ class CollectorWorker:
                 "paper_positions_blocked": 0,
             }
             finalized = 0
+
+            # Freeze a recent SOL/USD observation before any simulated execution.
+            # Paper accounting consumes this cache at the actual fee timestamp;
+            # a stale/missing FX fact blocks the paper trade instead of repricing
+            # it later with a different SOL price.
+            try:
+                await self._sol_price.refresh(self._service.provider, now_ts=int(time.time()))
+            except Exception as exc:
+                self.database.audit(
+                    category="simulation",
+                    action="sol_usd_price_refresh_failed",
+                    severity="warning",
+                    details={"error": f"{type(exc).__name__}: {exc}"[:300]},
+                )
 
             # Existing position exits have operational priority over discovering
             # new tokens. Failure in any stage is isolated so a broken Trenches

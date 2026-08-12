@@ -8,7 +8,13 @@ from ..database import Database
 from ..repositories.models import ModelRepository
 from ..repositories.samples import SampleRepository
 from ..risk.service import RiskService
-from ..strategy import MODEL_STRATEGIES, RULES_ONLY, SIMULATION_STRATEGIES, validate_strategy
+from ..strategy import (
+    MODEL_STRATEGIES,
+    RULES_ONLY,
+    SIMULATION_STRATEGIES,
+    algorithm_display_name,
+    validate_strategy,
+)
 from .paper_trading import PaperTradingService
 from .runtime import RuntimeService
 
@@ -294,21 +300,7 @@ class DashboardService:
             trained = trained_at.astimezone(timezone(timedelta(hours=8))).strftime("%Y%m%d")
         else:
             trained = "未训练"
-        short = {
-            "logistic_regression": "LR",
-            "decision_tree": "DT",
-            "hist_gradient_boosting": "HGB",
-            "gradient_boosting": "GB",
-            "ada_boost": "AdaBoost",
-            "extra_trees": "ExtraTrees",
-            "random_forest": "RF",
-            "rbf_svm": "RBF-SVM",
-            "xgboost": "XGBoost",
-            "lightgbm": "LightGBM",
-            "catboost": "CatBoost",
-            "flaml_automl": "FLAML",
-        }.get(str(model.get("algorithm")), str(model.get("algorithm") or "Model"))
-        return f"{trained}-{short}"
+        return f"{trained}-{algorithm_display_name(str(model.get('algorithm') or 'Model'))}"
 
     def _strategy_performance(self, session_id: str) -> list[dict[str, Any]]:
         rows = self.database.fetch_all(

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import itertools
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .types import (
     EntrySignal,
@@ -27,11 +27,15 @@ class TradingSimulator:
         self,
         quote_provider: QuoteProvider,
         config: SimulationConfig | None = None,
+        *,
+        sol_usd_price_at: Callable[[datetime], float | None] | None = None,
     ) -> None:
         self.quote_provider = quote_provider
         self.config = config or SimulationConfig()
+        self.sol_usd_price_at = sol_usd_price_at
         self.cash_usd = float(self.config.initial_cash_usd)
-        self.sol_fee_reserve = float(self.config.initial_sol_fee_reserve)
+        self.total_network_fees_sol = 0.0
+        self.total_network_fees_usd = 0.0
         self.positions: dict[str, SimulatedPosition] = {}
         self.events: list[SimulationEvent] = []
         self._position_ids = itertools.count(1)
@@ -75,14 +79,26 @@ class TradingSimulator:
             position_id=position_id,
         )
         quote = self.quote_provider.quote(request)
-        if not self._can_apply_quote(quote, capital + max(quote.fee_usd, 0.0)):
-            self._charge_failed_network_fee(quote)
+        network_fee = self._network_fee_usd(request, quote)
+        if network_fee is None:
+            self._record_rejection(
+                signal,
+                FailureCategory.API,
+                "SOL/USD fee price unavailable at execution time",
+            )
+            return None
+        network_fee_usd, sol_usd_price = network_fee
+        if not self._can_apply_quote(
+            quote, capital + max(quote.fee_usd, 0.0) + network_fee_usd
+        ):
+            self._charge_failed_network_fee(request, quote)
             self._record_failed_or_resource_quote(request, quote, "entry_failed")
             return None
 
         assert quote.fill_price is not None
-        self.cash_usd -= capital + quote.fee_usd
-        self.sol_fee_reserve -= quote.network_fee_sol
+        self.cash_usd -= capital + quote.fee_usd + network_fee_usd
+        self.total_network_fees_sol += quote.network_fee_sol
+        self.total_network_fees_usd += network_fee_usd
         position = SimulatedPosition(
             position_id=position_id,
             token_address=signal.token_address,
@@ -95,6 +111,8 @@ class TradingSimulator:
             invested_usd=capital,
             entry_fee_usd=quote.fee_usd,
             entry_network_fee_sol=quote.network_fee_sol,
+            entry_network_fee_usd=network_fee_usd,
+            entry_sol_usd_price=sol_usd_price,
             model_probability=signal.model_probability,
             strategy_key=signal.strategy_key,
         )
@@ -152,42 +170,68 @@ class TradingSimulator:
             position_id=position_id,
         )
         quote = self.quote_provider.quote(request)
+        network_fee = self._network_fee_usd(request, quote)
+        if network_fee is None:
+            self._record_failed_or_resource_quote(
+                request,
+                ExecutionQuote(
+                    success=False,
+                    fill_price=None,
+                    gross_usd=0.0,
+                    fee_usd=0.0,
+                    network_fee_sol=0.0,
+                    slippage_bps=quote.slippage_bps,
+                    latency_ms=quote.latency_ms,
+                    failure_category=FailureCategory.API,
+                    message="SOL/USD fee price unavailable at execution time",
+                ),
+                "exit_failed",
+                reason,
+            )
+            return False
+        network_fee_usd, sol_usd_price = network_fee
         if not self._can_apply_quote(quote, 0.0):
-            self._charge_failed_network_fee(quote)
+            self._charge_failed_network_fee(request, quote)
             self._record_failed_or_resource_quote(request, quote, "exit_failed", reason)
             return False
 
         assert quote.fill_price is not None
-        proceeds = quote.gross_usd - quote.fee_usd
+        proceeds = quote.gross_usd - quote.fee_usd - network_fee_usd
         self.cash_usd += proceeds
-        self.sol_fee_reserve -= quote.network_fee_sol
+        self.total_network_fees_sol += quote.network_fee_sol
+        self.total_network_fees_usd += network_fee_usd
         position.closed_at = observed_at
         position.exit_reason = reason
         position.exit_fill_price = quote.fill_price
         position.exit_fee_usd = quote.fee_usd
         position.exit_network_fee_sol = quote.network_fee_sol
+        position.exit_network_fee_usd = network_fee_usd
+        position.exit_sol_usd_price = sol_usd_price
         position.proceeds_usd = proceeds
         position.realized_pnl_usd = (
-            proceeds - position.invested_usd - position.entry_fee_usd
+            proceeds
+            - position.invested_usd
+            - position.entry_fee_usd
+            - position.entry_network_fee_usd
         )
         self._record_quote_event(request, quote, "exit_filled", reason)
         return True
 
     def snapshot(self) -> PortfolioSnapshot:
+        platform_fees = sum(
+            position.entry_fee_usd + position.exit_fee_usd
+            for position in self.positions.values()
+        )
         return PortfolioSnapshot(
             cash_usd=self.cash_usd,
-            sol_fee_reserve=self.sol_fee_reserve,
             open_positions=len(self.open_positions),
             closed_positions=len(self.closed_positions),
             realized_pnl_usd=sum(
                 position.realized_pnl_usd for position in self.closed_positions
             ),
-            total_fees_usd=sum(
-                position.entry_fee_usd + position.exit_fee_usd
-                for position in self.positions.values()
-            ),
-            total_network_fees_sol=self.config.initial_sol_fee_reserve
-            - self.sol_fee_reserve,
+            total_fees_usd=platform_fees + self.total_network_fees_usd,
+            total_network_fees_usd=self.total_network_fees_usd,
+            total_network_fees_sol=self.total_network_fees_sol,
         )
 
     def _exit_decision(
@@ -214,15 +258,41 @@ class TradingSimulator:
             and quote.fee_usd >= 0
             and quote.network_fee_sol >= 0
             and self.cash_usd >= required_cash
-            and self.sol_fee_reserve >= quote.network_fee_sol
         )
 
-    def _charge_failed_network_fee(self, quote: ExecutionQuote) -> None:
-        if (
-            not quote.success
-            and 0 < quote.network_fee_sol <= self.sol_fee_reserve
-        ):
-            self.sol_fee_reserve -= quote.network_fee_sol
+    def _network_fee_usd(
+        self,
+        request: QuoteRequest,
+        quote: ExecutionQuote,
+    ) -> tuple[float, float | None] | None:
+        fee_sol = max(0.0, float(quote.network_fee_sol))
+        if fee_sol == 0:
+            return 0.0, None
+        if self.sol_usd_price_at is None:
+            return None
+        occurred_at = request.requested_at + timedelta(
+            milliseconds=max(quote.latency_ms, 0)
+        )
+        price = self.sol_usd_price_at(occurred_at)
+        if price is None or float(price) <= 0:
+            return None
+        price_usd = float(price)
+        return fee_sol * price_usd, price_usd
+
+    def _charge_failed_network_fee(
+        self,
+        request: QuoteRequest,
+        quote: ExecutionQuote,
+    ) -> None:
+        if quote.success or quote.network_fee_sol <= 0:
+            return
+        network_fee = self._network_fee_usd(request, quote)
+        if network_fee is None:
+            return
+        network_fee_usd, _ = network_fee
+        self.cash_usd -= network_fee_usd
+        self.total_network_fees_sol += quote.network_fee_sol
+        self.total_network_fees_usd += network_fee_usd
 
     def _record_quote_event(
         self,
@@ -262,9 +332,7 @@ class TradingSimulator:
             self._record_quote_event(request, quote, event_type, reason)
             return
         category = FailureCategory.INSUFFICIENT_FUNDS
-        message = (
-            "simulated account lacks USD cash or SOL fee reserve for quoted execution"
-        )
+        message = "simulated account lacks USD cash for quoted execution"
         rejected = ExecutionQuote(
             success=False,
             fill_price=None,

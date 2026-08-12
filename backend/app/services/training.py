@@ -24,7 +24,7 @@ from ..repositories.models import ModelRepository
 from ..repositories.samples import SampleRepository
 
 
-TrainingTrigger = Literal["manual", "weekly", "startup_catchup", "degraded"]
+TrainingTrigger = Literal["manual", "weekly", "daily", "startup_catchup", "degraded"]
 
 
 class TrainingService:
@@ -199,7 +199,7 @@ class TrainingService:
                     }
                 )
 
-            self.models.set_active_models(registered)
+            completed_at = utc_now_iso()
             summary = {
                 "rows": len(dataset),
                 "early_stage": result.plan.early_stage,
@@ -209,6 +209,10 @@ class TrainingService:
                 "rule_baseline_final": asdict(result.rule_baseline),
                 "candidates": [asdict(candidate) for candidate in result.candidates],
                 "warnings": list(result.warnings),
+                "activation": {
+                    "status": "waiting_for_flat",
+                    "required_flat_strategies": ["model_1", "model_2", "model_3"],
+                },
                 "selection_formula": {
                     "economic": "mean_clip((6*TP-FP)/(6*N_positive),-1,1)",
                     "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",
@@ -220,21 +224,21 @@ class TrainingService:
                 """
                 UPDATE training_runs
                 SET status='completed', completed_at=?, candidate_model_id=?, champion_before_id=?,
-                    promoted=1, summary_json=?
+                    promoted=0, summary_json=?
                 WHERE id=?
                 """,
                 (
-                    utc_now_iso(),
+                    completed_at,
                     registered[0]["id"],
                     rank1_before["id"] if rank1_before else None,
                     json.dumps(summary, ensure_ascii=False),
                     run_id,
                 ),
             )
-            self.database.set_runtime_state("last_training_completed_at", utc_now_iso())
+            self.database.set_runtime_state("last_training_completed_at", completed_at)
             self.database.audit(
                 category="model",
-                action="top3_training_completed",
+                action="top3_training_completed_pending_activation",
                 entity_type="training_run",
                 entity_id=run_id,
                 details={
@@ -243,6 +247,7 @@ class TrainingService:
                     "rows": len(dataset),
                 },
             )
+            self.promote_pending_if_flat(run_id=run_id)
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"[:2000]
             self.database.execute(
@@ -258,12 +263,161 @@ class TrainingService:
                 details={"error": message, "trace_tail": traceback.format_exc(limit=2)[-1500:]},
             )
 
+    def promote_pending_if_flat(self, *, run_id: str | None = None) -> str | None:
+        """Activate the newest completed Top-3 only after model strategies are flat.
+
+        Training and activation are deliberately decoupled. A completed candidate
+        set survives process restarts in ``training_runs.summary_json`` and the
+        TrainingWorker retries this promotion check every poll. Older pending
+        generations are ignored once a newer completed candidate set exists.
+        """
+        if run_id is not None:
+            candidates = self.database.fetch_all(
+                "SELECT * FROM training_runs WHERE id=? AND status='completed' AND promoted=0",
+                (run_id,),
+            )
+        else:
+            candidates = self.database.fetch_all(
+                """
+                SELECT * FROM training_runs
+                WHERE status='completed' AND promoted=0
+                ORDER BY completed_at DESC, requested_at DESC
+                """
+            )
+        pending: dict[str, Any] | None = None
+        top_models: list[dict[str, Any]] = []
+        for row in candidates:
+            try:
+                summary = json.loads(row.get("summary_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            proposed = summary.get("top_models") if isinstance(summary, dict) else None
+            if not isinstance(proposed, list) or len(proposed) != 3:
+                continue
+            ids = [str(item.get("id") or "") for item in proposed if isinstance(item, dict)]
+            if len(ids) != 3 or not all(ids):
+                continue
+            statuses = self.database.fetch_all(
+                f"SELECT id,status FROM models WHERE id IN ({','.join('?' for _ in ids)})",
+                tuple(ids),
+            )
+            status_map = {str(item["id"]): str(item["status"]) for item in statuses}
+            if not all(status_map.get(model_id) == "candidate" for model_id in ids):
+                continue
+            pending = row
+            top_models = [dict(item) for item in proposed]
+            break
+        if pending is None:
+            return None
+
+        open_count = int((self.database.fetch_one(
+            """
+            SELECT COUNT(*) AS count
+            FROM positions
+            WHERE account_kind='simulation'
+              AND strategy_key IN ('model_1','model_2','model_3')
+              AND status IN ('opening','open','closing','manual_intervention')
+            """
+        ) or {"count": 0})["count"])
+        if open_count:
+            now = utc_now_iso()
+            self.database.set_runtime_state("model_entries_paused_for_rollover", True)
+            self.database.set_runtime_state(
+                "model_entry_rollover_gate",
+                {
+                    "paused": True,
+                    "scheduled_for": pending.get("scheduled_for"),
+                    "schedule_mode": "manual" if not pending.get("scheduled_for") else str(pending.get("trigger") or "scheduled"),
+                    "reason": "candidate_models_waiting_for_all_model_positions_to_close",
+                    "updated_at": now,
+                },
+            )
+            self.database.set_runtime_state(
+                "model_rollover_status",
+                {
+                    "state": "waiting_for_flat",
+                    "run_id": str(pending["id"]),
+                    "open_model_positions": open_count,
+                    "candidate_model_ids": [str(item["id"]) for item in top_models],
+                    "trained_at": pending.get("completed_at"),
+                    "updated_at": now,
+                },
+            )
+            return None
+
+        activated_at = utc_now_iso()
+        self.models.set_active_models(top_models)
+        # Import locally to keep the training module independent of simulation
+        # implementation details during module import.
+        from .paper_trading import PaperTradingService
+
+        PaperTradingService(self.database, self.settings).reset_model_accounts_for_activation(
+            top_models,
+            activated_at=activated_at,
+        )
+        try:
+            summary = json.loads(pending.get("summary_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            summary = {}
+        summary["activation"] = {
+            "status": "activated",
+            "activated_at": activated_at,
+            "required_flat_strategies": ["model_1", "model_2", "model_3"],
+        }
+        self.database.execute(
+            "UPDATE training_runs SET promoted=1, summary_json=? WHERE id=? AND promoted=0",
+            (json.dumps(summary, ensure_ascii=False), pending["id"]),
+        )
+        self.database.set_runtime_state("last_model_activation_at", activated_at)
+        self.database.set_runtime_state("model_entries_paused_for_rollover", False)
+        self.database.set_runtime_state(
+            "model_entry_rollover_gate",
+            {
+                "paused": False,
+                "scheduled_for": pending.get("scheduled_for"),
+                "schedule_mode": str(pending.get("trigger") or "manual"),
+                "reason": "candidate_models_activated_after_flat",
+                "updated_at": activated_at,
+            },
+        )
+        self.database.set_runtime_state(
+            "model_rollover_status",
+            {
+                "state": "activated",
+                "run_id": str(pending["id"]),
+                "activated_at": activated_at,
+                "model_ids": [str(item["id"]) for item in top_models],
+                "open_model_positions": 0,
+            },
+        )
+        self.database.audit(
+            category="model",
+            action="top3_activated_after_flat",
+            entity_type="training_run",
+            entity_id=str(pending["id"]),
+            details={
+                "activated_at": activated_at,
+                "model_ids": [str(item["id"]) for item in top_models],
+            },
+        )
+        return str(pending["id"])
+
     def rollback_model(self, model_id: str) -> dict[str, Any]:
         target = self.models.get(model_id)
         if not target:
             raise ValueError("model not found")
         if target["status"] != "retired":
             raise ValueError("only a retired rank-1 model can be rolled back")
+        open_count = int((self.database.fetch_one(
+            """
+            SELECT COUNT(*) AS count FROM positions
+            WHERE account_kind='simulation'
+              AND strategy_key IN ('model_1','model_2','model_3')
+              AND status IN ('opening','open','closing','manual_intervention')
+            """
+        ) or {"count": 0})["count"])
+        if open_count:
+            raise ValueError("model rollback requires model_1/model_2/model_3 to be fully flat")
         artifact = Path(str(target["artifact_path"]))
         artifact = artifact if artifact.is_absolute() else PROJECT_ROOT / artifact
         if not artifact.exists():
@@ -271,13 +425,26 @@ class TrainingService:
         ModelRegistry(artifact.parent).load(artifact.stem)
         previous = self.models.champion()
         self.models.rollback(model_id)
+        activated_at = utc_now_iso()
+        active = self.models.active_models()
+        from .paper_trading import PaperTradingService
+
+        PaperTradingService(self.database, self.settings).reset_model_accounts_for_activation(
+            active,
+            activated_at=activated_at,
+        )
+        self.database.set_runtime_state("last_model_activation_at", activated_at)
         self.database.audit(
             category="model",
             action="model_rolled_back",
             severity="warning",
             entity_type="model",
             entity_id=model_id,
-            details={"previous_rank1_id": previous["id"] if previous else None},
+            details={
+                "previous_rank1_id": previous["id"] if previous else None,
+                "statistics_reset": True,
+                "activated_at": activated_at,
+            },
         )
         champion = self.models.champion()
         assert champion is not None

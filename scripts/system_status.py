@@ -81,10 +81,15 @@ def main() -> int:
             "accounts": {
                 key: {
                     "cash_usd": value.get("cash_usd"),
-                    "sol_fee_reserve": value.get("sol_fee_reserve"),
+                    "invested_usd": value.get("invested_usd"),
                     "open_positions": value.get("open_positions"),
                     "closed_positions": value.get("closed_positions"),
                     "realized_pnl_usd": value.get("realized_pnl_usd"),
+                    "total_fees_usd": value.get("total_fees_usd"),
+                    "platform_fee_usd": value.get("platform_fee_usd"),
+                    "network_fee_usd": value.get("network_fee_usd"),
+                    "network_fee_sol": value.get("network_fee_sol"),
+                    "slippage_cost_usd": value.get("slippage_cost_usd"),
                 }
                 for key, value in simulation["accounts"].items()
             },

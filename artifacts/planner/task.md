@@ -1,7 +1,7 @@
 # Solana Meme Quant Trading System - 当前开发状态
 
 > 更新时间：2026-08-12
-> 当前范围：**除真实 live BUY 外，本地单机/单用户版本全部闭环**。系统已完成 Top 3 + `rules_only` 重构、schema v8 去 profile 迁移、真实 Top 3 训练和四策略模拟链；实盘 provider/journal/reconciliation/liquidation 继续 fail-closed。
+> 当前范围：**除真实 live BUY 外，本地单机/单用户版本全部闭环**。系统已完成 Top 3 + `rules_only` 重构、schema v10（v8 去 profile + v9 USD-only 手续费会计 + v10 staged model rollover）迁移、健康感知的 16:00/17:00 日/周训练、候选等待空仓换模、模型 generation 统计和四策略模拟链；实盘 provider/journal/reconciliation/liquidation 继续 fail-closed。
 
 ## Phase 1：数据与 Schema — COMPLETE
 
@@ -11,7 +11,7 @@
 - [x] schema v8：`positions` 物理删除 `profile`，`account_kind` 仅 `simulation/live`，模拟策略由 `strategy_key` 表达
 - [x] `active_model_slots` 保存 slot 1..3、model id、综合分、单一 threshold、选中时间
 - [x] 旧三档预测/仓位/成交原子迁移到 neutral legacy strategy；迁移副本验证 2379 samples / 207 predictions / 90 positions / 180 trades 原数保留
-- [x] 正式真实 DB 已升级 schema v8
+- [x] 正式真实 DB 已完成 schema v10 幂等升级（v8 去 profile + v9 USD-only 手续费会计 + v10 daily trigger / 待空仓候选持久化）
 - [x] 迁移前 SQLite backup：`data/backups/meme_quant_pre_top3_20260811T155151Z.db`
 - [x] durable `simulation_sessions` / `training_runs` / `agent_proposals` / trade journal
 
@@ -63,16 +63,21 @@
 - [x] 三个模型均由 one-standard-error 奥卡姆规则压缩到 12 特征
 - [x] final certification：RF `$875` / DT `$890` / GB `$1000` / `rules_only` `$915`
 - [x] HGB/XGBoost 等 final 局部成绩更高时也不会反向改写开发期 Top 3
-- [x] 模型短名按北京时间训练日显示，本次应为 `20260812-RF / 20260812-DT / 20260812-GB`
+- [x] 模型显示名统一使用算法全称，例如 `20260812-Random Forest / 20260812-Decision Tree / 20260812-Gradient Boosting`
+- [x] 后续历史 degraded run `374ec8e3-4479-4e7b-9e30-630183cadc23` 已按同一 OOS 纪律更新当前 Top 3 为 `20260812-Decision Tree / 20260812-Random Forest / 20260812-XGBoost`；v10 起 degraded 不再绕过 16:00/17:00 staged rollover 插队训练
 
 ## Phase 4：四策略 Simulation — COMPLETE
 
 - [x] 策略键：`model_1 / model_2 / model_3 / rules_only`
-- [x] 每策略独立 `1000 USD + 0.1 SOL`
+- [x] 每策略独立 `1000 USD` 单一 USD 账本；模拟盘不维护 SOL reserve
 - [x] 每策略最大 10 仓；同 Token 可跨策略/批次共存
 - [x] `model_1/2/3` 各自使用对应 active model + 单一 threshold
 - [x] `rules_only` 对所有 fresh rule-admitted sample 直接开模拟仓，不创建模型 prediction
 - [x] 四策略复用完全相同 BUY/SELL/滑点/费率/网络费/0.9x SL/1.6x TP/2h timeout/卖出失败重试链
+- [x] 网络费保留原始 SOL 数量，并按手续费实际发生时 SOL/USD 冻结折算为 USD 扣减模拟现金/PnL；缺失新鲜 FX 时 fail-closed，不事后补价
+- [x] schema v9 持久化 `asset_usd_prices` 与 `platform_fee_usd / sol_usd_price / network_fee_usd / slippage_cost_usd / fee_occurred_at`；v10 保持该费用会计不变
+- [x] 卡片 `当前余额` 是可用现金，不含已投入持仓本金；v9+ 完整费用交易逐笔审计满足 `net_pnl = gross_pnl - platform/network fees`，滑点已进入 fill price
+- [x] `model_1/2/3` 卡片按当前 model_id + selected_at 统计 8 项 generation 指标，sample.entry_time 也必须不早于 selected_at；`rules_only` Precision=当前 session 成熟样本正类率，Recall=100%（存在正类时）
 - [x] 同 Token 四策略仓位合并为一次市场 Kline 请求
 - [x] SELL failure 持久化 closing；restart 只重试原退出；no-route/重试耗尽按总损失关闭
 - [x] Dashboard/Portfolio 默认只统计当前 active simulation session；历史不污染当前 PnL
@@ -94,30 +99,32 @@
 - [x] p/r 收益恒等式回归
 - [x] Top 3 单阈值与 final holdout 隔离回归
 - [x] schema v8 去 profile + 历史迁移回归
+- [x] schema v9 USD-only 手续费会计回归：费时 SOL/USD、原始 SOL 事实保留、未来价格不泄漏、无模拟 SOL reserve
 - [x] four-strategy session reset / ledger
 - [x] rules-only 无 prediction 开仓
 - [x] Top3 prediction cycle + stale-signal 边界
 - [x] 同币四策略一次 Kline 的 1m first-touch E2E
-- [x] 三 active model health/degraded queue
+- [x] 三 active model health 分类 + `insufficient_data` 每日17:00 / 其他状态周17:00 调度；16:00 entry freeze、17:00 先训练、候选跨重启等待空仓、空仓后原子换模
+- [x] current-generation Precision/Recall 去除上线前 backlog；`rules_only` Precision/Recall 回归
 - [x] no-route / retry exhausted / live terminal failed sell 计入已实现亏损
 - [x] live journal/reconciliation/liquidation mock/fixture fail-closed
-- [x] 后端 full `pytest -q`：**98/98 passed**
+- [x] 后端 full `pytest -q`：**105/105 passed**
 - [x] 前端 `npm run build`：passed
 
 ## Phase 7：Runtime / 发布收尾 — COMPLETE
 
-- [x] 正式真实 DB schema v8 migration
-- [x] 正式 Top 3 training + active slots
+- [x] 正式真实 DB schema v10 migration
+- [x] 正式 Top 3 training + active slots；健康感知 staged rollover 已接管后续自动更新
 - [x] 创建新的四策略 active simulation session：`sim_5d975f6978f847de8aec8e5da57ccffa`
 - [x] 启动 backend Windows reload supervisor：PID 28404
 - [x] Collector / PredictionWorker / TrainingWorker / PaperMonitor / Scheduler / ModelHealth / Reconciliation / Liquidation 全部 `running`
-- [x] `/health`、`/api/dashboard`、`/api/models`、`/api/simulation`、`/api/portfolio/view` 真实 API smoke 通过；Top3 labels=`20260812-RF/DT/GB`
+- [x] `/health`、`/api/dashboard`、`/api/models`、`/api/simulation`、`/api/portfolio/view` 真实 API smoke 通过；当前 Top3=`20260812-Decision Tree / 20260812-Random Forest / 20260812-XGBoost`
 - [x] 前端 `http://127.0.0.1:5173` 返回 200，`/@vite/client` 存在，Vite HMR 正常
 - [x] 再次确认 `DRY_RUN=true`、`live_trading_enabled=false`
 - [x] 临时 `data/top3_migration_test.db` 已删除；保留 pre-top3 SQLite 安全备份
-- [x] `git diff --check` clean；final backend `98/98` passed；final frontend production build passed
-- [x] commit + push `main`
-- [x] Git worktree clean
+- [x] final backend `105/105` passed；final frontend production build passed
+- [x] 本轮 schema v10 / USD-only / staged rollover / 8 指标改造完成并在运行态验收
+- [x] 本轮按用户要求 commit + push `main`（以本轮最终 Git 验收记录为准），同时保持 backend/frontend 常驻运行
 
 ## Phase 8：Live — PARKED / FAIL-CLOSED
 

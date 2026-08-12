@@ -89,6 +89,8 @@ class SimulatedPosition:
     invested_usd: float
     entry_fee_usd: float
     entry_network_fee_sol: float
+    entry_network_fee_usd: float
+    entry_sol_usd_price: float | None
     model_probability: float | None
     strategy_key: str
     closed_at: datetime | None = None
@@ -96,6 +98,8 @@ class SimulatedPosition:
     exit_fill_price: float | None = None
     exit_fee_usd: float = 0.0
     exit_network_fee_sol: float = 0.0
+    exit_network_fee_usd: float = 0.0
+    exit_sol_usd_price: float | None = None
     proceeds_usd: float = 0.0
     realized_pnl_usd: float = 0.0
 
@@ -125,18 +129,17 @@ class SimulationEvent:
 @dataclass(frozen=True)
 class PortfolioSnapshot:
     cash_usd: float
-    sol_fee_reserve: float
     open_positions: int
     closed_positions: int
     realized_pnl_usd: float
     total_fees_usd: float
+    total_network_fees_usd: float
     total_network_fees_sol: float
 
 
 @dataclass(frozen=True)
 class SimulationConfig:
     initial_cash_usd: float = 1_000.0
-    initial_sol_fee_reserve: float = 0.1
     max_open_positions: int = 10
     take_profit_multiple: float = 1.60
     stop_loss_multiple: float = 0.90

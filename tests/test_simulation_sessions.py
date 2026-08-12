@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.config import Settings
-from backend.app.database import Database
+from backend.app.database import Database, utc_now_iso
 from backend.app.repositories.models import ModelRepository
 from backend.app.repositories.samples import SampleRecord, SampleRepository
 from backend.app.services.paper_trading import PaperTradingService
@@ -34,6 +34,13 @@ def make_settings(tmp_path: Path) -> Settings:
         sqlite_path=str(tmp_path / "unused.db"),
         background_workers_enabled=False,
         simulation_enabled=True,
+    )
+
+
+def seed_sol_price(database: Database, at: datetime, price: float = 180.0) -> None:
+    database.execute(
+        "INSERT OR REPLACE INTO asset_usd_prices(asset,observed_at,price_usd,source,recorded_at) VALUES('SOL',?,?,?,?)",
+        (int(at.timestamp()), price, "test", utc_now_iso()),
     )
 
 
@@ -89,7 +96,8 @@ def test_simulation_session_initializes_four_equal_accounts_and_reset_changes_id
     assert set(reset["accounts"]) == {"model_1", "model_2", "model_3", "rules_only"}
     for account in reset["accounts"].values():
         assert account["cash_usd"] == pytest.approx(1000.0)
-        assert account["sol_fee_reserve"] == pytest.approx(0.1)
+        assert "sol_fee_reserve" not in account
+        assert account["accounting_currency"] == "USD"
         assert account["open_positions"] == 0
         assert account["realized_pnl_usd"] == pytest.approx(0.0)
     history = service.simulation_history()
@@ -124,6 +132,8 @@ def test_successful_open_persists_position_trade_and_strategy_account(tmp_path: 
     settings = make_settings(tmp_path)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     sample_id, prediction_id, model_id = seed_prediction(database, now)
+    seed_sol_price(database, now, 180.0)
+    seed_sol_price(database, now + timedelta(minutes=1), 999.0)
     service = PaperTradingService(
         database,
         settings,
@@ -145,14 +155,19 @@ def test_successful_open_persists_position_trade_and_strategy_account(tmp_path: 
     )
     account = database.get_runtime_state("portfolio_strategy:model_1")
     trade = database.fetch_one(
-        "SELECT status,network_fee_sol FROM trades WHERE position_id=? AND side='buy'",
+        "SELECT status,network_fee_sol,sol_usd_price,network_fee_usd FROM trades WHERE position_id=? AND side='buy'",
         (result.position_id,),
     )
     assert position == {"simulation_session_id": session["id"], "strategy_key": "model_1", "status": "open"}
     assert account["session_id"] == session["id"]
-    assert account["cash_usd"] == pytest.approx(949.5)
-    assert account["sol_fee_reserve"] == pytest.approx(0.099)
-    assert trade == {"status": "confirmed", "network_fee_sol": pytest.approx(0.001)}
+    assert account["cash_usd"] == pytest.approx(949.32)
+    assert "sol_fee_reserve" not in account
+    assert trade == {
+        "status": "confirmed",
+        "network_fee_sol": pytest.approx(0.001),
+        "sol_usd_price": pytest.approx(180.0),
+        "network_fee_usd": pytest.approx(0.18),
+    }
 
 
 def test_failed_chain_execution_charges_network_fee_without_creating_position(tmp_path: Path) -> None:
@@ -160,6 +175,7 @@ def test_failed_chain_execution_charges_network_fee_without_creating_position(tm
     settings = make_settings(tmp_path)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     sample_id, prediction_id, model_id = seed_prediction(database, now)
+    seed_sol_price(database, now, 180.0)
     service = PaperTradingService(
         database,
         settings,
@@ -178,10 +194,15 @@ def test_failed_chain_execution_charges_network_fee_without_creating_position(tm
     assert not result.opened
     assert database.fetch_one("SELECT COUNT(*) AS n FROM positions")["n"] == 0
     account = database.get_runtime_state("portfolio_strategy:model_1")
-    assert account["cash_usd"] == pytest.approx(1000.0)
-    assert account["sol_fee_reserve"] == pytest.approx(0.099)
-    trade = database.fetch_one("SELECT status,network_fee_sol FROM trades")
-    assert trade == {"status": "failed", "network_fee_sol": pytest.approx(0.001)}
+    assert account["cash_usd"] == pytest.approx(999.82)
+    assert "sol_fee_reserve" not in account
+    trade = database.fetch_one("SELECT status,network_fee_sol,sol_usd_price,network_fee_usd FROM trades")
+    assert trade == {
+        "status": "failed",
+        "network_fee_sol": pytest.approx(0.001),
+        "sol_usd_price": pytest.approx(180.0),
+        "network_fee_usd": pytest.approx(0.18),
+    }
 
 
 def test_rules_only_can_open_without_prediction(tmp_path: Path) -> None:

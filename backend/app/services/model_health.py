@@ -83,12 +83,12 @@ class ModelHealthService:
             if state == "insufficient_data"
             else "degraded active models: " + ", ".join(item["strategy_key"] for item in degraded_models)
         )
+        # Health classification no longer starts an out-of-band retrain. The
+        # scheduler owns all automatic cadence: insufficient_data -> daily 17:00,
+        # every other state (including degraded) -> weekly 17:00. This keeps the
+        # 16:00 entry freeze / 17:00 training / flat-then-activate lifecycle
+        # deterministic for every automatic update.
         run_id = None
-        if degraded_models and queue_retraining:
-            run_id, queue_reason = self._queue_degraded_training(active[0], moment)
-            reason = f"{reason}; {queue_reason}"
-            if run_id:
-                state = "degraded_retraining_queued"
         report = ModelHealthReport(
             state=state,
             model_id=active[0]["id"],
@@ -113,15 +113,24 @@ class ModelHealthService:
     def _evaluate_model(self, model: dict[str, Any], cutoff: int, end: int) -> dict[str, Any]:
         slot = int(model.get("active_slot") or 0)
         strategy_key = f"model_{slot}"
+        try:
+            activated_at = datetime.fromisoformat(str(model.get("active_selected_at") or ""))
+            if activated_at.tzinfo is None:
+                activated_at = activated_at.replace(tzinfo=timezone.utc)
+            activation_epoch = int(activated_at.timestamp())
+        except (TypeError, ValueError):
+            activation_epoch = 0
+        scope_start = max(cutoff, activation_epoch)
         rows = self.database.fetch_all(
             """
             SELECT p.selected,s.tag,s.entry_time
             FROM predictions p JOIN samples s ON s.id=p.sample_id
             WHERE p.model_id=? AND p.strategy_key=?
-              AND s.label_status='mature' AND s.entry_time>=? AND s.entry_time<=?
+              AND s.label_status='mature' AND s.tag IN (0,1)
+              AND s.entry_time>=? AND s.entry_time<=?
             ORDER BY s.entry_time,p.id
             """,
-            (model["id"], strategy_key, cutoff, end),
+            (model["id"], strategy_key, scope_start, end),
         )
         selected = [row for row in rows if int(row.get("selected") or 0) == 1]
         tp = sum(int(int(row.get("tag") or 0) == 1) for row in selected)

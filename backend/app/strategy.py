@@ -13,6 +13,26 @@ STRATEGY_LABELS: Final[dict[str, str]] = {
     "rules_only": "不用模型",
 }
 
+ALGORITHM_DISPLAY_NAMES: Final[dict[str, str]] = {
+    "logistic_regression": "Logistic Regression",
+    "decision_tree": "Decision Tree",
+    "hist_gradient_boosting": "Histogram Gradient Boosting",
+    "gradient_boosting": "Gradient Boosting",
+    "ada_boost": "AdaBoost",
+    "extra_trees": "Extra Trees",
+    "random_forest": "Random Forest",
+    "rbf_svm": "RBF SVM",
+    "xgboost": "XGBoost",
+    "lightgbm": "LightGBM",
+    "catboost": "CatBoost",
+    "flaml_automl": "FLAML AutoML",
+}
+
+
+def algorithm_display_name(algorithm: str | None) -> str:
+    key = str(algorithm or "Model")
+    return ALGORITHM_DISPLAY_NAMES.get(key, key)
+
 
 def validate_strategy(strategy_key: str) -> str:
     if strategy_key not in SIMULATION_STRATEGIES:

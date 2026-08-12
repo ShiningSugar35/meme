@@ -7,6 +7,7 @@ import pytest
 
 from backend.app.database import Database
 from backend.app.repositories.models import ModelRepository
+from backend.app.repositories.samples import SampleRecord, SampleRepository
 from backend.app.services.dashboard import DashboardService
 from backend.app.services.paper_trading import PaperTradingService
 
@@ -42,6 +43,9 @@ def seed_top3(database: Database) -> None:
             for slot in (1, 2, 3)
         ]
     )
+    database.execute(
+        "UPDATE active_model_slots SET selected_at='2026-08-01T00:00:00+00:00'"
+    )
 
 
 def insert_closed(
@@ -53,13 +57,14 @@ def insert_closed(
     pnl: float,
     now: datetime,
     account_kind: str = "simulation",
+    model_id: str | None = None,
 ) -> None:
     database.execute(
         """
         INSERT INTO positions(
-            id,token_address,account_kind,strategy_key,status,simulation_session_id,
+            id,token_address,account_kind,strategy_key,status,simulation_session_id,model_id,
             entry_time,expires_at,invested_usd,exit_time,net_pnl_usd
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             position_id,
@@ -68,6 +73,7 @@ def insert_closed(
             strategy_key,
             "closed",
             session_id,
+            model_id,
             (now - timedelta(hours=1)).isoformat(),
             (now + timedelta(hours=1)).isoformat(),
             50.0,
@@ -110,18 +116,18 @@ def test_portfolio_view_filters_strategy_time_and_exposes_market_snapshot(tmp_pa
     paper = PaperTradingService(database)
     session_id = paper.ensure_simulation_session()["id"]
     now = datetime.now(timezone.utc)
-    insert_closed(database, position_id="model1-recent", strategy_key="model_1", session_id=session_id, pnl=6.0, now=now)
-    insert_closed(database, position_id="model1-old", strategy_key="model_1", session_id=session_id, pnl=-2.0, now=now - timedelta(days=2))
-    insert_closed(database, position_id="model2-recent", strategy_key="model_2", session_id=session_id, pnl=9.0, now=now)
+    insert_closed(database, position_id="model1-recent", strategy_key="model_1", session_id=session_id, pnl=6.0, now=now, model_id="model-1")
+    insert_closed(database, position_id="model1-old", strategy_key="model_1", session_id=session_id, pnl=-2.0, now=now - timedelta(days=2), model_id="model-1")
+    insert_closed(database, position_id="model2-recent", strategy_key="model_2", session_id=session_id, pnl=9.0, now=now, model_id="model-2")
     database.execute(
         """
         INSERT INTO positions(
-            id,token_address,account_kind,strategy_key,status,simulation_session_id,
+            id,token_address,account_kind,strategy_key,status,simulation_session_id,model_id,
             entry_time,expires_at,invested_usd,metadata_json
-        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
-            "model1-open", "token-model1-open", "simulation", "model_1", "open", session_id,
+            "model1-open", "token-model1-open", "simulation", "model_1", "open", session_id, "model-1",
             now.isoformat(), (now + timedelta(hours=2)).isoformat(), 40.0,
             '{"market_snapshot":{"price":1.2,"liquidity_usd":12345.0,"market_cap_usd":98765.0,"as_of":"2026-08-11T00:00:00+00:00"}}',
         ),
@@ -140,6 +146,96 @@ def test_portfolio_view_filters_strategy_time_and_exposes_market_snapshot(tmp_pa
     assert view["current"][0]["current_market_cap_usd"] == pytest.approx(98765.0)
     assert view["accounts"]["model_1"]["realized_pnl_usd"] == pytest.approx(4.0)
     assert view["accounts"]["model_2"]["realized_pnl_usd"] == pytest.approx(9.0)
+
+
+def test_model_card_quality_and_trade_count_are_scoped_to_current_generation(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    seed_top3(database)
+    paper = PaperTradingService(database)
+    session_id = paper.ensure_simulation_session()["id"]
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    activated_at = now - timedelta(hours=1)
+    database.execute(
+        "UPDATE active_model_slots SET selected_at=? WHERE slot=1",
+        (activated_at.isoformat(),),
+    )
+    samples = SampleRepository(database)
+    prediction_ids: list[int] = []
+    for index, (tag, selected) in enumerate(((1, 1), (0, 1), (1, 0)), start=1):
+        entry = activated_at + timedelta(minutes=index * 10)
+        samples.insert(
+            SampleRecord(
+                address=f"quality-token-{index}",
+                entry_time=int(entry.timestamp()),
+                entry_price=1.0,
+                liquidity=10_000.0,
+                features={"age": float(index)},
+                tag=tag,
+                label_status="mature",
+            )
+        )
+        sample_id = int(database.fetch_one("SELECT id FROM samples WHERE address=?", (f"quality-token-{index}",))["id"])
+        database.execute(
+            """
+            INSERT INTO predictions(sample_id,model_id,probability,strategy_key,threshold,selected,predicted_at)
+            VALUES(?, 'model-1', ?, 'model_1', 0.3, ?, ?)
+            """,
+            (sample_id, 0.9 if selected else 0.1, selected, entry.isoformat()),
+        )
+        prediction_ids.append(int(database.fetch_one(
+            "SELECT id FROM predictions WHERE sample_id=? AND model_id='model-1'",
+            (sample_id,),
+        )["id"]))
+
+    for index, prediction_id in enumerate(prediction_ids[:2], start=1):
+        entry = activated_at + timedelta(minutes=index * 10)
+        database.execute(
+            """
+            INSERT INTO positions(
+                id,token_address,account_kind,strategy_key,status,simulation_session_id,
+                sample_id,prediction_id,model_id,entry_time,expires_at,invested_usd,
+                exit_time,exit_reason,net_pnl_usd
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                f"quality-position-{index}", f"quality-position-token-{index}", "simulation", "model_1", "closed",
+                session_id, None, prediction_id, "model-1", entry.isoformat(),
+                (entry + timedelta(hours=2)).isoformat(), 50.0, (entry + timedelta(minutes=30)).isoformat(),
+                "take_profit_1_6x" if index == 1 else "sell_failed_retry_exhausted",
+                20.0 if index == 1 else -50.0,
+            ),
+        )
+
+    account = paper.simulation_status()["accounts"]["model_1"]
+    assert account["trade_count"] == 2
+    assert account["closed_positions"] == 2
+    assert account["precision"] == pytest.approx(0.5)
+    assert account["recall"] == pytest.approx(0.5)
+    assert account["realized_pnl_usd"] == pytest.approx(-30.0)
+
+
+def test_rules_only_quality_is_positive_prevalence_with_full_recall(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    paper = PaperTradingService(database)
+    session = paper.ensure_simulation_session()
+    started = datetime.fromisoformat(str(session["started_at"])).astimezone(timezone.utc)
+    samples = SampleRepository(database)
+    for index, tag in enumerate((1, 0, 1), start=1):
+        samples.insert(
+            SampleRecord(
+                address=f"rules-quality-{index}",
+                entry_time=int((started + timedelta(seconds=index)).timestamp()),
+                entry_price=1.0,
+                liquidity=10_000.0,
+                features={"age": float(index)},
+                tag=tag,
+                label_status="mature",
+            )
+        )
+
+    account = paper.simulation_status()["accounts"]["rules_only"]
+    assert account["precision"] == pytest.approx(2 / 3)
+    assert account["recall"] == pytest.approx(1.0)
 
 
 def test_simulation_audit_has_four_rows_per_session(tmp_path: Path) -> None:

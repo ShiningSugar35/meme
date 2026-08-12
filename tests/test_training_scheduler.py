@@ -28,26 +28,69 @@ def make_settings(tmp_path: Path, *, retries: int = 2) -> Settings:
         background_workers_enabled=False,
         training_timezone="Asia/Shanghai",
         training_weekday=6,
-        training_hour=3,
+        training_hour=17,
         training_minute=0,
         training_max_retries=retries,
     )
 
 
-def test_weekly_schedule_is_sunday_0300_bjt(tmp_path: Path) -> None:
+def set_health(database: Database, state: str) -> None:
+    database.set_runtime_state("model_health_status", {"state": state})
+
+
+def test_weekly_schedule_is_sunday_1700_bjt(tmp_path: Path) -> None:
     scheduler = TrainingScheduler(make_database(tmp_path), make_settings(tmp_path))
     tz = ZoneInfo("Asia/Shanghai")
 
-    before = datetime(2026, 8, 9, 2, 59, tzinfo=tz)
-    after = datetime(2026, 8, 9, 3, 1, tzinfo=tz)
+    before = datetime(2026, 8, 9, 16, 59, tzinfo=tz)
+    after = datetime(2026, 8, 9, 17, 1, tzinfo=tz)
 
-    assert scheduler.next_scheduled_at(before) == datetime(2026, 8, 9, 3, 0, tzinfo=tz)
-    assert scheduler.most_recent_scheduled_at(after) == datetime(2026, 8, 9, 3, 0, tzinfo=tz)
-    assert scheduler.next_scheduled_at(after) == datetime(2026, 8, 16, 3, 0, tzinfo=tz)
+    assert scheduler.schedule_mode() == "weekly"
+    assert scheduler.next_scheduled_at(before) == datetime(2026, 8, 9, 17, 0, tzinfo=tz)
+    assert scheduler.most_recent_scheduled_at(after) == datetime(2026, 8, 9, 17, 0, tzinfo=tz)
+    assert scheduler.next_scheduled_at(after) == datetime(2026, 8, 16, 17, 0, tzinfo=tz)
+
+
+def test_insufficient_data_accelerates_schedule_to_daily_1700_bjt(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    set_health(database, "insufficient_data")
+    scheduler = TrainingScheduler(database, make_settings(tmp_path))
+    tz = ZoneInfo("Asia/Shanghai")
+
+    before = datetime(2026, 8, 10, 16, 59, tzinfo=tz)
+    after = datetime(2026, 8, 10, 17, 1, tzinfo=tz)
+
+    assert scheduler.schedule_mode() == "daily"
+    assert scheduler.next_scheduled_at(before) == datetime(2026, 8, 10, 17, 0, tzinfo=tz)
+    assert scheduler.most_recent_scheduled_at(after) == datetime(2026, 8, 10, 17, 0, tzinfo=tz)
+    assert scheduler.next_scheduled_at(after) == datetime(2026, 8, 11, 17, 0, tzinfo=tz)
+
+
+def test_due_day_entry_gate_freezes_at_1600_until_new_generation_activates(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    scheduler = TrainingScheduler(database, make_settings(tmp_path))
+    tz = ZoneInfo("Asia/Shanghai")
+    # The previous weekly generation activated after the prior Sunday due point.
+    database.set_runtime_state(
+        "last_model_activation_at",
+        datetime(2026, 8, 2, 18, 0, tzinfo=tz).astimezone(timezone.utc).isoformat(),
+    )
+
+    assert not scheduler.refresh_entry_gate(now=datetime(2026, 8, 9, 15, 59, tzinfo=tz))
+    assert scheduler.refresh_entry_gate(now=datetime(2026, 8, 9, 16, 0, tzinfo=tz))
+    assert scheduler.refresh_entry_gate(now=datetime(2026, 8, 9, 17, 30, tzinfo=tz))
+    assert database.get_runtime_state("model_entries_paused_for_rollover") is True
+
+    database.set_runtime_state(
+        "last_model_activation_at",
+        datetime(2026, 8, 9, 17, 31, tzinfo=tz).astimezone(timezone.utc).isoformat(),
+    )
+    assert not scheduler.refresh_entry_gate(now=datetime(2026, 8, 9, 17, 32, tzinfo=tz))
+    assert database.get_runtime_state("model_entries_paused_for_rollover") is False
 
 
 @pytest.mark.asyncio
-async def test_startup_catchup_is_unique_for_same_schedule(monkeypatch, tmp_path: Path) -> None:
+async def test_startup_catchup_is_unique_for_same_weekly_schedule(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     scheduler = TrainingScheduler(database, settings)
@@ -62,11 +105,31 @@ async def test_startup_catchup_is_unique_for_same_schedule(monkeypatch, tmp_path
     assert rows[0]["trigger"] == "startup_catchup"
     assert rows[0]["status"] == "queued"
     assert rows[0]["retry_count"] == 0
-    assert rows[0]["scheduled_for"] == "2026-08-08T19:00:00+00:00"
+    assert rows[0]["scheduled_for"] == "2026-08-09T09:00:00+00:00"
 
 
 @pytest.mark.asyncio
-async def test_scheduled_training_inherits_champion_feature_schema(monkeypatch, tmp_path: Path) -> None:
+async def test_insufficient_data_due_cycle_queues_daily_training_at_1700(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    set_health(database, "insufficient_data")
+    scheduler = TrainingScheduler(database, make_settings(tmp_path))
+    now = datetime(2026, 8, 10, 17, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    run_id = await scheduler._schedule_if_due(startup=False, now=now)
+    row = database.fetch_one(
+        "SELECT trigger,status,scheduled_for FROM training_runs WHERE id=?", (run_id,)
+    )
+
+    assert row == {
+        "trigger": "daily",
+        "status": "queued",
+        "scheduled_for": "2026-08-10T09:00:00+00:00",
+    }
+    assert database.get_runtime_state("model_entries_paused_for_rollover") is True
+
+
+@pytest.mark.asyncio
+async def test_scheduled_training_inherits_champion_feature_schema(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     repository = ModelRepository(database)
@@ -91,13 +154,6 @@ async def test_scheduled_training_inherits_champion_feature_schema(monkeypatch, 
         active.append({"id": model_id, "composite_score": 1.0 - slot * 0.1, "threshold": 0.4, "metrics": {}})
     repository.set_active_models(active)
 
-    def complete(self, run_id: str) -> None:
-        self.database.execute(
-            "UPDATE training_runs SET status='completed', completed_at=? WHERE id=?",
-            (utc_now_iso(), run_id),
-        )
-
-    monkeypatch.setattr(TrainingService, "run", complete)
     run_id = await TrainingScheduler(database, settings)._schedule_if_due(
         startup=False,
         now=datetime(2026, 8, 10, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
@@ -111,7 +167,7 @@ async def test_scheduled_training_inherits_champion_feature_schema(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_failed_schedule_retries_same_run_only_to_limit(monkeypatch, tmp_path: Path) -> None:
+async def test_failed_schedule_retries_same_run_only_to_limit(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path, retries=2)
     scheduler = TrainingScheduler(database, settings)

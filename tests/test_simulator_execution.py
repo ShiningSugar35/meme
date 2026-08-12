@@ -109,7 +109,7 @@ def test_same_candle_tp_sl_conflict_conservatively_stops_all_batches() -> None:
 
 def test_two_hour_timeout_uses_close_and_accounts_for_fees() -> None:
     provider = _FixedQuoteProvider(fee_rate=0.01, network_fee_sol=0.001)
-    simulator = TradingSimulator(provider)
+    simulator = TradingSimulator(provider, sol_usd_price_at=lambda _at: 180.0)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     position = simulator.open_position(_signal("token-b", now, 10_000.0))
     assert position is not None
@@ -127,10 +127,12 @@ def test_two_hour_timeout_uses_close_and_accounts_for_fees() -> None:
     )
     closed = simulator.closed_positions[0]
     assert closed.exit_reason == ExitReason.TIMEOUT
-    # $50 -> $55 gross, $0.50 entry fee, $0.55 exit fee.
-    assert closed.realized_pnl_usd == pytest.approx(3.95)
+    # $50 -> $55 gross, $0.50 entry fee, $0.55 exit fee, plus
+    # 0.001 SOL network fee on each side at $180/SOL = $0.36 total.
+    assert closed.realized_pnl_usd == pytest.approx(3.59)
     snapshot = simulator.snapshot()
-    assert snapshot.total_fees_usd == pytest.approx(1.05)
+    assert snapshot.total_fees_usd == pytest.approx(1.41)
+    assert snapshot.total_network_fees_usd == pytest.approx(0.36)
     assert snapshot.total_network_fees_sol == pytest.approx(0.002)
 
 

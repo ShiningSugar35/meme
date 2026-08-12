@@ -76,7 +76,10 @@ async def lifespan(_: FastAPI):
         )
 
         scheduler = TrainingScheduler(database, settings)
-        tasks.append(asyncio.create_task(scheduler.run_forever(), name="weekly-training-scheduler"))
+        # Establish the 16:00/17:00 model-entry gate synchronously before the
+        # prediction worker can reconcile any fresh buy signal after startup.
+        scheduler.refresh_entry_gate()
+        tasks.append(asyncio.create_task(scheduler.run_forever(), name="model-training-scheduler"))
 
         assert reconciliation_worker is not None
         tasks.append(

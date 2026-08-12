@@ -62,11 +62,19 @@ class PredictionService:
         for slot, model in enumerate(active, start=1):
             bundle = self._load_bundle(model)
             active_ids.append(str(model["id"]))
+            try:
+                activated_at = datetime.fromisoformat(str(model.get("active_selected_at") or ""))
+                if activated_at.tzinfo is None:
+                    activated_at = activated_at.replace(tzinfo=timezone.utc)
+                activation_epoch = int(activated_at.timestamp())
+            except ValueError:
+                activation_epoch = 0
+            entry_cutoff = max(int(model.get("training_window_end") or 0), activation_epoch)
             rows = self.database.fetch_all(
                 """
                 SELECT s.*
                 FROM samples s
-                WHERE s.entry_time > COALESCE(?,0)
+                WHERE s.entry_time >= ?
                   AND NOT EXISTS(
                       SELECT 1 FROM predictions p
                       WHERE p.sample_id=s.id AND p.model_id=?
@@ -74,7 +82,7 @@ class PredictionService:
                 ORDER BY s.entry_time,s.id
                 LIMIT ?
                 """,
-                (model.get("training_window_end"), model["id"], limit),
+                (entry_cutoff, model["id"], limit),
             )
             strategy = model_strategy(slot)
             for row in rows:
@@ -154,9 +162,15 @@ class PredictionService:
         )
         opened = stale = blocked = 0
         now_epoch = int(moment.timestamp())
+        rollover_paused = bool(
+            self.database.get_runtime_state("model_entries_paused_for_rollover", False)
+        )
         for row in rows:
             if now_epoch - int(row["entry_time"]) > self.settings.signal_max_age_seconds:
                 stale += 1
+                continue
+            if rollover_paused:
+                blocked += 1
                 continue
             result = self.paper.open_from_prediction(
                 sample_id=int(row["sample_id"]),

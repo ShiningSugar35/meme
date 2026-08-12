@@ -63,6 +63,10 @@ def seed_top3(database: Database, now: datetime, *, baseline_capture: float = 0.
         )
         active.append({"id": model_id, "composite_score": 0.6 - slot * 0.05, "threshold": 0.5, "metrics": {}})
     repo.set_active_models(active)
+    database.execute(
+        "UPDATE active_model_slots SET selected_at=?",
+        ((now - timedelta(days=1)).isoformat(),),
+    )
     return ids
 
 
@@ -119,7 +123,7 @@ def test_insufficient_recent_predictions_do_not_queue_retraining(tmp_path: Path)
     assert database.fetch_one("SELECT COUNT(*) AS n FROM training_runs")["n"] == 0
 
 
-def test_fixed_payoff_degradation_queues_one_top3_retraining(tmp_path: Path) -> None:
+def test_fixed_payoff_degradation_is_reported_without_out_of_band_retraining(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     now = datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc)
@@ -129,13 +133,12 @@ def test_fixed_payoff_degradation_queues_one_top3_retraining(tmp_path: Path) -> 
     first = ModelHealthService(database, settings).evaluate(now=now)
     second = ModelHealthService(database, settings).evaluate(now=now + timedelta(minutes=1))
     assert first.degraded
-    assert first.state == "degraded_retraining_queued"
-    assert first.training_run_id is not None
-    run = database.fetch_one("SELECT trigger,status,request_json FROM training_runs WHERE id=?", (first.training_run_id,))
-    assert run["trigger"] == "degraded"
-    assert run["status"] == "queued"
-    assert json.loads(run["request_json"])["feature_names"] == ["price", "price_change_1h"]
+    assert first.state == "degraded"
+    assert first.training_run_id is None
     assert second.training_run_id is None
+    # Automatic retraining cadence is owned by TrainingScheduler so every
+    # update obeys the 16:00 freeze / 17:00 train / flat-then-activate lifecycle.
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM training_runs")["n"] == 0
 
 
 def test_healthy_fixed_payoff_window_does_not_retrain(tmp_path: Path) -> None:

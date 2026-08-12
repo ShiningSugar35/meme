@@ -202,15 +202,27 @@ export interface SimulationAccount {
   session_id: string;
   strategy_key: StrategyKey;
   cash_usd: number;
-  sol_fee_reserve: number;
   initial_cash_usd: number;
-  initial_sol_fee_reserve: number;
+  accounting_currency: "USD";
+  network_fee_accounting: "fee_time_sol_usd";
   source: string;
   updated_at: string;
   positions: number;
   open_positions: number;
   closed_positions: number;
+  invested_usd: number;
   realized_pnl_usd: number;
+  platform_fee_usd: number;
+  network_fee_usd: number;
+  network_fee_sol: number;
+  slippage_cost_usd: number;
+  total_fees_usd: number;
+  total_execution_cost_usd: number;
+  model_id: string | null;
+  statistics_started_at: string;
+  trade_count: number;
+  precision: number | null;
+  recall: number | null;
 }
 
 export interface SimulationStatus {
@@ -221,7 +233,6 @@ export interface SimulationStatus {
     status?: "active" | "closed";
     created_reason?: string;
     initial_cash_usd: number;
-    initial_sol_fee_reserve: number;
   };
   accounts: Record<StrategyKey, SimulationAccount>;
 }
@@ -232,7 +243,6 @@ export interface SimulationHistoryItem {
   ended_at: string | null;
   status: "active" | "closed";
   initial_cash_usd: number;
-  initial_sol_fee_reserve: number;
   created_reason: string;
   realized_pnl_usd: number;
   accounts: Record<StrategyKey, {
@@ -298,7 +308,6 @@ export interface PortfolioView {
     closed_positions?: number;
     realized_pnl_usd?: number;
     cash_usd?: number | null;
-    sol_fee_reserve?: number | null;
     source?: string;
   };
   current: Position[];

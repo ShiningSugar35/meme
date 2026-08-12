@@ -1,6 +1,6 @@
 # Solana Meme Quant Trading System - Architecture Review
 
-> 本文主体保留架构审阅与设计门禁；实际实现状态以文末“2026-08-12 实现状态附录”、`README.md` 与 `开发文档.md` 为准。schema v8 / Top 3 / `rules_only` 是当前权威业务语义；历史三档字段只允许出现在数据库迁移识别代码中。
+> 本文主体保留架构审阅与设计门禁；实际实现状态以文末“2026-08-12 实现状态附录”、`README.md` 与 `开发文档.md` 为准。schema v10 / Top 3 / `rules_only` / 模拟盘单一 USD 会计 / 16:00-17:00 staged model rollover 是当前权威业务语义；历史三档字段与旧 SOL reserve 字段只允许作为数据库迁移兼容事实存在。
 
 ## 1. 审阅目标与原则
 
@@ -76,13 +76,14 @@ Training Queue / OOS E-G-S Ranking / Top-3 Publish / Rollback
 
 ## 4. 数据库与持久化
 
-SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 schema v8 的关键对象：
+SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 schema v10 的关键对象：
 
 - `samples`
 - `models`
 - `active_model_slots`
 - `predictions`
 - `simulation_sessions`
+- `asset_usd_prices`
 - `positions`
 - `trades`
 - `training_runs`
@@ -90,7 +91,7 @@ SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 s
 - `runtime_state`
 - `audit_logs`
 
-数据库初始化必须对旧库幂等 migration。真实 `data/meme_quant.db` 已升级到 schema v8：`predictions`/`positions` 物理删除 `profile`，模拟仓统一 `account_kind='simulation'` 并由 `strategy_key` 区分；迁移副本验证 2379 samples、207 historical predictions、90 positions、180 trades 原数保留。
+数据库初始化必须对旧库幂等 migration。真实 `data/meme_quant.db` 已升级到 schema v10：v8 阶段 `predictions`/`positions` 物理删除 `profile`；v9 新增 `asset_usd_prices` 与每笔交易的费时 SOL/USD 审计字段；v10 扩展 durable training trigger 支持 `daily`，并保留 `completed + promoted=0` 的待激活候选，避免进程重启把“已训练、待空仓”的 generation 错误拒绝。旧交易缺少原始 FX 事实时保持 NULL，不使用当前价格伪回填。
 
 ## 5. 采集器架构
 
@@ -138,7 +139,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 ### 6.3 Top 3 单一决策线
 
-一次训练按开发期 `S` 选出三个 active model，每个模型只有一个冻结决策线，并分别映射 `model_1/model_2/model_3`。`rules_only` 不产生 prediction，直接交易全部规则准入样本。未来真实 live BUY 使用当时 Rank 1 模型及其决策线；schema v8 已无 `profile`。
+一次训练按开发期 `S` 选出三个候选 model，每个模型只有一个冻结决策线，并分别映射未来的 `model_1/model_2/model_3`。训练完成后候选先持久化，必须等旧 `model_1/2/3` 全部空仓才原子写入 `active_model_slots`；模型上线前的历史 sample 不允许由新模型补评分。`rules_only` 不产生 prediction，直接交易全部规则准入样本。未来真实 live BUY 使用当时 Rank 1 模型及其决策线；schema v10 仍无 `profile`。
 
 ### 6.4 最终 holdout 隔离与 Top 3 发布
 
@@ -150,9 +151,9 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 2. 每个算法比较 12/20/全量特征，并在 one-standard-error 内选最小子集；
 3. 对每个保留候选计算 E、G、`S=0.60E+0.40G`；
 4. 仅按 development S 排序并冻结 Top 3 次序、特征和 threshold；
-5. Top 3 冻结后才在最终 holdout 上计算 certification Precision/Recall/固定 $50 理论收益；
-6. `active_model_slots` 在同一事务内写入 slot 1..3，Rank 1 标为 champion；
-7. 三个 artifact 必须可加载；可选候选缺依赖显式 skipped；final 只审计，不回写排名。
+5. Top 3 候选冻结后才在最终 holdout 上计算 certification Precision/Recall/固定 $50 理论收益；
+6. 三个 artifact 成功持久化后，training run 先 `completed/promoted=0`；训练与激活解耦，16:00 起旧模型停止新买入，17:00 可先训练，候选等待旧 `model_1/2/3` 全部空仓；
+7. 空仓后 `active_model_slots` 在同一事务内写入 slot 1..3，Rank 1 标为 champion，同时重置三个模型策略 generation 账本/统计；可选候选缺依赖显式 skipped；final 只审计，不回写排名。
 
 2026-08-12 正式 run `89c2d088-ea1b-4bc7-9aec-2ca7a92220b2` 的开发期 Top 3 为 RF / DecisionTree / GradientBoosting，三者都由 one-standard-error 规则选择 12 特征。最终 holdout 理论固定 $50 收益分别为 $875 / $890 / $1000，`rules_only` 为 $915；这些 final 数值不参与 Top 3 排序。历史 `retired` Rank 1 保留人工回滚能力。
 
@@ -160,7 +161,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 ### 7.1 TrainingWorker
 
-手动、weekly、startup catch-up、degraded 都只创建 `training_runs` durable queue item。唯一 `TrainingWorker` 串行消费。API 断线、浏览器关闭不影响任务。
+手动、daily、weekly、startup catch-up 都只创建 `training_runs` durable queue item。唯一 `TrainingWorker` 串行消费，并在没有待训练任务时继续检查 `completed/promoted=0` 候选是否已经满足空仓激活条件。API 断线、浏览器关闭不影响训练；进程重启也不会丢失已训练但尚未激活的 generation。
 
 进程重启：
 
@@ -187,7 +188,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 ### 8.1 Simulation Session
 
-每个显式 simulation session 创建四策略账本：`model_1 / model_2 / model_3 / rules_only`，各自 1000 USD + 0.1 SOL。schema v8 的 `account_kind` 只分 `simulation/live`；策略完全由 `strategy_key` 表达。应用重启恢复，不自动重置。
+每个显式 simulation session 创建四策略账本：`model_1 / model_2 / model_3 / rules_only`，各自 1000 USD 单一 USD 账本。schema v9 的 `account_kind` 只分 `simulation/live`；策略完全由 `strategy_key` 表达。模拟盘不维护 SOL reserve，应用重启恢复，不自动重置。
 
 `simulation_sessions` registry 持久保存历史。reset 只有在无模拟开放仓时才允许：关闭旧 session，创建唯一 active session，重置四策略账本，不删除历史 position/trade/PnL。
 
@@ -198,7 +199,7 @@ BUY/SELL 经 seeded local quote model，包含：
 - 流动性占比 price impact；
 - 随机滑点；
 - 1% platform fee；
-- network fee；
+- network fee：保留 `network_fee_sol` 原始交易事实，同时冻结手续费发生时 `sol_usd_price` 并写入 `network_fee_usd`；模拟现金与 PnL 只按 USD 扣减；
 - latency；
 - injectable failures。
 
@@ -255,7 +256,7 @@ proposal 持久化到 SQLite，必须人工 approve/reject。批准后才执行�
 - Models / 模型中心
 - Agent Approval / Agent审批
 
-Portfolio 使用 `mode × strategy` 两层视图：模拟/实盘切换位于顶栏，simulation 下由 `model_1/model_2/model_3/rules_only` 四张策略卡过滤；当前仓位市场快照来自持仓监控，交易历史由 SQL 真分页/时间筛选，交易审计按 session × strategy 展开且第一列为模型。live 视图复用同构 UI/账本 contract，在钱包事实和 live BUY E2E 未完成前保持 fail-closed。Models 展示 Top 3、E/G/S、final certification、rules-only 基线、候选池、feature coverage、durable training runs 和 Rank 1 rollback；Runtime 显示 TrainingWorker/model health/monitor-only/reconciliation/liquidation；Agent 页面展示 allow/block 与人工审批。
+Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡以两列布局展示 8 项指标；`current balance` 是不含持仓本金的可用 USD 现金，`realized PnL` 使用 closed position 的净 PnL。模型卡 Precision/Recall 同时受当前 `model_id`、`selected_at`、sample `entry_time` 与 mature tag 约束，防止上线前 backlog 污染；`rules_only` 等价于全预测为正，因此 Precision 为当前 session 成熟样本正类率、存在正类时 Recall=100%。当前仓位市场快照来自持仓监控，交易历史由 SQL 真分页/时间筛选。live 视图复用同构 UI/账本 contract，在钱包事实和 live BUY E2E 未完成前保持 fail-closed。Models 使用算法全称并展示 Top 3、E/G/S、final certification、rules-only 基线、候选池、feature coverage、durable training/待空仓 activation 和 Rank 1 rollback；Runtime 显示 TrainingWorker/model health/health-aware scheduler/monitor-only/reconciliation/liquidation。
 
 ## 12. 单机第一版边界
 
@@ -295,7 +296,7 @@ Portfolio 使用 `mode × strategy` 两层视图：模拟/实盘切换位于顶�
 | `ln(liquidity_usd)` | 新样本持续采集；legacy 无法反推，当前默认关闭；模型中心可后续 opt-in。 |
 | raw liquidity | 经济 sizing/PnL 专用，不作为默认 model input。 |
 | 三档 vs 三模型 | 三档设计已删除；当前固定 Top 3 三个模型，各一条 decision threshold，另有 `rules_only` 基线。 |
-| future live strategy | 使用当时 active Top 3 的 Rank 1 模型及其单一 decision threshold；schema v8 无 `profile`。 |
+| future live strategy | 使用当时 active Top 3 的 Rank 1 模型及其单一 decision threshold；schema v10 无 `profile`。 |
 | 模拟每次 $1000 | 显式 new session 才重置；应用 restart 恢复。 |
 | 当前本地版 vs 公网/多进程 | localhost 单用户完成；公网/分布式属于后续扩展。 |
 
@@ -331,19 +332,19 @@ Portfolio 使用 `mode × strategy` 两层视图：模拟/实盘切换位于顶�
 
 已完成：
 
-- 当前真实库 2379 条样本，其中 2374 mature、414 positives；binary-v3 标签与 2h 路径审计事实持续保留；
-- SQLite schema v8，`profile` 已从当前 predictions/positions 物理删除，新增 `active_model_slots`，旧预测/仓位/成交无损迁移；
+- 当前真实库持续采集；本轮只读分析时有 2415 条 mature/tagged 样本、420 positives；binary-v3 标签与 2h 路径审计事实持续保留；
+- SQLite schema v10：v8 已从 predictions/positions 物理删除 `profile` 并新增 `active_model_slots`；v9 增加 USD-only 模拟会计、`asset_usd_prices` 与手续费费时 FX 审计字段；v10 增加 daily durable trigger 与待空仓候选持久状态，旧交易缺少历史 FX 时不伪回填；
 - 默认候选 feature pool 31；各算法在 12/20/全量中做 one-standard-error 选择；`launchpad` 仅元数据，`ln(liquidity_usd)` 可选；
 - 入场 `price_change_1h/5m` 缺失时使用 `T-1h → T` 历史 Kline 回补，不读取未来；
 - 扩展候选池 + chronological OOS + 单一决策线 + `6TP-FP`/E-G-S + one-standard-error Occam + final 隔离；
-- 正式 run `89c2d088-ea1b-4bc7-9aec-2ca7a92220b2` 发布 Top 3：RF / DecisionTree / GradientBoosting，均选择 12 特征；final certification 固定 $50 理论收益分别 $875 / $890 / $1000，rules-only $915；
-- TrainingWorker、周日 03:00/startup catch-up、有限 retry、restart recovery、7 日 model health、degraded queue、rollback；
-- 四策略 simulation session、Top 3 prediction + rules-only、市场驱动 1m first-touch、SELL failure/restart recovery、session history、monitor-only worker；
+- 首次正式 run `89c2d088-ea1b-4bc7-9aec-2ca7a92220b2` 发布 Random Forest / Decision Tree / Gradient Boosting；随后历史 degraded run `374ec8e3-4479-4e7b-9e30-630183cadc23` 更新当前 Top 3 为 Decision Tree / Random Forest / XGBoost；
+- TrainingWorker、`insufficient_data` 每日 17:00 / 其他状态周 17:00、16:00 model-entry freeze、startup catch-up、有限 retry、candidate waiting-for-flat/restart recovery、7 日 model health、rollback；
+- 四策略 USD-only simulation session、Top 3 prediction + rules-only、手续费发生时 SOL/USD 冻结折算并保留原始 SOL 事实、市场驱动 1m first-touch、SELL failure/restart recovery、8 项 generation 卡片指标、rules-only Precision/Recall、session history、monitor-only worker；
 - Agent durable proposal + 人工 approve/reject + 非实盘白名单执行；live/wallet/secret proposal fail-closed；
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × strategy` 同构视图、当前市场快照、SQL 分页/时间筛选与四策略“模型”交易审计；
-- 后端 `pytest -q` **98/98 通过**；前端 `npm run build` 通过。
+- 后端 `pytest -q` **105/105 通过**；前端 `npm run build` 通过。
 
 ### 实盘接口停放
 

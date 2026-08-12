@@ -300,6 +300,10 @@ async def test_paper_liquidation_uses_sell_quote_and_closes_position(tmp_path: P
     settings = make_settings(tmp_path)
     address = "paper-token"
     now = datetime.now(timezone.utc)
+    database.execute(
+        "INSERT OR REPLACE INTO asset_usd_prices(asset,observed_at,price_usd,source,recorded_at) VALUES('SOL',?,?,?,?)",
+        (int(now.timestamp()), 180.0, "test", utc_now_iso()),
+    )
     insert_sample(database, address=address, entry_time=int(now.timestamp()) - 1, price=1.10)
     insert_position(database, position_id="paper-1", address=address, account_kind="simulation")
     database.set_runtime_state(

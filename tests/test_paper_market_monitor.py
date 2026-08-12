@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +46,14 @@ class ExitQuoteProvider:
             slippage_bps=0.0,
             latency_ms=25,
         )
+
+
+class FixedSolPrice:
+    def __init__(self, price: float = 180.0) -> None:
+        self.price = price
+
+    def price_at(self, occurred_at):
+        return SimpleNamespace(price_usd=self.price, observed_at=int(occurred_at.timestamp()), source="test")
 
 
 class NoRouteQuoteProvider:
@@ -151,13 +160,14 @@ def seed_position(
         """,
         (prediction_id, sample_id, model_id, 0.9, strategy_key, opened_at.isoformat()),
     )
+    session_id = PaperTradingService(database).ensure_simulation_session()["id"]
     database.execute(
         """
         INSERT INTO positions(
-            id,token_address,account_kind,strategy_key,status,sample_id,prediction_id,model_id,
+            id,token_address,account_kind,strategy_key,status,simulation_session_id,sample_id,prediction_id,model_id,
             entry_time,expires_at,invested_usd,token_amount,entry_price,
             stop_loss_price,take_profit_price,metadata_json
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             position_id,
@@ -165,6 +175,7 @@ def seed_position(
             "simulation",
             strategy_key,
             "open",
+            session_id,
             sample_id,
             prediction_id,
             model_id,
@@ -178,10 +189,18 @@ def seed_position(
             json.dumps({"entry_fee_usd": 0.0}),
         ),
     )
+    session_started_at = (opened_at - timedelta(seconds=1)).isoformat()
+    database.execute(
+        "UPDATE simulation_sessions SET started_at=? WHERE id=?",
+        (session_started_at, session_id),
+    )
+    session_state = database.get_runtime_state("simulation_session")
+    session_state["started_at"] = session_started_at
+    database.set_runtime_state("simulation_session", session_state)
     database.set_runtime_state(
         f"portfolio_strategy:{strategy_key}",
         {
-            "session_id": PaperTradingService(database).ensure_simulation_session()["id"],
+            "session_id": session_id,
             "strategy_key": strategy_key,
             "cash_usd": 950.0,
             "sol_fee_reserve": 0.1,
@@ -237,7 +256,7 @@ async def test_failed_exit_persists_trigger_and_retries_without_new_market_decis
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
     seed_position(database, address="retry-token", position_id="paper-retry", strategy_key="model_1", opened_at=opened)
     quote_provider = ExitQuoteProvider([False, True])
-    paper = PaperTradingService(database, settings, quote_provider=quote_provider)
+    paper = PaperTradingService(database, settings, quote_provider=quote_provider, sol_price_service=FixedSolPrice())
     monitor = PaperPositionMonitor(database, settings, paper_service=paper)
     market = FakeKlineProvider(
         [Kline(int((opened + timedelta(minutes=5)).timestamp()), 1.7, 0.95, 1.6)]
@@ -253,7 +272,10 @@ async def test_failed_exit_persists_trigger_and_retries_without_new_market_decis
     assert pending["reason"] == "take_profit_1_6x"
     assert pending["attempt_count"] == 1
     assert pending["network_fee_sol_charged"] == pytest.approx(0.001)
-    assert database.get_runtime_state("portfolio_strategy:model_1")["sol_fee_reserve"] == pytest.approx(0.099)
+    assert pending["network_fee_usd_charged"] == pytest.approx(0.18)
+    account = database.get_runtime_state("portfolio_strategy:model_1")
+    assert account["cash_usd"] == pytest.approx(949.82)
+    assert "sol_fee_reserve" not in account
 
     restarted_monitor = PaperPositionMonitor(database, settings, paper_service=paper)
     second = await restarted_monitor.run_cycle(
@@ -361,7 +383,7 @@ async def test_repeated_sell_failures_close_after_retry_budget(tmp_path: Path) -
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
     seed_position(database, address="retry-budget-token", position_id="paper-retry-budget", strategy_key="model_1", opened_at=opened)
-    paper = PaperTradingService(database, settings, quote_provider=ExitQuoteProvider([False] * 7))
+    paper = PaperTradingService(database, settings, quote_provider=ExitQuoteProvider([False] * 7), sol_price_service=FixedSolPrice())
     monitor = PaperPositionMonitor(database, settings, paper_service=paper)
     market = FakeKlineProvider(
         [Kline(int((opened + timedelta(minutes=5)).timestamp()), 1.7, 0.95, 1.6)]
@@ -381,5 +403,5 @@ async def test_repeated_sell_failures_close_after_retry_budget(tmp_path: Path) -
     )
     assert row["status"] == "closed"
     assert row["exit_reason"] == "sell_failed_network"
-    assert row["net_pnl_usd"] == pytest.approx(-50.0)
+    assert row["net_pnl_usd"] == pytest.approx(-51.26)
     assert json.loads(row["metadata_json"])["sell_failure_attempts"] == 7
