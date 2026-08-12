@@ -180,7 +180,7 @@ def seed_position(
             prediction_id,
             model_id,
             opened_at.isoformat(),
-            (opened_at + timedelta(hours=2)).isoformat(),
+            (opened_at + timedelta(hours=1)).isoformat(),
             50.0,
             50.0 / entry_price,
             entry_price,
@@ -288,7 +288,7 @@ async def test_failed_exit_persists_trigger_and_retries_without_new_market_decis
 
 
 @pytest.mark.asyncio
-async def test_timeout_uses_last_close_at_or_before_two_hours(tmp_path: Path) -> None:
+async def test_timeout_uses_last_close_at_or_before_one_hour(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
@@ -301,13 +301,13 @@ async def test_timeout_uses_last_close_at_or_before_two_hours(tmp_path: Path) ->
     )
     market = FakeKlineProvider(
         [
-            Kline(int((opened + timedelta(hours=1, minutes=59)).timestamp()), 1.2, 0.95, 1.1),
-            Kline(int((opened + timedelta(hours=2)).timestamp()), 1.2, 0.95, 1.12),
+            Kline(int((opened + timedelta(minutes=59)).timestamp()), 1.2, 0.95, 1.1),
+            Kline(int((opened + timedelta(hours=1)).timestamp()), 1.2, 0.95, 1.12),
         ]
     )
 
     report = await monitor.run_cycle(
-        market, now_ts=int((opened + timedelta(hours=2, minutes=1)).timestamp())
+        market, now_ts=int((opened + timedelta(hours=1, minutes=1)).timestamp())
     )
 
     assert report.closed_positions == 1
@@ -315,7 +315,7 @@ async def test_timeout_uses_last_close_at_or_before_two_hours(tmp_path: Path) ->
         "SELECT status,exit_reason,exit_price FROM positions WHERE id='paper-timeout'"
     )
     assert row["status"] == "closed"
-    assert row["exit_reason"] == "timeout_2h"
+    assert row["exit_reason"] == "timeout_1h"
     assert row["exit_price"] == pytest.approx(1.12)
 
 
@@ -345,7 +345,7 @@ async def test_monitor_persists_current_market_snapshot_without_changing_exit_de
 
 
 @pytest.mark.asyncio
-async def test_no_route_after_two_hours_closes_as_total_loss(tmp_path: Path) -> None:
+async def test_no_route_after_one_hour_closes_as_total_loss(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
@@ -356,12 +356,12 @@ async def test_no_route_after_two_hours_closes_as_total_loss(tmp_path: Path) -> 
         paper_service=PaperTradingService(database, settings, quote_provider=NoRouteQuoteProvider()),
     )
     market = FakeKlineProvider(
-        [Kline(int((opened + timedelta(hours=2)).timestamp()), 1.2, 0.95, 1.1)]
+        [Kline(int((opened + timedelta(hours=1)).timestamp()), 1.2, 0.95, 1.1)]
     )
 
     report = await monitor.run_cycle(
         market,
-        now_ts=int((opened + timedelta(hours=2, minutes=1)).timestamp()),
+        now_ts=int((opened + timedelta(hours=1, minutes=1)).timestamp()),
     )
 
     assert report.closed_positions == 1

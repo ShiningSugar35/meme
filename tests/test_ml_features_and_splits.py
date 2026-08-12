@@ -21,8 +21,11 @@ def _frame(days: int = 60, rows_per_day: int = 4, *, liquidity: bool = True):
         "type": "new_creation",
         "time": [int(value.timestamp()) for value in time],
         "price": 1.0,
-        "price_2h_max/price": np.where(tag == 1, 1.6, 1.1),
-        "price_2h_min/price": np.where(tag == 0, 0.9, 1.0),
+        "price_1h_max/price": np.where(tag == 1, 1.6, 1.1),
+        "price_1h_min/price": np.where(tag == 0, 0.9, 1.0),
+        "final_1h_close_ratio": np.nan,
+        "price_2h_max/price": np.where(tag == 1, 1.7, 1.2),
+        "price_2h_min/price": np.where(tag == 0, 0.8, 0.95),
         "final_2h_close_ratio": np.nan,
         "feature_score": score,
         "launchpad": np.where(np.arange(rows) % 2, "Pump.fun", "letsbonk"),
@@ -45,6 +48,9 @@ def test_feature_builder_excludes_ids_time_and_future_outcomes() -> None:
         "launchpad",
         "time",
         "price",
+        "price_1h_max/price",
+        "price_1h_min/price",
+        "final_1h_close_ratio",
         "price_2h_max/price",
         "price_2h_min/price",
         "final_2h_close_ratio",
@@ -84,7 +90,7 @@ def test_legacy_missing_liquidity_is_proxy_not_dollar_pnl() -> None:
     assert any("liquidity" in blocker for blocker in economics.blockers)
 
 
-def test_early_stage_split_is_expanding_and_has_two_hour_gap() -> None:
+def test_early_stage_split_is_expanding_and_has_one_hour_gap() -> None:
     prepared = FeatureBuilder().prepare(_frame(days=60))
     plan = TemporalSplitter(
         TemporalSplitConfig(
@@ -102,7 +108,7 @@ def test_early_stage_split_is_expanding_and_has_two_hour_gap() -> None:
     for fold in (*plan.development_folds, plan.final_split):
         train_end = prepared.timestamps.iloc[fold.train_indices].max()
         test_start = prepared.timestamps.iloc[fold.test_indices].min()
-        assert train_end + pd.Timedelta(hours=2) <= test_start
+        assert train_end + pd.Timedelta(hours=1) <= test_start
         assert fold.train_indices.max() < fold.test_indices.min()
 
 
@@ -119,4 +125,4 @@ def test_120_day_plan_uses_only_last_120_days_and_recent_30_day_holdout() -> Non
     holdout_start = prepared.timestamps.iloc[plan.final_split.test_indices[0]]
     assert holdout_start >= end - pd.Timedelta(days=30)
     train_end = prepared.timestamps.iloc[plan.final_split.train_indices].max()
-    assert train_end + pd.Timedelta(hours=2) <= holdout_start
+    assert train_end + pd.Timedelta(hours=1) <= holdout_start

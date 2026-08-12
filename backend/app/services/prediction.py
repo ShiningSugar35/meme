@@ -75,6 +75,7 @@ class PredictionService:
                 SELECT s.*
                 FROM samples s
                 WHERE s.entry_time >= ?
+                  AND s.token_type IN ('new_creation','near_completion')
                   AND NOT EXISTS(
                       SELECT 1 FROM predictions p
                       WHERE p.sample_id=s.id AND p.model_id=?
@@ -153,6 +154,7 @@ class PredictionService:
             JOIN active_model_slots a ON a.model_id=p.model_id
             WHERE p.selected=1
               AND p.strategy_key IN ('model_1','model_2','model_3')
+              AND s.token_type IN ('new_creation','near_completion')
               AND NOT EXISTS(
                   SELECT 1 FROM positions pos
                   WHERE pos.prediction_id=p.id AND pos.strategy_key=p.strategy_key
@@ -202,6 +204,7 @@ class PredictionService:
             SELECT s.id,s.entry_time
             FROM samples s
             WHERE s.entry_time>=?
+              AND s.token_type IN ('new_creation','near_completion')
               AND NOT EXISTS(
                   SELECT 1 FROM positions pos
                   WHERE pos.sample_id=s.id AND pos.simulation_session_id=?

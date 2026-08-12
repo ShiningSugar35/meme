@@ -38,7 +38,7 @@ def test_same_minute_conflict_is_conservatively_tag_zero() -> None:
 def test_no_barrier_close_above_1_2_is_still_negative() -> None:
     result = LabelFinalizer().finalize(sample(), [
         Kline(ENTRY + 60, 130, 95, 121),
-        Kline(ENTRY + 7_200, 130, 95, 120.01),
+        Kline(ENTRY + 3_600, 130, 95, 120.01),
     ])
     assert result.tag == 0
     assert result.exit_reason == "window_timeout_negative"
@@ -46,7 +46,7 @@ def test_no_barrier_close_above_1_2_is_still_negative() -> None:
 
 
 def test_close_exactly_1_2_is_negative() -> None:
-    result = LabelFinalizer().finalize(sample(), [Kline(ENTRY + 7_200, 130, 95, 120)])
+    result = LabelFinalizer().finalize(sample(), [Kline(ENTRY + 3_600, 130, 95, 120)])
     assert result.tag == 0
     assert result.exit_reason == "window_timeout_negative"
 
@@ -55,8 +55,8 @@ def test_outside_window_does_not_leak_into_label_and_history_is_pre_entry() -> N
     result = LabelFinalizer().finalize(sample(), [
         Kline(ENTRY - 3_600, 50, 50, 50),
         Kline(ENTRY, 105, 95, 100),
-        Kline(ENTRY + 7_200, 130, 95, 121),
-        Kline(ENTRY + 7_201, 200, 50, 200),
+        Kline(ENTRY + 3_600, 130, 95, 121),
+        Kline(ENTRY + 3_601, 200, 50, 200),
     ])
     assert result.tag == 0
     assert result.max_price_ratio == 1.3

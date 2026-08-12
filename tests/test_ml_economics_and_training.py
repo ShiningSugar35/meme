@@ -130,7 +130,7 @@ def test_trainer_returns_top3_one_threshold_each_and_keeps_final_holdout_separat
     assert "certification-only" in " ".join(result.warnings)
     train_end = dataset.timestamps.iloc[result.plan.final_split.train_indices].max()
     test_start = dataset.timestamps.iloc[result.plan.final_split.test_indices].min()
-    assert train_end + pd.Timedelta(hours=2) <= test_start
+    assert train_end + pd.Timedelta(hours=1) <= test_start
 
 
 class _ScoreEstimator:

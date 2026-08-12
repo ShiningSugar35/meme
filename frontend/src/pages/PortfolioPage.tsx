@@ -21,7 +21,7 @@ const beijingTime = (value: string | null | undefined) => {
   return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(value));
 };
 const failureReasonName: Record<string, string> = { no_route: "无可用卖出路由", quote_failed: "卖出报价失败", network: "网络请求失败", api: "交易 API 失败", rate_limit: "接口限流", chain_rejected: "链上拒绝", insufficient_funds: "余额不足", risk_rejected: "风控拒绝", sol_usd_price_unavailable: "SOL/USD 手续费汇率暂不可用", order_failed: "链上订单失败", order_expired: "订单过期" };
-const exitReasonName: Record<string, string> = { stop_loss_0_9x: "止损 0.9x", take_profit_1_6x: "止盈 1.6x", timeout_2h: "持仓满 2 小时", liquidate_all: "一键清仓" };
+const exitReasonName: Record<string, string> = { stop_loss_0_9x: "止损 0.9x", take_profit_1_6x: "止盈 1.6x", timeout_1h: "持仓满 1 小时", timeout_2h: "持仓满 2 小时（历史）", liquidate_all: "一键清仓" };
 const reasonText = (exitReason: string | null, sellFailureReason?: string | null) => sellFailureReason ? (failureReasonName[sellFailureReason] ?? sellFailureReason) : (exitReason ? (exitReasonName[exitReason] ?? exitReason) : "—");
 const filterIso = (value: string, endOfMinute = false) => {
   if (!value) return undefined;

@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
+from ..collector.constants import LabelPolicy
 from ..database import Database, utc_now_iso
 
 
@@ -26,6 +27,9 @@ class SampleRecord:
     holder_count: float | None = None
     price_2h_max_ratio: float | None = None
     price_2h_min_ratio: float | None = None
+    price_1h_max_ratio: float | None = None
+    price_1h_min_ratio: float | None = None
+    final_1h_close_ratio: float | None = None
     final_close_ratio: float | None = None
     first_take_profit_at: int | None = None
     first_stop_loss_at: int | None = None
@@ -35,7 +39,7 @@ class SampleRecord:
     return_source: str | None = None
     tag: int | None = None
     label_status: str = "pending"
-    label_version: str = "sl090_tp160_h2_close120_v2"
+    label_version: str = "sl090_tp160_h1_binary_v4"
     label_source: str = "collector"
     terminal_return_estimated: bool = False
     raw: Mapping[str, Any] | None = None
@@ -59,7 +63,8 @@ class SampleRepository:
                 INSERT INTO samples(
                     sample_key, chain, address, name, symbol, token_type, entry_time, age_minutes,
                     launchpad, entry_price, liquidity, liquidity_estimated, utility_eligible, holder_count,
-                    features_json, price_2h_max_ratio, price_2h_min_ratio, final_close_ratio,
+                    features_json, price_2h_max_ratio, price_2h_min_ratio,
+                    price_1h_max_ratio, price_1h_min_ratio, final_1h_close_ratio, final_close_ratio,
                     first_take_profit_at, first_stop_loss_at, exit_reason, same_bar_conflict,
                     gross_return_rate, return_source,
                     tag, label_status, label_version, label_source, terminal_return_estimated,
@@ -67,7 +72,8 @@ class SampleRepository:
                 ) VALUES(
                     :sample_key, :chain, :address, :name, :symbol, :token_type, :entry_time, :age_minutes,
                     :launchpad, :entry_price, :liquidity, :liquidity_estimated, :utility_eligible, :holder_count,
-                    :features_json, :price_2h_max_ratio, :price_2h_min_ratio, :final_close_ratio,
+                    :features_json, :price_2h_max_ratio, :price_2h_min_ratio,
+                    :price_1h_max_ratio, :price_1h_min_ratio, :final_1h_close_ratio, :final_close_ratio,
                     :first_take_profit_at, :first_stop_loss_at, :exit_reason, :same_bar_conflict,
                     :gross_return_rate, :return_source,
                     :tag, :label_status, :label_version, :label_source, :terminal_return_estimated,
@@ -105,19 +111,19 @@ class SampleRepository:
         max_ratio: float,
         min_ratio: float,
         final_close_ratio: float,
-        label_version: str = "sl090_tp160_h2_close120_v2",
+        label_version: str = "sl090_tp160_h1_binary_v4",
         first_take_profit_at: int | None = None,
         first_stop_loss_at: int | None = None,
         exit_reason: str | None = None,
         same_bar_conflict: bool = False,
     ) -> None:
-        if tag not in {0, 1, 2}:
-            raise ValueError("tag must be 0, 1 or 2")
-        gross_return_rate = 0.60 if tag == 1 else (-0.10 if tag == 0 else final_close_ratio - 1.0)
+        if tag not in {0, 1}:
+            raise ValueError("tag must be 0 or 1")
+        gross_return_rate = 0.60 if tag == 1 else -0.10
         self.database.execute(
             """
             UPDATE samples
-            SET tag=?, price_2h_max_ratio=?, price_2h_min_ratio=?, final_close_ratio=?,
+            SET tag=?, price_1h_max_ratio=?, price_1h_min_ratio=?, final_1h_close_ratio=?,
                 first_take_profit_at=?, first_stop_loss_at=?, exit_reason=?, same_bar_conflict=?,
                 gross_return_rate=?, return_source='collector_kline',
                 label_status='mature', label_version=?, label_source='collector',
@@ -141,11 +147,14 @@ class SampleRepository:
         )
 
     def list_mature(self, *, since_epoch: int | None = None) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM samples WHERE label_status='mature'"
-        parameters: tuple[Any, ...] = ()
+        sql = (
+            "SELECT * FROM samples WHERE label_status='mature' AND tag IN (0,1) "
+            "AND token_type IN ('new_creation','near_completion') AND label_version=?"
+        )
+        parameters: tuple[Any, ...] = (LabelPolicy().label_version,)
         if since_epoch is not None:
             sql += " AND entry_time >= ?"
-            parameters = (since_epoch,)
+            parameters = (*parameters, since_epoch)
         sql += " ORDER BY entry_time, id"
         rows = self.database.fetch_all(sql, parameters)
         for row in rows:
@@ -172,7 +181,7 @@ class SampleRepository:
             SELECT COUNT(*) AS total,
                    SUM(CASE WHEN label_status='mature' THEN 1 ELSE 0 END) AS mature,
                    SUM(CASE WHEN label_status='pending' THEN 1 ELSE 0 END) AS pending,
-                   SUM(CASE WHEN tag IN (1,2) THEN 1 ELSE 0 END) AS positives,
+                   SUM(CASE WHEN tag=1 THEN 1 ELSE 0 END) AS positives,
                    MIN(entry_time) AS min_entry_time,
                    MAX(entry_time) AS max_entry_time
             FROM samples

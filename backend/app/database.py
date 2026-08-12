@@ -10,7 +10,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .config import get_settings
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def utc_now_iso() -> str:
@@ -280,6 +280,28 @@ class Database:
         # candidate rows across restart and widen the durable trigger enum for
         # insufficient-data daily training.
         cls._migrate_training_runs_v10(connection)
+
+        # v11: H1 labels are first-class audit facts. The historical 2h max/min
+        # columns remain untouched for provenance, but all new label finalization
+        # writes only the one-hour fields below.
+        for column in ("price_1h_max_ratio", "price_1h_min_ratio", "final_1h_close_ratio"):
+            cls._ensure_column(connection, "samples", column, "REAL")
+        connection.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS reject_completed_sample_insert
+            BEFORE INSERT ON samples
+            WHEN NEW.token_type='completed'
+            BEGIN
+                SELECT RAISE(ABORT, 'completed lifecycle is not supported');
+            END;
+            CREATE TRIGGER IF NOT EXISTS reject_completed_sample_update
+            BEFORE UPDATE OF token_type ON samples
+            WHEN NEW.token_type='completed'
+            BEGIN
+                SELECT RAISE(ABORT, 'completed lifecycle is not supported');
+            END;
+            """
+        )
 
     @classmethod
     def _migrate_training_runs_v10(cls, connection: sqlite3.Connection) -> None:
@@ -611,6 +633,9 @@ CREATE TABLE IF NOT EXISTS samples (
     features_json TEXT NOT NULL,
     price_2h_max_ratio REAL,
     price_2h_min_ratio REAL,
+    price_1h_max_ratio REAL,
+    price_1h_min_ratio REAL,
+    final_1h_close_ratio REAL,
     final_close_ratio REAL,
     first_take_profit_at INTEGER,
     first_stop_loss_at INTEGER,

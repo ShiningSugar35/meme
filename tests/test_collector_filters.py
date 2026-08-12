@@ -50,10 +50,13 @@ def test_strict_boundaries_match_readme() -> None:
     assert "swaps_1h>19" in decision.reasons
 
 
-def test_completed_pool_does_not_require_renounced_flags() -> None:
+def test_completed_pool_receives_no_filter_relaxation() -> None:
     token = valid_token()
     token.update(type="completed", renounced_mint=None, renounced_freeze_account=None)
-    assert SafetyFilter().evaluate(token).accepted
+    decision = SafetyFilter().evaluate(token)
+    assert not decision.accepted
+    assert "renounced_mint" in decision.reasons
+    assert "renounced_freeze_account" in decision.reasons
 
 
 def test_only_the_eight_frozen_launchpads_are_allowed() -> None:

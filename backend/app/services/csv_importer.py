@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..collector.constants import LabelPolicy
 from ..database import Database
 from ..repositories.samples import SampleRecord, SampleRepository
 
@@ -14,7 +15,7 @@ from ..repositories.samples import SampleRecord, SampleRepository
 IDENTITY_COLUMNS = {"address", "name", "symbol", "type", "time", "price"}
 FUTURE_COLUMNS = {"price_2h_max/price", "price_2h_min/price", "tag"}
 EXCLUDED_MODEL_COLUMNS = IDENTITY_COLUMNS | FUTURE_COLUMNS
-LEGACY_LABEL_VERSION = "sl090_tp160_h2_binary_legacy_v3"
+CURRENT_LABEL_VERSION = LabelPolicy().label_version
 
 
 @dataclass(slots=True)
@@ -64,7 +65,6 @@ class CsvImporter:
         source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         state = self.database.get_runtime_state("initial_csv_import", {})
         if not force and state.get("sha256") == source_hash:
-            self._backfill_legacy_label_facts()
             return ImportSummary(str(path), source_hash, state.get("total_rows", 0), 0, state.get("total_rows", 0), state.get("mature_rows", 0), state.get("pending_rows", 0), state.get("legacy_terminal_rows", 0))
 
         records: list[SampleRecord] = []
@@ -88,6 +88,10 @@ class CsvImporter:
                     )
                     continue
 
+                token_type = str(row.get("type") or "").strip()
+                if token_type == "completed":
+                    continue
+
                 raw_tag = _int(row.get("tag"))
                 max_ratio = _float(row.get("price_2h_max/price"))
                 min_ratio = _float(row.get("price_2h_min/price"))
@@ -108,21 +112,18 @@ class CsvImporter:
                     final_close_ratio = 1.20
                     terminal_estimated = True
 
-                status = "mature" if tag is not None and max_ratio is not None and min_ratio is not None else "pending"
+                # Shrinking H2 -> H1 is monotonic for negatives: an H2 negative
+                # cannot become an H1 positive. H2 positives, however, may have
+                # first touched 1.6x only in the second hour, so they must be
+                # re-fetched before becoming a mature H1 label.
+                status = "mature" if tag == 0 and max_ratio is not None and min_ratio is not None else "pending"
+                if status == "pending":
+                    tag = None
                 mature += int(status == "mature")
                 pending += int(status == "pending")
-                gross_return_rate = None
-                return_source = None
-                exit_reason = None
-                if status == "mature":
-                    if tag == 1:
-                        gross_return_rate = 0.60
-                        return_source = "legacy_label_rule"
-                        exit_reason = "legacy_take_profit"
-                    else:
-                        gross_return_rate = -0.10
-                        return_source = "legacy_binary_rule"
-                        exit_reason = "legacy_negative_or_timeout"
+                gross_return_rate = -0.10 if status == "mature" else None
+                return_source = "legacy_h2_monotonic_negative" if status == "mature" else None
+                exit_reason = "h1_negative_inferred_from_h2_negative" if status == "mature" else None
                 features = {
                     key: _typed(value)
                     for key, value in row.items()
@@ -133,7 +134,7 @@ class CsvImporter:
                         address=address,
                         name=str(row.get("name") or "").strip() or None,
                         symbol=str(row.get("symbol") or "").strip() or None,
-                        token_type=str(row.get("type") or "").strip() or None,
+                        token_type=token_type or None,
                         entry_time=entry_time,
                         age_minutes=_float(row.get("age")),
                         launchpad=str(row.get("launchpad") or "").strip() or None,
@@ -150,15 +151,18 @@ class CsvImporter:
                         return_source=return_source,
                         tag=tag,
                         label_status=status,
-                        label_version=LEGACY_LABEL_VERSION,
-                        label_source="legacy_csv_migration",
+                        label_version=CURRENT_LABEL_VERSION,
+                        label_source=(
+                            "legacy_h2_monotonic_negative"
+                            if status == "mature"
+                            else "legacy_h2_requires_h1_refetch"
+                        ),
                         terminal_return_estimated=terminal_estimated,
                         raw=row,
                     )
                 )
 
         inserted, skipped = self.samples.insert_many(records)
-        self._backfill_legacy_label_facts()
         summary = ImportSummary(
             source=str(path),
             source_sha256=source_hash,
@@ -191,32 +195,3 @@ class CsvImporter:
             },
         )
         return summary
-
-    def _backfill_legacy_label_facts(self) -> None:
-        """Fill v2 label-fact columns for already imported legacy rows."""
-        self.database.execute(
-            """
-            UPDATE samples
-            SET tag = CASE WHEN tag=2 THEN 0 ELSE tag END,
-                gross_return_rate = CASE
-                    WHEN tag=1 THEN 0.60
-                    WHEN tag IN (0,2) THEN -0.10
-                    ELSE gross_return_rate
-                END,
-                return_source = CASE
-                    WHEN tag=1 THEN 'legacy_label_rule'
-                    WHEN tag IN (0,2) THEN 'legacy_binary_rule'
-                    ELSE return_source
-                END,
-                exit_reason = CASE
-                    WHEN tag=1 THEN 'legacy_take_profit'
-                    WHEN tag IN (0,2) THEN 'legacy_negative_or_timeout'
-                    ELSE exit_reason
-                END,
-                label_version = ?,
-                terminal_return_estimated = 0
-            WHERE label_source='legacy_csv_migration'
-              AND label_status='mature'
-            """,
-            (LEGACY_LABEL_VERSION,),
-        )

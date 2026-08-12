@@ -1,6 +1,6 @@
 # Solana Meme Quant Trading System - Architecture Review
 
-> 本文主体保留架构审阅与设计门禁；实际实现状态以文末“2026-08-12 实现状态附录”、`README.md` 与 `开发文档.md` 为准。schema v10 / Top 3 / `rules_only` / 模拟盘单一 USD 会计 / 16:00-17:00 staged model rollover 是当前权威业务语义；历史三档字段与旧 SOL reserve 字段只允许作为数据库迁移兼容事实存在。
+> 本文主体保留架构审阅与设计门禁；实际实现状态以文末“2026-08-12 实现状态附录”、`README.md` 与 `开发文档.md` 为准。schema v11 / Top 3 / `rules_only` / 模拟盘单一 USD 会计 / 16:00-17:00 staged model rollover 是当前权威业务语义；历史三档字段与旧 SOL reserve 字段只允许作为数据库迁移兼容事实存在。
 
 ## 1. 审阅目标与原则
 
@@ -29,7 +29,7 @@ Top-3 Predictions + rules_only Baseline
   ↓
 Simulation Accounts / parked Live Interface
   ↓
-1m Kline Position Monitor + T+2h Label Finalizer
+1m Kline Position Monitor + T+1h Label Finalizer
   ↓
 Training Queue / OOS E-G-S Ranking / Top-3 Publish / Rollback
 ```
@@ -48,7 +48,7 @@ Training Queue / OOS E-G-S Ranking / Top-3 Publish / Rollback
 
 ### 3.1 样本唯一性
 
-每次通过初筛的观察按 `(chain,address,observed_at)` 形成独立 sample。不能按 token address 唯一覆盖，因为同 Token 跨 2 小时窗口再次出现仍是新的训练事件；固定模拟盘也允许同币多批次。
+每次通过初筛的观察按 `(chain,address,observed_at)` 形成独立 sample。不能按 token address 唯一覆盖，因为同 Token 跨 1 小时窗口再次出现仍是新的训练事件；固定模拟盘也允许同币多批次。
 
 ### 3.2 入场时特征
 
@@ -60,7 +60,7 @@ Training Queue / OOS E-G-S Ranking / Top-3 Publish / Rollback
 - raw `liquidity` 单独保留给资金公式/美元效用，不直接作为默认模型输入；
 - `price_change_1h/5m` 只能使用 `T` 之前的事实。快照缺失时，应立即取 `T-1h → T` 历史 1m Kline 回补，不能等未来窗口数据参与当次评分。
 
-硬排除：身份字段、`launchpad`、未来 2h max/min/final close、tag、first-touch/退出/PnL/成交结果、任何 observed_at 后生成字段。
+硬排除：身份字段、`launchpad`、未来 H1/H2 max/min/final close、tag、first-touch/退出/PnL/成交结果、任何 observed_at 后生成字段。
 
 ### 3.3 标签
 
@@ -72,11 +72,11 @@ Training Queue / OOS E-G-S Ranking / Top-3 Publish / Rollback
 - 标签只允许 `0/1`；
 - 同一 1m candle 同时触发 TP/SL，止损优先。
 
-新 schema 持久化：`first_take_profit_at`、`first_stop_loss_at`、`exit_reason`、`same_bar_conflict`、`gross_return_rate`、`return_source`。历史 timeout-positive 已统一折叠为 tag0，2h max/min/final-close 继续保留为审计事实。
+schema v11 持久化 H1 的 `price_1h_max_ratio / price_1h_min_ratio / final_1h_close_ratio` 与 `first_take_profit_at / first_stop_loss_at / exit_reason / same_bar_conflict / gross_return_rate / return_source`；旧 H2 max/min/final-close 仅保留 provenance。
 
 ## 4. 数据库与持久化
 
-SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 schema v10 的关键对象：
+SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 schema v11 的关键对象：
 
 - `samples`
 - `models`
@@ -91,7 +91,7 @@ SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 s
 - `runtime_state`
 - `audit_logs`
 
-数据库初始化必须对旧库幂等 migration。真实 `data/meme_quant.db` 已升级到 schema v10：v8 阶段 `predictions`/`positions` 物理删除 `profile`；v9 新增 `asset_usd_prices` 与每笔交易的费时 SOL/USD 审计字段；v10 扩展 durable training trigger 支持 `daily`，并保留 `completed + promoted=0` 的待激活候选，避免进程重启把“已训练、待空仓”的 generation 错误拒绝。旧交易缺少原始 FX 事实时保持 NULL，不使用当前价格伪回填。
+数据库初始化必须对旧库幂等 migration。真实 `data/meme_quant.db` 已升级到 schema v11：v8 阶段 `predictions`/`positions` 物理删除 `profile`；v9 新增 `asset_usd_prices` 与每笔交易的费时 SOL/USD 审计字段；v10 扩展 durable training trigger 支持 `daily` 并保留 `completed + promoted=0` 的待激活候选；v11 新增 H1 标签审计字段，并通过 SQLite trigger 拒绝 `token_type='completed'` 的新增/回写。旧 H2 字段仅作 provenance，旧交易缺少原始 FX 事实时保持 NULL，不使用当前价格伪回填。
 
 ## 5. 采集器架构
 
@@ -108,7 +108,7 @@ SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 s
 5. creator history 等可选补齐；
 6. admission feature 形成 sample；
 7. 模型评分；
-8. 后续 T+2h label finalization。
+8. 后续 T+1h label finalization。
 
 ### 5.2 限流与故障隔离
 
@@ -126,7 +126,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 ### 6.1 时间切分
 
-禁止 random split。所有 train/test 边界至少 2h embargo：
+禁止 random split。所有 train/test 边界至少 1h embargo：
 
 - `<120d`：扩展窗口开发 + 最近 20% final holdout，标记 `EARLY_STAGE_MODEL`；
 - `>=120d`：只用最近 120d，开发区间与最近 30d final holdout 分离。
@@ -139,7 +139,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 ### 6.3 Top 3 单一决策线
 
-一次训练按开发期 `S` 选出三个候选 model，每个模型只有一个冻结决策线，并分别映射未来的 `model_1/model_2/model_3`。训练完成后候选先持久化，必须等旧 `model_1/2/3` 全部空仓才原子写入 `active_model_slots`；模型上线前的历史 sample 不允许由新模型补评分。`rules_only` 不产生 prediction，直接交易全部规则准入样本。未来真实 live BUY 使用当时 Rank 1 模型及其决策线；schema v10 仍无 `profile`。
+一次训练按开发期 `S` 选出三个候选 model，每个模型只有一个冻结决策线，并分别映射未来的 `model_1/model_2/model_3`。训练完成后候选先持久化，必须等旧 `model_1/2/3` 全部空仓才原子写入 `active_model_slots`；模型上线前的历史 sample 不允许由新模型补评分。`rules_only` 不产生 prediction，直接交易全部规则准入样本。未来真实 live BUY 使用当时 Rank 1 模型及其决策线；schema v11 仍无 `profile`。
 
 ### 6.4 最终 holdout 隔离与 Top 3 发布
 
@@ -211,7 +211,7 @@ Prediction 只负责评分/开仓，不能在样本成熟后用 tag 事后“代
 
 - 0.9x SL；
 - 1.6x TP；
-- 2h timeout close；
+- 1h timeout close；
 - same bar SL first。
 
 触发后冻结 reason/reference/trigger，position -> closing。SELL quote 失败时持久化 `paper_exit_pending`，后续周期/重启只重试原退出，不因行情变化改写原因。同 token 多仓共享 Kline fetch。
@@ -290,13 +290,13 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 
 | 事项 | 最终决议 |
 | --- | --- |
-| legacy `>1.25x` timeout 正类 vs binary-v3 | 只保留先触及 `1.6x` 的 tag1；16 条旧非 TP 正类重标 tag0，2h 价格事实仅审计。 |
+| 旧 H2 标签 vs H1 binary-v4 | H2 负类按单调性转 H1 负类；H2 正类必须重新获取 GMGN 1m Kline 计算 H1 first-touch；旧 H2 价格事实仅审计。 |
 | `price` 是否泄漏 | 当前源码/README确认其为准入 `entry_price`，允许默认训练。 |
 | `launchpad` | 采集、准入、展示、审计与导出；不进入训练特征。 |
 | `ln(liquidity_usd)` | 新样本持续采集；legacy 无法反推，当前默认关闭；模型中心可后续 opt-in。 |
 | raw liquidity | 经济 sizing/PnL 专用，不作为默认 model input。 |
 | 三档 vs 三模型 | 三档设计已删除；当前固定 Top 3 三个模型，各一条 decision threshold，另有 `rules_only` 基线。 |
-| future live strategy | 使用当时 active Top 3 的 Rank 1 模型及其单一 decision threshold；schema v10 无 `profile`。 |
+| future live strategy | 使用当时 active Top 3 的 Rank 1 模型及其单一 decision threshold；schema v11 无 `profile`。 |
 | 模拟每次 $1000 | 显式 new session 才重置；应用 restart 恢复。 |
 | 当前本地版 vs 公网/多进程 | localhost 单用户完成；公网/分布式属于后续扩展。 |
 
@@ -332,8 +332,8 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 
 已完成：
 
-- 当前真实库持续采集；本轮只读分析时有 2415 条 mature/tagged 样本、420 positives；binary-v3 标签与 2h 路径审计事实持续保留；
-- SQLite schema v10：v8 已从 predictions/positions 物理删除 `profile` 并新增 `active_model_slots`；v9 增加 USD-only 模拟会计、`asset_usd_prices` 与手续费费时 FX 审计字段；v10 增加 daily durable trigger 与待空仓候选持久状态，旧交易缺少历史 FX 时不伪回填；
+- 当前真实库已完成 H1/no-completed 迁移：2296 samples、2292 mature H1 v4、4 pending、381 positives；123 completed 已删除且 DB trigger 禁止回写；旧 H2 路径事实只作 provenance；
+- SQLite schema v11：v8 已从 predictions/positions 物理删除 `profile` 并新增 `active_model_slots`；v9 增加 USD-only 模拟会计、`asset_usd_prices` 与手续费费时 FX 审计字段；v10 增加 daily durable trigger 与待空仓候选持久状态，旧交易缺少历史 FX 时不伪回填；
 - 默认候选 feature pool 31；各算法在 12/20/全量中做 one-standard-error 选择；`launchpad` 仅元数据，`ln(liquidity_usd)` 可选；
 - 入场 `price_change_1h/5m` 缺失时使用 `T-1h → T` 历史 Kline 回补，不读取未来；
 - 扩展候选池 + chronological OOS + 单一决策线 + `6TP-FP`/E-G-S + one-standard-error Occam + final 隔离；

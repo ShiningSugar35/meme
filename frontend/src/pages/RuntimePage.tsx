@@ -13,8 +13,7 @@ const number = (value: unknown) => typeof value === "number" ? value : Number(va
 const workerTone = (state: unknown) => ["degraded", "blocked", "failed"].includes(String(state)) ? "orange" : "neutral";
 const lifecycleLabel = (value: unknown) => ({
   new_creation: "New Creation",
-  near_completion: "Near Completion",
-  completed: "Completed"
+  near_completion: "Near Completion"
 }[String(value)] ?? "Collector");
 const eventTime = (value: string) => new Date(value).toLocaleTimeString("zh-CN", { hour12: false });
 
@@ -102,7 +101,7 @@ export function RuntimePage() {
   const rawTypeStats = runtime.collector.type_stats && typeof runtime.collector.type_stats === "object"
     ? runtime.collector.type_stats as Record<string, Record<string, unknown>>
     : {};
-  const lifecycleStats = ["new_creation", "near_completion", "completed"].map((key) => ({
+  const lifecycleStats = ["new_creation", "near_completion"].map((key) => ({
     key,
     label: lifecycleLabel(key),
     stats: rawTypeStats[key] ?? {}
@@ -113,7 +112,7 @@ export function RuntimePage() {
     ["Prediction", "Champion 评分 → 三档模拟信号", runtime.prediction_worker, BrainCircuit],
     ["Paper Market Monitor", "1m K 线 first-touch → 模拟退出", runtime.paper_monitor, Activity],
     ["Training Worker", "持久队列 → 串行训练 → 崩溃恢复", runtime.training_worker, BrainCircuit],
-    ["Weekly Trainer", "周日 03:00、启动补跑、有限重试", runtime.scheduler, ServerCog],
+    ["Model Trainer", "16:00 冻结模型新开仓 → 17:00 日/周训练 → 空仓换模", runtime.scheduler, ServerCog],
     ["Model Health", "7 日 OOS 退化检测 → 安全重训", runtime.model_health_worker, ShieldCheck],
     ["Order Reconciliation", "未决订单只查原单，禁止重复提交", runtime.reconciliation_worker, RefreshCw],
     ["Liquidation", "冻结快照 → 串行退出 → 重启恢复", runtime.liquidation_worker, Activity]
@@ -175,8 +174,8 @@ export function RuntimePage() {
       <section className="panel collector-cycle-panel">
         <div className="panel-heading">
           <div>
-            <h2>三生命周期采集</h2>
-            <p>每轮固定按 New Creation → Near Completion → Completed 扫描；单类请求上限 {number(runtime.collector.requested_limit_per_type) || 80}</p>
+            <h2>双生命周期采集</h2>
+            <p>每轮固定按 New Creation → Near Completion 扫描；Completed 已永久退出采样、训练和交易；单类请求上限 {number(runtime.collector.requested_limit_per_type) || 80}</p>
           </div>
           <StatusBadge tone={text(runtime.collector.cycle_state) === "in_progress" ? "gold" : "blue"} label={text(runtime.collector.cycle_state, "idle")} />
         </div>

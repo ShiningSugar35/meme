@@ -21,6 +21,7 @@ from ..collector import (
     GMGNDataClient,
     GMGNEnrichmentProvider,
     HttpxTransport,
+    LabelPolicy,
     PriceWindowResult,
 )
 from ..config import PROJECT_ROOT, Settings, get_settings
@@ -73,7 +74,7 @@ class SqliteCollectorSink:
             WHERE label_status='pending' AND entry_time <= ?
             ORDER BY entry_time LIMIT 100
             """,
-            (now_ts - 2 * 60 * 60,),
+            (now_ts - LabelPolicy().window_seconds,),
         )
         return tuple(
             CollectedSample(
@@ -108,8 +109,8 @@ class SqliteCollectorSink:
                 features["price_change_5m"] = result.price_change_5m
             connection.execute(
                 """
-                UPDATE samples SET tag=?, price_2h_max_ratio=?, price_2h_min_ratio=?,
-                    final_close_ratio=?, first_take_profit_at=?, first_stop_loss_at=?,
+                UPDATE samples SET tag=?, price_1h_max_ratio=?, price_1h_min_ratio=?,
+                    final_1h_close_ratio=?, first_take_profit_at=?, first_stop_loss_at=?,
                     exit_reason=?, same_bar_conflict=?, gross_return_rate=?,
                     return_source='collector_kline', label_status='mature', label_version=?,
                     label_source='collector', terminal_return_estimated=0,
@@ -176,7 +177,6 @@ class CollectorWorker:
         return {
             "new_creation": "New Creation",
             "near_completion": "Near Completion",
-            "completed": "Completed",
         }.get(str(token_type), str(token_type or "Collector"))
 
     def _record_event(
@@ -193,21 +193,21 @@ class CollectorWorker:
         reason_text = ", ".join(str(item) for item in reasons) if isinstance(reasons, list) else ""
         messages = {
             "cycle_started": (
-                "采集周期开始：依次扫描 New Creation → Near Completion → Completed，"
+                "采集周期开始：依次扫描 New Creation → Near Completion，"
                 f"单类 limit={int(payload.get('requested_limit') or 0)}"
             ),
             "discovery_start": f"开始拉取 {label}",
             "discovery_result": f"{label} 拉回 {int(payload.get('returned') or 0)} 个候选",
             "candidate_duplicate": f"{token or 'candidate'} [{label}] 跳过：该 Token 仍有未成熟样本",
             "candidate_rejected": f"{token or 'candidate'} [{label}] 拒绝：{reason_text or 'unspecified'}",
-            "candidate_accepted": f"{token or 'candidate'} [{label}] 已入样，进入 2h 标签等待",
+            "candidate_accepted": f"{token or 'candidate'} [{label}] 已入样，进入 1h 标签等待",
             "discovery_type_complete": (
                 f"{label} 完成：返回 {int(payload.get('returned') or 0)} / "
                 f"入样 {int(payload.get('accepted') or 0)} / "
                 f"拒绝 {int(payload.get('rejected') or 0)} / "
                 f"重复 {int(payload.get('duplicates') or 0)}"
             ),
-            "label_finalization": f"本轮完成 {int(payload.get('finalized') or 0)} 条 T+2h 标签补齐",
+            "label_finalization": f"本轮完成 {int(payload.get('finalized') or 0)} 条 T+1h 标签补齐",
             "paper_monitor": (
                 f"模拟盘监控：检查 {int(payload.get('checked') or 0)} 仓 / "
                 f"退出 {int(payload.get('closed') or 0)} / 待重试 {int(payload.get('pending') or 0)}"

@@ -88,12 +88,13 @@ def test_prediction_cycle_scores_top3_opens_models_and_rule_baseline_idempotentl
     )
     now = datetime.now(timezone.utc).replace(microsecond=0)
     seed_sol_price(database, now - timedelta(seconds=10))
-    seed_sol_price(database, now + timedelta(hours=2) - timedelta(seconds=10))
+    seed_sol_price(database, now + timedelta(hours=1) - timedelta(seconds=10))
     seed_top3(database, tmp_path / "models", now)
     repository = SampleRepository(database)
     repository.insert(
         SampleRecord(
             address="Token111111111111111111111111111111111111",
+            token_type="new_creation",
             entry_time=int((now - timedelta(seconds=10)).timestamp()),
             entry_price=1.0,
             liquidity=4_000.0,
@@ -121,7 +122,7 @@ def test_prediction_cycle_scores_top3_opens_models_and_rule_baseline_idempotentl
 
     sample_id = int(database.fetch_one("SELECT id FROM samples")["id"])
     repository.update_label(sample_id, tag=1, max_ratio=1.6, min_ratio=0.95, final_close_ratio=1.6)
-    third = service.run_cycle(now=now + timedelta(hours=2, seconds=1))
+    third = service.run_cycle(now=now + timedelta(hours=1, seconds=1))
     assert third.paper_positions_settled == 3
     assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE status='closed'")["n"] == 3
 
@@ -142,6 +143,7 @@ def test_stale_oos_signals_and_rule_baseline_are_not_retroactively_filled(tmp_pa
     SampleRepository(database).insert(
         SampleRecord(
             address="Token222222222222222222222222222222222222",
+            token_type="new_creation",
             entry_time=int((now - timedelta(hours=2)).timestamp()),
             entry_price=1.0,
             liquidity=5_000.0,
@@ -170,6 +172,7 @@ def test_rollover_gate_blocks_model_buys_but_keeps_rules_only_running(tmp_path):
     SampleRepository(database).insert(
         SampleRecord(
             address="TokenRollover11111111111111111111111111111111",
+            token_type="new_creation",
             entry_time=int(sample_at.timestamp()),
             entry_price=1.0,
             liquidity=10_000.0,
@@ -238,6 +241,7 @@ def test_prediction_to_four_strategy_market_exit_e2e(tmp_path):
     SampleRepository(database).insert(
         SampleRecord(
             address="Asset333333333333333333333333333333333333",
+            token_type="new_creation",
             entry_time=int(entry.timestamp()),
             entry_price=1.0,
             liquidity=10_000.0,

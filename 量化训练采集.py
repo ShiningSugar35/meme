@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-GMGN meme-token training data collector.
+LEGACY GMGN meme-token training data collector (reference only).
 
-The script is intentionally self-contained: it only depends on Python stdlib
-plus httpx when available. It reads GMGN_* settings from .env, writes
-./meme数据.csv, and never touches the application code or git remotes.
+This standalone H2 collector is intentionally disabled as an executable after
+the 2026-08-12 H1/no-completed migration. Production collection must go through
+backend.app.collector so completed lifecycle samples and H2 labels cannot be
+reintroduced into the dataset.
 """
 from __future__ import annotations
 
@@ -2121,4 +2122,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        "量化训练采集.py is legacy H2 reference code and is disabled. "
+        "Use backend.app.collector (H1, new_creation/near_completion only)."
+    )

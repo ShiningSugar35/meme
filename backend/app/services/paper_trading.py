@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
+from ..collector.constants import LabelPolicy
 from ..collector.models import Kline
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
@@ -493,8 +494,10 @@ class PaperTradingService:
                     WHERE p.model_id=? AND p.strategy_key=? AND p.predicted_at>=?
                       AND s.entry_time>=?
                       AND s.label_status='mature' AND s.tag IN (0,1)
+                      AND s.token_type IN ('new_creation','near_completion')
+                      AND s.label_version=?
                     """,
-                    (scope["model_id"], strategy, scope["selected_at"], statistics_epoch),
+                    (scope["model_id"], strategy, scope["selected_at"], statistics_epoch, LabelPolicy().label_version),
                 ) or {}
                 selected_count = int(quality.get("selected_count") or 0)
                 positive_count = int(quality.get("positive_count") or 0)
@@ -538,8 +541,10 @@ class PaperTradingService:
                            COALESCE(SUM(CASE WHEN tag=1 THEN 1 ELSE 0 END),0) AS positive_count
                     FROM samples
                     WHERE label_status='mature' AND tag IN (0,1) AND entry_time>=?
+                      AND token_type IN ('new_creation','near_completion')
+                      AND label_version=?
                     """,
-                    (statistics_epoch,),
+                    (statistics_epoch, LabelPolicy().label_version),
                 ) or {}
                 mature_count = int(quality.get("mature_count") or 0)
                 positive_count = int(quality.get("positive_count") or 0)
@@ -810,7 +815,7 @@ class PaperTradingService:
         if float(state["cash_usd"]) < capital + quote.fee_usd + network_fee_usd:
             return PaperOpenResult(False, "insufficient_paper_cash")
 
-        expires_at = observed_at + timedelta(hours=2)
+        expires_at = observed_at + timedelta(hours=1)
         quantity = capital / quote.fill_price
         metadata = {
             "sample_id": sample_id,
@@ -873,13 +878,16 @@ class PaperTradingService:
         rows = self.database.fetch_all(
             """
             SELECT p.*,s.tag,s.entry_price AS reference_entry_price,s.liquidity,
-                   s.final_close_ratio,s.price_2h_min_ratio
+                   s.final_1h_close_ratio,s.price_1h_min_ratio
             FROM positions p
             JOIN samples s ON s.id=p.sample_id
             WHERE p.strategy_key IN ('model_1','model_2','model_3','rules_only')
               AND p.status='open' AND s.label_status='mature'
+              AND s.token_type IN ('new_creation','near_completion')
+              AND s.label_version=?
             ORDER BY p.entry_time
-            """
+            """,
+            (LabelPolicy().label_version,),
         )
         settled = 0
         for row in rows:
@@ -956,7 +964,7 @@ class PaperTradingService:
             close_lines = [line for line in ordered if line.close not in (None, 0)]
             if close_lines:
                 final_line = close_lines[-1]
-                decision = ("timeout_2h", float(final_line.close), expires_ts)
+                decision = ("timeout_1h", float(final_line.close), expires_ts)
             else:
                 return PaperMonitorResult(position_id, "pending", "timeout_candle_unavailable")
 
@@ -1309,11 +1317,11 @@ class PaperTradingService:
         reference_entry = float(row["reference_entry_price"])
         if tag == 1:
             exit_reason, reference_price = "take_profit_1_6x", reference_entry * 1.6
-        elif float(row.get("price_2h_min_ratio") or 1.0) <= 0.9:
+        elif float(row.get("price_1h_min_ratio") or 1.0) <= 0.9:
             exit_reason, reference_price = "stop_loss_0_9x", reference_entry * 0.9
         else:
-            ratio = float(row.get("final_close_ratio") or 1.0)
-            exit_reason, reference_price = "timeout_2h", reference_entry * ratio
+            ratio = float(row.get("final_1h_close_ratio") or 1.0)
+            exit_reason, reference_price = "timeout_1h", reference_entry * ratio
         quantity = float(row["token_amount"] or 0)
         gross_reference = quantity * reference_price
         observed_at = datetime.fromisoformat(row["expires_at"])

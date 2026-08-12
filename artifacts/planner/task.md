@@ -1,29 +1,30 @@
 # Solana Meme Quant Trading System - 当前开发状态
 
 > 更新时间：2026-08-12
-> 当前范围：**除真实 live BUY 外，本地单机/单用户版本全部闭环**。系统已完成 Top 3 + `rules_only` 重构、schema v10（v8 去 profile + v9 USD-only 手续费会计 + v10 staged model rollover）迁移、健康感知的 16:00/17:00 日/周训练、候选等待空仓换模、模型 generation 统计和四策略模拟链；实盘 provider/journal/reconciliation/liquidation 继续 fail-closed。
+> 当前范围：**除真实 live BUY 外，本地单机/单用户版本全部闭环**。系统已完成 Top 3 + `rules_only` 重构、schema v11（v8 去 profile + v9 USD-only 手续费会计 + v10 staged model rollover + v11 H1/no-completed）迁移、健康感知的 16:00/17:00 日/周训练、候选等待空仓换模、模型 generation 统计和四策略模拟链；实盘 provider/journal/reconciliation/liquidation 继续 fail-closed。
 
 ## Phase 1：数据与 Schema — COMPLETE
 
-- [x] legacy CSV 2319 行幂等迁入 SQLite，binary-v3 标签与 2h 路径事实可追溯
+- [x] legacy CSV 旧 H2 路径事实保留 provenance；生产标签已迁移到 H1 binary-v4
 - [x] 当前真实库迁移前审计：2379 samples、2374 mature、414 positives
 - [x] schema v8：`predictions` 物理删除 `profile`，UNIQUE(`sample_id`,`model_id`,`strategy_key`)
 - [x] schema v8：`positions` 物理删除 `profile`，`account_kind` 仅 `simulation/live`，模拟策略由 `strategy_key` 表达
 - [x] `active_model_slots` 保存 slot 1..3、model id、综合分、单一 threshold、选中时间
 - [x] 旧三档预测/仓位/成交原子迁移到 neutral legacy strategy；迁移副本验证 2379 samples / 207 predictions / 90 positions / 180 trades 原数保留
-- [x] 正式真实 DB 已完成 schema v10 幂等升级（v8 去 profile + v9 USD-only 手续费会计 + v10 daily trigger / 待空仓候选持久化）
+- [x] 正式真实 DB 已完成 schema v11 幂等升级（v10 daily trigger / 待空仓候选持久化 + v11 H1 字段 / completed 写入阻断）
 - [x] 迁移前 SQLite backup：`data/backups/meme_quant_pre_top3_20260811T155151Z.db`
+- [x] H1/no-completed 真实迁移 backup：`data/backups/meme_quant_pre_h1_no_completed_20260812T092259Z.db`；删除 123 completed，416 个旧 H2 正类通过 GMGN 1m Kline 重算为 381 正 / 35 负，0 API 错误；迁移后 2292 mature H1 / 4 pending
 - [x] durable `simulation_sessions` / `training_runs` / `agent_proposals` / trade journal
 
 ## Phase 2：持续采集与入场特征 — COMPLETE
 
-- [x] README 指定 8 Launchpad / 3 生命周期 / 12 Key 角色分工
+- [x] README 指定 8 Launchpad / 2 生命周期（new_creation / near_completion）/ 12 Key 角色分工
 - [x] GMGN discovery/enrichment adapter、共享限流、429 cooldown、本地 safety filter、top-holder 后置过滤
 - [x] quote 侧仅 SOL/USDC/USDT；目标 Token 排除稳定币/包装主资产
 - [x] admission-time `price` 可训练；`launchpad` 仅元数据；`ln(liquidity_usd)` 持续采集且可 opt-in
 - [x] `price_change_1h/5m` 缺失时仅用 `T-1h → T` 历史 1m Kline 回补
 - [x] Collector paper-exit / label / discovery stage isolation
-- [x] monitor-only：关闭 discovery 仍继续模拟退出与 T+2h 标签
+- [x] monitor-only：关闭 discovery 仍继续模拟退出与 T+1h 标签
 
 ## Phase 3：Top 3 ML / 奥卡姆 / 自更新 — COMPLETE
 
@@ -64,7 +65,7 @@
 - [x] final certification：RF `$875` / DT `$890` / GB `$1000` / `rules_only` `$915`
 - [x] HGB/XGBoost 等 final 局部成绩更高时也不会反向改写开发期 Top 3
 - [x] 模型显示名统一使用算法全称，例如 `20260812-Random Forest / 20260812-Decision Tree / 20260812-Gradient Boosting`
-- [x] 后续历史 degraded run `374ec8e3-4479-4e7b-9e30-630183cadc23` 已按同一 OOS 纪律更新当前 Top 3 为 `20260812-Decision Tree / 20260812-Random Forest / 20260812-XGBoost`；v10 起 degraded 不再绕过 16:00/17:00 staged rollover 插队训练
+- [x] H1/no-completed 重训 run `ca922c9b-a835-486b-ba61-e94c04978399` 已按 17:00 `startup_catchup` 完成并激活当前 Top 3：`Extra Trees / AdaBoost / Random Forest`；v11 继续统一经过 16:00/17:00 staged rollover
 
 ## Phase 4：四策略 Simulation — COMPLETE
 
@@ -73,9 +74,9 @@
 - [x] 每策略最大 10 仓；同 Token 可跨策略/批次共存
 - [x] `model_1/2/3` 各自使用对应 active model + 单一 threshold
 - [x] `rules_only` 对所有 fresh rule-admitted sample 直接开模拟仓，不创建模型 prediction
-- [x] 四策略复用完全相同 BUY/SELL/滑点/费率/网络费/0.9x SL/1.6x TP/2h timeout/卖出失败重试链
+- [x] 四策略复用完全相同 BUY/SELL/滑点/费率/网络费/0.9x SL/1.6x TP/1h timeout/卖出失败重试链
 - [x] 网络费保留原始 SOL 数量，并按手续费实际发生时 SOL/USD 冻结折算为 USD 扣减模拟现金/PnL；缺失新鲜 FX 时 fail-closed，不事后补价
-- [x] schema v9 持久化 `asset_usd_prices` 与 `platform_fee_usd / sol_usd_price / network_fee_usd / slippage_cost_usd / fee_occurred_at`；v10 保持该费用会计不变
+- [x] schema v9 持久化 `asset_usd_prices` 与 `platform_fee_usd / sol_usd_price / network_fee_usd / slippage_cost_usd / fee_occurred_at`；v11 保持该费用会计不变
 - [x] 卡片 `当前余额` 是可用现金，不含已投入持仓本金；v9+ 完整费用交易逐笔审计满足 `net_pnl = gross_pnl - platform/network fees`，滑点已进入 fill price
 - [x] `model_1/2/3` 卡片按当前 model_id + selected_at 统计 8 项 generation 指标，sample.entry_time 也必须不早于 selected_at；`rules_only` Precision=当前 session 成熟样本正类率，Recall=100%（存在正类时）
 - [x] 同 Token 四策略仓位合并为一次市场 Kline 请求

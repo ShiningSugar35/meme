@@ -1,4 +1,4 @@
-"""Two-hour first-touch label finalization."""
+"""One-hour first-touch label finalization."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ class LabelFinalizer:
             key=lambda line: line.timestamp,
         )
         if not ordered:
-            raise CollectorValidationError("No usable Kline exists inside the 2h label window")
+            raise CollectorValidationError("No usable Kline exists inside the 1h label window")
 
         max_ratio = 0.0
         min_ratio = float("inf")

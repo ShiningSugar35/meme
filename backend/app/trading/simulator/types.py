@@ -24,7 +24,7 @@ class FailureCategory(str, Enum):
 class ExitReason(str, Enum):
     TAKE_PROFIT = "take_profit_1_6x"
     STOP_LOSS = "stop_loss_0_9x"
-    TIMEOUT = "timeout_2h"
+    TIMEOUT = "timeout_1h"
     MANUAL = "manual"
 
 
@@ -143,5 +143,5 @@ class SimulationConfig:
     max_open_positions: int = 10
     take_profit_multiple: float = 1.60
     stop_loss_multiple: float = 0.90
-    max_holding_seconds: int = 2 * 60 * 60
+    max_holding_seconds: int = 60 * 60
 

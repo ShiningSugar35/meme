@@ -14,7 +14,7 @@ class PromotionConfig:
     min_pnl_lift: float = 0.05
     minimum_baseline_usd: float = 1.0
     min_trades: int = 3
-    label_gap_hours: float = 2.0
+    label_gap_hours: float = 1.0
 
 
 class PromotionEvaluator:

@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..collector.constants import LabelPolicy
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..ml.economics import theoretical_profit_units
@@ -127,10 +128,12 @@ class ModelHealthService:
             FROM predictions p JOIN samples s ON s.id=p.sample_id
             WHERE p.model_id=? AND p.strategy_key=?
               AND s.label_status='mature' AND s.tag IN (0,1)
+              AND s.token_type IN ('new_creation','near_completion')
+              AND s.label_version=?
               AND s.entry_time>=? AND s.entry_time<=?
             ORDER BY s.entry_time,p.id
             """,
-            (model["id"], strategy_key, scope_start, end),
+            (model["id"], strategy_key, LabelPolicy().label_version, scope_start, end),
         )
         selected = [row for row in rows if int(row.get("selected") or 0) == 1]
         tp = sum(int(int(row.get("tag") or 0) == 1) for row in selected)

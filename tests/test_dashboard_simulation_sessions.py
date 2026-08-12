@@ -166,6 +166,7 @@ def test_model_card_quality_and_trade_count_are_scoped_to_current_generation(tmp
         samples.insert(
             SampleRecord(
                 address=f"quality-token-{index}",
+                token_type="new_creation",
                 entry_time=int(entry.timestamp()),
                 entry_price=1.0,
                 liquidity=10_000.0,
@@ -224,6 +225,7 @@ def test_rules_only_quality_is_positive_prevalence_with_full_recall(tmp_path: Pa
         samples.insert(
             SampleRecord(
                 address=f"rules-quality-{index}",
+                token_type="near_completion",
                 entry_time=int((started + timedelta(seconds=index)).timestamp()),
                 entry_price=1.0,
                 liquidity=10_000.0,

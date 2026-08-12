@@ -176,11 +176,10 @@ class SafetyFilter:
         lt("fresh_wallet_rate", to_float(token.get("fresh_wallet_rate")), t.max_fresh_wallet_rate)
         if str(token.get("burn_status") or "").strip().lower() != "burn":
             fail.append("burn_status")
-        if str(token.get("type") or "") != "completed":
-            if token.get("renounced_mint") not in (1, True, "1", "true", "True"):
-                fail.append("renounced_mint")
-            if token.get("renounced_freeze_account") not in (1, True, "1", "true", "True"):
-                fail.append("renounced_freeze_account")
+        if token.get("renounced_mint") not in (1, True, "1", "true", "True"):
+            fail.append("renounced_mint")
+        if token.get("renounced_freeze_account") not in (1, True, "1", "true", "True"):
+            fail.append("renounced_freeze_account")
         if not _is_false(token.get("is_wash_trading")):
             fail.append("is_wash_trading")
         lt("rat_trader_amount_rate", to_float(token.get("rat_trader_amount_rate")), t.max_rat_trader_amount_rate)

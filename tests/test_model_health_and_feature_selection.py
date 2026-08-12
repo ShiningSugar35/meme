@@ -77,6 +77,7 @@ def seed_recent_predictions(database: Database, model_ids: list[str], now: datet
         repo.insert(
             SampleRecord(
                 address=f"health-token-{index}",
+                token_type="new_creation",
                 entry_time=int(entry.timestamp()),
                 entry_price=1.0,
                 liquidity=10_000.0,

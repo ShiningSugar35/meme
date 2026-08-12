@@ -45,11 +45,11 @@ def test_csv_import_is_idempotent_and_migrates_legacy_terminal(tmp_path: Path) -
     row = database.fetch_one("SELECT * FROM samples")
     assert row["tag"] == 0
     assert row["final_close_ratio"] == 1.25
-    assert row["terminal_return_estimated"] == 0
+    assert row["terminal_return_estimated"] == 1
     assert row["utility_eligible"] == 0
     assert row["gross_return_rate"] == -0.10
-    assert row["return_source"] == "legacy_binary_rule"
-    assert row["exit_reason"] == "legacy_negative_or_timeout"
+    assert row["return_source"] == "legacy_h2_monotonic_negative"
+    assert row["exit_reason"] == "h1_negative_inferred_from_h2_negative"
 
 
 def test_label_finalization_preserves_legacy_utility_ineligibility(tmp_path: Path) -> None:
@@ -71,7 +71,7 @@ def test_label_finalization_preserves_legacy_utility_ineligibility(tmp_path: Pat
     result = PriceWindowResult(
         address="fixture-mint-legacy-pending",
         entry_time=1_800_000_000,
-        label_version="sl090_tp160_h2_binary_v3",
+        label_version="sl090_tp160_h1_binary_v4",
         tag=0,
         exit_reason="window_timeout_negative",
         max_price_ratio=1.3,
@@ -86,13 +86,13 @@ def test_label_finalization_preserves_legacy_utility_ineligibility(tmp_path: Pat
     asyncio.run(SqliteCollectorSink(database).save_label(result))
 
     row = database.fetch_one(
-        "SELECT label_status,utility_eligible,terminal_return_estimated,final_close_ratio FROM samples WHERE address=?",
+        "SELECT label_status,utility_eligible,terminal_return_estimated,final_1h_close_ratio FROM samples WHERE address=?",
         ("fixture-mint-legacy-pending",),
     )
     assert row["label_status"] == "mature"
     assert row["utility_eligible"] == 0
     assert row["terminal_return_estimated"] == 0
-    assert row["final_close_ratio"] == 1.25
+    assert row["final_1h_close_ratio"] == 1.25
 
 
 def test_same_token_is_independent_at_different_entry_times(tmp_path: Path) -> None:
@@ -107,11 +107,11 @@ def test_sample_export_contains_all_and_only_mature_tagged_rows(tmp_path: Path) 
     database = make_database(tmp_path)
     repository = SampleRepository(database)
     repository.insert(SampleRecord(
-        address="mature-token", entry_time=100, entry_price=1.0,
+        address="mature-token", token_type="new_creation", entry_time=100, entry_price=1.0,
         launchpad="Pump.fun", features={"age": 5.0}, tag=1, label_status="mature",
     ))
     repository.insert(SampleRecord(
-        address="pending-token", entry_time=200, entry_price=1.0,
+        address="pending-token", token_type="near_completion", entry_time=200, entry_price=1.0,
         launchpad="letsbonk", features={"age": 6.0}, tag=None, label_status="pending",
     ))
 

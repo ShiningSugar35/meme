@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-DISCOVERY_TYPES = ("new_creation", "near_completion", "completed")
+DISCOVERY_TYPES = ("new_creation", "near_completion")
 
 LAUNCHPADS = (
     "Pump.fun",
@@ -51,13 +51,13 @@ class FilterThresholds:
 
 @dataclass(frozen=True, slots=True)
 class LabelPolicy:
-    """Binary first-touch label: SL 0.9, TP 1.6, timeout is negative."""
+    """One-hour binary first-touch label: SL 0.9, TP 1.6, timeout is negative."""
 
     stop_loss_ratio: float = 0.9
     take_profit_ratio: float = 1.6
-    window_seconds: int = 2 * 60 * 60
+    window_seconds: int = 60 * 60
     history_seconds: int = 60 * 60
-    label_version: str = "sl090_tp160_h2_binary_v3"
+    label_version: str = "sl090_tp160_h1_binary_v4"
 
 
 ALLOWED_QUOTE_SYMBOLS = frozenset({"SOL", "USDC", "USDT"})

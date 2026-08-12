@@ -5,6 +5,7 @@ import io
 import json
 from typing import Any
 
+from ..collector.constants import LabelPolicy
 from ..database import Database
 
 
@@ -23,9 +24,9 @@ class SampleExportService:
         "holder_count",
     )
     LABEL_COLUMNS = (
-        "price_2h_max/price",
-        "price_2h_min/price",
-        "final_close_ratio",
+        "price_1h_max/price",
+        "price_1h_min/price",
+        "final_1h_close_ratio",
         "tag",
         "label_version",
         "label_source",
@@ -38,9 +39,12 @@ class SampleExportService:
         rows = self.database.fetch_all(
             """
             SELECT * FROM samples
-            WHERE label_status='mature' AND tag IS NOT NULL
+            WHERE label_status='mature' AND tag IN (0,1)
+              AND token_type IN ('new_creation','near_completion')
+              AND label_version=?
             ORDER BY entry_time, id
-            """
+            """,
+            (LabelPolicy().label_version,),
         )
         feature_names: set[str] = set()
         decoded: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -70,9 +74,9 @@ class SampleExportService:
                 "price": row.get("entry_price"),
                 "liquidity": row.get("liquidity"),
                 "holder_count": row.get("holder_count"),
-                "price_2h_max/price": row.get("price_2h_max_ratio"),
-                "price_2h_min/price": row.get("price_2h_min_ratio"),
-                "final_close_ratio": row.get("final_close_ratio"),
+                "price_1h_max/price": row.get("price_1h_max_ratio"),
+                "price_1h_min/price": row.get("price_1h_min_ratio"),
+                "final_1h_close_ratio": row.get("final_1h_close_ratio"),
                 "tag": row.get("tag"),
                 "label_version": row.get("label_version"),
                 "label_source": row.get("label_source"),

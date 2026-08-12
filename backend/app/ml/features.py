@@ -30,7 +30,9 @@ _EXACT_EXCLUSIONS = {
 }
 
 _FUTURE_PATTERNS = (
+    re.compile(r"(^|[/_])price_?1h_(max|min|close)"),
     re.compile(r"(^|[/_])price_?2h_(max|min|close)"),
+    re.compile(r"(^|[/_])final_?1h"),
     re.compile(r"(^|[/_])final_?2h"),
     re.compile(r"(^|[/_])future([/_]|$)"),
     re.compile(r"(^|[/_])exit_(time|price|reason)"),
@@ -49,6 +51,7 @@ _LIQUIDITY_COLUMNS = (
 )
 
 _FINAL_CLOSE_COLUMNS = (
+    "final_1h_close_ratio",
     "final_2h_close_ratio",
     "close_2h_ratio",
     "price_2h_close/price",
