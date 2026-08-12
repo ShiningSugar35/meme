@@ -334,17 +334,17 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 
 - 当前真实库已完成 H1/no-completed 迁移：2296 samples、2292 mature H1 v4、4 pending、381 positives；123 completed 已删除且 DB trigger 禁止回写；旧 H2 路径事实只作 provenance；
 - SQLite schema v11：v8 已从 predictions/positions 物理删除 `profile` 并新增 `active_model_slots`；v9 增加 USD-only 模拟会计、`asset_usd_prices` 与手续费费时 FX 审计字段；v10 增加 daily durable trigger 与待空仓候选持久状态，旧交易缺少历史 FX 时不伪回填；
-- 默认候选 feature pool 31；各算法在 12/20/全量中做 one-standard-error 选择；`launchpad` 仅元数据，`ln(liquidity_usd)` 可选；
+- 默认候选 feature pool 31；各算法从 4 个特征起逐维扫描到可用全量，fold-train-only 排序并用 one-standard-error 选择近优最小维度；`launchpad` 仅元数据，`ln(liquidity_usd)` 可选；
 - 入场 `price_change_1h/5m` 缺失时使用 `T-1h → T` 历史 Kline 回补，不读取未来；
 - 扩展候选池 + chronological OOS + 单一决策线 + `6TP-FP`/E-G-S + one-standard-error Occam + final 隔离；
-- 首次正式 run `89c2d088-ea1b-4bc7-9aec-2ca7a92220b2` 发布 Random Forest / Decision Tree / Gradient Boosting；随后历史 degraded run `374ec8e3-4479-4e7b-9e30-630183cadc23` 更新当前 Top 3 为 Decision Tree / Random Forest / XGBoost；
+- H1/no-completed 迁移后正式 run `ca922c9b-a835-486b-ba61-e94c04978399` 当前发布 Extra Trees / AdaBoost / Random Forest；其工件保留原训练时的冻结特征/阈值，新的自适应特征选择从后续 run 生效；
 - TrainingWorker、`insufficient_data` 每日 17:00 / 其他状态周 17:00、16:00 model-entry freeze、startup catch-up、有限 retry、candidate waiting-for-flat/restart recovery、7 日 model health、rollback；
 - 四策略 USD-only simulation session、Top 3 prediction + rules-only、手续费发生时 SOL/USD 冻结折算并保留原始 SOL 事实、市场驱动 1m first-touch、SELL failure/restart recovery、8 项 generation 卡片指标、rules-only Precision/Recall、session history、monitor-only worker；
 - Agent durable proposal + 人工 approve/reject + 非实盘白名单执行；live/wallet/secret proposal fail-closed；
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × strategy` 同构视图、当前市场快照、SQL 分页/时间筛选与四策略“模型”交易审计；
-- 后端 `pytest -q` **105/105 通过**；前端 `npm run build` 通过。
+- 后端 `pytest -q` **115/115 通过**；前端 `npm run build` 通过；新增覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态以及 current-generation 历史隔离。
 
 ### 实盘接口停放
 

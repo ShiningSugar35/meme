@@ -55,6 +55,7 @@ def test_cli_provider_never_adds_credentials_to_arguments() -> None:
     flattened = " ".join(value for call in runner.arguments for value in call).lower()
     assert "api-key" not in flattened
     assert "private-key" not in flattened
+    assert "--slippage 2" in flattened
     assert "--priority-fee 0.0002" in flattened
     assert "--tip-fee 0.0003" in flattened
 
