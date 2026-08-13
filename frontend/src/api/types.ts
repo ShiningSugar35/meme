@@ -221,6 +221,8 @@ export interface SimulationAccount {
   model_id: string | null;
   statistics_started_at: string;
   trade_count: number;
+  profit_count: number;
+  loss_count: number;
   precision: number | null;
   recall: number | null;
 }

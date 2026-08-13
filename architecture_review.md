@@ -244,7 +244,7 @@ proposal 持久化到 SQLite，必须人工 approve/reject。批准后才执行�
 - Models / 模型中心
 - Agent Approval / Agent审批
 
-Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡以两列布局展示 8 项指标；`current balance` 是不含持仓本金的可用 USD 现金，`realized PnL` 使用 closed position 的净 PnL。模型卡 Precision/Recall 同时受当前 `model_id`、`selected_at`、sample `entry_time` 与 mature tag 约束，防止上线前 backlog 污染；`rules_only` 等价于全预测为正，因此 Precision 为当前 session 成熟样本正类率、存在正类时 Recall=100%。当前仓位市场快照来自持仓监控，交易历史由 SQL 真分页/时间筛选。live 视图复用同构 UI/账本 contract，在钱包事实和 live BUY E2E 未完成前保持 fail-closed。Models 使用算法全称并展示 Top 3、E/G/S、final certification、rules-only 基线、候选池、feature coverage、durable training/待空仓 activation 和 Rank 1 rollback；Runtime 显示 TrainingWorker/model health/health-aware scheduler/4s position-monitor/reconciliation/liquidation。
+Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡以两列布局展示 8 项指标；`current balance` 是不含持仓本金的可用 USD 现金，`realized PnL` 使用 closed position 的净 PnL。卡片不再展示 Precision/Recall，改为同一交易统计范围内的 `profit_count`（`net_pnl_usd >= 0.20 * invested_usd`）与 `loss_count`（`net_pnl_usd < 0.05 * invested_usd`）；训练、模型中心和模型健康中的 Precision/Recall 定义不受影响。当前仓位市场快照来自持仓监控，交易历史由 SQL 真分页/时间筛选。live 视图复用同构 UI/账本 contract，在钱包事实和 live BUY E2E 未完成前保持 fail-closed。Models 使用算法全称并展示 Top 3、E/G/S、final certification、rules-only 基线、候选池、feature coverage、durable training/待空仓 activation 和 Rank 1 rollback；Runtime 显示 TrainingWorker/model health/health-aware scheduler/4s position-monitor/reconciliation/liquidation。
 
 ## 12. 单机第一版边界
 
@@ -332,7 +332,7 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × strategy` 同构视图、当前市场快照、SQL 分页/时间筛选与四策略“模型”交易审计；
-- 后端 `pytest -q` **119/119 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、4s current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
+- 后端 `pytest -q` **120/120 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、4s current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
 
 ### 实盘接口停放
 

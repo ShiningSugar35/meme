@@ -461,6 +461,8 @@ class PaperTradingService:
                     SELECT COUNT(*) AS positions,
                            COALESCE(SUM(CASE WHEN p.status IN ('opening','open','closing') THEN 1 ELSE 0 END),0) AS open_positions,
                            COALESCE(SUM(CASE WHEN p.status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+                           COALESCE(SUM(CASE WHEN p.status='closed' AND p.net_pnl_usd >= 0.20 * p.invested_usd THEN 1 ELSE 0 END),0) AS profit_count,
+                           COALESCE(SUM(CASE WHEN p.status='closed' AND p.net_pnl_usd < 0.05 * p.invested_usd THEN 1 ELSE 0 END),0) AS loss_count,
                            COALESCE(SUM(CASE WHEN p.status IN ('opening','open','closing') THEN p.invested_usd ELSE 0 END),0) AS invested_usd,
                            COALESCE(SUM(CASE WHEN p.status='closed' THEN p.net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                     FROM positions p
@@ -513,6 +515,8 @@ class PaperTradingService:
                     SELECT COUNT(*) AS positions,
                            COALESCE(SUM(CASE WHEN status IN ('opening','open','closing') THEN 1 ELSE 0 END),0) AS open_positions,
                            COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+                           COALESCE(SUM(CASE WHEN status='closed' AND net_pnl_usd >= 0.20 * invested_usd THEN 1 ELSE 0 END),0) AS profit_count,
+                           COALESCE(SUM(CASE WHEN status='closed' AND net_pnl_usd < 0.05 * invested_usd THEN 1 ELSE 0 END),0) AS loss_count,
                            COALESCE(SUM(CASE WHEN status IN ('opening','open','closing') THEN invested_usd ELSE 0 END),0) AS invested_usd,
                            COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                     FROM positions

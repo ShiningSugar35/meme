@@ -211,9 +211,27 @@ def test_model_card_quality_and_trade_count_are_scoped_to_current_generation(tmp
     account = paper.simulation_status()["accounts"]["model_1"]
     assert account["trade_count"] == 2
     assert account["closed_positions"] == 2
+    assert account["profit_count"] == 1
+    assert account["loss_count"] == 1
     assert account["precision"] == pytest.approx(0.5)
     assert account["recall"] == pytest.approx(0.5)
     assert account["realized_pnl_usd"] == pytest.approx(-30.0)
+
+
+def test_simulation_profit_and_loss_counts_use_requested_net_pnl_boundaries(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    paper = PaperTradingService(database)
+    session_id = paper.ensure_simulation_session()["id"]
+    now = datetime.now(timezone.utc)
+
+    insert_closed(database, position_id="profit-edge", strategy_key="rules_only", session_id=session_id, pnl=10.0, now=now)
+    insert_closed(database, position_id="loss-edge-excluded", strategy_key="rules_only", session_id=session_id, pnl=2.5, now=now)
+    insert_closed(database, position_id="loss-edge-included", strategy_key="rules_only", session_id=session_id, pnl=2.49, now=now)
+
+    account = paper.simulation_status()["accounts"]["rules_only"]
+    assert account["trade_count"] == 3
+    assert account["profit_count"] == 1
+    assert account["loss_count"] == 1
 
 
 def test_rules_only_quality_is_positive_prevalence_with_full_recall(tmp_path: Path) -> None:
