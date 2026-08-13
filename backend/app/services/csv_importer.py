@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..collector.constants import LabelPolicy
+from ..collector.constants import FilterThresholds, LabelPolicy
 from ..database import Database
 from ..repositories.samples import SampleRecord, SampleRepository
 
@@ -16,6 +16,7 @@ IDENTITY_COLUMNS = {"address", "name", "symbol", "type", "time", "price"}
 FUTURE_COLUMNS = {"price_2h_max/price", "price_2h_min/price", "tag"}
 EXCLUDED_MODEL_COLUMNS = IDENTITY_COLUMNS | FUTURE_COLUMNS
 CURRENT_LABEL_VERSION = LabelPolicy().label_version
+FILTER_THRESHOLDS = FilterThresholds()
 
 
 @dataclass(slots=True)
@@ -90,6 +91,22 @@ class CsvImporter:
 
                 token_type = str(row.get("type") or "").strip()
                 if token_type == "completed":
+                    continue
+
+                age_feature = _float(row.get("age"))
+                min_log_age = math.log(FILTER_THRESHOLDS.min_age_minutes)
+                max_log_age = math.log(FILTER_THRESHOLDS.max_age_minutes_exclusive)
+                if age_feature is None or not min_log_age < age_feature < max_log_age:
+                    try:
+                        age_minutes = math.exp(age_feature) if age_feature is not None else None
+                    except OverflowError:
+                        age_minutes = None
+                    self.database.audit(
+                        category="data_import",
+                        action="age_out_of_range_csv_row",
+                        severity="info",
+                        details={"row_number": row_number, "age_minutes": age_minutes},
+                    )
                     continue
 
                 raw_tag = _int(row.get("tag"))

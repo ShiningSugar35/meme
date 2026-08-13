@@ -213,6 +213,7 @@ class SafetyFilter:
         lt("buy_tax", token.get("buy_tax"), t.max_buy_tax)
         lt("sniper_count", token.get("sniper_count"), t.max_sniper_count)
         gt("age", token.get("age"), t.min_age_minutes)
+        lt("age", token.get("age"), t.max_age_minutes_exclusive)
         liquidity = _nonnegative_float(token.get("liquidity"))
         if not liquidity or not holder_count or liquidity / holder_count <= t.min_liquidity_per_holder:
             fail.append("liquidity/holder_count")

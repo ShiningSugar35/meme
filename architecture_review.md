@@ -154,10 +154,10 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 3. 对每个保留候选计算 E、G、`S=0.60E+0.40G`；
 4. 仅按 development S 排序并冻结 Top 3 次序、特征和 threshold；
 5. Top 3 候选冻结后才在最终 holdout 上计算 certification Precision/Recall/固定 $50 理论收益；
-6. 三个 artifact 成功持久化后，training run 先 `completed/promoted=0`；训练与激活解耦，16:00 起旧模型停止新买入，17:00 可先训练，候选等待旧 `model_1/2/3` 全部空仓；
-7. 空仓后 `active_model_slots` 在同一事务内写入 slot 1..3，Rank 1 标为 champion，同时重置三个模型策略 generation 账本/统计；可选候选缺依赖显式 skipped；final 只审计，不回写排名。
+6. 三个 artifact 成功持久化后，training run 先 `completed/promoted=0`；训练与激活解耦，16:00 起冻结 `model_1/2/3/rules_only` 四策略新买入，17:00 可先训练，候选等待四策略全部空仓；
+7. 空仓后 `active_model_slots` 原子写入 slot 1..3，Rank 1 标为 champion，同时新建 simulation session 并重置四策略账本/统计；可选候选缺依赖显式 skipped；final 只审计，不回写排名。
 
-2026-08-12 H1/no-completed 迁移后的正式 run `ca922c9b-a835-486b-ba61-e94c04978399` 激活了 ExtraTrees / AdaBoost / RandomForest。该 generation 仍由当时的旧 12/20/full 搜索策略产出；本轮新增的自适应 4..N、fold-train-only 特征选择只从后续训练 run 生效，不追溯改写现役工件。最终 holdout 始终不参与 Top 3 排名；历史 `retired` Rank 1 保留人工回滚能力。
+2026-08-13 age<240 数据迁移后，run `3aa752e0-7557-4602-aa79-22d9b5381c7f` 在 1856 条 mature H1 v4 样本上完成自适应 4..N / fold-train-only 重训，激活 RandomForest / AdaBoost / HistGradientBoosting（8 / 8 / 6 features），并创建新的 `model_generation_upgrade` simulation session。最终 holdout 始终不参与 Top 3 排名；历史 `retired` Rank 1 保留人工回滚能力。
 
 ## 7. Durable Training 与模型健康
 
@@ -322,19 +322,19 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 
 已完成：
 
-- 当前真实库已完成 H1/no-completed 迁移：2296 samples、2292 mature H1 v4、4 pending、381 positives；123 completed 已删除且 DB trigger 禁止回写；旧 H2 路径事实只作 provenance；
+- 当前真实库在 H1/no-completed 基础上进一步完成 age<240 迁移：严格 `1<age_minutes<240`，备份后删除 497 个不合规样本及关联 predictions/positions/trades；现有 1856 samples 全部为 mature H1 v4，344 positives / 1512 negatives，age 违规数 0；completed 仍由 DB trigger 禁止回写；
 - SQLite schema v11：v8 已从 predictions/positions 物理删除 `profile` 并新增 `active_model_slots`；v9 增加 USD-only 模拟会计、`asset_usd_prices` 与手续费费时 FX 审计字段；v10 增加 daily durable trigger 与待空仓候选持久状态，旧交易缺少历史 FX 时不伪回填；
 - 默认候选 feature pool 31；各算法从 4 个特征起逐维扫描到可用全量，fold-train-only 排序并用 one-standard-error 选择近优最小维度；`launchpad` 仅元数据，`ln(liquidity_usd)` 可选；
 - 入场 `price_change_1h/5m` 缺失时使用 `T-1h → T` 历史 Kline 回补，不读取未来；
 - 扩展候选池 + chronological OOS + 单一决策线 + `6TP-FP`/E-G-S + one-standard-error Occam + final 隔离；
-- H1/no-completed 迁移后正式 run `ca922c9b-a835-486b-ba61-e94c04978399` 当前发布 Extra Trees / AdaBoost / Random Forest；其工件保留原训练时的冻结特征/阈值，新的自适应特征选择从后续 run 生效；
+- age<240 迁移后正式 run `3aa752e0-7557-4602-aa79-22d9b5381c7f` 当前发布 Random Forest / AdaBoost / HistGradientBoosting；分别选择 8 / 8 / 6 个特征，并已切入新的 `model_generation_upgrade` simulation session；
 - TrainingWorker、`insufficient_data` 每日 17:00 / 其他状态周 17:00、16:00 model-entry freeze、startup catch-up、有限 retry、candidate waiting-for-flat/restart recovery、7 日 model health、rollback；
 - 四策略 USD-only simulation session、Top 3 prediction + rules-only、手续费发生时 SOL/USD 冻结折算并保留原始 SOL 事实、约 4s current-price 持仓触发、Jupiter executable quote、SELL failure/restart recovery、8 项卡片指标、重大模型换代新 session、H1-only history、独立 position-monitor worker；
 - Agent durable proposal + 人工 approve/reject + 非实盘白名单执行；live/wallet/secret proposal fail-closed；
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × strategy` 同构视图、当前市场快照、SQL 分页/时间筛选与四策略“模型”交易审计；
-- 后端 `pytest -q` **130/130 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、4s current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
+- 后端 `pytest -q` **131/131 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、4s current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
 
 ### 实盘接口停放
 

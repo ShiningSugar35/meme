@@ -80,7 +80,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 - 非洗盘，`rat_trader_amount_rate < 0.2`；
 - `29 < holder_count < 1000`，`marketcap > 5000`；
 - `sell_tax < 0.025`、`buy_tax < 0.025`；
-- `sniper_count < 10`、`age > 1` 分钟；
+- `sniper_count < 10`、`1 < age < 240` 分钟；
 - `liquidity / holder_count > 50`；
 - `swaps_1h > 19`、`volume_1h / swaps_1h > 30`；
 - `(0.5 + smart_degen_count + renowned_count) * volume > 5000`；
@@ -118,6 +118,10 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 - schema 升级到 v11，新标签写入 `price_1h_max_ratio`、`price_1h_min_ratio`、`final_1h_close_ratio`；旧 `price_2h_*` 列仅保留历史审计；
 - SQLite `reject_completed_sample_insert/update` trigger 阻止未来任何脚本重新写入 completed 生命周期；
 - legacy CSV importer 会直接跳过 completed。H2 负类可按单调性归为 H1 负类；H2 正类必须重新获取 H1 K 线，在完成前保持 pending，禁止用旧 H2 正类冒充 H1 标签。
+
+#### 2026-08-13 age<240 样本池迁移
+
+基于 age 长尾审计，正式把业务准入池收窄为严格 `1 < age_minutes < 240`。在线 `SafetyFilter` 对 GMGN raw age 直接执行该边界；legacy CSV/export 中 `age` 为 `ln(age_minutes)`，importer 在 log 空间执行完全等价的 `ln(1) < age < ln(240)`，避免重建数据库时超龄样本回流。迁移前备份 `data/backups/meme_quant_pre_age240_20260813T0318Z.db`。本次从 2353 条样本中删除 497 条不合规样本（449 mature negative、46 mature positive、2 pending），并同步删除其 201 条 prediction、45 个 simulation position 和 88 条 trade；迁移后剩余 **1856 条 mature H1 v4 样本，344 正 / 1512 负，正类率 18.53%**，age 违规数为 0。
 
 ## 3. 模型与收益评价
 
@@ -307,9 +311,9 @@ Invoke-RestMethod -Method Post `
   -Body '{"reason":"manual","features":["price","price_change_1h"]}'
 ```
 
-HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。自动调度统一使用北京时间 17:00：7 日模型健康为 `insufficient_data` 时每天训练，否则按每周约定日训练；到期日 16:00 先冻结三个模型策略的新买入。训练本身不等待旧仓位，完成后候选 Top 3 以 `promoted=0 + activation.waiting_for_flat` 持久化；`TrainingWorker` 独立轮询三个模型策略是否全空仓，满足后才调用 `set_active_models()` 原子换代、重置三个模型策略账本/上线统计并解除冻结。系统错过 17:00 时在下次启动按同一 `scheduled_for` 幂等补训。模型健康服务只报告 `healthy / insufficient_data / degraded`，不再绕过该生命周期插队启动另一条自动训练。自动训练继承当前 Rank 1 的 requested feature pool；实际胜出模型仍可通过奥卡姆选择缩减到更小特征子集。
+HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。自动调度统一使用北京时间 17:00：7 日模型健康为 `insufficient_data` 时每天训练，否则按每周约定日训练；到期日 16:00 先冻结 `model_1/model_2/model_3/rules_only` 四策略的新买入。训练本身不等待旧仓位，完成后候选 Top 3 以 `promoted=0 + activation.waiting_for_flat` 持久化；`TrainingWorker` 独立轮询四策略是否全空仓，满足后才原子替换 Top 3，并创建新的 simulation session，使四策略统一从 1000 USD/0 交易重新开始后再解除冻结。系统错过 17:00 时在下次启动按同一 `scheduled_for` 幂等补训。模型健康服务只报告 `healthy / insufficient_data / degraded`，不再绕过该生命周期插队启动另一条自动训练。自动训练继承当前 Rank 1 的 requested feature pool；实际胜出模型仍可通过奥卡姆选择缩减到更小特征子集。
 
-2026-08-12 H1/no-completed 迁移完成后，以当天北京时间 17:00 的 `startup_catchup` 语义执行正式重训 run `ca922c9b-a835-486b-ba61-e94c04978399`。训练只读取 `new_creation / near_completion + mature + sl090_tp160_h1_binary_v4` 样本；当时可训练成熟样本为 2292 条。三个旧模型策略均已空仓，因此候选完成后于 `2026-08-12T09:49:31.758954+00:00` 立即原子激活并重置三模型 generation 账本/统计。当前 active Top 3：Rank 1 **Extra Trees**（model `20260812T094929Z-extra_trees-dafe5c8f`，threshold `0.1458133345`，E `0.316053`，G `0.494539`，S `0.387447`）；Rank 2 **AdaBoost**（model `20260812T094929Z-ada_boost-1973ed9d`，threshold `0.1709170735`，E `0.304160`，G `0.470036`，S `0.370510`）；Rank 3 **Random Forest**（model `20260812T094929Z-random_forest-d0c075b7`，threshold `0.1164060005`，E `0.279157`，G `0.493895`，S `0.365052`）。schema v11 继续使用 16:00/17:00 staged rollover；`insufficient_data` 每日执行，其他健康状态按周执行。
+2026-08-13 age<240 迁移后执行正式手动重训 run `3aa752e0-7557-4602-aa79-22d9b5381c7f`。首轮本地训练进程因工具 180 秒调用上限被中断，durable TrainingWorker 按既有恢复规则将同一 run `retry_count=1` 后继续执行，没有创建重复任务。训练集为 1856 条 mature H1 v4 样本；完成于 `2026-08-13T03:35:38.461429+00:00`，四策略当时全平，因此于 `2026-08-13T03:35:38.499689+00:00` 立即激活并创建 `sim_ed9d999af1964ee194c9bfdd74fbb12d`（`created_reason=model_generation_upgrade`）。当前 active Top 3：Rank 1 **Random Forest**（8 features，model `20260813T033536Z-random_forest-84713328`，threshold `0.1392631283`，E `0.331758`，G `0.468985`，S `0.386649`）；Rank 2 **AdaBoost**（8 features，model `20260813T033536Z-ada_boost-4ed3f589`，threshold `0.14`，E `0.327415`，G `0.452823`，S `0.377578`）；Rank 3 **HistGradientBoosting**（6 features，model `20260813T033536Z-hist_gradient_boosting-9bf64805`，threshold `0.11`，E `0.329539`，G `0.408732`，S `0.361216`）。四个新 simulation 策略账本均从 1000 USD / 0 交易开始。
 
 ## 7. 测试与构建
 
@@ -321,7 +325,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-13 当前基线：后端 `pytest -q` **130/130 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV + schema v11 H1/no-completed 迁移、`6TP-FP` 与 p/r 恒等式、自适应特征数 + fold-train-only 奥卡姆特征选择、Top 3 chronological OOS 排名/最终 holdout 隔离、四策略 USD-only session、手续费发生时 SOL/USD 折算、`insufficient_data` 每日 17:00/正常周训、16:00 四策略 entry gate、17:00 先训练、候选跨重启等待四策略空仓、全平后新 simulation session、4s current-price position monitor、同 Token 行情合并、simulation Jupiter executable quote、live DRY_RUN fail-closed、H1-only 交易历史、交易失败计入交易数、Precision/Recall、TrainingWorker/启动恢复、Agent 人工审批，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
+2026-08-13 当前基线：后端 `pytest -q` **131/131 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV + schema v11 H1/no-completed 迁移、`6TP-FP` 与 p/r 恒等式、自适应特征数 + fold-train-only 奥卡姆特征选择、Top 3 chronological OOS 排名/最终 holdout 隔离、四策略 USD-only session、手续费发生时 SOL/USD 折算、`insufficient_data` 每日 17:00/正常周训、16:00 四策略 entry gate、17:00 先训练、候选跨重启等待四策略空仓、全平后新 simulation session、4s current-price position monitor、同 Token 行情合并、simulation Jupiter executable quote、live DRY_RUN fail-closed、H1-only 交易历史、交易失败计入交易数、Precision/Recall、TrainingWorker/启动恢复、Agent 人工审批，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
@@ -376,5 +380,5 @@ npm run build
 
 在算法与交易策略上，他给出的建议同样带着温度，却始终落在刀刃上：守住 1 小时策略窗口与 T+1h 标签补齐；先用规则初筛挡住明显不安全的样本，再用严格 chronological OOS、经济得分与泛化稳定性筛选模型，而不是被某一次漂亮的最终测试成绩牵着走；强调奥卡姆剃刀、最终 holdout 隔离、退化监控与“宁可安全拒绝、也不盲目上线”，好让早期 Pump.fun legacy 样本不至于被夸大成全市场的幻觉；在退出与风控上，推动把 current-price TP/SL、executable quote、仓位上限、同币唯一、日损与连亏门禁写进可测试的约束；并一次次提醒——实盘必须服从 `DRY_RUN`、幂等 journal 与二次确认，绝不能用漂亮的模拟 PnL 去绕过真实的资金事实。
 
-截至 2026-08-13，仓库里的非实盘主链已经完成 schema v11 H1/no-completed、扩展候选池、自适应且 fold-train-only 的特征选择、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、约 4s current-price PositionMonitor、Jupiter Token→USDC executable quote-only 卖出验证、重大模型换代新 simulation session、H1-only simulation 历史与重启可恢复的 workers，以及 130/130 后端测试与前端 production build。现役 Top 3 已在真实样本上完成训练与激活，最终 holdout 被严格保留为 certification；`E_exec` 仅作为权重为 0 的执行影子指标。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
+截至 2026-08-13，仓库里的非实盘主链已经完成 schema v11 H1/no-completed、扩展候选池、自适应且 fold-train-only 的特征选择、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、约 4s current-price PositionMonitor、Jupiter Token→USDC executable quote-only 卖出验证、重大模型换代新 simulation session、H1-only simulation 历史与重启可恢复的 workers，以及 131/131 后端测试与前端 production build。现役 Top 3 已在真实样本上完成训练与激活，最终 holdout 被严格保留为 certification；`E_exec` 仅作为权重为 0 的执行影子指标。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import math
 from pathlib import Path
 
 from backend.app.collector.labels import PriceWindowResult
@@ -50,6 +51,36 @@ def test_csv_import_is_idempotent_and_migrates_legacy_terminal(tmp_path: Path) -
     assert row["gross_return_rate"] == -0.10
     assert row["return_source"] == "legacy_h2_monotonic_negative"
     assert row["exit_reason"] == "h1_negative_inferred_from_h2_negative"
+
+
+def test_csv_import_skips_age_at_or_above_240_minutes(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    path = tmp_path / "legacy-age.csv"
+    fields = [
+        "address", "name", "symbol", "type", "time", "age", "launchpad", "price",
+        "price_2h_max/price", "price_2h_min/price", "fresh_wallet_rate", "tag",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow({
+            "address": "token-young", "name": "Y", "symbol": "Y", "type": "new_creation",
+            "time": "1700000000", "age": str(math.log(239.0)), "launchpad": "Pump.fun", "price": "0.1",
+            "price_2h_max/price": "1.30", "price_2h_min/price": "0.91",
+            "fresh_wallet_rate": "0.1", "tag": "0",
+        })
+        writer.writerow({
+            "address": "token-old", "name": "O", "symbol": "O", "type": "new_creation",
+            "time": "1700000001", "age": str(math.log(240.0)), "launchpad": "Pump.fun", "price": "0.1",
+            "price_2h_max/price": "1.30", "price_2h_min/price": "0.91",
+            "fresh_wallet_rate": "0.1", "tag": "0",
+        })
+
+    summary = CsvImporter(database).import_file(path)
+
+    assert summary.inserted_rows == 1
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM samples")["n"] == 1
+    assert database.fetch_one("SELECT address FROM samples")["address"] == "token-young"
 
 
 def test_label_finalization_preserves_legacy_utility_ineligibility(tmp_path: Path) -> None:
