@@ -42,17 +42,33 @@ def test_valid_token_passes_all_local_filters() -> None:
 
 def test_top_10_holder_rate_uses_new_inclusive_range() -> None:
     safety = SafetyFilter()
-    for accepted in (0.125, 0.275):
+    for accepted in (0.125, 0.28):
         token = valid_token()
         token["top_10_holder_rate"] = accepted
         assert safety.evaluate(token).accepted
 
-    for rejected in (0.124999, 0.275001):
+    for rejected in (0.124999, 0.280001):
         token = valid_token()
         token["top_10_holder_rate"] = rejected
         decision = safety.evaluate(token)
         assert not decision.accepted
         assert "top_10_holder_rate" in decision.reasons
+
+
+def test_volume_per_swap_must_be_strictly_above_31() -> None:
+    safety = SafetyFilter()
+
+    boundary = valid_token()
+    boundary["swaps_1h"] = 20
+    boundary["volume_1h"] = 620
+    decision = safety.evaluate(boundary)
+    assert not decision.accepted
+    assert "volume_1h/swaps_1h" in decision.reasons
+
+    accepted = valid_token()
+    accepted["swaps_1h"] = 20
+    accepted["volume_1h"] = 620.01
+    assert safety.evaluate(accepted).accepted
 
 
 def test_strict_boundaries_match_readme() -> None:

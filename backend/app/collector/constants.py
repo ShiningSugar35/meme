@@ -31,7 +31,7 @@ class FilterThresholds:
     max_bundler_rate: float = 0.2
     min_liquidity: float = 4_800.0
     min_top_10_holder_rate: float = 0.125
-    max_top_10_holder_rate: float = 0.275
+    max_top_10_holder_rate: float = 0.28
     max_fresh_wallet_rate: float = 0.2
     max_rat_trader_amount_rate: float = 0.2
     min_holder_count_exclusive: int = 29
@@ -44,7 +44,7 @@ class FilterThresholds:
     max_age_minutes_exclusive: float = 240.0
     min_liquidity_per_holder: float = 50.0
     min_swaps_1h: int = 19
-    min_volume_per_swap_1h: float = 30.0
+    min_volume_per_swap_1h: float = 31.0
     min_weighted_activity: float = 5_000.0
     min_top1_addr_type0_rate: float = 0.028
     max_top1_addr_type0_rate: float = 0.056
@@ -79,7 +79,7 @@ TRENCH_PREFILTERS = {
     "max_bundler_rate": 0.2,
     "min_liquidity": 4_800,
     "min_top_holder_rate": 0.125,
-    "max_top_holder_rate": 0.275,
+    "max_top_holder_rate": 0.28,
     "max_fresh_wallet_rate": 0.2,
     "renounced_mint": 1,
     "renounced_freeze_account": 1,

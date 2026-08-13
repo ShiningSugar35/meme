@@ -110,7 +110,7 @@ SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 s
 7. 模型评分；
 8. 后续 T+1h label finalization。
 
-自 2026-08-13 起，Trenches 前置筛选与 local safety filter 对 `top_10_holder_rate` 使用同一闭区间：`0.125 <= top_10_holder_rate <= 0.275`。该变更只作用于此后新进入采集链的候选，不追溯删除、重标或重筛既有样本集。
+自 2026-08-13 起，Trenches 前置筛选与 local safety filter 对 `top_10_holder_rate` 使用同一闭区间：`0.125 <= top_10_holder_rate <= 0.28`；local safety filter 同时要求 `volume_1h / swaps_1h > 31`。旧版采集脚本同步采用相同阈值，legacy CsvImporter 对已 log 化的成交均额特征执行等价的 `feature > ln(31)`。该口径已追溯清理真实样本集：删除 182 条不合格样本和 36 条关联 predictions；4 个已关闭模拟持仓只解除 sample/prediction 引用，8 条历史成交及账户流水保留。迁移后剩余 1676 条样本且新口径违规数为 0。
 
 ### 5.2 限流与故障隔离
 

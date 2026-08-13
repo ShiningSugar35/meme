@@ -203,7 +203,7 @@ PREFILTERS = {
     "max_bundler_rate": 0.2,
     "min_liquidity": 4800,
     "min_top_holder_rate": 0.125,
-    "max_top_holder_rate": 0.275,
+    "max_top_holder_rate": 0.28,
     "max_fresh_wallet_rate": 0.2,
     "renounced_mint": 1,
     "renounced_freeze_account": 1,
@@ -747,7 +747,7 @@ def passes_basic_filters(t: Dict[str, Any]) -> Tuple[bool, List[str]]:
     lt("bundler_rate", t.get("bundler_rate"), 0.2)
     gt("liquidity", t.get("liquidity"), 4800)
     top10 = t.get("top_10_holder_rate")
-    if top10 is None or not (0.125 <= top10 <= 0.275):
+    if top10 is None or not (0.125 <= top10 <= 0.28):
         fail.append("top_10_holder_rate")
     lt("fresh_wallet_rate", t.get("fresh_wallet_rate"), 0.2)
     if str(t.get("burn_status") or "").lower() != "burn":
@@ -773,7 +773,7 @@ def passes_basic_filters(t: Dict[str, Any]) -> Tuple[bool, List[str]]:
     swaps_1h = t.get("swaps_1h")
     volume_1h = t.get("volume_1h")
     gt("swaps_1h", swaps_1h, 19)
-    if not swaps_1h or not volume_1h or volume_1h / swaps_1h <= 30:
+    if not swaps_1h or not volume_1h or volume_1h / swaps_1h <= 31:
         fail.append("volume_1h/swaps_1h")
     smart = t.get("smart_degen_count") or 0
     renowned = t.get("renowned_count") or 0

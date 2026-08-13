@@ -45,7 +45,7 @@ def test_discovery_payload_has_all_launchpads_and_prefilters() -> None:
     assert "token_mill" not in section["launchpad_platform"]
     assert section["max_rug_ratio"] == 0.2
     assert section["min_top_holder_rate"] == 0.125
-    assert section["max_top_holder_rate"] == 0.275
+    assert section["max_top_holder_rate"] == 0.28
     assert section["launchpad_platform_v2"] is True
     assert section["filters"] == ["offchain", "onchain"]
     assert "quote_address_type" not in section

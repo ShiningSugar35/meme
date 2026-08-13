@@ -56,7 +56,7 @@ max_insider_ratio = 0.2
 max_bundler_rate = 0.2
 min_liquidity = 4800
 min_top_holder_rate = 0.125
-max_top_holder_rate = 0.275
+max_top_holder_rate = 0.28
 max_fresh_wallet_rate = 0.2
 renounced_mint = 1
 renounced_freeze_account = 1
@@ -73,7 +73,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 - quote 资产属于 `SOL/USDC/USDT`，且目标 Token 不属于 `SOL/USDT/USDC/PYUSD/WBTC/WETH`；
 - `rug_ratio < 0.2`、`insider_ratio < 0.2`、`bundler_rate < 0.2`；
 - `liquidity > 4800`；
-- `0.125 <= top_10_holder_rate <= 0.275`；
+- `0.125 <= top_10_holder_rate <= 0.28`；
 - `fresh_wallet_rate < 0.2`；
 - `burn_status == "burn"`；
 - `renounced_mint == 1` 且 `renounced_freeze_account == 1`；
@@ -82,7 +82,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 - `sell_tax < 0.025`、`buy_tax < 0.025`；
 - `sniper_count < 10`、`1 < age < 240` 分钟；
 - `liquidity / holder_count > 50`；
-- `swaps_1h > 19`、`volume_1h / swaps_1h > 30`；
+- `swaps_1h > 19`、`volume_1h / swaps_1h > 31`；
 - `(0.5 + smart_degen_count + renowned_count) * volume > 5000`；
 - top holders 中 `addr_type=0` 的第一名占比严格满足 `0.028 < top1 < 0.056`。
 
@@ -122,6 +122,12 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 #### 2026-08-13 age<240 样本池迁移
 
 基于 age 长尾审计，正式把业务准入池收窄为严格 `1 < age_minutes < 240`。在线 `SafetyFilter` 对 GMGN raw age 直接执行该边界；legacy CSV/export 中 `age` 为 `ln(age_minutes)`，importer 在 log 空间执行完全等价的 `ln(1) < age < ln(240)`，避免重建数据库时超龄样本回流。迁移前备份 `data/backups/meme_quant_pre_age240_20260813T0318Z.db`。本次从 2353 条样本中删除 497 条不合规样本（449 mature negative、46 mature positive、2 pending），并同步删除其 201 条 prediction、45 个 simulation position 和 88 条 trade；迁移后剩余 **1856 条 mature H1 v4 样本，344 正 / 1512 负，正类率 18.53%**，age 违规数为 0。
+
+#### 2026-08-13 Top10 / 成交均额样本池迁移
+
+筛选口径更新为 `0.125 <= top_10_holder_rate <= 0.28` 与 `volume_1h / swaps_1h > 31`。Trenches 前置 Top10 上限、本地 `SafetyFilter`、legacy `量化训练采集.py` 已统一；数据库/CSV 的 `volume_1h/swaps_1h` 特征是原始成交均额的自然对数，因此 `CsvImporter` 对有该列的旧导出执行等价的 `feature > ln(31)`，防止已淘汰样本重新回流。
+
+迁移前备份 `data/backups/meme_quant_pre_filter_top028_vps31_20260813T050755Z.db`。从 1858 条样本中删除 182 条不合格样本，其中 165 条 mature negative、17 条 mature positive；Top10 不合格 42 条（4 条 `<0.125`、38 条 `>0.28`），成交均额 `<=31` 的 144 条，二者有 4 条重叠。同步删除 36 条关联 prediction；4 个关联 simulation position 均已关闭，因此只解绑其 sample/prediction 引用，保留 8 条历史 trade 与账户流水。迁移后剩余 **1676 条样本：1674 mature（327 正 / 1347 负）+ 2 pending**，新筛选口径违规数为 0。
 
 ## 3. 模型与收益评价
 

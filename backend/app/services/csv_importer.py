@@ -109,6 +109,34 @@ class CsvImporter:
                     )
                     continue
 
+                top_10_holder_rate = _float(row.get("top_10_holder_rate"))
+                volume_per_swap_feature = _float(row.get("volume_1h/swaps_1h"))
+                min_log_volume_per_swap = math.log(FILTER_THRESHOLDS.min_volume_per_swap_1h)
+                if (
+                    top_10_holder_rate is not None
+                    and not FILTER_THRESHOLDS.min_top_10_holder_rate
+                    <= top_10_holder_rate
+                    <= FILTER_THRESHOLDS.max_top_10_holder_rate
+                ) or (
+                    volume_per_swap_feature is not None
+                    and volume_per_swap_feature <= min_log_volume_per_swap
+                ):
+                    self.database.audit(
+                        category="data_import",
+                        action="safety_filter_out_of_range_csv_row",
+                        severity="info",
+                        details={
+                            "row_number": row_number,
+                            "top_10_holder_rate": top_10_holder_rate,
+                            "volume_per_swap_1h": (
+                                math.exp(volume_per_swap_feature)
+                                if volume_per_swap_feature is not None
+                                else None
+                            ),
+                        },
+                    )
+                    continue
+
                 raw_tag = _int(row.get("tag"))
                 max_ratio = _float(row.get("price_2h_max/price"))
                 min_ratio = _float(row.get("price_2h_min/price"))
