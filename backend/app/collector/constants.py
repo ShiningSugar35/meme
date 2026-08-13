@@ -40,7 +40,7 @@ class FilterThresholds:
     max_sell_tax: float = 0.025
     max_buy_tax: float = 0.025
     max_sniper_count: int = 10
-    min_age_minutes: float = 3.0
+    min_age_minutes: float = 1.0
     min_liquidity_per_holder: float = 50.0
     min_swaps_1h: int = 19
     min_volume_per_swap_1h: float = 30.0

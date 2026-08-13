@@ -5,10 +5,12 @@ from backend.app.collector.filters import SafetyFilter
 
 def valid_token() -> dict[str, object]:
     return {
+        "address": "Token111111111111111111111111111111111111",
         "type": "new_creation",
         "launchpad": "Pump.fun",
         "symbol": "MEME",
         "quote_symbol": "SOL",
+        "price": 0.00001,
         "rug_ratio": 0.1,
         "insider_ratio": 0.1,
         "bundler_rate": 0.1,
@@ -104,4 +106,51 @@ def test_top1_addr_type_zero_uses_strict_range() -> None:
     ]).accepted
     assert not safety.evaluate_top_holders([{"addr_type": 0, "rate": 0.028}]).accepted
     assert not safety.evaluate_top_holders([{"addr_type": 0, "rate": 0.056}]).accepted
+
+
+def test_age_threshold_is_strictly_greater_than_one_minute() -> None:
+    safety = SafetyFilter()
+    boundary = valid_token()
+    boundary["age"] = 1.0
+    decision = safety.evaluate(boundary)
+    assert not decision.accepted
+    assert "age>1" in decision.reasons
+
+    accepted = valid_token()
+    accepted["age"] = 1.0001
+    assert safety.evaluate(accepted).accepted
+
+
+def test_missing_or_malformed_safety_facts_never_count_as_safe() -> None:
+    safety = SafetyFilter()
+    for field, bad_value in (
+        ("rug_ratio", None),
+        ("insider_ratio", "nan"),
+        ("bundler_rate", -0.01),
+        ("top_10_holder_rate", float("inf")),
+        ("fresh_wallet_rate", -0.1),
+        ("sell_tax", -0.01),
+        ("buy_tax", "null"),
+        ("sniper_count", -1),
+        ("renounced_mint", None),
+        ("renounced_freeze_account", "null"),
+        ("is_wash_trading", "null"),
+    ):
+        token = valid_token()
+        token[field] = bad_value
+        readiness = safety.evaluate_required_facts(token)
+        assert not readiness.accepted, field
+        assert f"missing_or_invalid:{field}" in readiness.reasons
+        assert not safety.evaluate(token).accepted, field
+
+
+def test_required_filter_facts_are_complete_for_a_valid_token() -> None:
+    assert SafetyFilter().evaluate_required_facts(valid_token()).accepted
+
+
+def test_malformed_or_missing_holder_type_does_not_default_to_type_zero() -> None:
+    safety = SafetyFilter()
+    assert safety.top1_addr_type0_rate([{"rate": 0.04}]) is None
+    assert safety.top1_addr_type0_rate([{"addr_type": "bad", "rate": 0.04}]) is None
+    assert not safety.evaluate_top_holders([{"rate": 0.04}]).accepted
 

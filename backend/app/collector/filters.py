@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -22,9 +23,20 @@ def to_float(value: Any) -> float | None:
     try:
         if value in (None, ""):
             return None
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
+
+
+def _nonnegative_float(value: Any) -> float | None:
+    parsed = to_float(value)
+    return parsed if parsed is not None and parsed >= 0 else None
+
+
+def _ratio_float(value: Any) -> float | None:
+    parsed = _nonnegative_float(value)
+    return parsed if parsed is not None and parsed <= 1 else None
 
 
 def parse_timestamp(value: Any) -> int | None:
@@ -80,9 +92,17 @@ def _is_false(value: Any) -> bool:
     return isinstance(value, str) and value.strip().lower() in {
         "false",
         "no",
-        "none",
-        "null",
     }
+
+
+def _known_bool(value: Any) -> bool | None:
+    if value is True or value in (1, "1"):
+        return True
+    if isinstance(value, str) and value.strip().lower() == "true":
+        return True
+    if _is_false(value):
+        return False
+    return None
 
 
 def normalize_token(raw: Mapping[str, Any], token_type: str) -> dict[str, Any]:
@@ -149,16 +169,18 @@ class SafetyFilter:
         t = self.t
         fail: list[str] = []
 
-        def gt(name: str, value: float | None, limit: float) -> None:
-            if value is None or not value > limit:
+        def gt(name: str, value: Any, limit: float) -> None:
+            parsed = _nonnegative_float(value)
+            if parsed is None or not parsed > limit:
                 fail.append(f"{name}>{limit:g}")
 
-        def lt(name: str, value: float | None, limit: float) -> None:
-            if value is None or not value < limit:
+        def lt(name: str, value: Any, limit: float) -> None:
+            parsed = _nonnegative_float(value)
+            if parsed is None or not parsed < limit:
                 fail.append(f"{name}<{limit:g}")
 
         platform = str(token.get("launchpad") or "")
-        if platform and launchpad_key(platform) not in ALLOWED_LAUNCHPAD_KEYS:
+        if not platform or launchpad_key(platform) not in ALLOWED_LAUNCHPAD_KEYS:
             fail.append("launchpad")
         target_symbol = str(token.get("symbol") or "").strip().upper()
         quote_symbol = str(token.get("quote_symbol") or "").strip().upper()
@@ -166,58 +188,119 @@ class SafetyFilter:
             fail.append("target_asset_excluded")
         if not quote_symbol or quote_symbol not in ALLOWED_QUOTE_SYMBOLS:
             fail.append("quote_asset_not_allowed")
-        lt("rug_ratio", to_float(token.get("rug_ratio")), t.max_rug_ratio)
-        lt("insider_ratio", to_float(token.get("insider_ratio")), t.max_insider_ratio)
-        lt("bundler_rate", to_float(token.get("bundler_rate")), t.max_bundler_rate)
-        gt("liquidity", to_float(token.get("liquidity")), t.min_liquidity)
-        top10 = to_float(token.get("top_10_holder_rate"))
+        lt("rug_ratio", token.get("rug_ratio"), t.max_rug_ratio)
+        lt("insider_ratio", token.get("insider_ratio"), t.max_insider_ratio)
+        lt("bundler_rate", token.get("bundler_rate"), t.max_bundler_rate)
+        gt("liquidity", token.get("liquidity"), t.min_liquidity)
+        top10 = _ratio_float(token.get("top_10_holder_rate"))
         if top10 is None or not t.min_top_10_holder_rate <= top10 <= t.max_top_10_holder_rate:
             fail.append("top_10_holder_rate")
-        lt("fresh_wallet_rate", to_float(token.get("fresh_wallet_rate")), t.max_fresh_wallet_rate)
+        lt("fresh_wallet_rate", token.get("fresh_wallet_rate"), t.max_fresh_wallet_rate)
         if str(token.get("burn_status") or "").strip().lower() != "burn":
             fail.append("burn_status")
-        if token.get("renounced_mint") not in (1, True, "1", "true", "True"):
+        if _known_bool(token.get("renounced_mint")) is not True:
             fail.append("renounced_mint")
-        if token.get("renounced_freeze_account") not in (1, True, "1", "true", "True"):
+        if _known_bool(token.get("renounced_freeze_account")) is not True:
             fail.append("renounced_freeze_account")
-        if not _is_false(token.get("is_wash_trading")):
+        if _known_bool(token.get("is_wash_trading")) is not False:
             fail.append("is_wash_trading")
-        lt("rat_trader_amount_rate", to_float(token.get("rat_trader_amount_rate")), t.max_rat_trader_amount_rate)
-        holder_count = to_float(token.get("holder_count"))
+        lt("rat_trader_amount_rate", token.get("rat_trader_amount_rate"), t.max_rat_trader_amount_rate)
+        holder_count = _nonnegative_float(token.get("holder_count"))
         if holder_count is None or not t.min_holder_count_exclusive < holder_count < t.max_holder_count_exclusive:
             fail.append("holder_count")
-        gt("marketcap", to_float(token.get("marketcap")), t.min_marketcap)
-        lt("sell_tax", to_float(token.get("sell_tax")), t.max_sell_tax)
-        lt("buy_tax", to_float(token.get("buy_tax")), t.max_buy_tax)
-        lt("sniper_count", to_float(token.get("sniper_count")), t.max_sniper_count)
-        gt("age", to_float(token.get("age")), t.min_age_minutes)
-        liquidity = to_float(token.get("liquidity"))
+        gt("marketcap", token.get("marketcap"), t.min_marketcap)
+        lt("sell_tax", token.get("sell_tax"), t.max_sell_tax)
+        lt("buy_tax", token.get("buy_tax"), t.max_buy_tax)
+        lt("sniper_count", token.get("sniper_count"), t.max_sniper_count)
+        gt("age", token.get("age"), t.min_age_minutes)
+        liquidity = _nonnegative_float(token.get("liquidity"))
         if not liquidity or not holder_count or liquidity / holder_count <= t.min_liquidity_per_holder:
             fail.append("liquidity/holder_count")
-        swaps = to_float(token.get("swaps_1h"))
-        volume_1h = to_float(token.get("volume_1h"))
+        swaps = _nonnegative_float(token.get("swaps_1h"))
+        volume_1h = _nonnegative_float(token.get("volume_1h"))
         gt("swaps_1h", swaps, t.min_swaps_1h)
         if not swaps or not volume_1h or volume_1h / swaps <= t.min_volume_per_swap_1h:
             fail.append("volume_1h/swaps_1h")
-        smart = to_float(token.get("smart_degen_count")) or 0.0
-        renowned = to_float(token.get("renowned_count")) or 0.0
-        volume = to_float(token.get("volume")) or volume_1h or 0.0
-        if (0.5 + smart + renowned) * volume <= t.min_weighted_activity:
+        smart = _nonnegative_float(token.get("smart_degen_count"))
+        renowned = _nonnegative_float(token.get("renowned_count"))
+        volume = _nonnegative_float(token.get("volume"))
+        if volume is None:
+            volume = volume_1h
+        if smart is None or renowned is None or volume is None:
+            fail.append("weighted_activity_data")
+        elif (0.5 + smart + renowned) * volume <= t.min_weighted_activity:
             fail.append("weighted_activity")
         return FilterDecision(not fail, tuple(fail))
 
-    def evaluate_top_holders(self, holders: Sequence[Mapping[str, Any]]) -> FilterDecision:
-        rate: float | None = None
+    def evaluate_required_facts(self, token: Mapping[str, Any]) -> FilterDecision:
+        """Validate filter inputs without assuming that unknown means safe."""
+        invalid: list[str] = []
+
+        def require_text(name: str) -> None:
+            if not str(token.get(name) or "").strip():
+                invalid.append(name)
+
+        def require_nonnegative(name: str) -> None:
+            if _nonnegative_float(token.get(name)) is None:
+                invalid.append(name)
+
+        def require_ratio(name: str) -> None:
+            if _ratio_float(token.get(name)) is None:
+                invalid.append(name)
+
+        for name in ("address", "launchpad", "symbol", "quote_symbol", "burn_status"):
+            require_text(name)
+        for name in (
+            "rug_ratio",
+            "insider_ratio",
+            "bundler_rate",
+            "top_10_holder_rate",
+            "fresh_wallet_rate",
+            "rat_trader_amount_rate",
+            "sell_tax",
+            "buy_tax",
+        ):
+            require_ratio(name)
+        for name in (
+            "price",
+            "liquidity",
+            "holder_count",
+            "marketcap",
+            "sniper_count",
+            "age",
+            "swaps_1h",
+            "volume_1h",
+            "smart_degen_count",
+            "renowned_count",
+        ):
+            require_nonnegative(name)
+        if _nonnegative_float(token.get("volume")) is None and _nonnegative_float(token.get("volume_1h")) is None:
+            invalid.append("volume")
+        for name in ("renounced_mint", "renounced_freeze_account", "is_wash_trading"):
+            if _known_bool(token.get(name)) is None:
+                invalid.append(name)
+        reasons = tuple(f"missing_or_invalid:{name}" for name in invalid)
+        return FilterDecision(not invalid, reasons)
+
+    @staticmethod
+    def top1_addr_type0_rate(holders: Sequence[Mapping[str, Any]]) -> float | None:
         for holder in holders:
-            raw_type = first(holder, ("addr_type", "address_type", "type"), 0)
+            raw_type = first(holder, ("addr_type", "address_type", "type"))
+            if raw_type in (None, ""):
+                continue
             try:
                 addr_type = int(raw_type)
             except (TypeError, ValueError):
-                addr_type = 0
+                continue
             if addr_type != 0:
                 continue
-            rate = to_float(first(holder, ("top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate")))
-            break
+            return _ratio_float(
+                first(holder, ("top1_holder_rate", "rate", "amount_percentage", "percentage", "hold_rate"))
+            )
+        return None
+
+    def evaluate_top_holders(self, holders: Sequence[Mapping[str, Any]]) -> FilterDecision:
+        rate = self.top1_addr_type0_rate(holders)
         accepted = (
             rate is not None
             and self.t.min_top1_addr_type0_rate < rate < self.t.max_top1_addr_type0_rate

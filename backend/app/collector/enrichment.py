@@ -260,9 +260,20 @@ def _historical_change_from_klines(
 
 
 class EnrichmentService:
-    def __init__(self, provider: EnrichmentProvider, safety_filter: SafetyFilter | None = None) -> None:
+    def __init__(
+        self,
+        provider: EnrichmentProvider,
+        safety_filter: SafetyFilter | None = None,
+        *,
+        readiness_attempts: int = 3,
+        readiness_retry_seconds: float = 2.0,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self.provider = provider
         self.safety_filter = safety_filter or SafetyFilter()
+        self.readiness_attempts = max(1, int(readiness_attempts))
+        self.readiness_retry_seconds = max(0.0, float(readiness_retry_seconds))
+        self._sleep = sleeper
 
     async def enrich(
         self,
@@ -271,16 +282,38 @@ class EnrichmentService:
         trending: Mapping[str, Any] | None = None,
         now_ts: int | None = None,
     ) -> EnrichmentResult:
-        bundle = await self.provider.token_bundle(candidate.address)
-        source = merge_sources(candidate.raw, bundle, trending or {})
-        normalized = normalize_token(source, candidate.token_type)
-        if not normalized.get("address"):
-            normalized["address"] = candidate.address
+        bundle: Mapping[str, Any] = {}
+        source: Mapping[str, Any] = {}
+        normalized: dict[str, Any] = {}
+        readiness = FilterDecision(False, ("missing_or_invalid:unknown",))
+        for attempt in range(self.readiness_attempts):
+            bundle = await self.provider.token_bundle(candidate.address)
+            source = merge_sources(candidate.raw, bundle, trending or {})
+            normalized = normalize_token(source, candidate.token_type)
+            if not normalized.get("address"):
+                normalized["address"] = candidate.address
+            readiness = self.safety_filter.evaluate_required_facts(normalized)
+            if readiness.accepted:
+                break
+            if attempt < self.readiness_attempts - 1 and self.readiness_retry_seconds:
+                await self._sleep(self.readiness_retry_seconds)
+        if not readiness.accepted:
+            return EnrichmentResult(None, readiness)
+
         decision = self.safety_filter.evaluate(normalized)
         if not decision.accepted:
             return EnrichmentResult(None, decision)
-        holders = await self.provider.top_holders(candidate.address, 20)
-        holders_decision = self.safety_filter.evaluate_top_holders(holders)
+
+        holders: Sequence[Mapping[str, Any]] = ()
+        holders_decision = FilterDecision(False, ("missing_or_invalid:top1_addr_type0_rate",))
+        for attempt in range(self.readiness_attempts):
+            holders = await self.provider.top_holders(candidate.address, 20)
+            rate = self.safety_filter.top1_addr_type0_rate(holders)
+            if rate is not None:
+                holders_decision = self.safety_filter.evaluate_top_holders(holders)
+                break
+            if attempt < self.readiness_attempts - 1 and self.readiness_retry_seconds:
+                await self._sleep(self.readiness_retry_seconds)
         if not holders_decision.accepted:
             return EnrichmentResult(None, holders_decision)
 

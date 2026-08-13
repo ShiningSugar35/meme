@@ -334,7 +334,7 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × strategy` 同构视图、当前市场快照、SQL 分页/时间筛选与四策略“模型”交易审计；
-- 后端 `pytest -q` **120/120 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、4s current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
+- 后端 `pytest -q` **130/130 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、4s current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
 
 ### 实盘接口停放
 
