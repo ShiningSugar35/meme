@@ -39,7 +39,11 @@ def child_command() -> list[str]:
 
 
 def start_child() -> subprocess.Popen[bytes]:
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    flags = (
+        subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        if os.name == "nt"
+        else 0
+    )
     process = subprocess.Popen(
         child_command(),
         cwd=PROJECT_ROOT,

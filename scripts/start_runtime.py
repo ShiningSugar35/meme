@@ -40,15 +40,19 @@ def main() -> int:
         print(f"runtime=blocked reason=python_missing path={python}")
         return 2
 
+    background_python = python
     creationflags = 0
     if os.name == "nt":
-        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        pythonw = python.with_name("pythonw.exe")
+        if pythonw.exists():
+            background_python = pythonw
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
 
     command = (
-        [str(python), str(PROJECT_ROOT / "scripts" / "runtime_supervisor.py")]
+        [str(background_python), str(PROJECT_ROOT / "scripts" / "runtime_supervisor.py")]
         if args.reload
         else [
-            str(python),
+            str(background_python),
             "-m",
             "uvicorn",
             "backend.app.main:app",

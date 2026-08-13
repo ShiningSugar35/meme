@@ -267,7 +267,9 @@ npm install
 
 ### 6.2 启动后端
 
-本地开发推荐使用项目启动器开启热更新：
+Windows 桌面日常使用可直接双击根目录 `一键启动系统.bat`。它会把后端 supervisor/Uvicorn 与 Vite 前端都以无控制台窗口的后台进程启动，服务就绪后自动打开 `http://127.0.0.1:5173/` 并退出启动器，因此成功启动后任务栏只保留浏览器，不留下 `cmd.exe` / `python.exe` 黑窗口；异常时启动器才停留并提示检查 `logs/backend.err.log` 或 `logs/frontend.err.log`。
+
+本地开发也可以单独使用项目启动器开启后端热更新：
 
 ```powershell
 Set-Location D:\meme
