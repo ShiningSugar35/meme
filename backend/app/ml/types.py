@@ -218,6 +218,7 @@ class TrainingResult:
     candidates: tuple[CandidateEvaluation, ...]
     top_algorithms: tuple[str, ...]
     rule_baseline: EvaluationMetrics
+    diversity_metrics: Mapping[str, Any] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
     @property

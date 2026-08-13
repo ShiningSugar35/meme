@@ -92,7 +92,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 需要采集/导出的核心列如下：address	name	symbol	type	time	ln(age+1)	launchpad	price	ln(price+1)	ln(liquidity_usd)	price_1h_max/price	price_1h_min/price	final_1h_close_ratio	liquidity/holder_count	volume_1h/swaps_1h	has_twitter	has_website	ln(image_dup+1)	dexscr_update_link	cto_flag	ln(twitter_rename_count+1)	ln(twitter_del_post_token_count+1)	ln(twitter_create_token_count+1)	top_10_holder_rate	top_bot_degen_percentage	fresh_wallet_rate	bot_degen_rate	price/ath_price	stat.holder_count/market_cap	ln(smart_degen_count+1)	ln(renowned_count+1)	entrapment_ratio	dev_team_hold_rate	top70_sniper_hold_rate	ln(twitter_dup+1)	ln(website_dup+1)	ln(visiting_count+1)	price_change_1h	price_change_5m	ln(creator_open_count+1)	creator_open_ratio	ln(top_wallets+1)	tag。数据库仍保留旧 `price_2h_*` 审计列，仅用于历史 provenance，不再由新标签链路写入或参与训练/交易。
 
-当前默认候选 feature pool 包含 31 个入场时数值/布尔特征；模型中心的勾选状态会自动持久化为长期训练候选池，手动训练、每日/周训、启动补跑和退化重训均从这份已保存候选池重新开始，不能再继承上一代冠军已经压缩后的 feature_names 造成 31→8→4 的代际单向收缩。每个算法在这份候选池内默认从 4 个特征起逐维扫描到可用全量，特征排序严格在每个 chronological development fold 的训练段内完成，再按 one-standard-error 奥卡姆规则选择“统计上接近最佳”的最小维度。最终生产列名只用 final-train 重新排序确定，最终 holdout 不参与任何特征选择。`launchpad` 仅作为样本来源元数据保存，不进入模型输入矩阵；`tag` 仅作为二分类 target。
+当前默认候选 feature pool 包含 31 个入场时数值/布尔特征；模型中心的勾选状态会自动持久化为长期训练候选池，手动训练、每日/周训、启动补跑和退化重训均从这份已保存候选池重新开始，不能再继承上一代冠军已经压缩后的 feature_names 造成 31→8→4 的代际单向收缩。每个算法在这份候选池内默认从 4 个特征起逐维扫描到可用全量；特征排序严格在每个 chronological development fold 的训练段内用浅层 XGBoost + TreeSHAP interaction contribution 完成，使主要通过交互起作用的弱单变量特征也有进入前 k 的机会，若交互排序器不可用才回退 mutual information。维度选择同时满足 one-standard-error 与“相对该算法最佳开发期 S 不得下降超过 8%”两个门槛，再取最小维度。最终生产列名只用 final-train 重新排序确定，最终 holdout 不参与任何特征选择。`launchpad` 仅作为样本来源元数据保存，不进入模型输入矩阵；`tag` 仅作为二分类 target。
 
 `tag` 为分类标签列，只作为 target，不进入模型输入矩阵。`age_minutes` 与 `samples.entry_price` 继续保存/使用 raw 入场事实：前者用于严格准入边界，后者用于标签、收益、仓位和交易核算；模型输入不再直接使用旧 `age=ln(age_minutes)` 或 raw `price`，而统一使用 `ln(age+1)` 与 `ln(price+1)`。`ln(liquidity_usd)` 从新样本开始持续采集并作为可选训练特征，但由于 legacy CSV 不含 raw entry liquidity，当前默认训练集先不启用它；后续新样本积累充分后可在模型中心勾选该特征重新训练。数据库仍单独保存 raw entry liquidity，供单笔资金公式和真实美元收益评价使用。`launchpad` 仅用于准入、展示、审计与导出。
 
@@ -310,16 +310,16 @@ npm run dev
 
 ### 6.4 训练、自更新与自选特征
 
-“模型中心”会同时展示当前 Top 3、完整候选池、E/G/S、最终 holdout 审计、“不用模型”基线和成熟样本覆盖率。默认候选特征池仍是 31 个入场时特征；勾选/取消勾选会立即保存到 SQLite runtime state，重新进入页面会恢复上次选择，之后的手动训练和所有自动训练都从这份长期候选池重新评估。生产训练不再固定 12 / 20 / 全量档位，而是从最小可行维度开始逐维自适应比较，并用 one-standard-error 规则选择“表现未明显下降时的最小特征数”。每个 chronological fold 的特征排序只读取该 fold 训练段，避免 development-level selection leakage。`launchpad` 不进入模型；`ln(liquidity_usd)` 从新样本开始持续采集，覆盖率足够后可手动加入候选池。API 也支持显式提交候选特征列表：
+“模型中心”会同时展示当前 Top 3、完整候选池、E/G/S、最终 holdout 审计、“不用模型”基线、成熟样本覆盖率和 Top 3 多样性审计。默认候选特征池仍是 31 个入场时特征；勾选/取消勾选会立即保存到 SQLite runtime state，重新进入页面会恢复上次选择，之后的手动训练和所有自动训练都从这份长期候选池重新评估。生产训练从最小可行维度开始逐维自适应比较；每个 chronological fold 的特征排序只读取该 fold 训练段，由浅层 XGBoost TreeSHAP 交互贡献排序，失败时才回退单变量 mutual information。奥卡姆选择必须同时落在 one-standard-error 区间内，且相对该算法最佳开发期 `S` 的损失不超过 8%。Top 3 在最佳模型 8% 性能保护带内优先选择不同 model family，最终 holdout 上的概率相关、决策一致率和买入集合 Jaccard 只作 certification 审计，不反向参与选模。`launchpad` 不进入模型；`ln(liquidity_usd)` 从新样本开始持续采集，覆盖率足够后可手动加入候选池。API 也支持显式提交候选特征列表：
 
 ```powershell
 Invoke-RestMethod -Method Post `
   -Uri http://127.0.0.1:8000/api/models/train `
   -ContentType application/json `
-  -Body '{"reason":"manual","features":["price","price_change_1h"]}'
+  -Body '{"reason":"manual","features":["ln(price+1)","price_change_1h"]}'
 ```
 
-HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。自动调度统一使用北京时间 17:00：7 日模型健康为 `insufficient_data` 时每天训练，否则按每周约定日训练；到期日 16:00 先冻结 `model_1/model_2/model_3/rules_only` 四策略的新买入。训练本身不等待旧仓位，完成后候选 Top 3 以 `promoted=0 + activation.waiting_for_flat` 持久化；`TrainingWorker` 独立轮询四策略是否全空仓，满足后才原子替换 Top 3，并创建新的 simulation session，使四策略统一从 1000 USD/0 交易重新开始后再解除冻结。系统错过 17:00 时在下次启动按同一 `scheduled_for` 幂等补训。模型健康服务只报告 `healthy / insufficient_data / degraded`，不再绕过该生命周期插队启动另一条自动训练。自动训练继承当前 Rank 1 的 requested feature pool；实际胜出模型仍可通过奥卡姆选择缩减到更小特征子集。
+HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。自动调度统一使用北京时间 17:00：7 日模型健康为 `insufficient_data` 时每天训练，否则按每周约定日训练；到期日 16:00 先冻结 `model_1/model_2/model_3/rules_only` 四策略的新买入。训练本身不等待旧仓位，完成后候选 Top 3 以 `promoted=0 + activation.waiting_for_flat` 持久化；`TrainingWorker` 独立轮询四策略是否全空仓，满足后才原子替换 Top 3，并创建新的 simulation session，使四策略统一从 1000 USD/0 交易重新开始后再解除冻结。系统错过 17:00 时在下次启动按同一 `scheduled_for` 幂等补训。模型健康服务只报告 `healthy / insufficient_data / degraded`，不再绕过该生命周期插队启动另一条自动训练。自动训练读取模型中心持久化的长期候选池；实际胜出模型可在 one-SE + 8% 相对性能保护下缩减到更小特征子集。
 
 2026-08-13 age<240 迁移后执行正式手动重训 run `3aa752e0-7557-4602-aa79-22d9b5381c7f`。首轮本地训练进程因工具 180 秒调用上限被中断，durable TrainingWorker 按既有恢复规则将同一 run `retry_count=1` 后继续执行，没有创建重复任务。训练集为 1856 条 mature H1 v4 样本；完成于 `2026-08-13T03:35:38.461429+00:00`，四策略当时全平，因此于 `2026-08-13T03:35:38.499689+00:00` 立即激活并创建 `sim_ed9d999af1964ee194c9bfdd74fbb12d`（`created_reason=model_generation_upgrade`）。当前 active Top 3：Rank 1 **Random Forest**（8 features，model `20260813T033536Z-random_forest-84713328`，threshold `0.1392631283`，E `0.331758`，G `0.468985`，S `0.386649`）；Rank 2 **AdaBoost**（8 features，model `20260813T033536Z-ada_boost-4ed3f589`，threshold `0.14`，E `0.327415`，G `0.452823`，S `0.377578`）；Rank 3 **HistGradientBoosting**（6 features，model `20260813T033536Z-hist_gradient_boosting-9bf64805`，threshold `0.11`，E `0.329539`，G `0.408732`，S `0.361216`）。四个新 simulation 策略账本均从 1000 USD / 0 交易开始。
 

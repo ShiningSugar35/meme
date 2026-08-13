@@ -57,6 +57,10 @@ class TrainerConfig:
     # retained as an explicit test/operator override, not production policy.
     feature_subset_sizes: tuple[int, ...] | None = None
     min_features_to_select: int = 4
+    max_relative_occam_score_drop: float = 0.08
+    max_diversity_score_drop: float = 0.08
+    interaction_rank_estimators: int = 160
+    interaction_rank_max_depth: int = 3
     economic_weight: float = 0.60
     generalization_weight: float = 0.40
     # E remains the current fixed-payoff proxy. E_exec is collected and reported
@@ -83,8 +87,10 @@ class ModelTrainer:
     ) -> None:
         self.config = config or TrainerConfig()
         self.splitter = TemporalSplitter(split_config)
+        self._feature_rank_cache: dict[bytes, list[str]] = {}
 
     def train(self, dataset: PreparedDataset) -> TrainingResult:
+        self._feature_rank_cache.clear()
         plan = self.splitter.build(dataset)
         specs = {spec.name: spec for spec in candidate_catalog(self.config.random_state)}
         unknown = sorted(set(self.config.candidate_names) - set(specs))
@@ -175,7 +181,7 @@ class ModelTrainer:
                 item.algorithm,
             ),
         )
-        top = ranked[: self.config.top_k]
+        top = self._select_diverse_top_k(ranked, successful_specs)
         now = datetime.now(timezone.utc)
         bundles: list[ModelBundle] = []
         evaluation_bundles: list[ModelBundle] = []
@@ -250,6 +256,13 @@ class ModelTrainer:
             )
 
         final_rows = plan.final_split.test_indices
+        diversity_metrics = self._audit_top_diversity(
+            top,
+            successful_specs,
+            final_estimators,
+            dataset,
+            plan,
+        )
         rule_baseline = evaluate_rule_baseline(
             dataset.y.iloc[final_rows].to_numpy(dtype=int),
             dataset.economic_slice(final_rows),
@@ -260,6 +273,9 @@ class ModelTrainer:
             warnings.append(f"optional candidates skipped: {', '.join(skipped)}")
         if plan.early_stage:
             warnings.append("models are marked EARLY_STAGE_MODEL because history is under 120 days")
+        warnings.append(
+            "Top-3 selection prefers distinct model families inside the configured relative score budget"
+        )
         warnings.append("final recent holdout is certification-only and is not used for Top-3 ranking")
 
         return TrainingResult(
@@ -269,6 +285,7 @@ class ModelTrainer:
             candidates=tuple(evaluations),
             top_algorithms=tuple(item.algorithm for item in top),
             rule_baseline=rule_baseline,
+            diversity_metrics=diversity_metrics,
             warnings=tuple(warnings),
         )
 
@@ -307,7 +324,132 @@ class ModelTrainer:
         )
         return bundle, plan, evaluation
 
+    def _select_diverse_top_k(
+        self,
+        ranked: list[CandidateEvaluation],
+        specs: dict[str, CandidateSpec],
+    ) -> list[CandidateEvaluation]:
+        """Prefer distinct model families without sacrificing more than the score budget.
+
+        The three deployed slots are independent strategies, not one averaged
+        ensemble. Keeping three near-identical tree ensembles adds little model
+        risk diversification, so within the configured near-best score band we
+        prefer the strongest candidate from a family not yet represented. If the
+        band cannot supply enough families, selection falls back to pure score.
+        """
+
+        if not ranked:
+            return []
+        best_score = float(ranked[0].composite_score or 0.0)
+        relative_drop = float(np.clip(self.config.max_diversity_score_drop, 0.0, 1.0))
+        score_floor = best_score - abs(best_score) * relative_drop
+        remaining = list(ranked)
+        selected: list[CandidateEvaluation] = []
+        families: set[str] = set()
+
+        while remaining and len(selected) < self.config.top_k:
+            within_budget = [
+                item
+                for item in remaining
+                if float(item.composite_score or -math.inf) >= score_floor
+            ]
+            candidate_pool = within_budget or remaining
+            unseen_family = [
+                item
+                for item in candidate_pool
+                if specs[item.algorithm].family not in families
+            ]
+            choice = (unseen_family or candidate_pool)[0]
+            selected.append(choice)
+            families.add(specs[choice.algorithm].family)
+            remaining.remove(choice)
+
+        return selected
+
+    def _audit_top_diversity(
+        self,
+        top: list[CandidateEvaluation],
+        specs: dict[str, CandidateSpec],
+        final_estimators: dict[str, object],
+        dataset: PreparedDataset,
+        plan,
+    ) -> dict[str, object]:
+        """Measure Top-3 redundancy on the certification-only recent holdout."""
+
+        rows = plan.final_split.test_indices
+        probabilities: dict[str, np.ndarray] = {}
+        selections: dict[str, np.ndarray] = {}
+        families: dict[str, str] = {}
+        for item in top:
+            estimator = final_estimators[item.algorithm]
+            features = item.feature_names
+            probs = positive_probabilities(estimator, dataset.X.loc[rows, features])
+            probabilities[item.algorithm] = probs
+            selections[item.algorithm] = probs >= float(item.threshold)
+            families[item.algorithm] = specs[item.algorithm].family
+
+        pairs: list[dict[str, object]] = []
+        for left_index, left in enumerate(top):
+            for right in top[left_index + 1 :]:
+                left_probs = probabilities[left.algorithm]
+                right_probs = probabilities[right.algorithm]
+                left_std = float(np.std(left_probs))
+                right_std = float(np.std(right_probs))
+                if left_std <= 1e-12 or right_std <= 1e-12:
+                    pearson = 1.0 if np.allclose(left_probs, right_probs) else 0.0
+                else:
+                    pearson = float(np.corrcoef(left_probs, right_probs)[0, 1])
+                left_selected = selections[left.algorithm]
+                right_selected = selections[right.algorithm]
+                agreement = float(np.mean(left_selected == right_selected))
+                union = int(np.sum(left_selected | right_selected))
+                jaccard = (
+                    float(np.sum(left_selected & right_selected) / union)
+                    if union
+                    else 1.0
+                )
+                pairs.append(
+                    {
+                        "left": left.algorithm,
+                        "right": right.algorithm,
+                        "pearson_probability": pearson,
+                        "decision_agreement": agreement,
+                        "selected_jaccard": jaccard,
+                    }
+                )
+
+        return {
+            "selection_policy": "distinct_model_family_within_relative_score_budget",
+            "max_relative_score_drop": float(self.config.max_diversity_score_drop),
+            "holdout_role": "certification_only_not_used_for_selection",
+            "families": families,
+            "pairs": pairs,
+            "max_abs_probability_correlation": max(
+                (abs(float(item["pearson_probability"])) for item in pairs),
+                default=0.0,
+            ),
+            "max_selected_jaccard": max(
+                (float(item["selected_jaccard"]) for item in pairs),
+                default=0.0,
+            ),
+        }
+
     def _rank_features(self, dataset: PreparedDataset, train_indices: np.ndarray) -> list[str]:
+        """Rank features using train-only tree interaction contributions.
+
+        The previous univariate mutual-information ranker could discard features
+        whose signal appears mainly through interactions. A shallow XGBoost
+        screening model sees the full candidate pool on the chronological train
+        slice only; TreeSHAP interaction values then attribute both main and
+        pairwise/low-order interaction contribution back to each base feature.
+        Mutual information remains a deterministic fallback if screening fails.
+        """
+
+        cache_key = train_indices.tobytes()
+        cached = self._feature_rank_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
         frame = dataset.X.iloc[train_indices].copy()
         array = frame.to_numpy(dtype=float)
         medians = np.nanmedian(array, axis=0)
@@ -315,18 +457,63 @@ class ModelTrainer:
         missing = ~np.isfinite(array)
         if missing.any():
             array[missing] = medians[np.where(missing)[1]]
+        frame.loc[:, :] = array
         y = dataset.y.iloc[train_indices].to_numpy(dtype=int)
-        scores = mutual_info_classif(
-            array,
-            y,
-            discrete_features=False,
-            random_state=self.config.random_state,
-        )
         original = {name: index for index, name in enumerate(dataset.feature_names)}
-        return sorted(
-            dataset.feature_names,
-            key=lambda name: (-float(scores[original[name]]), original[name]),
-        )
+
+        try:
+            from xgboost import DMatrix, XGBClassifier
+
+            screen = XGBClassifier(
+                n_estimators=max(40, int(self.config.interaction_rank_estimators)),
+                max_depth=max(2, int(self.config.interaction_rank_max_depth)),
+                learning_rate=0.04,
+                min_child_weight=12,
+                subsample=0.90,
+                colsample_bytree=1.0,
+                reg_lambda=6.0,
+                reg_alpha=0.15,
+                objective="binary:logistic",
+                eval_metric="logloss",
+                random_state=self.config.random_state,
+                n_jobs=1,
+            )
+            screen.fit(
+                frame,
+                y,
+                sample_weight=economic_sample_weights(dataset.economic_slice(train_indices)),
+            )
+            interactions = screen.get_booster().predict(
+                DMatrix(frame),
+                pred_interactions=True,
+                strict_shape=True,
+            )
+            interactions = np.asarray(interactions, dtype=float)
+            if interactions.ndim == 4:
+                interactions = interactions[:, 0, :, :]
+            feature_count = len(dataset.feature_names)
+            interactions = interactions[:, :feature_count, :feature_count]
+            strengths = np.mean(np.sum(np.abs(interactions), axis=2), axis=0)
+            if len(strengths) != feature_count or not np.isfinite(strengths).any():
+                raise ValueError("interaction ranker returned invalid strengths")
+            order = sorted(
+                dataset.feature_names,
+                key=lambda name: (-float(strengths[original[name]]), original[name]),
+            )
+        except Exception:
+            scores = mutual_info_classif(
+                array,
+                y,
+                discrete_features=False,
+                random_state=self.config.random_state,
+            )
+            order = sorted(
+                dataset.feature_names,
+                key=lambda name: (-float(scores[original[name]]), original[name]),
+            )
+
+        self._feature_rank_cache[cache_key] = list(order)
+        return list(order)
 
     def _feature_subset_sizes(self, total: int) -> tuple[int, ...]:
         if total <= 0:
@@ -529,11 +716,14 @@ class ModelTrainer:
         )
         return replace(evaluation, final_metrics=final_metrics), estimator
 
-    @staticmethod
-    def _occam_feature_choice(evaluations: list[CandidateEvaluation]) -> CandidateEvaluation:
-        """Choose the smallest subset inside one SE of an algorithm's best score."""
+    def _occam_feature_choice(self, evaluations: list[CandidateEvaluation]) -> CandidateEvaluation:
+        """Choose the smallest subset that is both statistically and practically near-best."""
         best = max(evaluations, key=lambda item: float(item.composite_score or -math.inf))
-        cutoff = float(best.composite_score or 0.0) - float(best.score_standard_error or 0.0)
+        best_score = float(best.composite_score or 0.0)
+        one_se_cutoff = best_score - float(best.score_standard_error or 0.0)
+        relative_drop = float(np.clip(self.config.max_relative_occam_score_drop, 0.0, 1.0))
+        relative_cutoff = best_score - abs(best_score) * relative_drop
+        cutoff = max(one_se_cutoff, relative_cutoff)
         near_best = [item for item in evaluations if float(item.composite_score or -math.inf) >= cutoff]
         return min(
             near_best,

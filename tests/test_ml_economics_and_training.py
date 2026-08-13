@@ -7,7 +7,9 @@ import pandas as pd
 import pytest
 
 from backend.app.ml import (
+    CandidateEvaluation,
     FeatureBuilder,
+    FeaturePolicy,
     ModelBundle,
     ModelTrainer,
     PromotionEvaluator,
@@ -115,6 +117,113 @@ def test_default_feature_count_search_is_adaptive_and_explicit_override_is_prese
     assert overridden._feature_subset_sizes(8) == (2, 5, 8)
 
 
+def test_occam_rule_never_accepts_more_than_eight_percent_score_drop() -> None:
+    trainer = ModelTrainer(TrainerConfig(max_relative_occam_score_drop=0.08))
+    evaluations = [
+        CandidateEvaluation(
+            algorithm="random_forest",
+            complexity_rank=4,
+            status="ok",
+            feature_names=("a", "b", "c", "d"),
+            composite_score=0.350,
+            score_standard_error=0.100,
+        ),
+        CandidateEvaluation(
+            algorithm="random_forest",
+            complexity_rank=4,
+            status="ok",
+            feature_names=("a", "b", "c", "d", "e", "f"),
+            composite_score=0.372,
+            score_standard_error=0.050,
+        ),
+        CandidateEvaluation(
+            algorithm="random_forest",
+            complexity_rank=4,
+            status="ok",
+            feature_names=tuple("abcdefghij"),
+            composite_score=0.400,
+            score_standard_error=0.100,
+        ),
+    ]
+
+    chosen = trainer._occam_feature_choice(evaluations)
+
+    # One-SE alone would accept 0.350, but the 8% floor is 0.368.
+    assert chosen.composite_score == pytest.approx(0.372)
+    assert len(chosen.feature_names) == 6
+
+
+def test_top3_prefers_distinct_model_families_inside_eight_percent_budget() -> None:
+    trainer = ModelTrainer(TrainerConfig(top_k=3, max_diversity_score_drop=0.08))
+    specs = {spec.name: spec for spec in candidate_catalog(42)}
+    ranked = [
+        CandidateEvaluation(
+            algorithm="ada_boost",
+            complexity_rank=4,
+            status="ok",
+            feature_names=("a", "b", "c", "d"),
+            composite_score=1.00,
+        ),
+        CandidateEvaluation(
+            algorithm="hist_gradient_boosting",
+            complexity_rank=3,
+            status="ok",
+            feature_names=("a", "b", "c", "d"),
+            composite_score=0.99,
+        ),
+        CandidateEvaluation(
+            algorithm="random_forest",
+            complexity_rank=4,
+            status="ok",
+            feature_names=("a", "b", "c", "d"),
+            composite_score=0.97,
+        ),
+        CandidateEvaluation(
+            algorithm="logistic_regression",
+            complexity_rank=1,
+            status="ok",
+            feature_names=("a", "b", "c", "d"),
+            composite_score=0.94,
+        ),
+    ]
+
+    selected = trainer._select_diverse_top_k(ranked, specs)
+
+    assert [item.algorithm for item in selected] == [
+        "ada_boost",
+        "random_forest",
+        "logistic_regression",
+    ]
+
+
+def test_interaction_aware_ranker_keeps_xor_features_ahead_of_noise() -> None:
+    rng = np.random.default_rng(123)
+    rows = 800
+    x1 = rng.integers(0, 2, size=rows).astype(float)
+    x2 = rng.integers(0, 2, size=rows).astype(float)
+    tag = np.logical_xor(x1.astype(bool), x2.astype(bool)).astype(int)
+    frame = pd.DataFrame(
+        {
+            "time": np.arange(1_800_000_000, 1_800_000_000 + rows),
+            "x1": x1,
+            "x2": x2,
+            "noise": rng.normal(size=rows),
+            "tag": tag,
+        }
+    )
+    dataset = FeatureBuilder(
+        FeaturePolicy(feature_allowlist=("x1", "x2", "noise"))
+    ).prepare(frame)
+    trainer = ModelTrainer(
+        TrainerConfig(interaction_rank_estimators=100, interaction_rank_max_depth=3)
+    )
+
+    ranked = trainer._rank_features(dataset, np.arange(600))
+
+    assert set(ranked[:2]) == {"x1", "x2"}
+    assert ranked[-1] == "noise"
+
+
 def test_execution_score_is_shadow_only_and_never_changes_ranking_weight() -> None:
     trainer = ModelTrainer(
         TrainerConfig(
@@ -180,6 +289,9 @@ def test_trainer_returns_top3_one_threshold_each_and_keeps_final_holdout_separat
     assert all(set(bundle.thresholds.as_dict()) == {"decision"} for bundle in result.bundles)
     assert all(candidate.composite_score is not None for candidate in result.candidates if candidate.status == "ok")
     assert result.rule_baseline.recall == pytest.approx(1.0)
+    assert result.diversity_metrics["holdout_role"] == "certification_only_not_used_for_selection"
+    assert len(result.diversity_metrics["pairs"]) == 3
+    assert 0.0 <= result.diversity_metrics["max_selected_jaccard"] <= 1.0
     assert "certification-only" in " ".join(result.warnings)
     train_end = dataset.timestamps.iloc[result.plan.final_split.train_indices].max()
     test_start = dataset.timestamps.iloc[result.plan.final_split.test_indices].min()

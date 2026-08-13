@@ -220,7 +220,10 @@ class TrainingService:
                             "economic_weight": TrainerConfig().economic_weight,
                             "generalization_weight": TrainerConfig().generalization_weight,
                             "gap_hours": result.plan.gap_hours,
-                            "feature_selection": "adaptive_train_fold_rank_one_se",
+                            "feature_selection": "adaptive_train_fold_treeshap_interaction_one_se_relative_cap",
+                            "max_relative_occam_score_drop": TrainerConfig().max_relative_occam_score_drop,
+                            "top3_diversity_policy": "distinct_model_family_within_relative_score_budget",
+                            "max_diversity_score_drop": TrainerConfig().max_diversity_score_drop,
                             "execution_min_observations": TrainerConfig().execution_min_observations,
                             "execution_full_observations": TrainerConfig().execution_full_observations,
                             "execution_max_weight": TrainerConfig().execution_max_weight,
@@ -259,6 +262,7 @@ class TrainingService:
                 "top_models": registered,
                 "rule_baseline_final": asdict(result.rule_baseline),
                 "candidates": [asdict(candidate) for candidate in result.candidates],
+                "diversity": dict(result.diversity_metrics),
                 "warnings": list(result.warnings),
                 "activation": {
                     "status": "waiting_for_flat",
@@ -270,7 +274,9 @@ class TrainingService:
                     "ranking_economic": "E_proxy only; E_exec is shadow/audit-only and has zero ranking weight",
                     "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",
                     "composite": "0.60*ranking_economic + 0.40*generalization",
-                    "occam": "adaptive feature count; smallest subset within one standard error of algorithm best",
+                    "occam": "adaptive feature count; smallest subset inside both one-SE and <=8% relative S-loss guards",
+                    "feature_ranking": "fold-train-only XGBoost TreeSHAP interaction-aware ranking; mutual-information fallback",
+                    "top3_diversity": "prefer distinct model families inside <=8% relative S-loss budget; final holdout correlation is audit-only",
                 },
             }
             self.database.execute(
