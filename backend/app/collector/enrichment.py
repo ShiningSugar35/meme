@@ -357,7 +357,7 @@ class EnrichmentService:
                     price, history_klines, entry_time - 5 * 60
                 )
         features = {
-            "age": _ln(normalized.get("age")),
+            "ln(age+1)": _ln1p(normalized.get("age")),
             "ln(liquidity_usd)": _ln(liquidity),
             "liquidity/holder_count": _ln(_ratio(normalized.get("liquidity"), normalized.get("holder_count"))),
             "volume_1h/swaps_1h": _ln(_ratio(normalized.get("volume_1h"), normalized.get("swaps_1h"))),

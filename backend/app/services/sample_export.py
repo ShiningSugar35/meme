@@ -7,6 +7,7 @@ from typing import Any
 
 from ..collector.constants import LabelPolicy
 from ..database import Database
+from ..ml.features import AGE_LOG1P_FEATURE, PRICE_LOG1P_FEATURE, materialize_entry_feature
 
 
 class SampleExportService:
@@ -55,8 +56,19 @@ class SampleExportService:
                 features = {}
             if not isinstance(features, dict):
                 features = {}
-            feature_names.update(str(name) for name in features)
-            decoded.append((row, features))
+            canonical_features = {
+                str(name): value for name, value in features.items() if str(name) != "age"
+            }
+            for name in (AGE_LOG1P_FEATURE, PRICE_LOG1P_FEATURE):
+                value = materialize_entry_feature(
+                    name,
+                    features,
+                    entry_price=row.get("entry_price"),
+                )
+                if value is not None:
+                    canonical_features[name] = value
+            feature_names.update(canonical_features)
+            decoded.append((row, canonical_features))
 
         ordered_features = sorted(feature_names)
         fieldnames = [*self.BASE_COLUMNS, *ordered_features, *self.LABEL_COLUMNS]

@@ -5,6 +5,8 @@ import csv
 import math
 from pathlib import Path
 
+import pytest
+
 from backend.app.collector.labels import PriceWindowResult
 from backend.app.config import Settings
 from backend.app.database import Database
@@ -139,11 +141,11 @@ def test_sample_export_contains_all_and_only_mature_tagged_rows(tmp_path: Path) 
     repository = SampleRepository(database)
     repository.insert(SampleRecord(
         address="mature-token", token_type="new_creation", entry_time=100, entry_price=1.0,
-        launchpad="Pump.fun", features={"age": 5.0}, tag=1, label_status="mature",
+        launchpad="Pump.fun", features={"age": math.log(5.0)}, tag=1, label_status="mature",
     ))
     repository.insert(SampleRecord(
         address="pending-token", token_type="near_completion", entry_time=200, entry_price=1.0,
-        launchpad="letsbonk", features={"age": 6.0}, tag=None, label_status="pending",
+        launchpad="letsbonk", features={"age": math.log(6.0)}, tag=None, label_status="pending",
     ))
 
     text, count = SampleExportService(database).render_csv()
@@ -154,7 +156,9 @@ def test_sample_export_contains_all_and_only_mature_tagged_rows(tmp_path: Path) 
     assert rows[0]["address"] == "mature-token"
     assert rows[0]["launchpad"] == "Pump.fun"
     assert rows[0]["tag"] == "1"
-    assert rows[0]["age"] == "5.0"
+    assert "age" not in rows[0]
+    assert float(rows[0]["ln(age+1)"]) == pytest.approx(math.log1p(5.0))
+    assert float(rows[0]["ln(price+1)"]) == pytest.approx(math.log1p(1.0))
 
 
 def test_risk_limits_and_duplicate_live_position(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ from typing import Any
 
 from ..collector.constants import FilterThresholds, LabelPolicy
 from ..database import Database
+from ..ml.features import AGE_LOG1P_FEATURE, PRICE_LOG1P_FEATURE
 from ..repositories.samples import SampleRecord, SampleRepository
 
 
@@ -93,14 +94,33 @@ class CsvImporter:
                 if token_type == "completed":
                     continue
 
-                age_feature = _float(row.get("age"))
-                min_log_age = math.log(FILTER_THRESHOLDS.min_age_minutes)
-                max_log_age = math.log(FILTER_THRESHOLDS.max_age_minutes_exclusive)
-                if age_feature is None or not min_log_age < age_feature < max_log_age:
-                    try:
-                        age_minutes = math.exp(age_feature) if age_feature is not None else None
-                    except OverflowError:
-                        age_minutes = None
+                age_log1p = _float(row.get(AGE_LOG1P_FEATURE))
+                legacy_age_log = _float(row.get("age"))
+                if age_log1p is not None:
+                    age_in_range = (
+                        math.log1p(FILTER_THRESHOLDS.min_age_minutes)
+                        < age_log1p
+                        < math.log1p(FILTER_THRESHOLDS.max_age_minutes_exclusive)
+                    )
+                elif legacy_age_log is not None:
+                    age_in_range = (
+                        math.log(FILTER_THRESHOLDS.min_age_minutes)
+                        < legacy_age_log
+                        < math.log(FILTER_THRESHOLDS.max_age_minutes_exclusive)
+                    )
+                else:
+                    age_in_range = False
+                try:
+                    age_minutes = (
+                        math.expm1(age_log1p)
+                        if age_log1p is not None
+                        else math.exp(legacy_age_log)
+                        if legacy_age_log is not None
+                        else None
+                    )
+                except OverflowError:
+                    age_minutes = None
+                if age_minutes is None or not age_in_range:
                     self.database.audit(
                         category="data_import",
                         action="age_out_of_range_csv_row",
@@ -174,6 +194,9 @@ class CsvImporter:
                     for key, value in row.items()
                     if key not in EXCLUDED_MODEL_COLUMNS
                 }
+                features.pop("age", None)
+                features[AGE_LOG1P_FEATURE] = math.log1p(age_minutes)
+                features[PRICE_LOG1P_FEATURE] = math.log1p(entry_price)
                 records.append(
                     SampleRecord(
                         address=address,
@@ -181,7 +204,7 @@ class CsvImporter:
                         symbol=str(row.get("symbol") or "").strip() or None,
                         token_type=token_type or None,
                         entry_time=entry_time,
-                        age_minutes=_float(row.get("age")),
+                        age_minutes=age_minutes,
                         launchpad=str(row.get("launchpad") or "").strip() or None,
                         entry_price=entry_price,
                         liquidity=None,

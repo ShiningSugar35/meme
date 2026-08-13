@@ -13,10 +13,13 @@ import pandas as pd
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..ml.features import (
+    AGE_LOG1P_FEATURE,
     AVAILABLE_MODEL_FEATURES,
     DEFAULT_MODEL_TRAINING_FEATURES,
+    PRICE_LOG1P_FEATURE,
     FeatureBuilder,
     FeaturePolicy,
+    materialize_entry_feature,
 )
 from ..ml.registry import ModelRegistry
 from ..ml.trainer import ModelTrainer, TrainerConfig
@@ -83,7 +86,12 @@ class TrainingService:
     ) -> tuple[str, ...]:
         if feature_names is None:
             return DEFAULT_MODEL_TRAINING_FEATURES
-        requested = {str(name).strip() for name in feature_names if str(name).strip()}
+        aliases = {"age": AGE_LOG1P_FEATURE, "price": PRICE_LOG1P_FEATURE}
+        requested = {
+            aliases.get(str(name).strip(), str(name).strip())
+            for name in feature_names
+            if str(name).strip()
+        }
         if not requested:
             raise ValueError("at least one model feature must be selected")
         unknown = sorted(requested.difference(AVAILABLE_MODEL_FEATURES))
@@ -483,7 +491,11 @@ class TrainingService:
         for name in AVAILABLE_MODEL_FEATURES:
             present = 0
             for row in rows:
-                value = row.get("entry_price") if name == "price" else row.get(name)
+                value = materialize_entry_feature(
+                    name,
+                    row,
+                    entry_price=row.get("entry_price"),
+                )
                 if value is None:
                     continue
                 if isinstance(value, str) and not value.strip():
@@ -532,7 +544,11 @@ class TrainingService:
         execution = self._execution_observations()
         for row in rows:
             features = {
-                key: (row.get("entry_price") if key == "price" else row.get(key))
+                key: materialize_entry_feature(
+                    key,
+                    row,
+                    entry_price=row.get("entry_price"),
+                )
                 for key in AVAILABLE_MODEL_FEATURES
             }
             features.update(

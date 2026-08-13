@@ -12,6 +12,7 @@ import pandas as pd
 
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..ml.features import materialize_entry_feature
 from ..ml.registry import ModelRegistry
 from ..repositories.models import ModelRepository
 from ..strategy import MODEL_STRATEGIES, RULES_ONLY, model_strategy
@@ -139,8 +140,14 @@ class PredictionService:
             source = json.loads(row.get("features_json") or "{}")
         except (TypeError, json.JSONDecodeError):
             source = {}
-        source["price"] = row.get("entry_price")
-        record = {name: source.get(name, np.nan) for name in feature_names}
+        record = {
+            name: materialize_entry_feature(
+                name,
+                source,
+                entry_price=row.get("entry_price"),
+            )
+            for name in feature_names
+        }
         return pd.DataFrame.from_records([record], columns=list(feature_names))
 
     def _reconcile_model_signals(self, *, moment: datetime) -> tuple[int, int, int]:

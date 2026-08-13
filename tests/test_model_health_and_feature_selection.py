@@ -100,10 +100,10 @@ def seed_recent_predictions(database: Database, model_ids: list[str], now: datet
 def test_feature_selection_defaults_exclude_optional_liquidity_feature(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     service = TrainingService(database, make_settings(tmp_path))
-    assert "price" in service.normalize_feature_selection(None)
+    assert "ln(price+1)" in service.normalize_feature_selection(None)
     assert "ln(liquidity_usd)" not in service.normalize_feature_selection(None)
     selected = service.normalize_feature_selection(["price", "ln(liquidity_usd)"])
-    assert selected == ("price", "ln(liquidity_usd)")
+    assert selected == ("ln(price+1)", "ln(liquidity_usd)")
     with pytest.raises(ValueError):
         service.normalize_feature_selection(["launchpad"])
     run_id = service.create_run("manual", feature_names=list(selected))

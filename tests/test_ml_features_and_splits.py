@@ -5,7 +5,13 @@ import pandas as pd
 import pytest
 
 from backend.app.ml import FeatureBuilder, TemporalSplitConfig, TemporalSplitter
-from backend.app.ml.features import FeaturePolicy, MODEL_TRAINING_FEATURES
+from backend.app.ml.features import (
+    AGE_LOG1P_FEATURE,
+    PRICE_LOG1P_FEATURE,
+    FeaturePolicy,
+    MODEL_TRAINING_FEATURES,
+    materialize_entry_feature,
+)
 
 
 def _frame(days: int = 60, rows_per_day: int = 4, *, liquidity: bool = True):
@@ -21,6 +27,8 @@ def _frame(days: int = 60, rows_per_day: int = 4, *, liquidity: bool = True):
         "type": "new_creation",
         "time": [int(value.timestamp()) for value in time],
         "price": 1.0,
+        AGE_LOG1P_FEATURE: np.log1p(30.0),
+        PRICE_LOG1P_FEATURE: np.log1p(1.0),
         "price_1h_max/price": np.where(tag == 1, 1.6, 1.1),
         "price_1h_min/price": np.where(tag == 0, 0.9, 1.0),
         "final_1h_close_ratio": np.nan,
@@ -71,13 +79,34 @@ def test_production_feature_allowlist_includes_entry_price_and_excludes_launchpa
 
     assert prepared.feature_names == MODEL_TRAINING_FEATURES
     assert len(prepared.feature_names) == 31
-    assert "price" in prepared.feature_names
+    assert AGE_LOG1P_FEATURE in prepared.feature_names
+    assert PRICE_LOG1P_FEATURE in prepared.feature_names
+    assert "price" not in prepared.feature_names
     assert "launchpad" not in prepared.feature_names
     assert not any(name.startswith("launchpad::") for name in prepared.feature_names)
     assert "liquidity" not in prepared.feature_names
     assert "liquidity_usd" not in prepared.feature_names
     assert "tag" not in prepared.feature_names
-    assert prepared.X["price"].eq(1.0).all()
+    assert prepared.X[PRICE_LOG1P_FEATURE].eq(np.log1p(1.0)).all()
+
+
+def test_log1p_entry_feature_materialization_keeps_legacy_models_compatible() -> None:
+    legacy_age = float(np.log(9.0))
+    current_age = float(np.log1p(9.0))
+    entry_price = 0.001
+
+    assert materialize_entry_feature(
+        AGE_LOG1P_FEATURE, {"age": legacy_age}, entry_price=entry_price
+    ) == pytest.approx(current_age)
+    assert materialize_entry_feature(
+        PRICE_LOG1P_FEATURE, {"age": legacy_age}, entry_price=entry_price
+    ) == pytest.approx(np.log1p(entry_price))
+    assert materialize_entry_feature(
+        "age", {AGE_LOG1P_FEATURE: current_age}, entry_price=entry_price
+    ) == pytest.approx(legacy_age)
+    assert materialize_entry_feature(
+        "price", {AGE_LOG1P_FEATURE: current_age}, entry_price=entry_price
+    ) == pytest.approx(entry_price)
 
 
 def test_legacy_missing_liquidity_is_proxy_not_dollar_pnl() -> None:

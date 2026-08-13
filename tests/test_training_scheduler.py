@@ -160,7 +160,7 @@ async def test_scheduled_training_inherits_champion_feature_schema(tmp_path: Pat
     )
     row = database.fetch_one("SELECT request_json FROM training_runs WHERE id=?", (run_id,))
     assert json.loads(row["request_json"])["feature_names"] == [
-        "price",
+        "ln(price+1)",
         "ln(liquidity_usd)",
         "price_change_1h",
     ]

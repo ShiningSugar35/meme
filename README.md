@@ -90,11 +90,11 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 通过初筛的每次观察按 `(chain, address, observed_at)` 视为独立样本。同一 Token 在 1 小时窗口结束后再次出现可以形成新样本；不能只按地址去重。实盘已有未平仓同 Token 时跳过新买入，模拟盘允许多个独立批次。
 
-需要采集/导出的核心列如下：address	name	symbol	type	time	age	launchpad	price	ln(liquidity_usd)	price_1h_max/price	price_1h_min/price	final_1h_close_ratio	liquidity/holder_count	volume_1h/swaps_1h	has_twitter	has_website	ln(image_dup+1)	dexscr_update_link	cto_flag	ln(twitter_rename_count+1)	ln(twitter_del_post_token_count+1)	ln(twitter_create_token_count+1)	top_10_holder_rate	top_bot_degen_percentage	fresh_wallet_rate	bot_degen_rate	price/ath_price	stat.holder_count/market_cap	ln(smart_degen_count+1)	ln(renowned_count+1)	entrapment_ratio	dev_team_hold_rate	top70_sniper_hold_rate	ln(twitter_dup+1)	ln(website_dup+1)	ln(visiting_count+1)	price_change_1h	price_change_5m	ln(creator_open_count+1)	creator_open_ratio	ln(top_wallets+1)	tag。数据库仍保留旧 `price_2h_*` 审计列，仅用于历史 provenance，不再由新标签链路写入或参与训练/交易。
+需要采集/导出的核心列如下：address	name	symbol	type	time	ln(age+1)	launchpad	price	ln(price+1)	ln(liquidity_usd)	price_1h_max/price	price_1h_min/price	final_1h_close_ratio	liquidity/holder_count	volume_1h/swaps_1h	has_twitter	has_website	ln(image_dup+1)	dexscr_update_link	cto_flag	ln(twitter_rename_count+1)	ln(twitter_del_post_token_count+1)	ln(twitter_create_token_count+1)	top_10_holder_rate	top_bot_degen_percentage	fresh_wallet_rate	bot_degen_rate	price/ath_price	stat.holder_count/market_cap	ln(smart_degen_count+1)	ln(renowned_count+1)	entrapment_ratio	dev_team_hold_rate	top70_sniper_hold_rate	ln(twitter_dup+1)	ln(website_dup+1)	ln(visiting_count+1)	price_change_1h	price_change_5m	ln(creator_open_count+1)	creator_open_ratio	ln(top_wallets+1)	tag。数据库仍保留旧 `price_2h_*` 审计列，仅用于历史 provenance，不再由新标签链路写入或参与训练/交易。
 
 当前默认候选 feature pool 包含 31 个入场时数值/布尔特征；每个算法默认从 4 个特征起逐维扫描到可用全量，特征排序严格在每个 chronological development fold 的训练段内完成，再按 one-standard-error 奥卡姆规则选择“统计上接近最佳”的最小维度。最终生产列名只用 final-train 重新排序确定，最终 holdout 不参与任何特征选择。`launchpad` 仅作为样本来源元数据保存，不进入模型输入矩阵；`tag` 仅作为二分类 target。
 
-`tag` 为分类标签列，只作为 target，不进入模型输入矩阵。`price` 是样本通过准入规则时记录的入场价格，因此属于入场时已知特征并默认参与训练。`ln(liquidity_usd)` 从新样本开始持续采集并作为可选训练特征，但由于 legacy CSV 不含 raw entry liquidity，当前默认训练集先不启用它；后续新样本积累充分后可在模型中心勾选该特征重新训练。数据库仍单独保存 raw entry liquidity，供单笔资金公式和真实美元收益评价使用。`launchpad` 仅用于准入、展示、审计与导出。
+`tag` 为分类标签列，只作为 target，不进入模型输入矩阵。`age_minutes` 与 `samples.entry_price` 继续保存/使用 raw 入场事实：前者用于严格准入边界，后者用于标签、收益、仓位和交易核算；模型输入不再直接使用旧 `age=ln(age_minutes)` 或 raw `price`，而统一使用 `ln(age+1)` 与 `ln(price+1)`。`ln(liquidity_usd)` 从新样本开始持续采集并作为可选训练特征，但由于 legacy CSV 不含 raw entry liquidity，当前默认训练集先不启用它；后续新样本积累充分后可在模型中心勾选该特征重新训练。数据库仍单独保存 raw entry liquidity，供单笔资金公式和真实美元收益评价使用。`launchpad` 仅用于准入、展示、审计与导出。
 
 ### 2.3 1 小时标签
 
@@ -121,7 +121,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 #### 2026-08-13 age<240 样本池迁移
 
-基于 age 长尾审计，正式把业务准入池收窄为严格 `1 < age_minutes < 240`。在线 `SafetyFilter` 对 GMGN raw age 直接执行该边界；legacy CSV/export 中 `age` 为 `ln(age_minutes)`，importer 在 log 空间执行完全等价的 `ln(1) < age < ln(240)`，避免重建数据库时超龄样本回流。迁移前备份 `data/backups/meme_quant_pre_age240_20260813T0318Z.db`。本次从 2353 条样本中删除 497 条不合规样本（449 mature negative、46 mature positive、2 pending），并同步删除其 201 条 prediction、45 个 simulation position 和 88 条 trade；迁移后剩余 **1856 条 mature H1 v4 样本，344 正 / 1512 负，正类率 18.53%**，age 违规数为 0。
+基于 age 长尾审计，正式把业务准入池收窄为严格 `1 < age_minutes < 240`。在线 `SafetyFilter` 始终对 GMGN raw age 直接执行该边界；历史 legacy CSV/export 的旧 `age` 列为 `ln(age_minutes)`，`CsvImporter` 继续兼容该旧格式并先还原 raw age 做等价边界判断，导入后统一规范为模型特征 `ln(age+1)`；当前新采集/导出也使用 `ln(age+1)`。迁移前备份 `data/backups/meme_quant_pre_age240_20260813T0318Z.db`。本次从 2353 条样本中删除 497 条不合规样本（449 mature negative、46 mature positive、2 pending），并同步删除其 201 条 prediction、45 个 simulation position 和 88 条 trade；迁移后剩余 **1856 条 mature H1 v4 样本，344 正 / 1512 负，正类率 18.53%**，age 违规数为 0。
 
 #### 2026-08-13 Top10 / 成交均额样本池迁移
 
@@ -153,7 +153,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 - 数据跨度 `<120` 天：时间排序的扩展窗口验证，最近 20% 为最终留出；模型标记 `EARLY_STAGE_MODEL`。
 - 所有训练/验证边界保留至少 1 小时标签隔离带。
 
-硬性排除标识、展示和未来字段，包括 `address`、`name`、`symbol`、`type`、`time`、`launchpad`、`price_2h_max/price`、`price_2h_min/price`、最终收盘、退出字段、tag 和交易结果。`price` 是准入时快照并默认参与训练。`ln(liquidity_usd)` 当前持续采集并作为可选特征，默认训练暂不启用。raw liquidity 只用于资金和收益评价，不直接作为模型输入。训练与评分必须复用同一个序列化 Pipeline 和固定列顺序。
+硬性排除标识、展示和未来字段，包括 `address`、`name`、`symbol`、`type`、`time`、`launchpad`、`price_2h_max/price`、`price_2h_min/price`、最终收盘、退出字段、tag 和交易结果。raw `age_minutes` / `price` 是准入时业务事实，模型默认使用 `ln(age+1)` / `ln(price+1)`；`ln(liquidity_usd)` 当前持续采集并作为可选特征，默认训练暂不启用。raw liquidity 只用于资金和收益评价，不直接作为模型输入。训练与评分必须复用同一个序列化 Pipeline 和固定列顺序。
 
 ### 3.3 资金与效用
 

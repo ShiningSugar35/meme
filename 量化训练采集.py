@@ -110,9 +110,10 @@ CSV_COLUMNS = [
     "type",
     "北京时间",
     "time",
-    "age",
+    "ln(age+1)",
     "launchpad",
     "price",
+    "ln(price+1)",
     "price_2h_max/price",
     "price_2h_min/price",
     "liquidity/holder_count",
@@ -1309,6 +1310,15 @@ def write_csv_rows(rows: List[Dict[str, Any]]) -> None:
             legacy_time = row.get("time", "")
             for col in CSV_COLUMNS:
                 value = row.get(col, "")
+                if value == "" and col == "ln(age+1)":
+                    legacy_age = to_float(row.get("age"))
+                    if legacy_age is not None:
+                        try:
+                            value = safe_ln1p_nonnegative(math.exp(legacy_age))
+                        except OverflowError:
+                            value = ""
+                if value == "" and col == "ln(price+1)":
+                    value = safe_ln1p_nonnegative(row.get("price"))
                 if value == "" and col in LEGACY_COLUMN_MAP:
                     value = row.get(LEGACY_COLUMN_MAP[col], "")
                 normalized[col] = value
@@ -1518,9 +1528,10 @@ def compute_feature_row(address: str, token_type: str, source: Dict[str, Any],
         "type": token_type,
         "北京时间": bjt_display_string(now_dt),
         "time": str(now_ts),
-        "age": safe_ln_pos(normalized.get("age") or age_minutes(source)),
+        "ln(age+1)": safe_ln1p_nonnegative(normalized.get("age") or age_minutes(source)),
         "launchpad": normalized.get("launchpad") or best_launchpad_value(source),
         "price": f"{price:.16g}" if price else "",
+        "ln(price+1)": safe_ln1p_nonnegative(price),
         "price_2h_max/price": "",
         "price_2h_min/price": "",
         "liquidity/holder_count": ratio_ln(liquidity, holder_count),

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -66,14 +67,77 @@ _RETURN_ESTIMATE_COLUMNS = (
     "terminal_return_estimated",
 )
 
+AGE_LOG1P_FEATURE = "ln(age+1)"
+PRICE_LOG1P_FEATURE = "ln(price+1)"
+LEGACY_AGE_FEATURE = "age"
+LEGACY_PRICE_FEATURE = "price"
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def materialize_entry_feature(
+    name: str,
+    source: Mapping[str, Any],
+    *,
+    entry_price: Any = None,
+) -> Any:
+    """Resolve current feature semantics while keeping old model schemas scoreable.
+
+    Historical samples/models use ``age=ln(age_minutes)`` and raw ``price``.
+    New models use log1p for both features. This adapter lets current training
+    reconstruct the new age feature from legacy samples and lets retired/active
+    legacy models continue scoring samples collected after the schema change.
+    """
+
+    if name == PRICE_LOG1P_FEATURE:
+        price = _finite_float(entry_price)
+        return math.log1p(price) if price is not None and price >= 0 else None
+    if name == LEGACY_PRICE_FEATURE:
+        return _finite_float(entry_price)
+
+    if name == AGE_LOG1P_FEATURE:
+        current = _finite_float(source.get(AGE_LOG1P_FEATURE))
+        if current is not None:
+            return current
+        legacy = _finite_float(source.get(LEGACY_AGE_FEATURE))
+        if legacy is None:
+            return None
+        try:
+            return math.log1p(math.exp(legacy))
+        except OverflowError:
+            return None
+
+    if name == LEGACY_AGE_FEATURE:
+        legacy = _finite_float(source.get(LEGACY_AGE_FEATURE))
+        if legacy is not None:
+            return legacy
+        current = _finite_float(source.get(AGE_LOG1P_FEATURE))
+        if current is None:
+            return None
+        try:
+            age_minutes = math.expm1(current)
+        except OverflowError:
+            return None
+        return math.log(age_minutes) if age_minutes > 0 else None
+
+    return source.get(name)
+
+
 # Frozen model-input schema from README.md §2.2. `tag` is deliberately absent:
-# it is the target, never an input feature. `price` is an admission-time fact.
+# it is the target, never an input feature. Price and age are admission-time
+# facts whose model-facing representations use log1p transforms.
 # Launchpad remains sample metadata and is deliberately excluded from model
 # inputs. Raw liquidity remains economic sizing/evaluation data; only its
 # optional log transform may be selected as a model input.
 AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
-    "age",
-    "price",
+    AGE_LOG1P_FEATURE,
+    PRICE_LOG1P_FEATURE,
     "ln(liquidity_usd)",
     "liquidity/holder_count",
     "volume_1h/swaps_1h",
@@ -126,11 +190,6 @@ class FeaturePolicy:
 
     def is_excluded(self, column: str) -> bool:
         normalized = column.strip().lower()
-        # Entry price is normally excluded by the generic leakage policy for
-        # backwards compatibility. A caller using an explicit allowlist may opt
-        # it in because README defines it as an admission-time feature.
-        if normalized == "price" and self.feature_allowlist is not None:
-            return normalized not in {item.strip().lower() for item in self.feature_allowlist}
         if normalized in _EXACT_EXCLUSIONS:
             return True
         if normalized in {item.strip().lower() for item in self.extra_exclusions}:
