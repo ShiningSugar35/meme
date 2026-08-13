@@ -100,10 +100,13 @@ def test_candidate_catalog_is_expanded_and_optional_automl_is_explicit() -> None
         "xgboost",
         "lightgbm",
         "catboost",
+        "tabpfn",
         "flaml_automl",
     }
     assert set(catalog) == required
     assert catalog["decision_tree"].available
+    assert catalog["tabpfn"].family == "foundation"
+    assert catalog["tabpfn"].feature_subset_sizes == (4, 8, 16, 24)
     assert catalog["flaml_automl"].skip_reason is not None
 
 
@@ -115,6 +118,9 @@ def test_default_feature_count_search_is_adaptive_and_explicit_override_is_prese
 
     overridden = ModelTrainer(TrainerConfig(feature_subset_sizes=(2, 5)))
     assert overridden._feature_subset_sizes(8) == (2, 5, 8)
+
+    tabpfn = {spec.name: spec for spec in candidate_catalog()}["tabpfn"]
+    assert adaptive._feature_subset_sizes(31, tabpfn) == (4, 8, 16, 24, 31)
 
 
 def test_occam_rule_never_accepts_more_than_eight_percent_score_drop() -> None:

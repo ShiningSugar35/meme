@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib.util
+import os
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import (
     AdaBoostClassifier,
@@ -31,6 +34,8 @@ class CandidateSpec:
     builder: Callable[[], object] | None
     scale_numeric: bool = False
     family: str = "other"
+    preprocess: bool = True
+    feature_subset_sizes: tuple[int, ...] | None = None
 
 
 def _optional_missing(name: str, dependency: str, complexity_rank: int, family: str) -> CandidateSpec:
@@ -133,6 +138,161 @@ def _catboost_spec(random_state: int) -> CandidateSpec:
         skip_reason=None,
         builder=build,
         family="boosting",
+    )
+
+
+class TabPFNProductionClassifier(ClassifierMixin, BaseEstimator):
+    """Local TabPFN adapter safe for unattended scheduled training.
+
+    V3 is preferred when its checkpoint is already cached or TABPFN_TOKEN is
+    configured. Otherwise the adapter falls back to V2 instead of launching an
+    interactive browser from a background worker. The actual checkpoint version
+    and device are exposed on the fitted estimator for registry audit.
+    """
+
+    def __init__(
+        self,
+        *,
+        random_state: int = 42,
+        preferred_version: str = "v3",
+        cpu_n_estimators: int = 1,
+        gpu_n_estimators: int = 4,
+    ) -> None:
+        self.random_state = random_state
+        self.preferred_version = preferred_version
+        self.cpu_n_estimators = cpu_n_estimators
+        self.gpu_n_estimators = gpu_n_estimators
+
+    @staticmethod
+    def _version_enum(value: str):
+        from tabpfn.constants import ModelVersion
+
+        normalized = str(value).strip().lower()
+        mapping = {
+            "v2": ModelVersion.V2,
+            "v2.5": ModelVersion.V2_5,
+            "v2_5": ModelVersion.V2_5,
+            "v2.6": ModelVersion.V2_6,
+            "v2_6": ModelVersion.V2_6,
+            "v3": ModelVersion.V3,
+        }
+        if normalized not in mapping:
+            raise ValueError(f"unsupported TabPFN model version: {value}")
+        return mapping[normalized]
+
+    def _can_use_preferred(self, version) -> bool:
+        from tabpfn import TabPFNClassifier
+
+        if str(version.value) == "v2":
+            return True
+        probe = TabPFNClassifier.create_default_for_version(
+            version,
+            device="cpu",
+            n_estimators=1,
+            show_progress_bar=False,
+        )
+        return Path(probe.model_path).exists() or bool(os.getenv("TABPFN_TOKEN"))
+
+    def _build(self, version):
+        import torch
+        from tabpfn import TabPFNClassifier
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cpu":
+            os.environ.setdefault("TABPFN_ALLOW_CPU_LARGE_DATASET", "1")
+        os.environ.setdefault("TABPFN_DISABLE_TELEMETRY", "1")
+        os.environ.setdefault("TABPFN_NO_BROWSER", "1")
+        n_estimators = (
+            max(1, int(self.gpu_n_estimators))
+            if device == "cuda"
+            else max(1, int(self.cpu_n_estimators))
+        )
+        model = TabPFNClassifier.create_default_for_version(
+            version,
+            device=device,
+            n_estimators=n_estimators,
+            random_state=self.random_state,
+            ignore_pretraining_limits=(device == "cpu"),
+            show_progress_bar=False,
+        )
+        return model, device, n_estimators
+
+    def fit(self, X, y, sample_weight=None):
+        if sample_weight is not None:
+            weights = np.asarray(sample_weight, dtype=float)
+            if len(weights) != len(y):
+                raise ValueError("TabPFN sample_weight length must match y")
+            if len(weights) and not np.allclose(weights, weights[0]):
+                raise ValueError(
+                    "TabPFN adapter only supports the current equal-weight training policy"
+                )
+
+        preferred = self._version_enum(self.preferred_version)
+        fallback = self._version_enum("v2")
+        versions = [preferred]
+        if fallback != preferred:
+            versions.append(fallback)
+
+        last_error: Exception | None = None
+        for version in versions:
+            if version == preferred and not self._can_use_preferred(version):
+                continue
+            try:
+                model, device, n_estimators = self._build(version)
+                model.fit(X, y)
+            except Exception as exc:
+                last_error = exc
+                continue
+            self.model_ = model
+            self.classes_ = np.asarray(model.classes_)
+            self.actual_model_version_ = str(version.value)
+            self.device_ = device
+            self.n_estimators_ = n_estimators
+            self.model_path_ = str(model.model_path)
+            return self
+
+        if last_error is not None:
+            raise RuntimeError(f"TabPFN initialization failed: {last_error}") from last_error
+        raise RuntimeError(
+            "TabPFN preferred checkpoint is unavailable and no fallback could be used"
+        )
+
+    def predict_proba(self, X):
+        if not hasattr(self, "model_"):
+            raise RuntimeError("TabPFNProductionClassifier is not fitted")
+        return self.model_.predict_proba(X)
+
+
+def _tabpfn_spec(random_state: int) -> CandidateSpec:
+    if importlib.util.find_spec("tabpfn") is None:
+        return _optional_missing("tabpfn", "tabpfn", 7, "foundation")
+
+    from tabpfn import TabPFNClassifier
+    from tabpfn.constants import ModelVersion
+
+    v3_probe = TabPFNClassifier.create_default_for_version(
+        ModelVersion.V3,
+        device="cpu",
+        n_estimators=1,
+        show_progress_bar=False,
+    )
+    resolved_version = (
+        "v3"
+        if Path(v3_probe.model_path).exists() or bool(os.getenv("TABPFN_TOKEN"))
+        else "v2"
+    )
+    return CandidateSpec(
+        name="tabpfn",
+        complexity_rank=7,
+        available=True,
+        skip_reason=None,
+        builder=lambda: TabPFNProductionClassifier(
+            random_state=random_state,
+            preferred_version=resolved_version,
+        ),
+        family="foundation",
+        preprocess=False,
+        feature_subset_sizes=(4, 8, 16, 24),
     )
 
 
@@ -287,6 +447,7 @@ def candidate_catalog(random_state: int = 42) -> tuple[CandidateSpec, ...]:
         _xgboost_spec(random_state),
         _lightgbm_spec(random_state),
         _catboost_spec(random_state),
+        _tabpfn_spec(random_state),
         _flaml_spec(random_state),
     )
 
@@ -338,6 +499,8 @@ def _preprocessor(frame: pd.DataFrame, *, scale_numeric: bool) -> ColumnTransfor
 def build_pipeline(spec: CandidateSpec, frame: pd.DataFrame) -> Pipeline:
     if not spec.available or spec.builder is None:
         raise RuntimeError(spec.skip_reason or f"candidate {spec.name} is unavailable")
+    if not spec.preprocess:
+        return Pipeline([("model", spec.builder())])
     return Pipeline(
         [
             ("preprocessor", _preprocessor(frame, scale_numeric=spec.scale_numeric)),

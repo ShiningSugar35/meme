@@ -51,6 +51,7 @@ class TrainerConfig:
         "xgboost",
         "lightgbm",
         "catboost",
+        "tabpfn",
         "flaml_automl",
     )
     # None means adaptive search over every feasible feature count. A tuple is
@@ -97,7 +98,6 @@ class ModelTrainer:
         if unknown:
             raise ValueError(f"unknown model candidates: {unknown}")
 
-        subset_sizes = self._feature_subset_sizes(len(dataset.feature_names))
         evaluations: list[CandidateEvaluation] = []
         final_estimators: dict[str, object] = {}
         successful_specs: dict[str, CandidateSpec] = {}
@@ -115,6 +115,7 @@ class ModelTrainer:
                 )
                 continue
 
+            subset_sizes = self._feature_subset_sizes(len(dataset.feature_names), spec)
             subset_evaluations: list[CandidateEvaluation] = []
             for size in subset_sizes:
                 try:
@@ -197,6 +198,14 @@ class ModelTrainer:
                 dataset.y.iloc[plan.refit_indices],
                 economic_sample_weights(refit_economics),
             )
+            model_step = refit.named_steps.get("model")
+            runtime_metadata: dict[str, object] = {}
+            if model_step is not None and hasattr(model_step, "actual_model_version_"):
+                runtime_metadata = {
+                    "tabpfn_model_version": getattr(model_step, "actual_model_version_", None),
+                    "tabpfn_device": getattr(model_step, "device_", None),
+                    "tabpfn_n_estimators": getattr(model_step, "n_estimators_", None),
+                }
             model_id = f"{now:%Y%m%dT%H%M%SZ}-{selected.algorithm}-{uuid.uuid4().hex[:8]}"
             thresholds = self._threshold_set(selected)
             common = dict(
@@ -223,6 +232,7 @@ class ModelTrainer:
                         "score_standard_error": selected.score_standard_error,
                         "utility_eligible": refit_economics.utility_eligible,
                         "utility_blockers": refit_economics.blockers,
+                        "model_runtime": runtime_metadata,
                         "evaluation_only": False,
                     },
                     **common,
@@ -238,6 +248,7 @@ class ModelTrainer:
                         "final_recent_window": asdict(selected.final_metrics),
                         "generalization": asdict(selected.generalization) if selected.generalization else {},
                         "composite_score": selected.composite_score,
+                        "model_runtime": runtime_metadata,
                         "evaluation_only": True,
                         "trained_through": dataset.timestamps.iloc[
                             plan.final_split.train_indices[-1]
@@ -515,11 +526,26 @@ class ModelTrainer:
         self._feature_rank_cache[cache_key] = list(order)
         return list(order)
 
-    def _feature_subset_sizes(self, total: int) -> tuple[int, ...]:
+    def _feature_subset_sizes(
+        self,
+        total: int,
+        spec: CandidateSpec | None = None,
+    ) -> tuple[int, ...]:
         if total <= 0:
             return ()
         if self.config.feature_subset_sizes:
-            sizes = {min(total, max(1, int(size))) for size in self.config.feature_subset_sizes}
+            sizes = {
+                min(total, max(1, int(size)))
+                for size in self.config.feature_subset_sizes
+            }
+            sizes.add(total)
+            return tuple(sorted(sizes))
+        if spec is not None and spec.feature_subset_sizes:
+            minimum = min(total, max(1, int(self.config.min_features_to_select)))
+            sizes = {
+                min(total, max(minimum, int(size)))
+                for size in spec.feature_subset_sizes
+            }
             sizes.add(total)
             return tuple(sorted(sizes))
         minimum = min(total, max(1, int(self.config.min_features_to_select)))

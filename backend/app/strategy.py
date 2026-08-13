@@ -25,6 +25,7 @@ ALGORITHM_DISPLAY_NAMES: Final[dict[str, str]] = {
     "xgboost": "XGBoost",
     "lightgbm": "LightGBM",
     "catboost": "CatBoost",
+    "tabpfn": "TabPFN",
     "flaml_automl": "FLAML AutoML",
 }
 

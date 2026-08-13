@@ -87,9 +87,17 @@ class PredictionService:
                 (entry_cutoff, model["id"], limit),
             )
             strategy = model_strategy(slot)
-            for row in rows:
-                frame = self._prediction_frame(row, bundle.feature_names)
-                probability = float(np.clip(bundle.predict_probabilities(frame)[0], 0.0, 1.0))
+            if not rows:
+                continue
+            frame = pd.concat(
+                [self._prediction_frame(row, bundle.feature_names) for row in rows],
+                ignore_index=True,
+            )
+            probabilities = np.clip(bundle.predict_probabilities(frame), 0.0, 1.0)
+            if len(probabilities) != len(rows):
+                raise RuntimeError("model returned a prediction count that does not match the batch")
+            for row, raw_probability in zip(rows, probabilities, strict=True):
+                probability = float(raw_probability)
                 threshold = float(bundle.threshold)
                 chosen = probability >= threshold
                 with self.database.transaction(immediate=True) as connection:
