@@ -55,8 +55,8 @@ max_rug_ratio = 0.2
 max_insider_ratio = 0.2
 max_bundler_rate = 0.2
 min_liquidity = 4800
-min_top_holder_rate = 0.145
-max_top_holder_rate = 0.29
+min_top_holder_rate = 0.125
+max_top_holder_rate = 0.275
 max_fresh_wallet_rate = 0.2
 renounced_mint = 1
 renounced_freeze_account = 1
@@ -73,7 +73,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 - quote 资产属于 `SOL/USDC/USDT`，且目标 Token 不属于 `SOL/USDT/USDC/PYUSD/WBTC/WETH`；
 - `rug_ratio < 0.2`、`insider_ratio < 0.2`、`bundler_rate < 0.2`；
 - `liquidity > 4800`；
-- `0.145 <= top_10_holder_rate <= 0.29`；
+- `0.125 <= top_10_holder_rate <= 0.275`；
 - `fresh_wallet_rate < 0.2`；
 - `burn_status == "burn"`；
 - `renounced_mint == 1` 且 `renounced_freeze_account == 1`；

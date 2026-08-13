@@ -110,6 +110,8 @@ SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 s
 7. 模型评分；
 8. 后续 T+1h label finalization。
 
+自 2026-08-13 起，Trenches 前置筛选与 local safety filter 对 `top_10_holder_rate` 使用同一闭区间：`0.125 <= top_10_holder_rate <= 0.275`。该变更只作用于此后新进入采集链的候选，不追溯删除、重标或重筛既有样本集。
+
 ### 5.2 限流与故障隔离
 
 全局共享 2 RPS 安全门限；429 按 reset/retry-after 全局冷却。Cloudflare HTML block 不能当普通业务 429 无限探测。

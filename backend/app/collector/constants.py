@@ -30,8 +30,8 @@ class FilterThresholds:
     max_insider_ratio: float = 0.2
     max_bundler_rate: float = 0.2
     min_liquidity: float = 4_800.0
-    min_top_10_holder_rate: float = 0.145
-    max_top_10_holder_rate: float = 0.29
+    min_top_10_holder_rate: float = 0.125
+    max_top_10_holder_rate: float = 0.275
     max_fresh_wallet_rate: float = 0.2
     max_rat_trader_amount_rate: float = 0.2
     min_holder_count_exclusive: int = 29
@@ -77,8 +77,8 @@ TRENCH_PREFILTERS = {
     "max_insider_ratio": 0.2,
     "max_bundler_rate": 0.2,
     "min_liquidity": 4_800,
-    "min_top_holder_rate": 0.145,
-    "max_top_holder_rate": 0.29,
+    "min_top_holder_rate": 0.125,
+    "max_top_holder_rate": 0.275,
     "max_fresh_wallet_rate": 0.2,
     "renounced_mint": 1,
     "renounced_freeze_account": 1,

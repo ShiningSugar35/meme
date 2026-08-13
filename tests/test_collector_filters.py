@@ -38,6 +38,21 @@ def test_valid_token_passes_all_local_filters() -> None:
     assert SafetyFilter().evaluate(valid_token()).accepted
 
 
+def test_top_10_holder_rate_uses_new_inclusive_range() -> None:
+    safety = SafetyFilter()
+    for accepted in (0.125, 0.275):
+        token = valid_token()
+        token["top_10_holder_rate"] = accepted
+        assert safety.evaluate(token).accepted
+
+    for rejected in (0.124999, 0.275001):
+        token = valid_token()
+        token["top_10_holder_rate"] = rejected
+        decision = safety.evaluate(token)
+        assert not decision.accepted
+        assert "top_10_holder_rate" in decision.reasons
+
+
 def test_strict_boundaries_match_readme() -> None:
     token = valid_token()
     token["fresh_wallet_rate"] = 0.2
