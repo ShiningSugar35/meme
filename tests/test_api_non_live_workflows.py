@@ -31,13 +31,25 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
     catalog = models.json()["feature_catalog"]
     assert "ln(age+1)" in catalog["default_features"]
     assert "ln(price+1)" in catalog["default_features"]
+    assert catalog["selected_features"] == catalog["default_features"]
     assert "price" not in catalog["available_features"]
     assert "ln(liquidity_usd)" not in catalog["default_features"]
     assert "ln(liquidity_usd)" in catalog["available_features"]
 
+    saved = client.put(
+        "/api/models/feature-selection",
+        json={"features": ["ln(price+1)", "price_change_1h"]},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["selected_features"] == ["ln(price+1)", "price_change_1h"]
+    assert client.get("/api/models").json()["feature_catalog"]["selected_features"] == [
+        "ln(price+1)",
+        "price_change_1h",
+    ]
+
     response = client.post(
         "/api/models/train",
-        json={"reason": "api-smoke", "features": ["ln(price+1)", "price_change_1h"]},
+        json={"reason": "api-smoke"},
     )
     assert response.status_code == 202
     run_id = response.json()["run_id"]

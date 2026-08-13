@@ -17,6 +17,10 @@ class TrainingRequest(BaseModel):
     features: list[str] | None = Field(default=None, max_length=64)
 
 
+class FeatureSelectionRequest(BaseModel):
+    features: list[str] = Field(min_length=1, max_length=64)
+
+
 class AgentProposalRequest(BaseModel):
     proposal_type: str = Field(min_length=1, max_length=100)
     payload: dict[str, Any] = Field(default_factory=dict)

@@ -129,7 +129,7 @@ async def test_insufficient_data_due_cycle_queues_daily_training_at_1700(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_scheduled_training_inherits_champion_feature_schema(tmp_path: Path) -> None:
+async def test_scheduled_training_uses_persisted_feature_pool_not_champion_subset(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     repository = ModelRepository(database)
@@ -153,6 +153,9 @@ async def test_scheduled_training_inherits_champion_feature_schema(tmp_path: Pat
         )
         active.append({"id": model_id, "composite_score": 1.0 - slot * 0.1, "threshold": 0.4, "metrics": {}})
     repository.set_active_models(active)
+    TrainingService(database, settings).save_feature_selection(
+        ["ln(age+1)", "ln(price+1)", "price_change_1h", "ln(liquidity_usd)"]
+    )
 
     run_id = await TrainingScheduler(database, settings)._schedule_if_due(
         startup=False,
@@ -160,6 +163,7 @@ async def test_scheduled_training_inherits_champion_feature_schema(tmp_path: Pat
     )
     row = database.fetch_one("SELECT request_json FROM training_runs WHERE id=?", (run_id,))
     assert json.loads(row["request_json"])["feature_names"] == [
+        "ln(age+1)",
         "ln(price+1)",
         "ln(liquidity_usd)",
         "price_change_1h",

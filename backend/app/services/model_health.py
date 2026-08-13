@@ -9,7 +9,6 @@ from ..collector.constants import LabelPolicy
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..ml.economics import theoretical_profit_units
-from ..ml.features import DEFAULT_MODEL_TRAINING_FEATURES
 from ..repositories.models import ModelRepository
 from .training import TrainingService
 
@@ -189,7 +188,7 @@ class ModelHealthService:
                 return None, "degraded retraining cooldown is active"
         run_id = self.training.create_run(
             "degraded",
-            feature_names=tuple(rank1.get("parameters", {}).get("requested_feature_pool") or DEFAULT_MODEL_TRAINING_FEATURES),
+            feature_names=self.training.configured_feature_selection(),
         )
         self.database.set_runtime_state("last_degraded_training_requested_at", moment.isoformat())
         self.database.audit(

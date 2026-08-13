@@ -33,6 +33,8 @@ TrainingTrigger = Literal["manual", "weekly", "daily", "startup_catchup", "degra
 class TrainingService:
     """Persistent Top-3 model training and atomic active-set installation."""
 
+    FEATURE_SELECTION_STATE_KEY = "model_training_feature_pool"
+
     def __init__(self, database: Database, settings: Settings | None = None) -> None:
         self.database = database
         self.settings = settings or get_settings()
@@ -47,7 +49,11 @@ class TrainingService:
         feature_names: list[str] | tuple[str, ...] | None = None,
         scheduled_for: str | None = None,
     ) -> str:
-        selected_features = self.normalize_feature_selection(feature_names)
+        selected_features = (
+            self.configured_feature_selection()
+            if feature_names is None
+            else self.normalize_feature_selection(feature_names)
+        )
         request_payload = {"feature_names": list(selected_features)}
         request_json = json.dumps(request_payload, ensure_ascii=False, separators=(",", ":"))
         run_id = str(uuid.uuid4())
@@ -98,6 +104,27 @@ class TrainingService:
         if unknown:
             raise ValueError(f"unsupported model features: {unknown}")
         return tuple(name for name in AVAILABLE_MODEL_FEATURES if name in requested)
+
+    def configured_feature_selection(self) -> tuple[str, ...]:
+        stored = self.database.get_runtime_state(self.FEATURE_SELECTION_STATE_KEY)
+        if not isinstance(stored, list):
+            return DEFAULT_MODEL_TRAINING_FEATURES
+        try:
+            return self.normalize_feature_selection(stored)
+        except ValueError:
+            return DEFAULT_MODEL_TRAINING_FEATURES
+
+    def save_feature_selection(self, feature_names: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        selected = self.normalize_feature_selection(feature_names)
+        self.database.set_runtime_state(self.FEATURE_SELECTION_STATE_KEY, list(selected))
+        self.database.audit(
+            category="model",
+            action="training_feature_pool_saved",
+            entity_type="runtime_state",
+            entity_id=self.FEATURE_SELECTION_STATE_KEY,
+            details={"feature_names": list(selected), "count": len(selected)},
+        )
+        return selected
 
     def run(self, run_id: str) -> None:
         row = self.database.fetch_one("SELECT * FROM training_runs WHERE id=?", (run_id,))
@@ -520,6 +547,7 @@ class TrainingService:
             )
         return {
             "default_features": list(DEFAULT_MODEL_TRAINING_FEATURES),
+            "selected_features": list(self.configured_feature_selection()),
             "available_features": list(AVAILABLE_MODEL_FEATURES),
             "total_mature_rows": total,
             "active_model_count": len(active),

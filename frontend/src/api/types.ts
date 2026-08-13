@@ -53,6 +53,7 @@ export interface ModelFeatureItem {
 
 export interface ModelFeatureCatalog {
   default_features: string[];
+  selected_features: string[];
   available_features: string[];
   total_mature_rows: number;
   active_model_count: number;

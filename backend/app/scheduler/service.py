@@ -220,11 +220,8 @@ class TrainingScheduler:
             },
         )
 
-    def _scheduled_features(self) -> tuple[str, ...] | None:
-        champion = TrainingService(self.database, self.settings).models.champion()
-        if champion and champion.get("feature_names"):
-            return tuple(str(name) for name in champion["feature_names"])
-        return None
+    def _scheduled_features(self) -> tuple[str, ...]:
+        return TrainingService(self.database, self.settings).configured_feature_selection()
 
     async def _schedule_if_due(
         self,

@@ -21,6 +21,7 @@ from .schemas import (
     AgentDecisionRequest,
     AgentProposalRequest,
     ConfirmActionRequest,
+    FeatureSelectionRequest,
     ImportRequest,
     TrainingRequest,
 )
@@ -46,6 +47,16 @@ def models(limit: int = Query(default=50, ge=1, le=200)) -> dict:
         "feature_catalog": training.feature_catalog(),
         "training_runs": training.list_runs(limit=min(limit, 20)),
     }
+
+
+@router.put("/models/feature-selection")
+def save_model_feature_selection(request: FeatureSelectionRequest) -> dict:
+    service = TrainingService(get_database())
+    try:
+        selected = service.save_feature_selection(request.features)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"selected_features": list(selected), "count": len(selected)}
 
 
 @router.post("/models/train", status_code=202)

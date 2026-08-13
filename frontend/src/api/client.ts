@@ -61,6 +61,7 @@ export const api = {
   rejectAgentProposal: (proposalId: string, note?: string) => request<AgentProposal>(`/api/agent/proposals/${encodeURIComponent(proposalId)}/reject`, { method: "POST", body: JSON.stringify({ note }) }),
   runtime: () => request<{ runtime: RuntimeStatus; risk: RiskStatus }>("/api/runtime"),
   collectorEvents: (limit = 200) => request<{ items: CollectorEvent[] }>(`/api/runtime/collector-events?limit=${limit}`),
+  saveModelFeatureSelection: (features: string[]) => request<{ selected_features: string[]; count: number }>("/api/models/feature-selection", { method: "PUT", body: JSON.stringify({ features }) }),
   trainModel: (features?: string[]) => request<{ run_id: string; status: string }>("/api/models/train", { method: "POST", body: JSON.stringify({ reason: "manual", features }) }),
   rollbackModel: (modelId: string) => request<{ champion: ModelVersion }>(`/api/models/${encodeURIComponent(modelId)}/rollback`, { method: "POST" }),
   prepareLive: () => request<PreparedAction>("/api/runtime/live/prepare", { method: "POST" }),
