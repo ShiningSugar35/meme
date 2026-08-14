@@ -278,6 +278,12 @@ class EnrichmentService:
         self.readiness_retry_seconds = max(0.0, float(readiness_retry_seconds))
         self._sleep = sleeper
 
+    def prefilter(self, candidate: TokenCandidate) -> FilterDecision:
+        normalized = normalize_token(candidate.raw, candidate.token_type)
+        if not normalized.get("address"):
+            normalized["address"] = candidate.address
+        return self.safety_filter.evaluate_discovery_prefilter(normalized)
+
     async def enrich(
         self,
         candidate: TokenCandidate,

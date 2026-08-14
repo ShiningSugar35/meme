@@ -165,6 +165,100 @@ class SafetyFilter:
     def __init__(self, thresholds: FilterThresholds | None = None) -> None:
         self.t = thresholds or FilterThresholds()
 
+    def evaluate_discovery_prefilter(self, token: Mapping[str, Any]) -> FilterDecision:
+        """Fail-open coarse filter for raw Trenches rows.
+
+        Trenches is used only for candidate discovery.  A raw row may omit facts
+        that are available later from token_info/security/pool, so missing or
+        malformed values are deliberately deferred to the authoritative
+        enrichment filter.  A candidate is rejected here only when a present,
+        valid fact already proves that the unchanged business threshold fails.
+        """
+
+        t = self.t
+        fail: list[str] = []
+
+        def reject_lt(name: str, value: Any, limit: float) -> None:
+            parsed = _nonnegative_float(value)
+            if parsed is not None and not parsed < limit:
+                fail.append(f"{name}<{limit:g}")
+
+        def reject_gt(name: str, value: Any, limit: float) -> None:
+            parsed = _nonnegative_float(value)
+            if parsed is not None and not parsed > limit:
+                fail.append(f"{name}>{limit:g}")
+
+        platform = str(token.get("launchpad") or "").strip()
+        if platform and launchpad_key(platform) not in ALLOWED_LAUNCHPAD_KEYS:
+            fail.append("launchpad")
+
+        target_symbol = str(token.get("symbol") or "").strip().upper()
+        quote_symbol = str(token.get("quote_symbol") or "").strip().upper()
+        if target_symbol and target_symbol in EXCLUDED_TARGET_SYMBOLS:
+            fail.append("target_asset_excluded")
+        if quote_symbol and quote_symbol not in ALLOWED_QUOTE_SYMBOLS:
+            fail.append("quote_asset_not_allowed")
+
+        reject_lt("rug_ratio", token.get("rug_ratio"), t.max_rug_ratio)
+        reject_lt("insider_ratio", token.get("insider_ratio"), t.max_insider_ratio)
+        reject_lt("bundler_rate", token.get("bundler_rate"), t.max_bundler_rate)
+        reject_gt("liquidity", token.get("liquidity"), t.min_liquidity)
+
+        top10 = _ratio_float(token.get("top_10_holder_rate"))
+        if top10 is not None and not t.min_top_10_holder_rate <= top10 <= t.max_top_10_holder_rate:
+            fail.append("top_10_holder_rate")
+        reject_lt("fresh_wallet_rate", token.get("fresh_wallet_rate"), t.max_fresh_wallet_rate)
+
+        burn_status = str(token.get("burn_status") or "").strip().lower()
+        if burn_status and burn_status != "burn":
+            fail.append("burn_status")
+        mint_renounced = _known_bool(token.get("renounced_mint"))
+        if mint_renounced is False:
+            fail.append("renounced_mint")
+        freeze_renounced = _known_bool(token.get("renounced_freeze_account"))
+        if freeze_renounced is False:
+            fail.append("renounced_freeze_account")
+        wash_trading = _known_bool(token.get("is_wash_trading"))
+        if wash_trading is True:
+            fail.append("is_wash_trading")
+
+        reject_lt(
+            "rat_trader_amount_rate",
+            token.get("rat_trader_amount_rate"),
+            t.max_rat_trader_amount_rate,
+        )
+        holder_count = _nonnegative_float(token.get("holder_count"))
+        if holder_count is not None and not t.min_holder_count_exclusive < holder_count < t.max_holder_count_exclusive:
+            fail.append("holder_count")
+        reject_gt("marketcap", token.get("marketcap"), t.min_marketcap)
+        reject_lt("sell_tax", token.get("sell_tax"), t.max_sell_tax)
+        reject_lt("buy_tax", token.get("buy_tax"), t.max_buy_tax)
+        reject_lt("sniper_count", token.get("sniper_count"), t.max_sniper_count)
+        reject_gt("age", token.get("age"), t.min_age_minutes)
+        reject_lt("age", token.get("age"), t.max_age_minutes_exclusive)
+
+        liquidity = _nonnegative_float(token.get("liquidity"))
+        if liquidity is not None and holder_count is not None:
+            if not liquidity or not holder_count or liquidity / holder_count <= t.min_liquidity_per_holder:
+                fail.append("liquidity/holder_count")
+
+        swaps = _nonnegative_float(token.get("swaps_1h"))
+        volume_1h = _nonnegative_float(token.get("volume_1h"))
+        if swaps is not None and not swaps > t.min_swaps_1h:
+            fail.append(f"swaps_1h>{t.min_swaps_1h:g}")
+        if swaps is not None and volume_1h is not None:
+            if not swaps or not volume_1h or volume_1h / swaps <= t.min_volume_per_swap_1h:
+                fail.append("volume_1h/swaps_1h")
+
+        smart = _nonnegative_float(token.get("smart_degen_count"))
+        renowned = _nonnegative_float(token.get("renowned_count"))
+        volume = _nonnegative_float(token.get("volume"))
+        if smart is not None and renowned is not None and volume is not None:
+            if (0.5 + smart + renowned) * volume <= t.min_weighted_activity:
+                fail.append("weighted_activity")
+
+        return FilterDecision(not fail, tuple(fail))
+
     def evaluate(self, token: Mapping[str, Any]) -> FilterDecision:
         t = self.t
         fail: list[str] = []

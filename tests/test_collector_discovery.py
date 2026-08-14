@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from backend.app.collector.discovery import DiscoveryService
+from backend.app.collector.discovery import DiscoveryService, extract_trench_candidates
 from backend.app.collector.models import ApiKeyRoles
 
 
@@ -38,7 +38,7 @@ def test_dynamic_key_role_layout_uses_all_configured_keys_and_redacts() -> None:
     assert single.discovery_fallback.index == 0
 
 
-def test_discovery_payload_has_all_launchpads_and_prefilters() -> None:
+def test_discovery_payload_tracks_current_gmgn_contract_without_business_prefilters() -> None:
     roles = ApiKeyRoles.from_secrets([f"key-{i}" for i in range(12)])
     client = FakeClient()
     service = DiscoveryService(client, roles, retry_delay_seconds=0, sleeper=no_sleep)
@@ -49,10 +49,30 @@ def test_discovery_payload_has_all_launchpads_and_prefilters() -> None:
     assert len(section["launchpad_platform"]) == 8
     assert "memoo" not in section["launchpad_platform"]
     assert "token_mill" not in section["launchpad_platform"]
-    assert section["max_rug_ratio"] == 0.2
-    assert section["min_top_holder_rate"] == 0.125
-    assert section["max_top_holder_rate"] == 0.28
     assert section["launchpad_platform_v2"] is True
     assert section["filters"] == ["offchain", "onchain"]
-    assert "quote_address_type" not in section
+    assert section["quote_address_type"] == [4, 5, 3, 1, 13, 0]
+    assert section["min_created"] == "1m"
+    assert section["max_created"] == "240m"
+    for business_filter in (
+        "max_rug_ratio",
+        "min_top_holder_rate",
+        "max_top_holder_rate",
+        "renounced_mint",
+        "renounced_freeze_account",
+    ):
+        assert business_filter not in section
+
+
+def test_discovery_parser_never_relabels_unrelated_sections() -> None:
+    response = {
+        "data": {
+            "new_creation": [{"address": "new-only"}],
+            "near_completion": [],
+            "completed": [{"address": "completed-only"}],
+        }
+    }
+    assert extract_trench_candidates(response, "near_completion") == []
+    found = extract_trench_candidates(response, "new_creation")
+    assert [candidate.address for candidate in found] == ["new-only"]
 

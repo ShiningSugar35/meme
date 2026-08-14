@@ -31,6 +31,8 @@ class CollectionReport:
     rejected: int
     unfinished_duplicates: int
     finalized: int = 0
+    prefilter_rejected: int = 0
+    enrichment_rejected: int = 0
     rejection_reasons: Mapping[str, int] = field(default_factory=dict)
     type_stats: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
 
@@ -58,6 +60,7 @@ class CollectorService:
         event_sink: Callable[[str, Mapping[str, object]], None] | None = None,
     ) -> CollectionReport:
         discovered = accepted = rejected = duplicates = 0
+        prefilter_rejected = enrichment_rejected = 0
         rejection_reasons: Counter[str] = Counter()
         type_stats: dict[str, dict[str, int]] = {}
 
@@ -69,7 +72,14 @@ class CollectorService:
             emit("discovery_start", {"token_type": token_type, "requested_limit": limit})
             candidates = await self.discovery.discover(token_type, limit=limit)
             discovered += len(candidates)
-            current = {"returned": len(candidates), "accepted": 0, "rejected": 0, "duplicates": 0}
+            current = {
+                "returned": len(candidates),
+                "accepted": 0,
+                "rejected": 0,
+                "prefilter_rejected": 0,
+                "enrichment_rejected": 0,
+                "duplicates": 0,
+            }
             type_stats[token_type] = current
             emit(
                 "discovery_result",
@@ -86,15 +96,40 @@ class CollectorService:
                     current["duplicates"] += 1
                     emit("candidate_duplicate", {"token_type": token_type, "token": token_label})
                     continue
+                prefilter = self.enrichment.prefilter(candidate)
+                if not prefilter.accepted:
+                    rejected += 1
+                    prefilter_rejected += 1
+                    current["rejected"] += 1
+                    current["prefilter_rejected"] += 1
+                    reasons = tuple(prefilter.reasons or ("unspecified",))
+                    rejection_reasons.update(reasons)
+                    emit(
+                        "candidate_rejected",
+                        {
+                            "token_type": token_type,
+                            "token": token_label,
+                            "stage": "trench_prefilter",
+                            "reasons": list(reasons),
+                        },
+                    )
+                    continue
                 result = await self.enrichment.enrich(candidate, now_ts=now_ts)
                 if result.sample is None:
                     rejected += 1
+                    enrichment_rejected += 1
                     current["rejected"] += 1
+                    current["enrichment_rejected"] += 1
                     reasons = tuple(result.decision.reasons or ("unspecified",))
                     rejection_reasons.update(reasons)
                     emit(
                         "candidate_rejected",
-                        {"token_type": token_type, "token": token_label, "reasons": list(reasons)},
+                        {
+                            "token_type": token_type,
+                            "token": token_label,
+                            "stage": "enrichment",
+                            "reasons": list(reasons),
+                        },
                     )
                     continue
                 await self.sink.add_sample(result.sample)
@@ -107,6 +142,8 @@ class CollectorService:
             accepted,
             rejected,
             duplicates,
+            prefilter_rejected=prefilter_rejected,
+            enrichment_rejected=enrichment_rejected,
             rejection_reasons=dict(rejection_reasons.most_common()),
             type_stats=type_stats,
         )

@@ -187,7 +187,8 @@ export function RuntimePage() {
               <span className="collector-lifecycle-caption">最近完整周期返回</span>
               <div className="collector-lifecycle-meta">
                 <span>入样 <b>{number(stats.accepted)}</b></span>
-                <span>拒绝 <b>{number(stats.rejected)}</b></span>
+                <span>粗筛拒绝 <b>{number(stats.prefilter_rejected)}</b></span>
+                <span>深筛拒绝 <b>{number(stats.enrichment_rejected)}</b></span>
                 <span>重复 <b>{number(stats.duplicates)}</b></span>
               </div>
             </article>
@@ -196,7 +197,8 @@ export function RuntimePage() {
         <div className="collector-summary-strip">
           <span>发现 <strong>{number(runtime.collector.discovered)}</strong></span>
           <span>入样 <strong>{number(runtime.collector.accepted)}</strong></span>
-          <span>拒绝 <strong>{number(runtime.collector.rejected)}</strong></span>
+          <span>粗筛拒绝 <strong>{number(runtime.collector.prefilter_rejected)}</strong></span>
+          <span>深筛拒绝 <strong>{number(runtime.collector.enrichment_rejected)}</strong></span>
           <span>重复 <strong>{number(runtime.collector.duplicates)}</strong></span>
           <span>耗时 <strong>{number(runtime.collector.last_cycle_duration_seconds).toFixed(1)}s</strong></span>
         </div>

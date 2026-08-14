@@ -45,25 +45,19 @@ GMGN Trenches 发现
 
 ### 2.2 规则初筛
 
-Trenches 请求尽量前置以下过滤：
+Trenches 自 2026-08-14 起只负责候选发现与生命周期/范围约束，不再把业务阈值作为 GMGN 服务端联合预筛：
 
 ```text
 filters = ["offchain", "onchain"]
 launchpad_platform_v2 = true
 launchpad_platform = [Pump.fun, Moonshot, moonshot_app, letsbonk, jup_studio, bags, believe, heaven]
-max_rug_ratio = 0.2
-max_insider_ratio = 0.2
-max_bundler_rate = 0.2
-min_liquidity = 4800
-min_top_holder_rate = 0.125
-max_top_holder_rate = 0.28
-max_fresh_wallet_rate = 0.2
-renounced_mint = 1
-renounced_freeze_account = 1
-min_holder_count = 30
-max_holder_count = 999
-min_marketcap = 5000
+quote_address_type = [4, 5, 3, 1, 13, 0]
+min_created = "1m"
+max_created = "240m"
+limit <= 80
 ```
+
+`rug/insider/bundler/liquidity/Top10/fresh/holder/marketcap` 等业务阈值统一由本地执行。raw Trenches 行先经过 fail-open 粗筛：只有字段存在、可解析且已经明确违反冻结阈值时才提前拒绝；字段缺失或异常不会在粗筛阶段被误杀，而是进入 `token_info/security/pool` enrichment 后由 fail-closed `SafetyFilter` 做最终权威判定。`renounced_mint / renounced_freeze_account` 也只在 enrichment 后校验，不再作为 Trenches 服务端参数发送。
 
 GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USDC/USDT`；目标 Token 排除 `SOL/USDT/USDC/PYUSD/WBTC/WETH`。
 
@@ -125,7 +119,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 #### 2026-08-13 Top10 / 成交均额样本池迁移
 
-筛选口径更新为 `0.125 <= top_10_holder_rate <= 0.28` 与 `volume_1h / swaps_1h > 31`。Trenches 前置 Top10 上限、本地 `SafetyFilter`、legacy `量化训练采集.py` 已统一；数据库/CSV 的 `volume_1h/swaps_1h` 特征是原始成交均额的自然对数，因此 `CsvImporter` 对有该列的旧导出执行等价的 `feature > ln(31)`，防止已淘汰样本重新回流。
+筛选口径更新为 `0.125 <= top_10_holder_rate <= 0.28` 与 `volume_1h / swaps_1h > 31`。本地 discovery prefilter、authoritative `SafetyFilter`、legacy `量化训练采集.py` 已统一；Trenches 自 2026-08-14 起不再发送这些业务阈值，避免服务端候选搜索深度影响本地样本定义。数据库/CSV 的 `volume_1h/swaps_1h` 特征是原始成交均额的自然对数，因此 `CsvImporter` 对有该列的旧导出执行等价的 `feature > ln(31)`，防止已淘汰样本重新回流。
 
 迁移前备份 `data/backups/meme_quant_pre_filter_top028_vps31_20260813T050755Z.db`。从 1858 条样本中删除 182 条不合格样本，其中 165 条 mature negative、17 条 mature positive；Top10 不合格 42 条（4 条 `<0.125`、38 条 `>0.28`），成交均额 `<=31` 的 144 条，二者有 4 条重叠。同步删除 36 条关联 prediction；4 个关联 simulation position 均已关闭，因此只解绑其 sample/prediction 引用，保留 8 条历史 trade 与账户流水。迁移后剩余 **1676 条样本：1674 mature（327 正 / 1347 负）+ 2 pending**，新筛选口径违规数为 0。
 

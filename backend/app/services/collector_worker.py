@@ -194,6 +194,11 @@ class CollectorWorker:
         token = str(payload.get("token") or "")
         reasons = payload.get("reasons")
         reason_text = ", ".join(str(item) for item in reasons) if isinstance(reasons, list) else ""
+        _rejection_stage = {
+            "trench_prefilter": "本地粗筛",
+            "enrichment": "Enrichment 深筛",
+        }.get(str(payload.get("stage") or ""), "筛选")
+        reason_text = f"{_rejection_stage} / {reason_text}" if reason_text else _rejection_stage
         messages = {
             "cycle_started": (
                 "采集周期开始：依次扫描 New Creation → Near Completion，"
@@ -330,6 +335,8 @@ class CollectorWorker:
                 "discovered": 0,
                 "accepted": 0,
                 "rejected": 0,
+                "prefilter_rejected": 0,
+                "enrichment_rejected": 0,
                 "duplicates": 0,
                 "rejection_reasons": {},
                 "type_stats": {},
@@ -379,6 +386,8 @@ class CollectorWorker:
                         "discovered": collection.discovered,
                         "accepted": collection.accepted,
                         "rejected": collection.rejected,
+                        "prefilter_rejected": collection.prefilter_rejected,
+                        "enrichment_rejected": collection.enrichment_rejected,
                         "duplicates": collection.unfinished_duplicates,
                         "rejection_reasons": dict(collection.rejection_reasons),
                         "type_stats": {key: dict(value) for key, value in collection.type_stats.items()},

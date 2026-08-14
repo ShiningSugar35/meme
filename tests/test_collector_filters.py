@@ -101,12 +101,36 @@ def test_completed_pool_receives_no_filter_relaxation() -> None:
     assert "renounced_freeze_account" in decision.reasons
 
 
-def test_only_the_eight_frozen_launchpads_are_allowed() -> None:
-    for blocked in ("unknown-pad", "memoo", "token_mill"):
+def test_only_the_eight_frozen_business_launchpads_are_allowed() -> None:
+    safety = SafetyFilter()
+    for allowed in ("Pump.fun", "Moonshot", "bags", "heaven"):
+        token = valid_token()
+        token["launchpad"] = allowed
+        assert safety.evaluate(token).accepted, allowed
+
+    for blocked in ("unknown-pad", "memoo", "token_mill", "xstocks"):
         token = valid_token()
         token["launchpad"] = blocked
-        decision = SafetyFilter().evaluate(token)
-        assert "launchpad" in decision.reasons
+        assert "launchpad" in safety.evaluate(token).reasons
+
+
+def test_discovery_prefilter_defers_missing_facts_but_rejects_known_failures() -> None:
+    safety = SafetyFilter()
+    sparse = {
+        "launchpad": "Pump.fun",
+        "symbol": "MEME",
+        "liquidity": None,
+        "holder_count": None,
+        "marketcap": None,
+        "top_10_holder_rate": None,
+    }
+    assert safety.evaluate_discovery_prefilter(sparse).accepted
+
+    known_bad = dict(sparse, liquidity=4_800, holder_count=100, marketcap=5_000)
+    decision = safety.evaluate_discovery_prefilter(known_bad)
+    assert not decision.accepted
+    assert "liquidity>4800" in decision.reasons
+    assert "marketcap>5000" in decision.reasons
 
 
 def test_quote_asset_is_limited_to_sol_usdc_usdt() -> None:

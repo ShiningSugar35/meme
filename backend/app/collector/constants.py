@@ -23,6 +23,8 @@ LAUNCHPADS = (
     "heaven",
 )
 
+SOL_TRENCH_QUOTE_ADDRESS_TYPES = (4, 5, 3, 1, 13, 0)
+
 
 @dataclass(frozen=True, slots=True)
 class FilterThresholds:
@@ -71,20 +73,3 @@ PYUSD_MINT = "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo"
 
 ALLOWED_QUOTE_MINTS = frozenset({SOL_WRAPPED_MINT, USDC_MINT, USDT_MINT})
 EXCLUDED_TARGET_MINTS = frozenset({SOL_WRAPPED_MINT, USDC_MINT, USDT_MINT, PYUSD_MINT})
-
-
-TRENCH_PREFILTERS = {
-    "max_rug_ratio": 0.2,
-    "max_insider_ratio": 0.2,
-    "max_bundler_rate": 0.2,
-    "min_liquidity": 4_800,
-    "min_top_holder_rate": 0.125,
-    "max_top_holder_rate": 0.28,
-    "max_fresh_wallet_rate": 0.2,
-    "renounced_mint": 1,
-    "renounced_freeze_account": 1,
-    "min_holder_count": 30,
-    "max_holder_count": 999,
-    "min_marketcap": 5_000,
-}
-

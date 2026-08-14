@@ -1,4 +1,4 @@
-"""Trenches discovery for the three lifecycle sections."""
+"""Trenches discovery for the two supported lifecycle sections."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from .client import GMGNDataClient
-from .constants import DISCOVERY_TYPES, LAUNCHPADS, TRENCH_PREFILTERS
+from .constants import DISCOVERY_TYPES, LAUNCHPADS, SOL_TRENCH_QUOTE_ADDRESS_TYPES
 from .errors import CollectorError, CollectorValidationError
 from .models import ApiKeyRoles, TokenCandidate
 
@@ -55,14 +55,6 @@ def extract_trench_candidates(data: Mapping[str, Any], requested_type: str) -> l
                 continue
             seen.add(address)
             result.append(TokenCandidate(address, requested_type, dict(raw)))
-    if not result:
-        for raw in _items(inner):
-            if not isinstance(raw, Mapping):
-                continue
-            address = _address(raw)
-            if address and address not in seen:
-                seen.add(address)
-                result.append(TokenCandidate(address, requested_type, dict(raw)))
     return result
 
 
@@ -91,7 +83,9 @@ class DiscoveryService:
             "launchpad_platform_v2": True,
             "limit": limit,
             "launchpad_platform": list(LAUNCHPADS),
-            **TRENCH_PREFILTERS,
+            "quote_address_type": list(SOL_TRENCH_QUOTE_ADDRESS_TYPES),
+            "min_created": "1m",
+            "max_created": "240m",
         }
         return {"version": "v2", token_type: section}
 
