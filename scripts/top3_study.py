@@ -59,9 +59,9 @@ def main() -> int:
             ),
         ),
         "formula": {
-            "fixed_payoff_units": "6*TP-FP",
-            "precision_recall_identity": "N_positive*recall*(7-1/precision)",
-            "economic": "mean_clip((6*TP-FP)/(6*N_positive),-1,1)",
+            "fixed_payoff_units": "5*TP-FP",
+            "precision_recall_identity": "N_positive*recall*(6-1/precision)",
+            "economic": "mean_clip((5*TP-FP)/(5*N_positive),-1,1)",
             "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",
             "composite": "0.60*economic + 0.40*generalization",
             "occam": "adaptive feature-count search; fold-train-only ranking; smallest subset within one standard error of algorithm best",

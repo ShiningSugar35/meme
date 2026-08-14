@@ -23,46 +23,59 @@ class ApiSlot:
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyRoles:
-    """The 12-key allocation frozen by the source collector."""
+    """Dynamic GMGN key pools with deterministic rotation and fallback."""
 
     discovery: tuple[ApiSlot, ApiSlot]
-    position_monitor: ApiSlot
+    position_monitor: tuple[ApiSlot, ...]
     discovery_fallback: ApiSlot
-    realtime: tuple[ApiSlot, ApiSlot, ApiSlot, ApiSlot]
-    realtime_fallback: tuple[ApiSlot, ApiSlot]
-    kline: tuple[ApiSlot, ApiSlot]
+    realtime: tuple[ApiSlot, ...]
+    realtime_fallback: tuple[ApiSlot, ...]
+    kline: tuple[ApiSlot, ...]
 
     @classmethod
     def from_secrets(cls, secrets: Sequence[str]) -> "ApiKeyRoles":
         clean = [str(value).strip() for value in secrets if str(value).strip()]
-        if len(clean) < 12:
-            raise CollectorValidationError(
-                "At least 12 GMGN API keys are required for the frozen role layout"
-            )
-        slots = tuple(ApiSlot(index, secret) for index, secret in enumerate(clean[:12]))
+        if not clean:
+            raise CollectorValidationError("At least one GMGN API key is required")
+        slots = tuple(ApiSlot(index, value) for index, value in enumerate(clean))
+
+        def pick(index: int) -> ApiSlot:
+            return slots[index % len(slots)]
+
+        # All pools may reuse the same underlying keys when only a few are
+        # configured. A shared per-IP limiter still caps aggregate throughput;
+        # the larger pool merely spreads auth/key-specific failures and hotspots.
         return cls(
-            discovery=(slots[0], slots[1]),
-            position_monitor=slots[2],
-            discovery_fallback=slots[3],
-            realtime=(slots[4], slots[5], slots[6], slots[7]),
-            realtime_fallback=(slots[8], slots[9]),
-            kline=(slots[10], slots[11]),
+            discovery=(pick(0), pick(1)),
+            position_monitor=slots,
+            discovery_fallback=pick(2),
+            realtime=slots,
+            realtime_fallback=slots,
+            kline=slots,
         )
 
     @property
-    def kline_fallback(self) -> tuple[ApiSlot, ApiSlot, ApiSlot]:
-        return (self.discovery_fallback, *self.realtime_fallback)
+    def kline_fallback(self) -> tuple[ApiSlot, ...]:
+        ordered = (self.discovery_fallback, *self.realtime_fallback)
+        unique: dict[int, ApiSlot] = {}
+        for slot in ordered:
+            unique.setdefault(slot.index, slot)
+        return tuple(unique.values())
 
     @property
     def all_slots(self) -> tuple[ApiSlot, ...]:
-        return (
+        ordered = (
             *self.discovery,
-            self.position_monitor,
+            *self.position_monitor,
             self.discovery_fallback,
             *self.realtime,
             *self.realtime_fallback,
             *self.kline,
         )
+        unique: dict[int, ApiSlot] = {}
+        for slot in ordered:
+            unique.setdefault(slot.index, slot)
+        return tuple(unique.values())
 
 
 @dataclass(frozen=True, slots=True)

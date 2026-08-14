@@ -43,15 +43,25 @@ class AsyncRateLimiter:
     async def acquire(self, weight: float = 1.0) -> None:
         if weight <= 0:
             raise ValueError("request weight must be positive")
-        async with self._lock:
-            remaining = self._pause_until - self._wall_clock()
-            if remaining > 0:
-                await self._sleep(remaining)
-            now = self._monotonic()
-            wait_for_slot = self._next_request_at - now
-            if wait_for_slot > 0:
-                await self._sleep(wait_for_slot)
-            granted_at = self._monotonic()
-            self._next_request_at = max(granted_at, self._next_request_at) + (
-                weight / self.requests_per_second
-            )
+        # Reserve weighted capacity in one-request quanta. This keeps the exact
+        # same aggregate rate while allowing latency-sensitive token-info calls
+        # to interleave between heavy collector routes instead of waiting behind
+        # a single 3x/5x sleep reservation.
+        remaining_weight = float(weight)
+        while remaining_weight > 1e-12:
+            quantum = min(1.0, remaining_weight)
+            async with self._lock:
+                remaining = self._pause_until - self._wall_clock()
+                if remaining > 0:
+                    await self._sleep(remaining)
+                now = self._monotonic()
+                wait_for_slot = self._next_request_at - now
+                if wait_for_slot > 0:
+                    await self._sleep(wait_for_slot)
+                granted_at = self._monotonic()
+                self._next_request_at = max(granted_at, self._next_request_at) + (
+                    quantum / self.requests_per_second
+                )
+            remaining_weight -= quantum
+            if remaining_weight > 1e-12:
+                await self._sleep(0)

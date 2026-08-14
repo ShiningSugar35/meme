@@ -29,7 +29,7 @@ Top-3 Predictions + rules_only Baseline
   ↓
 Simulation Accounts / parked Live Interface
   ↓
-4s Current-Price Position Monitor + T+1h Kline Label Finalizer
+3s（可配置）Current-Price Position Monitor + T+1h Kline Label Finalizer
   ↓
 Training Queue / OOS E-G-S Ranking / Top-3 Publish / Rollback
 ```
@@ -137,7 +137,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 候选池覆盖 LogisticRegression、DecisionTree、HistGradientBoosting、GradientBoosting、AdaBoost、ExtraTrees、RandomForest、RBF-SVM、XGBoost，并登记 LightGBM/CatBoost/FLAML optional candidates。缺依赖必须显式 `skipped`；AutoML 只能嵌套在 outer train 内部时间切分。
 
-模型拟合与交易评价分离：训练仍做二分类；开发期经济单位 `U=6TP-FP`，Precision/Recall 恒等式为 `U=N+×r×(7-1/p)`。经济得分 E 为各 chronological OOS fold 的归一化 capture，泛化得分 G 综合 AP Skill、稳定性、衰减，综合 `S=0.60E+0.40G`。当前 E/G/S 排名公式保持冻结不变。特征数默认从 4 到可用全量逐维搜索；每个 chronological fold 的特征排序只读取本 fold train slice，最终再用 final-train 确定生产特征名，one-standard-error 内优先更小维度。
+模型拟合与交易评价分离：训练仍做二分类；开发期经济单位自 2026-08-14 起为 `U=5TP-FP`，Precision/Recall 恒等式为 `U=N+×r×(6-1/p)`。经济得分 E 为各 chronological OOS fold 的归一化 capture，泛化得分 G 综合 AP Skill、稳定性、衰减，综合 `S=0.60E+0.40G`。当前 E/G/S 排名公式保持冻结不变。特征数默认从 4 到可用全量逐维搜索；每个 chronological fold 的特征排序只读取本 fold train slice，最终再用 final-train 确定生产特征名，one-standard-error 内优先更小维度。
 
 ### 6.3 Top 3 单一决策线
 
@@ -198,7 +198,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 BUY 仍经 seeded local quote model，包含流动性 price impact、随机滑点、1% platform fee、按手续费发生时 SOL/USD 冻结的 network fee、latency 与 injectable failures。失败不得伪造持仓或零 PnL 平仓。
 
-SELL runtime 由 `PositionMonitorWorker` 驱动：专用 GMGN Key 3 调用 `/v1/token/info`，目标 cadence 4 秒；同 Token 的 simulation/live 仓位合并一次 current-market 请求，多个 Token 并发启动并通过 15 req/s limiter 约束。0.9x SL、1.6x TP、1h timeout 都以本轮 current price 判定，而不是回看历史 1m Kline first-touch。
+SELL runtime 由 `PositionMonitorWorker` 驱动：默认目标 cadence 3 秒且可在配置页调整；同 Token 的 simulation/live 仓位合并一次 current-market 请求。GMGN Key 进入动态轮换/fallback 池，Collector 与 PositionMonitor 共享默认 10 req/s 的总 limiter；多个 Key 不再被当作 IP 吞吐倍增器。0.9x SL、1.6x TP、1h timeout 都以本轮 current price 判定，而不是回看历史 1m Kline first-touch。
 
 ### 8.3 市场驱动退出
 
@@ -208,7 +208,7 @@ Prediction 只负责评分/开仓，不能在样本成熟后用 tag 事后“代
 
 ## 9. Live 接口与 fail-closed
 
-当前 live 自动 BUY **刻意未接通**。已存在 live 持仓由同一个 `PositionMonitorWorker` 以约 4s current-price cadence 监控；只有 `DRY_RUN=false` 且 runtime live gate 已武装时，触发退出才进入既有 `LiveTradingService` 幂等执行链，否则 fail-closed。保留：
+当前 live 自动 BUY **刻意未接通**。已存在 live 持仓由同一个 `PositionMonitorWorker` 以默认 3s（可配置）current-price cadence 监控；只有 `DRY_RUN=false` 且 runtime live gate 已武装时，触发退出才进入既有 `LiveTradingService` 幂等执行链，否则 fail-closed。保留：
 
 - GMGN CLI/HTTP provider adapters；
 - quote/swap/status 类型；
@@ -266,11 +266,11 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - legacy CSV/schema migration；
 - 标签边界/first-touch；
 - entry-time 特征与未来泄漏；
-- 时序 split/扩展候选池/单一决策线/`6TP-FP`/E-G-S/one-standard-error Occam/final 隔离；
+- 时序 split/扩展候选池/单一决策线/`5TP-FP`/E-G-S/one-standard-error Occam/final 隔离；
 - Top 3 原子发布/三 active model degraded/Rank 1 rollback；
 - durable training queue/restart/scheduler retry；
-- 四策略 simulation session、rules-only 无预测开仓、同 Token current-market 请求合并、4s current-price trigger、Jupiter executable quote、ledger/closing recovery；
-- collector 与独立 4s position-monitor lifecycle；
+- 四策略 simulation session、rules-only 无预测开仓、同 Token current-market 请求合并、3s（可配置）current-price trigger、Jupiter executable quote、ledger/closing recovery；
+- collector 与独立 3s（可配置）position-monitor lifecycle；
 - Agent approval；
 - FastAPI non-live workflows；
 - live journal/reconciliation/liquidation mock/contract fixtures；
@@ -326,15 +326,15 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - SQLite schema v11：v8 已从 predictions/positions 物理删除 `profile` 并新增 `active_model_slots`；v9 增加 USD-only 模拟会计、`asset_usd_prices` 与手续费费时 FX 审计字段；v10 增加 daily durable trigger 与待空仓候选持久状态，旧交易缺少历史 FX 时不伪回填；
 - 默认候选 feature pool 31；各算法从 4 个特征起逐维扫描到可用全量，fold-train-only 排序并用 one-standard-error 选择近优最小维度；`launchpad` 仅元数据，`ln(liquidity_usd)` 可选；
 - 入场 `price_change_1h/5m` 缺失时使用 `T-1h → T` 历史 Kline 回补，不读取未来；
-- 扩展候选池 + chronological OOS + 单一决策线 + `6TP-FP`/E-G-S + one-standard-error Occam + final 隔离；
+- 扩展候选池 + chronological OOS + 单一决策线 + `5TP-FP`/E-G-S + one-standard-error Occam + final 隔离；
 - age<240 迁移后正式 run `3aa752e0-7557-4602-aa79-22d9b5381c7f` 当前发布 Random Forest / AdaBoost / HistGradientBoosting；分别选择 8 / 8 / 6 个特征，并已切入新的 `model_generation_upgrade` simulation session；
 - TrainingWorker、`insufficient_data` 每日 17:00 / 其他状态周 17:00、16:00 model-entry freeze、startup catch-up、有限 retry、candidate waiting-for-flat/restart recovery、7 日 model health、rollback；
-- 四策略 USD-only simulation session、Top 3 prediction + rules-only、手续费发生时 SOL/USD 冻结折算并保留原始 SOL 事实、约 4s current-price 持仓触发、Jupiter executable quote、SELL failure/restart recovery、8 项卡片指标、重大模型换代新 session、H1-only history、独立 position-monitor worker；
+- 四策略 USD-only simulation session、Top 3 prediction + rules-only、手续费发生时 SOL/USD 冻结折算并保留原始 SOL 事实、默认 3s（可配置）current-price 持仓触发、Jupiter executable quote、SELL failure/restart recovery、8 项卡片指标、重大模型换代新 session、H1-only history、独立 position-monitor worker；
 - Agent durable proposal + 人工 approve/reject + 非实盘白名单执行；live/wallet/secret proposal fail-closed；
 - FastAPI non-live route smoke tests；
 - GMGN trade adapter 脱敏 fixture contract tests；
 - Portfolio `mode × strategy` 同构视图、当前市场快照、SQL 分页/时间筛选与四策略“模型”交易审计；
-- 后端 `pytest -q` **131/131 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、4s current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
+- 后端 `pytest -q` **131/131 通过**；前端 `npm run build` 通过；覆盖 adaptive feature count、fold-train-only 选择、E_exec shadow-only、Jupiter quoted/no-route/unavailable 三态、3s（可配置）current-price position monitor、live DRY_RUN gate、四策略 rollover 新 session 以及 H1-only 历史隔离。
 
 ### 实盘接口停放
 

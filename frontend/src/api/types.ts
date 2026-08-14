@@ -11,6 +11,7 @@ export interface RuntimeStatus {
   prediction_worker: Record<string, unknown>;
   scheduler: Record<string, unknown>;
   paper_monitor: Record<string, unknown>;
+  position_monitor: Record<string, unknown>;
   model_health: Record<string, unknown>;
   model_health_worker: Record<string, unknown>;
   training_worker: Record<string, unknown>;
@@ -354,4 +355,39 @@ export interface PreparedAction {
   summary: Record<string, string | number | boolean | null>;
   can_confirm: boolean;
   blocker: string | null;
+}
+
+export interface ProviderCredentialSummary {
+  slot: number;
+  masked: string;
+}
+
+export interface PlatformProviderConfig {
+  key: string;
+  label: string;
+  description: string;
+  multiple: boolean;
+  credential_count: number;
+  credentials: ProviderCredentialSummary[];
+  base_url: string | null;
+}
+
+export interface PlatformConfiguration {
+  runtime: {
+    position_monitor_poll_seconds: number;
+    gmgn_global_rps: number;
+  };
+  providers: PlatformProviderConfig[];
+  derived: {
+    gmgn_key_count: number;
+    jupiter_key_count: number;
+    gmgn_total_rps: number;
+    jupiter_exit_concurrency: number;
+    position_monitor_target_seconds: number;
+    gmgn_unique_tokens_per_target_cycle: number;
+    open_unique_tokens: number;
+    estimated_min_cycle_seconds: number;
+    capacity_state: "within_target" | "budget_limited";
+    policy: string;
+  };
 }

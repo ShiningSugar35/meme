@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class ConfirmActionRequest(BaseModel):
@@ -28,3 +28,14 @@ class AgentProposalRequest(BaseModel):
 
 class AgentDecisionRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
+
+
+class PlatformRuntimeConfigRequest(BaseModel):
+    position_monitor_poll_seconds: float = Field(ge=1.0, le=60.0)
+    gmgn_global_rps: float = Field(gt=0, le=50.0)
+    gmgn_base_url: str | None = Field(default=None, max_length=500)
+    jupiter_quote_url: str | None = Field(default=None, max_length=500)
+
+
+class ProviderCredentialRequest(BaseModel):
+    credential: SecretStr

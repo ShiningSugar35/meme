@@ -73,4 +73,5 @@ def test_weighted_limiter_reserves_capacity_after_each_request() -> None:
         await limiter.acquire(weight=1)
 
     asyncio.run(run())
-    assert waits == [1.5]
+    assert waits == [0, 0.5, 0, 0.5, 0.5]
+    assert sum(waits) == 1.5

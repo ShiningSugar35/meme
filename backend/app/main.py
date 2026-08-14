@@ -9,12 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.routes import router
 from .config import get_settings
 from .database import get_database, utc_now_iso
+from .collector.rate_limit import AsyncRateLimiter
 from .scheduler.service import TrainingScheduler
 from .services.collector_worker import CollectorWorker
 from .services.csv_importer import CsvImporter
 from .services.liquidation import LiquidationWorker
 from .services.model_health import ModelHealthWorker
 from .services.position_monitor import PositionMonitorWorker
+from .services.platform_configuration import PlatformConfigurationService
 from .services.prediction import PredictionWorker
 from .services.reconciliation import ReconciliationWorker
 from .services.training_worker import TrainingWorker
@@ -25,6 +27,8 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     database = get_database()
     database.initialize()
+    platform_configuration = PlatformConfigurationService(database)
+    gmgn_limiter = AsyncRateLimiter(platform_configuration.runtime_values()["gmgn_global_rps"])
     if settings.csv_import_path.exists():
         CsvImporter(database).import_file(settings.csv_import_path)
 
@@ -100,7 +104,7 @@ async def lifespan(_: FastAPI):
         tasks.append(asyncio.create_task(model_health_worker.run_forever(), name="model-health-worker"))
 
         if settings.position_monitor_enabled:
-            position_monitor_worker = PositionMonitorWorker(database, settings)
+            position_monitor_worker = PositionMonitorWorker(database, settings, gmgn_limiter=gmgn_limiter)
             tasks.append(
                 asyncio.create_task(
                     position_monitor_worker.run_forever(), name="position-monitor-worker"
@@ -110,7 +114,7 @@ async def lifespan(_: FastAPI):
         prediction_worker = PredictionWorker(database, settings)
         tasks.append(asyncio.create_task(prediction_worker.run_forever(), name="prediction-worker"))
         if settings.collector_enabled:
-            collector = CollectorWorker(database, settings, monitor_only=False)
+            collector = CollectorWorker(database, settings, monitor_only=False, gmgn_limiter=gmgn_limiter)
             tasks.append(
                 asyncio.create_task(
                     collector.run_forever(),

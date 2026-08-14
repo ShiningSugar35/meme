@@ -109,8 +109,8 @@ export function RuntimePage() {
 
   const workers = [
     ["Collector", "Trenches → enrichment → 标签补齐", runtime.collector, RefreshCw],
-    ["Prediction", "Champion 评分 → 三档模拟信号", runtime.prediction_worker, BrainCircuit],
-    ["Paper Market Monitor", "1m K 线 first-touch → 模拟退出", runtime.paper_monitor, Activity],
+    ["Prediction", "Top 3 评分 → 四策略模拟信号", runtime.prediction_worker, BrainCircuit],
+    ["Position Monitor", `${number(runtime.position_monitor.target_poll_seconds) || 3}s current-price → TP/SL/timeout → Jupiter 退出`, runtime.position_monitor, Activity],
     ["Training Worker", "持久队列 → 串行训练 → 崩溃恢复", runtime.training_worker, BrainCircuit],
     ["Model Trainer", "16:00 冻结模型新开仓 → 17:00 日/周训练 → 空仓换模", runtime.scheduler, ServerCog],
     ["Model Health", "7 日 OOS 退化检测 → 安全重训", runtime.model_health_worker, ShieldCheck],

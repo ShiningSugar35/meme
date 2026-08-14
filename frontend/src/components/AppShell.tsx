@@ -1,4 +1,4 @@
-import { Activity, Bot, ChartNoAxesCombined, LayoutDashboard, Menu, Radio, ShieldCheck, WalletCards, X } from "lucide-react";
+import { Activity, Bot, ChartNoAxesCombined, LayoutDashboard, Menu, Radio, Settings, ShieldCheck, WalletCards, X } from "lucide-react";
 import { useState } from "react";
 import type { MouseEvent, ReactNode } from "react";
 
@@ -8,7 +8,8 @@ const navigation = [
   { to: "/signals", label: "样本采集", icon: Radio },
   { to: "/runtime", label: "运行监控", icon: Activity },
   { to: "/models", label: "模型中心", icon: Bot },
-  { to: "/agent", label: "Agent审批", icon: ShieldCheck }
+  { to: "/agent", label: "Agent审批", icon: ShieldCheck },
+  { to: "/configuration", label: "配置", icon: Settings }
 ];
 
 interface AppShellProps {

@@ -143,7 +143,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 一次训练按开发期 chronological OOS 结果选出 **Top 3**。三个模型分别保存自己的特征子集、单一决策线、经济得分、泛化得分和综合分，并映射到 `model_1 / model_2 / model_3`。此外 `rules_only` 作为“不用模型”基线：所有通过规则初筛的新样本都进入同样的模拟执行链，只跳过模型二筛。
 
-模型拟合仍是标准二分类问题，交易目标不直接写成训练 loss。离线经济评价使用固定收益单位 `U = 6×TP - FP`；若以 Precision `p`、Recall `r` 和同一评估池真实正类数 `N+` 表示，则等价于 `U = N+ × r × (7 - 1/p)`。固定 $50 只用于模型间公平离线评价，对应理论美元收益 `$5 × U`；实际交易本金仍执行 `min(1% × entry liquidity, $50)`。开发期经济得分 `E = mean(clip((6×TP-FP)/(6×N+), -1, 1))`；泛化得分 `G` 综合 AP Skill、跨时间窗口稳定性和近期衰减；综合分固定为 `S = 0.60×E + 0.40×G`。Top 3 只按开发期 OOS 的 `S` 排名，最终时间留出集只做 certification。每个算法内部不再固定 12 / 20 / 全量档位，而是在可行特征数上自适应搜索；每个 chronological development fold 只能用该 fold 的训练段进行特征排序，测试段不得参与特征选择。最终仍采用 one-standard-error 奥卡姆规则：性能没有显著低于最佳方案时选择更小维度；最终 holdout 始终只做 certification。
+模型拟合仍是标准二分类问题，交易目标不直接写成训练 loss。离线经济评价自 2026-08-14 起使用摩擦调整固定收益单位 `U = 5×TP - FP`；若以 Precision `p`、Recall `r` 和同一评估池真实正类数 `N+` 表示，则等价于 `U = N+ × r × (6 - 1/p)`。固定 $50 只用于模型间公平离线评价，对应理论美元收益 `$5 × U`；实际交易本金仍执行 `min(1% × entry liquidity, $50)`。开发期经济得分 `E = mean(clip((5×TP-FP)/(5×N+), -1, 1))`；泛化得分 `G` 综合 AP Skill、跨时间窗口稳定性和近期衰减；综合分固定为 `S = 0.60×E + 0.40×G`。Top 3 只按开发期 OOS 的 `S` 排名，最终时间留出集只做 certification。每个算法内部不再固定 12 / 20 / 全量档位，而是在可行特征数上自适应搜索；每个 chronological development fold 只能用该 fold 的训练段进行特征排序，测试段不得参与特征选择。最终仍采用 one-standard-error 奥卡姆规则：性能没有显著低于最佳方案时选择更小维度；最终 holdout 始终只做 certification。
 
 ### 3.2 时间切分
 
@@ -165,7 +165,7 @@ pnl_i = capital_i × realized_return_i
 cumulative_pnl = Σ pnl_i
 ```
 
-实际模拟/实盘执行继续使用上述逐笔本金和真实交易摩擦；离线 Top 3 排名仍刻意使用统一的固定 $50、忽略交易磨损的 `+6/-1` 理论收益，从而不让不同样本的流动性规模污染模型优劣。当前 E/G/S 公式不变。系统另从 `rules_only` 的 route-validated 平仓中采集 `E_exec` shadow 指标，用于观察手续费、滑点和 no-route 对真实可执行收益的影响；`E_exec` 当前权重固定为 0，不参与模型排名。模型概率与决策线都来自开发期 OOS；最终 holdout 只生成审计成绩单，不再参与阈值或排名。
+实际模拟/实盘执行继续使用上述逐笔本金和真实交易摩擦；离线 Top 3 排名仍使用统一固定 $50，但从 gross 标签的 `+6/-1` 主动 haircut 为 `+5/-1` 摩擦调整代理：正类按 +$25、负类按 -$5 计入排序，从模型选择阶段为滑点、平台费、网络费和执行摩擦预留空间，同时不让不同样本的流动性规模污染模型优劣。系统另从 `rules_only` 的 route-validated 平仓中采集 `E_exec` shadow 指标，用于观察手续费、滑点和 no-route 对真实可执行收益的影响；`E_exec` 当前权重固定为 0，不参与模型排名。模型概率与决策线都来自开发期 OOS；最终 holdout 只生成审计成绩单，不再参与阈值或排名。
 
 Top 3 更新规则：
 
@@ -175,7 +175,7 @@ Top 3 更新规则：
 4. 最近最终 holdout 只做 certification，禁止反向调模型或阈值；
 5. 三个 Top 模型工件必须可加载，Rank 1 历史版本保留可回滚链。
 
-自动训练与模型切换从 schema v10 起拆成两个阶段，当前数据库 schema 为 v11。正常状态按每周约定日（当前为周日）北京时间 **17:00** 训练；当模型健康为 `insufficient_data` 时临时加速为**每天 17:00**。每个到期日 16:00 起冻结 `model_1 / model_2 / model_3 / rules_only` 四策略的新买入，已有仓位继续由约 4s current-price 持仓监控正常退出；17:00 无论旧模型是否仍持仓都先训练并持久化候选 Top 3，待四策略全部空仓后立即原子切换并创建新的 simulation session，四账本统一回到 1000 USD。系统在 17:00 未运行时，下次启动会补训对应计划点。手动训练与 Rank 1 rollback 同样要求四策略全平后切新 session。
+自动训练与模型切换从 schema v10 起拆成两个阶段，当前数据库 schema 为 v11。正常状态按每周约定日（当前为周日）北京时间 **17:00** 训练；当模型健康为 `insufficient_data` 时临时加速为**每天 17:00**。每个到期日 16:00 起冻结 `model_1 / model_2 / model_3 / rules_only` 四策略的新买入，已有仓位继续由默认 3s（可配置）current-price 持仓监控正常退出；17:00 无论旧模型是否仍持仓都先训练并持久化候选 Top 3，待四策略全部空仓后立即原子切换并创建新的 simulation session，四账本统一回到 1000 USD。系统在 17:00 未运行时，下次启动会补训对应计划点。手动训练与 Rank 1 rollback 同样要求四策略全平后切新 session。
 
 ## 4. 交易与风控
 
@@ -183,7 +183,7 @@ Top 3 更新规则：
 
 - `model_1 / model_2 / model_3 / rules_only` 四个模拟策略各自拥有 `1000 USD` 单一 USD 独立账本；模拟盘不维护 SOL 余额，同 Token 可在不同策略、不同批次同时存在。重大模型换代/rollback 在四策略全平后创建新 simulation session，四账本统一重置。
 - 四策略统一复用同一 BUY/SELL、滑点、费用、0.9x 止损、1.6x 止盈、1h 到期和卖出失败重试链；差别只在是否经过某个模型决策线。每次实际发生的网络费仍以 SOL 原始数量记录，并使用手续费发生时的 SOL/USD 折算成 USD 直接进入现金与 PnL。
-- 已存在的 simulation/live 持仓统一由独立 `PositionMonitorWorker` 以约 4s current-price cadence 监控。GMGN Key 3 专用于 `/v1/token/info`，同 Token 多仓合并一次 current-market 请求；simulation 命中退出条件后立即用 Jupiter executable quote 决定 SELL fill。实盘自动 BUY 仍刻意停放；live 退出只有在 `DRY_RUN=false` 且 runtime gate 已武装时才进入既有幂等执行链，否则 fail-closed。
+- 已存在的 simulation/live 持仓统一由独立 `PositionMonitorWorker` 以默认 3s（可配置）current-price cadence 监控。同 Token 多仓仍合并为一次 GMGN current-market 请求；GMGN Key 数量不再固定为 12 个，所有已配置 Key 进入轮换/fallback 池，但 Collector 与 PositionMonitor 共享同一个默认 10 req/s IP 总预算，避免多 Key 误放大公网请求。simulation 命中退出条件后先冻结同一触发价/触发时刻，再按当前 Jupiter Key 数进行受控并发 executable quote，避免四策略因串行报价人为错开数秒。实盘自动 BUY 仍刻意停放；live 退出只有在 `DRY_RUN=false` 且 runtime gate 已武装时才进入既有幂等执行链，否则 fail-closed。
 
 理论标签收益、模拟可执行收益和真实链上收益必须分开展示，不能混成一个 PnL。
 
@@ -285,7 +285,7 @@ Set-Location D:\meme
 3. 在任何新信号 worker 启动前运行一次订单 journal 对账：有 `provider_order_id` 只查询原单，无法确认的 submit 保持 `submission_unknown` 并暂停新开仓；
 4. 恢复上次进程中断的 `running` 训练任务，再启动唯一 `TrainingWorker` 串行消费手动/每日/周训/启动补跑任务，并持续检查已训练候选是否已满足“四策略全部空仓”的换代条件；满足后激活 Top 3 并创建新的 simulation session；
 5. 启动健康感知的模型调度器：`insufficient_data` 时每天 16:00 冻结四策略新买入、17:00 训练；其他状态只在每周约定日执行同一流程。同时运行 7 日 Top 3 模型健康监控、三模型实时 prediction、`rules_only` 基线、持久化 liquidation/reconciliation；
-6. 独立启动 `PositionMonitorWorker`：默认约每 4 秒用专用 GMGN Key 3 获取 simulation/live 持仓的 current price/liquidity，同 Token 合并请求；simulation 命中退出条件时同轮调用 Jupiter executable quote，live 仅在既有安全门禁已武装时执行退出。`COLLECTOR_ENABLED=true` 时 Collector 只负责 SOL/USD 费用事实刷新、discovery、enrichment 与 T+1h 标签补齐，不再承载持仓退出。
+6. 独立启动 `PositionMonitorWorker`：默认每 3 秒（配置页可改）获取 simulation/live 持仓的 current price/liquidity，同 Token 合并请求；GMGN 使用动态 Key 池并与 Collector 共享总 RPS 预算。simulation 命中退出条件时先冻结同一 current-price 触发事实，再按 Jupiter Key 数进行受控并发 SELL quote，避免四策略串行报价把同一触发事件人为拉开数秒；live 仅在既有安全门禁已武装时执行退出。运行态同时记录目标周期、单次 cycle 耗时和真实 start-to-start 周期。`COLLECTOR_ENABLED=true` 时 Collector 只负责 SOL/USD 费用事实刷新、discovery、enrichment 与 T+1h 标签补齐，不再承载持仓退出。
 
 健康检查：`http://127.0.0.1:8000/health`；OpenAPI：`http://127.0.0.1:8000/docs`。
 
@@ -325,6 +325,19 @@ HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `Traini
 
 2026-08-13 TabPFN 正式接入后的 durable run `ed4996ef-aff7-4079-9a0e-d8a288c093e6` 使用 1687 条 mature H1 v4 样本和模型中心持久化的 31 个候选特征，完整执行 fold-train-only TreeSHAP 交互排序、one-SE + 8% 相对 S 损失奥卡姆和 8% 性能带内 model-family 多样性选择。训练完成后因旧 generation 四策略仍持有同一批仓位，run 以 `waiting_for_flat` 持久等待，没有强制平仓；旧仓在 1h timeout 后由 PositionMonitor 正常退出，TrainingWorker 于 `2026-08-13T11:56:51.005533+00:00` 原子激活新 generation，并创建 `sim_425e0aaa067d427a8de69662d1411ed9`。当前 active Top 3：Rank 1 **Gradient Boosting**（4 features，threshold `0.13`，E `0.412130`，G `0.464015`，S `0.432884`）；Rank 2 **Random Forest**（4 features，threshold `0.1159806`，E `0.402369`，G `0.457405`，S `0.424383`）；Rank 3 **TabPFN**（4 features，threshold `0.1123239`，E `0.376403`，G `0.453300`，S `0.407162`）。三者统一使用 `price_change_1h / ln(top_wallets+1) / fresh_wallet_rate / dev_team_hold_rate`；TabPFN 本轮实际使用 `V2 / CPU / 1 estimator`（V3 checkpoint 未完成一次性授权/缓存时后台自动回退 V2）。新 session 四策略均从 1000 USD / 0 交易开始。
 
+
+### 6.5 配置中心
+
+左侧新增 `/configuration`「配置」页面，统一管理当前外部 Provider 资源池和运行频率：
+
+- GMGN Data：支持任意数量 `GMGN_API_KEY_n` 动态增删/重编号、Base URL、共享 IP 总 RPS；默认总预算为 10 req/s；部分最新官方 Skill 文档标注 20/capacity 20，实际账号确认后可在配置页覆盖，增加 Key 默认只增强轮换与 fallback，不自动放大 IP 吞吐。
+- Jupiter Quote：支持任意数量 `JUPITER_API_KEY_n`，同一批模拟 SELL 的并发上限自动取 `min(8, 当前 Key 数)`；Key 数减少时并发自动收缩。
+- TabPFN：可维护可选授权 Token，下一轮训练直接读取最新配置。
+- Position Monitor：默认目标周期 3.0 秒，可在 1–60 秒间调整；页面同时显示当前唯一持仓 Token 数、按 GMGN 总预算估算的最短周期和 `within_target / budget_limited` 状态。
+- 所有凭据只写本机 `.env`；GET/API/前端只返回掩码和数量，不回传明文，增删操作写审计但不记录 secret。
+
+配置文件使用原子替换写入并保留非受管配置/注释。Collector 与 PositionMonitor 检测 `.env` 变更后重建 Provider；持仓周期与 GMGN RPS 在运行中热读取，无需为普通参数修改重启系统。
+
 ## 7. 测试与构建
 
 ```powershell
@@ -335,7 +348,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-13 当前基线：后端 `pytest -q` **137/137 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV + schema v11 H1/no-completed 迁移、`6TP-FP` 与 p/r 恒等式、自适应特征数 + fold-train-only 奥卡姆特征选择、Top 3 chronological OOS 排名/最终 holdout 隔离、四策略 USD-only session、手续费发生时 SOL/USD 折算、`insufficient_data` 每日 17:00/正常周训、16:00 四策略 entry gate、17:00 先训练、候选跨重启等待四策略空仓、全平后新 simulation session、4s current-price position monitor、同 Token 行情合并、simulation Jupiter executable quote、live DRY_RUN fail-closed、H1-only 交易历史、交易失败计入交易数、Precision/Recall、TrainingWorker/启动恢复、Agent 人工审批，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
+2026-08-13 当前基线：后端 `pytest -q` **141/141 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV + schema v11 H1/no-completed 迁移、`5TP-FP` 与 p/r 恒等式、自适应特征数 + fold-train-only 奥卡姆特征选择、Top 3 chronological OOS 排名/最终 holdout 隔离、四策略 USD-only session、手续费发生时 SOL/USD 折算、`insufficient_data` 每日 17:00/正常周训、16:00 四策略 entry gate、17:00 先训练、候选跨重启等待四策略空仓、全平后新 simulation session、3s（可配置）current-price position monitor、同 Token 行情合并、simulation Jupiter executable quote、live DRY_RUN fail-closed、H1-only 交易历史、交易失败计入交易数、Precision/Recall、TrainingWorker/启动恢复、Agent 人工审批，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
@@ -358,12 +371,12 @@ npm run build
 
 ### 9.1 非实盘本地版
 
-截至 2026-08-13，单机/单用户/localhost 范围内的非实盘主链已经闭环：legacy CSV → schema v11 SQLite → 持续采集/入场特征 → T+1h 标签 → chronological OOS + 奥卡姆候选训练 → Top 3 + rules-only → 四策略 USD-only 模拟 → 手续费发生时 SOL/USD 冻结折算 → 约 4s current-price 持仓监控 → Jupiter executable SELL quote → H1 route-aware 净 USD PnL/Precision/Recall/交易数 → 健康感知的 16:00/17:00 日/周训练 → 候选持久化等待四策略空仓 → 原子换模并创建新的 simulation session → Rank 1 历史回滚同样切新 session。训练任务、待激活候选、模拟会话和 Agent 提案均为持久化对象并支持重启恢复；`rules_only` 作为独立无模型基线运行，但其统计边界与当前 simulation session 一致。
+截至 2026-08-13，单机/单用户/localhost 范围内的非实盘主链已经闭环：legacy CSV → schema v11 SQLite → 持续采集/入场特征 → T+1h 标签 → chronological OOS + 奥卡姆候选训练 → Top 3 + rules-only → 四策略 USD-only 模拟 → 手续费发生时 SOL/USD 冻结折算 → 默认 3s（可配置）current-price 持仓监控 → Jupiter executable SELL quote → H1 route-aware 净 USD PnL/Precision/Recall/交易数 → 健康感知的 16:00/17:00 日/周训练 → 候选持久化等待四策略空仓 → 原子换模并创建新的 simulation session → Rank 1 历史回滚同样切新 session。训练任务、待激活候选、模拟会话和 Agent 提案均为持久化对象并支持重启恢复；`rules_only` 作为独立无模型基线运行，但其统计边界与当前 simulation session 一致。
 
 历史数据本身仍有客观边界：
 
 - 2319 条 legacy 样本跨度约 25 天且全部来自 Pump.fun，因此当前三个 Top 模型均必须标记 `EARLY_STAGE_MODEL`，非 Pump.fun 泛化尚无证据；
-- 旧 CSV 没有 raw entry liquidity 和 `ln(liquidity_usd)`，因此不能用于逐笔真实美元本金回放；但其二分类 tag 可参与当前固定 $50、`+6/-1` 的模型离线排名；
+- 旧 CSV 没有 raw entry liquidity 和 `ln(liquidity_usd)`，因此不能用于逐笔真实美元本金回放；但其二分类 tag 可参与当前固定 $50、`+5/-1` 的模型离线排名；
 - `ln(liquidity_usd)` 已从新样本开始持续采集，是模型中心的可选特征，当前默认 recipe 暂不启用；
 - 本项目按 localhost 单用户交付。公网认证、session/CSRF、多租户不是当前本地版的“漏开发功能”；如果未来改成公网服务，必须先补正式身份认证与 CSRF/权限边界；
 - SQLite 适合当前单进程第一版；跨进程/多服务器扩展时再引入正式 migration/lease/PostgreSQL，不把扩展架构伪装成当前版本阻塞项。
@@ -390,5 +403,5 @@ npm run build
 
 在算法与交易策略上，他给出的建议同样带着温度，却始终落在刀刃上：守住 1 小时策略窗口与 T+1h 标签补齐；先用规则初筛挡住明显不安全的样本，再用严格 chronological OOS、经济得分与泛化稳定性筛选模型，而不是被某一次漂亮的最终测试成绩牵着走；强调奥卡姆剃刀、最终 holdout 隔离、退化监控与“宁可安全拒绝、也不盲目上线”，好让早期 Pump.fun legacy 样本不至于被夸大成全市场的幻觉；在退出与风控上，推动把 current-price TP/SL、executable quote、仓位上限、同币唯一、日损与连亏门禁写进可测试的约束；并一次次提醒——实盘必须服从 `DRY_RUN`、幂等 journal 与二次确认，绝不能用漂亮的模拟 PnL 去绕过真实的资金事实。
 
-截至 2026-08-13，仓库里的非实盘主链已经完成 schema v11 H1/no-completed、扩展候选池、自适应且 fold-train-only 的特征选择、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、约 4s current-price PositionMonitor、Jupiter Token→USDC executable quote-only 卖出验证、重大模型换代新 simulation session、H1-only simulation 历史与重启可恢复的 workers，以及 137/137 后端测试与前端 production build。现役 Top 3 已在真实样本上完成训练与激活，最终 holdout 被严格保留为 certification；`E_exec` 仅作为权重为 0 的执行影子指标。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
+截至 2026-08-13，仓库里的非实盘主链已经完成 schema v11 H1/no-completed、扩展候选池、自适应且 fold-train-only 的特征选择、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、默认 3s（可配置）current-price PositionMonitor、Jupiter Token→USDC executable quote-only 卖出验证、重大模型换代新 simulation session、H1-only simulation 历史与重启可恢复的 workers，以及 141/141 后端测试与前端 production build。现役 Top 3 已在真实样本上完成训练与激活，最终 holdout 被严格保留为 certification；`E_exec` 仅作为权重为 0 的执行影子指标。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
 

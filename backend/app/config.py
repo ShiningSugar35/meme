@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     signal_max_age_seconds: int = Field(default=300, ge=30, le=3_600)
     paper_market_monitor_enabled: bool = True
     position_monitor_enabled: bool = True
-    position_monitor_poll_seconds: float = Field(default=4.0, ge=1.0, le=60.0)
+    position_monitor_poll_seconds: float = Field(default=3.0, ge=1.0, le=60.0)
     reconciliation_poll_seconds: int = Field(default=30, ge=5, le=3_600)
     liquidation_poll_seconds: int = Field(default=5, ge=1, le=300)
     background_workers_enabled: bool = True

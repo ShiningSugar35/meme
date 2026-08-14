@@ -279,7 +279,7 @@ class PaperPositionMonitor:
                     fee_usd=gross_usd * QuoteModelConfig().platform_fee_rate,
                     network_fee_sol=QuoteModelConfig().network_fee_sol,
                     slippage_bps=slippage,
-                    latency_ms=0,
+                    latency_ms=int(result.latency_ms or 0),
                     message="jupiter_read_only_quote",
                 )
 

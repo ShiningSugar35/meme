@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import time
 from typing import Any, Literal
 
 import httpx
 
 from ...collector.constants import USDC_MINT
 from ...config import Settings, get_settings
+from ...services.platform_configuration import read_provider_base_url, read_provider_credentials
 
 RouteProbeState = Literal["quoted", "no_route", "unavailable", "disabled"]
 
@@ -22,6 +25,8 @@ class RouteProbeResult:
     mode: str | None = None
     error_kind: str | None = None
     message: str | None = None
+    latency_ms: int | None = None
+    quoted_at: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,7 +68,11 @@ class JupiterReadOnlyQuoteProbe:
                 error_kind="invalid_amount",
                 message="token amount is not positive",
             )
-        keys = self.settings.jupiter_api_keys
+        keys = (
+            read_provider_credentials("jupiter") or self.settings.jupiter_api_keys
+            if self.settings.app_env != "test"
+            else self.settings.jupiter_api_keys
+        )
         if not keys:
             return RouteProbeResult(
                 "unavailable",
@@ -78,15 +87,29 @@ class JupiterReadOnlyQuoteProbe:
             "amount": str(int(amount_raw)),
         }
         last_error: RouteProbeResult | None = None
+        request_started = time.monotonic()
+        start_index = self._key_index % len(keys)
+        self._key_index = (start_index + 1) % len(keys)
+
+        def timing_fields() -> dict[str, Any]:
+            return {
+                "latency_ms": max(0, int(round((time.monotonic() - request_started) * 1000))),
+                "quoted_at": datetime.now(timezone.utc).isoformat(),
+            }
+
         async with httpx.AsyncClient(
             timeout=self.settings.paper_quote_timeout_seconds,
             transport=self._transport,
         ) as client:
             for offset in range(len(keys)):
-                key = keys[(self._key_index + offset) % len(keys)]
+                key = keys[(start_index + offset) % len(keys)]
                 try:
                     response = await client.get(
-                        self.settings.paper_jupiter_quote_url,
+                        (
+                            read_provider_base_url("jupiter") or self.settings.paper_jupiter_quote_url
+                            if self.settings.app_env != "test"
+                            else self.settings.paper_jupiter_quote_url
+                        ),
                         params=params,
                         headers={"x-api-key": key},
                     )
@@ -96,6 +119,7 @@ class JupiterReadOnlyQuoteProbe:
                         self.SOURCE,
                         error_kind="network",
                         message=f"{type(exc).__name__}: {exc}"[:240],
+                        **timing_fields(),
                     )
                     continue
 
@@ -120,7 +144,6 @@ class JupiterReadOnlyQuoteProbe:
                     )
                 )
                 if explicit_no_route:
-                    self._key_index = (self._key_index + offset + 1) % len(keys)
                     return RouteProbeResult(
                         "no_route",
                         self.SOURCE,
@@ -128,6 +151,7 @@ class JupiterReadOnlyQuoteProbe:
                         mode=str(payload.get("mode") or "") or None,
                         error_kind="no_route",
                         message=message[:240] or "Jupiter returned no route",
+                        **timing_fields(),
                     )
                 if response.status_code == 429:
                     last_error = RouteProbeResult(
@@ -135,6 +159,7 @@ class JupiterReadOnlyQuoteProbe:
                         self.SOURCE,
                         error_kind="rate_limit",
                         message=message[:240] or "Jupiter rate limit",
+                        **timing_fields(),
                     )
                     continue
                 if response.status_code >= 400:
@@ -143,6 +168,7 @@ class JupiterReadOnlyQuoteProbe:
                         self.SOURCE,
                         error_kind="api",
                         message=(message or f"HTTP {response.status_code}")[:240],
+                        **timing_fields(),
                     )
                     continue
 
@@ -161,6 +187,7 @@ class JupiterReadOnlyQuoteProbe:
                         mode=str(payload.get("mode") or "") or None,
                         error_kind="invalid_quote",
                         message=message[:240] or "Jupiter order returned no positive outAmount",
+                        **timing_fields(),
                     )
                     continue
 
@@ -175,7 +202,6 @@ class JupiterReadOnlyQuoteProbe:
                         impact = float(payload.get("priceImpactPct"))
                     except (TypeError, ValueError):
                         impact = None
-                self._key_index = (self._key_index + offset + 1) % len(keys)
                 return RouteProbeResult(
                     "quoted",
                     self.SOURCE,
@@ -184,6 +210,7 @@ class JupiterReadOnlyQuoteProbe:
                     route_count=route_count,
                     router=str(payload.get("router") or "") or None,
                     mode=str(payload.get("mode") or "") or None,
+                    **timing_fields(),
                 )
 
         return last_error or RouteProbeResult(
@@ -191,4 +218,5 @@ class JupiterReadOnlyQuoteProbe:
             self.SOURCE,
             error_kind="unknown",
             message="Jupiter Swap V2 order quote did not return a result",
+            **timing_fields(),
         )

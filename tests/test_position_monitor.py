@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ from backend.app.config import Settings
 from backend.app.database import Database
 from backend.app.services.paper_position_monitor import PaperPositionMonitor
 from backend.app.services.paper_trading import PaperTradingService
+from backend.app.services.platform_configuration import PlatformConfigurationService
 from backend.app.services.position_monitor import PositionMonitorService
 from backend.app.trading.live.models import ExecutionResult, OrderStatus
 from backend.app.trading.simulator.jupiter_probe import RouteProbeResult
@@ -49,6 +52,25 @@ class FixedRouteProbe:
             "jupiter-test",
             out_amount_raw=self.out_amount_raw,
             route_count=1,
+        )
+
+
+class DelayedRouteProbe:
+    def __init__(self, delay_seconds: float = 0.12, out_amount_raw: int = 44_000_000) -> None:
+        self.delay_seconds = delay_seconds
+        self.out_amount_raw = out_amount_raw
+        self.calls: list[dict] = []
+
+    async def quote_sell(self, **kwargs):
+        self.calls.append(kwargs)
+        await asyncio.sleep(self.delay_seconds)
+        return RouteProbeResult(
+            "quoted",
+            "jupiter-test",
+            out_amount_raw=self.out_amount_raw,
+            route_count=1,
+            latency_ms=int(round(self.delay_seconds * 1000)),
+            quoted_at=datetime.now(timezone.utc).isoformat(),
         )
 
 
@@ -97,7 +119,7 @@ def make_database(tmp_path: Path) -> Database:
     return database
 
 
-def seed_paper(database: Database, *, position_id: str, address: str, opened: datetime) -> None:
+def seed_paper(database: Database, *, position_id: str, address: str, opened: datetime, strategy_key: str = "model_1") -> None:
     session_id = PaperTradingService(database).ensure_simulation_session()["id"]
     database.execute(
         """
@@ -105,11 +127,12 @@ def seed_paper(database: Database, *, position_id: str, address: str, opened: da
             id,token_address,account_kind,strategy_key,status,simulation_session_id,
             entry_time,expires_at,invested_usd,token_amount,entry_price,
             stop_loss_price,take_profit_price,metadata_json
-        ) VALUES(?,?, 'simulation','model_1','open',?,?,?,?,?,?,?,?, '{}')
+        ) VALUES(?,?, 'simulation',?,'open',?,?,?,?,?,?,?,?, '{}')
         """,
         (
             position_id,
             address,
+            strategy_key,
             session_id,
             opened.isoformat(),
             (opened + timedelta(hours=1)).isoformat(),
@@ -252,3 +275,40 @@ async def test_armed_live_trigger_executes_asynchronously_without_blocking_cycle
     assert row["exit_reason"] == "stop_loss_0_9x"
     metadata = json.loads(row["metadata_json"])
     assert metadata["live_exit_execution"]["status"] == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_same_asset_paper_exits_quote_concurrently_and_record_execution_delay(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for strategy in ("model_1", "model_2", "model_3", "rules_only"):
+        seed_paper(database, position_id=f"paper-{strategy}", address="shared-asset", opened=opened, strategy_key=strategy)
+    provider = CurrentMarketProvider(0.89)
+    route_probe = DelayedRouteProbe(delay_seconds=0.12)
+    paper = PaperTradingService(database, settings, sol_price_service=FixedSolPrice())
+    paper_monitor = PaperPositionMonitor(database, settings, paper_service=paper, route_probe=route_probe)
+    service = PositionMonitorService(database, settings, paper_service=paper, paper_monitor=paper_monitor)
+    config_env = tmp_path / "monitor-config.env"
+    config_env.write_text(
+        "JUPITER_API_KEY_1=one\nJUPITER_API_KEY_2=two\nJUPITER_API_KEY_3=three\nJUPITER_API_KEY_4=four\n",
+        encoding="utf-8",
+    )
+    service.configuration = PlatformConfigurationService(database, env_path=config_env)
+
+    started = time.monotonic()
+    report = await service.run_cycle(provider)
+    elapsed = time.monotonic() - started
+
+    assert report.paper_closed == 4
+    assert report.market_requests == 1
+    assert len(route_probe.calls) == 4
+    assert elapsed < 0.35
+    rows = database.fetch_all("SELECT metadata_json FROM positions WHERE strategy_key IN ('model_1','model_2','model_3','rules_only') ORDER BY id")
+    assert len(rows) == 4
+    for row in rows:
+        metadata = json.loads(row["metadata_json"])
+        assert metadata["exit_quote_latency_ms"] == 120
+        assert metadata["exit_execution_delay_ms"] >= 0
+        assert isinstance(metadata["exit_execution_deviation_bps"], float)
+        assert metadata["exit_fee_occurred_at"] == metadata["exit_route_probe"]["quoted_at"]

@@ -9,6 +9,7 @@ const SignalsPage = lazy(async () => ({ default: (await import("./pages/SignalsP
 const PortfolioPage = lazy(async () => ({ default: (await import("./pages/PortfolioPage")).PortfolioPage }));
 const RuntimePage = lazy(async () => ({ default: (await import("./pages/RuntimePage")).RuntimePage }));
 const AgentPage = lazy(async () => ({ default: (await import("./pages/AgentPage")).AgentPage }));
+const ConfigurationPage = lazy(async () => ({ default: (await import("./pages/ConfigurationPage")).ConfigurationPage }));
 
 const pages: Record<string, ComponentType> = {
   "/": DashboardPage,
@@ -16,7 +17,8 @@ const pages: Record<string, ComponentType> = {
   "/signals": SignalsPage,
   "/portfolio": PortfolioPage,
   "/runtime": RuntimePage,
-  "/agent": AgentPage
+  "/agent": AgentPage,
+  "/configuration": ConfigurationPage
 };
 
 function browserPath() {

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.api import routes as routes_module
 from backend.app.database import Database
+from backend.app.services import platform_configuration as platform_configuration_module
 
 
 def make_database(tmp_path: Path) -> Database:
@@ -126,3 +127,45 @@ def test_agent_api_rejects_live_proposals_and_executes_only_after_human_approval
     paths = {route.path for route in routes_module.router.routes}
     assert "/api/agent/execute" not in paths
     assert "/api/agent/liquidate" not in paths
+
+
+def test_configuration_api_never_returns_plaintext_credentials(monkeypatch, tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    env_path = tmp_path / ".env"
+    first = "[TEST_KEY_ONE]"
+    second = "[TEST_KEY_TWO]"
+    added_value = "[TEST_KEY_THREE]"
+    env_path.write_text(
+        f"GMGN_API_KEY_1={first}\nJUPITER_API_KEY_1={second}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(platform_configuration_module, "ENV_PATH", env_path)
+    client = make_client(monkeypatch, database)
+
+    initial = client.get("/api/configuration")
+    assert initial.status_code == 200
+    assert first not in initial.text
+    assert second not in initial.text
+    assert initial.json()["derived"]["gmgn_key_count"] == 1
+    assert initial.json()["derived"]["jupiter_exit_concurrency"] == 1
+
+    added = client.post(
+        "/api/configuration/providers/gmgn/credentials",
+        json={"credential": added_value},
+    )
+    assert added.status_code == 200
+    assert added_value not in added.text
+    assert added.json()["derived"]["gmgn_key_count"] == 2
+
+    saved = client.put(
+        "/api/configuration/runtime",
+        json={"position_monitor_poll_seconds": 3, "gmgn_global_rps": 10},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["runtime"]["position_monitor_poll_seconds"] == 3
+    assert saved.json()["runtime"]["gmgn_global_rps"] == 10
+
+    removed = client.delete("/api/configuration/providers/gmgn/credentials/1")
+    assert removed.status_code == 200
+    assert added_value not in removed.text
+    assert removed.json()["derived"]["gmgn_key_count"] == 1

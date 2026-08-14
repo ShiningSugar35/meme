@@ -8,7 +8,7 @@ from typing import Any
 from ..collector.constants import LabelPolicy
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
-from ..ml.economics import theoretical_profit_units
+from ..ml.economics import UNIT_USD, WIN_UNITS, theoretical_profit_units
 from ..repositories.models import ModelRepository
 from .training import TrainingService
 
@@ -139,7 +139,7 @@ class ModelHealthService:
         fp = len(selected) - tp
         positive_count = sum(int(int(row.get("tag") or 0) == 1) for row in rows)
         units = theoretical_profit_units(tp, fp)
-        capture = units / (6.0 * positive_count) if positive_count else 0.0
+        capture = units / (WIN_UNITS * positive_count) if positive_count else 0.0
         precision = tp / len(selected) if selected else None
         baseline = (
             model.get("metrics", {}).get("final_recent_window", {}).get("economic_capture")
@@ -162,7 +162,7 @@ class ModelHealthService:
             "false_positives": fp,
             "precision": precision,
             "profit_units": float(units),
-            "fixed_profit_usd": float(units * 5.0),
+            "fixed_profit_usd": float(units * UNIT_USD),
             "economic_capture": float(capture),
             "baseline_capture": baseline_capture,
             "degraded": degraded,

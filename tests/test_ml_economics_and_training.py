@@ -72,8 +72,8 @@ def test_realized_return_and_fixed_payoff_formula_are_exact() -> None:
     assert economics.capital.tolist() == [10.0, 40.0, 50.0]
     assert economics.realized_return.tolist() == pytest.approx([-0.10, 0.60, -0.10])
     assert metrics.cumulative_pnl_usd == pytest.approx(-1 + 24 - 5)
-    assert metrics.profit_units == pytest.approx(4.0)  # 6*TP - FP = 6 - 2
-    assert metrics.fixed_profit_usd == pytest.approx(20.0)
+    assert metrics.profit_units == pytest.approx(3.0)  # 5*TP - FP = 5 - 2
+    assert metrics.fixed_profit_usd == pytest.approx(15.0)
 
 
 def test_precision_recall_identity_matches_tp_fp_payoff() -> None:
@@ -83,7 +83,7 @@ def test_precision_recall_identity_matches_tp_fp_payoff() -> None:
     from_counts = theoretical_profit_units(tp, fp)
     from_pr = theoretical_profit_from_precision_recall(precision, recall, positives)
     assert from_counts == pytest.approx(from_pr)
-    assert from_pr == pytest.approx(positives * recall * (7 - 1 / precision))
+    assert from_pr == pytest.approx(positives * recall * (6 - 1 / precision))
 
 
 def test_candidate_catalog_is_expanded_and_optional_automl_is_explicit() -> None:

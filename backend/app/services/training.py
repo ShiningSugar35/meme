@@ -269,7 +269,7 @@ class TrainingService:
                     "required_flat_strategies": ["model_1", "model_2", "model_3", "rules_only"],
                 },
                 "selection_formula": {
-                    "economic": "mean_clip((6*TP-FP)/(6*N_positive),-1,1) [unchanged E_proxy]",
+                    "economic": "mean_clip((5*TP-FP)/(5*N_positive),-1,1) [friction-adjusted E_proxy]",
                     "execution": "E_exec shadow metric from route-validated rules-only net PnL; never used for ranking",
                     "ranking_economic": "E_proxy only; E_exec is shadow/audit-only and has zero ranking weight",
                     "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",

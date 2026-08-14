@@ -1163,7 +1163,16 @@ class PaperTradingService:
             return PaperMonitorResult(position_id, "blocked", "pending_exit_facts_incomplete", trigger_at or None)
 
         gross_reference = quantity * reference_price
+        route_probe = pending_exit.get("route_probe") if isinstance(pending_exit.get("route_probe"), dict) else {}
         execution_at = datetime.fromtimestamp(now_ts, timezone.utc)
+        route_completed_at = route_probe.get("quoted_at") or route_probe.get("probed_at")
+        if route_completed_at:
+            try:
+                execution_at = datetime.fromisoformat(str(route_completed_at)).astimezone(timezone.utc)
+            except ValueError:
+                execution_at = datetime.now(timezone.utc)
+        elif execution_quote is not None:
+            execution_at = datetime.now(timezone.utc)
         quote = execution_quote or self.quote_provider.quote(
             QuoteRequest(
                 token_address=row["token_address"],
@@ -1175,9 +1184,14 @@ class PaperTradingService:
                 position_id=position_id,
             )
         )
+        settlement_at = (
+            execution_at
+            if execution_quote is not None
+            else execution_at + timedelta(milliseconds=max(0, int(quote.latency_ms or 0)))
+        )
         fee_fact = self._network_fee_fact(
-            execution_at,
-            latency_ms=quote.latency_ms,
+            settlement_at,
+            latency_ms=0,
             network_fee_sol=quote.network_fee_sol,
         )
         if fee_fact is None:
@@ -1200,8 +1214,14 @@ class PaperTradingService:
                 attach_position=True,
                 client_order_id=f"{position_id}:sell_attempt:{pending_exit['attempt_count']}",
             )
-            if self._sell_failure_is_terminal(row, pending_exit, now_ts=now_ts):
-                return self._finalize_failed_exit(row, metadata, failure_reason=str(pending_exit["last_failure"]), failed_at=now_ts)
+            settlement_ts = int(settlement_at.timestamp())
+            if self._sell_failure_is_terminal(row, pending_exit, now_ts=settlement_ts):
+                return self._finalize_failed_exit(
+                    row,
+                    metadata,
+                    failure_reason=str(pending_exit["last_failure"]),
+                    failed_at=settlement_ts,
+                )
             self.database.execute(
                 "UPDATE positions SET status='closing',metadata_json=? WHERE id=?",
                 (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), position_id),
@@ -1217,8 +1237,13 @@ class PaperTradingService:
         prior_costs = self._position_paid_costs(position_id)
         net_pnl = proceeds - invested - prior_costs
         final_metadata = dict(metadata)
-        route_probe = pending_exit.get("route_probe") if isinstance(pending_exit.get("route_probe"), dict) else {}
         final_metadata.pop("paper_exit_pending", None)
+        execution_delay_ms = max(0, int(round((settlement_at.timestamp() - trigger_at) * 1000)))
+        execution_deviation_bps = (
+            (float(quote.fill_price) - reference_price) / reference_price * 10_000.0
+            if quote.fill_price is not None and reference_price > 0
+            else None
+        )
         final_metadata.update({
             "execution_policy_version": "h1_route_aware_v1",
             "exit_route_probe": route_probe,
@@ -1230,6 +1255,9 @@ class PaperTradingService:
             "exit_sol_usd_price": fee_fact["sol_usd_price"],
             "exit_fee_occurred_at": fee_fact["fee_occurred_at"],
             "exit_slippage_bps": quote.slippage_bps,
+            "exit_quote_latency_ms": int(quote.latency_ms),
+            "exit_execution_delay_ms": execution_delay_ms,
+            "exit_execution_deviation_bps": execution_deviation_bps,
         })
         next_state = dict(state)
         next_state["cash_usd"] = float(state["cash_usd"]) + proceeds
@@ -1242,7 +1270,7 @@ class PaperTradingService:
                 WHERE id=? AND status='closing'
                 """,
                 (
-                    execution_at.isoformat(), quote.fill_price, reason, gross_pnl, net_pnl,
+                    settlement_at.isoformat(), quote.fill_price, reason, gross_pnl, net_pnl,
                     json.dumps(final_metadata, ensure_ascii=False, separators=(",", ":")), position_id,
                 ),
             )

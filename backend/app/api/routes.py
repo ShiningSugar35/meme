@@ -13,6 +13,7 @@ from ..services.agent_service import AgentService
 from ..services.csv_importer import CsvImporter
 from ..services.dashboard import DashboardService
 from ..services.paper_trading import PaperTradingService
+from ..services.platform_configuration import PlatformConfigurationService
 from ..services.runtime import RuntimeService
 from ..services.sample_export import SampleExportService
 from ..services.prediction import PredictionService
@@ -23,6 +24,8 @@ from .schemas import (
     ConfirmActionRequest,
     FeatureSelectionRequest,
     ImportRequest,
+    PlatformRuntimeConfigRequest,
+    ProviderCredentialRequest,
     TrainingRequest,
 )
 
@@ -173,6 +176,43 @@ def simulation_audit(limit_sessions: int = Query(default=50, ge=1, le=200)) -> d
 def runtime_status() -> dict:
     database = get_database()
     return {"runtime": RuntimeService(database).status(), "risk": RiskService(database).status()}
+
+
+@router.get("/configuration")
+def platform_configuration() -> dict:
+    return PlatformConfigurationService(get_database()).configuration()
+
+
+@router.put("/configuration/runtime")
+def save_platform_runtime_configuration(request: PlatformRuntimeConfigRequest) -> dict:
+    try:
+        return PlatformConfigurationService(get_database()).save_runtime(
+            position_monitor_poll_seconds=request.position_monitor_poll_seconds,
+            gmgn_global_rps=request.gmgn_global_rps,
+            gmgn_base_url=request.gmgn_base_url,
+            jupiter_quote_url=request.jupiter_quote_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/configuration/providers/{provider}/credentials")
+def add_platform_provider_credential(provider: str, request: ProviderCredentialRequest) -> dict:
+    try:
+        return PlatformConfigurationService(get_database()).add_credential(
+            provider,
+            request.credential.get_secret_value(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/configuration/providers/{provider}/credentials/{slot}")
+def delete_platform_provider_credential(provider: str, slot: int) -> dict:
+    try:
+        return PlatformConfigurationService(get_database()).delete_credential(provider, slot)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/runtime/collector-events")

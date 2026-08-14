@@ -34,7 +34,7 @@
 - [x] p/r 恒等式测试：`U = N_positive × recall × (7 - 1/precision)`
 - [x] 固定 $50 仅用于模型公平离线排名：`fixed_profit_usd = 5 × U`
 - [x] 实际模拟/实盘 sizing 不变：`min(1% × entry liquidity, $50)`，并继续计滑点/平台费/网络费
-- [x] 经济得分 `E = mean(clip((6TP-FP)/(6N+), -1, 1))`
+- [x] 经济得分 `E = mean(clip((5TP-FP)/(5N+), -1, 1))`
 - [x] 泛化得分 `G = 0.60×AP Skill + 0.20×Stability + 0.20×Decay`
 - [x] 综合分 `S = 0.60×E + 0.40×G`
 - [x] 最终 holdout certification-only，不参与模型、feature、threshold 或 Top 3 排名

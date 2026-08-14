@@ -11,6 +11,7 @@ from dotenv import dotenv_values
 
 from ..collector.client import CollectorEndpoints, GMGNDataClient, HttpxTransport
 from ..collector.enrichment import merge_sources
+from ..collector.errors import CollectorAPIError, CollectorNetworkError
 from ..collector.filters import first, normalize_token, to_float
 from ..collector.models import ApiKeyRoles
 from ..collector.rate_limit import AsyncRateLimiter
@@ -21,6 +22,7 @@ from ..trading.live.models import OrderStatus, SwapIntent, TradeSide
 from .live_trading import LiveTradingService
 from .paper_position_monitor import PaperPositionMonitor
 from .paper_trading import PaperTradingService
+from .platform_configuration import ENV_PATH, PlatformConfigurationService
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +39,7 @@ class PositionMonitorCycle:
 
 
 class GMGNPositionMarketProvider:
-    """Current-price provider bound to the formerly unused third discovery key."""
+    """Current-price provider using the configured GMGN key rotation/fallback pool."""
 
     def __init__(
         self,
@@ -47,6 +49,7 @@ class GMGNPositionMarketProvider:
         self.client = client
         self.roles = roles
         self._cache: dict[str, Mapping[str, Any]] = {}
+        self._position_index = 0
 
     def reset_cycle_cache(self) -> None:
         self._cache.clear()
@@ -55,18 +58,30 @@ class GMGNPositionMarketProvider:
         cached = self._cache.get(address)
         if cached is not None:
             return cached
-        data = await self.client.request(
-            self.roles.position_monitor,
-            self.client.endpoints.token_info,
-            params={"chain": "sol", "address": address},
-        )
-        bundle: Mapping[str, Any] = {"token_info": data}
-        self._cache[address] = bundle
-        return bundle
+        pool = self.roles.position_monitor
+        last_error: Exception | None = None
+        start = self._position_index % len(pool)
+        self._position_index = (start + 1) % len(pool)
+        for offset in range(len(pool)):
+            slot = pool[(start + offset) % len(pool)]
+            try:
+                data = await self.client.request(
+                    slot,
+                    self.client.endpoints.token_info,
+                    params={"chain": "sol", "address": address},
+                )
+                bundle: Mapping[str, Any] = {"token_info": data}
+                self._cache[address] = bundle
+                return bundle
+            except (CollectorNetworkError, CollectorAPIError) as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("GMGN position-monitor key pool is empty")
 
 
 class PositionMonitorService:
-    """Four-second current-market monitor shared by simulation and live positions."""
+    """Configurable current-market monitor shared by simulation and live positions."""
 
     PAPER_STRATEGIES = ("model_1", "model_2", "model_3", "rules_only")
 
@@ -81,6 +96,7 @@ class PositionMonitorService:
     ) -> None:
         self.database = database
         self.settings = settings or get_settings()
+        self.configuration = PlatformConfigurationService(database)
         self.paper = paper_service or PaperTradingService(database, self.settings)
         self.paper_monitor = paper_monitor or PaperPositionMonitor(
             database, self.settings, paper_service=self.paper
@@ -138,6 +154,7 @@ class PositionMonitorService:
 
         checked = market_requests = paper_closed = paper_pending = 0
         live_triggered = live_pending = blocked = 0
+        paper_work: list[tuple[dict[str, Any], float]] = []
         for row in direct_retry:
             checked += 1
             try:
@@ -156,10 +173,7 @@ class PositionMonitorService:
                 else 0.0
             )
             if str(row["account_kind"]) == "simulation":
-                outcome = await self._monitor_paper(row, reference_price, current_ts)
-                paper_closed += int(outcome == "closed")
-                paper_pending += int(outcome == "pending")
-                blocked += int(outcome == "blocked")
+                paper_work.append((row, reference_price))
             else:
                 outcome = self._monitor_live(row, reference_price, current_ts)
                 live_triggered += int(outcome == "triggered")
@@ -202,15 +216,30 @@ class PositionMonitorService:
                 self._persist_snapshot(str(row["id"]), snapshot)
                 checked += 1
                 if str(row["account_kind"]) == "simulation":
-                    outcome = await self._monitor_paper(row, price, current_ts)
-                    paper_closed += int(outcome == "closed")
-                    paper_pending += int(outcome == "pending")
-                    blocked += int(outcome == "blocked")
+                    paper_work.append((row, price))
                 else:
                     outcome = self._monitor_live(row, price, current_ts)
                     live_triggered += int(outcome == "triggered")
                     live_pending += int(outcome == "pending")
                     blocked += int(outcome == "blocked")
+
+        if paper_work:
+            jupiter_key_count = len(
+                self.configuration.provider_credentials("jupiter") or self.settings.jupiter_api_keys
+            )
+            exit_concurrency = max(1, min(8, jupiter_key_count or 1))
+            semaphore = asyncio.Semaphore(exit_concurrency)
+
+            async def run_paper(row: dict[str, Any], price: float) -> str:
+                async with semaphore:
+                    return await self._monitor_paper(row, price, current_ts)
+
+            outcomes = await asyncio.gather(
+                *(run_paper(row, price) for row, price in paper_work)
+            )
+            paper_closed += sum(int(outcome == "closed") for outcome in outcomes)
+            paper_pending += sum(int(outcome == "pending") for outcome in outcomes)
+            blocked += sum(int(outcome == "blocked") for outcome in outcomes)
 
         self._live_tasks = {
             key: task for key, task in self._live_tasks.items() if not task.done()
@@ -487,13 +516,22 @@ class PositionMonitorService:
 
 
 class PositionMonitorWorker:
-    def __init__(self, database: Database, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        database: Database,
+        settings: Settings | None = None,
+        *,
+        gmgn_limiter: AsyncRateLimiter | None = None,
+    ) -> None:
         self.database = database
         self.settings = settings or get_settings()
         self.service = PositionMonitorService(database, self.settings)
+        self.configuration = PlatformConfigurationService(database)
         self._stop = asyncio.Event()
         self._transport: HttpxTransport | None = None
         self._provider: GMGNPositionMarketProvider | None = None
+        self._gmgn_limiter = gmgn_limiter
+        self._env_mtime_ns: int | None = None
 
     def _build_provider(self) -> GMGNPositionMarketProvider:
         env = {
@@ -501,8 +539,8 @@ class PositionMonitorWorker:
             for key, value in dotenv_values(PROJECT_ROOT / ".env").items()
             if value not in (None, "")
         }
-        secrets = [env.get(f"GMGN_API_KEY_{index}", "") for index in range(1, 13)]
-        roles = ApiKeyRoles.from_secrets(secrets)
+        credentials = self.configuration.provider_credentials("gmgn")
+        roles = ApiKeyRoles.from_secrets(credentials)
         endpoints = CollectorEndpoints(
             trenches=env.get("GMGN_TRENCHES_PATH", "/v1/trenches"),
             token_info=env.get("GMGN_TOKEN_INFO_PATH", "/v1/token/info"),
@@ -514,14 +552,14 @@ class PositionMonitorWorker:
             created_tokens=env.get("GMGN_PORTFOLIO_CREATED_TOKENS_PATH", "/v1/user/created_tokens"),
         )
         self._transport = HttpxTransport()
+        runtime = self.configuration.runtime_values()
+        limiter = self._gmgn_limiter or AsyncRateLimiter(runtime["gmgn_global_rps"])
+        limiter.requests_per_second = runtime["gmgn_global_rps"]
+        self._gmgn_limiter = limiter
         client = GMGNDataClient(
             base_url=env.get("GMGN_API_BASE_URL", ""),
             transport=self._transport,
-            # Current GMGN token-info docs publish rate=20/capacity=20 with
-            # weight=1 for this route. Keep 25% headroom for network jitter and
-            # server-side policy variation while still covering the worst-case
-            # simulation+live token set on an approximately four-second cadence.
-            limiter=AsyncRateLimiter(15.0),
+            limiter=limiter,
             endpoints=endpoints,
         )
         return GMGNPositionMarketProvider(client, roles)
@@ -535,22 +573,59 @@ class PositionMonitorWorker:
         try:
             self._provider = self._build_provider()
         except Exception as exc:
+            self._provider = None
             self.database.set_runtime_state(
                 "position_monitor_status",
                 {"state": "blocked", "error": f"{type(exc).__name__}: {exc}"[:500]},
             )
-            return
+        initial_runtime = self.configuration.runtime_values()
+        initial_status = self.database.get_runtime_state("position_monitor_status", {})
+        initial_status = initial_status if isinstance(initial_status, dict) else {}
         self.database.set_runtime_state(
             "position_monitor_status",
             {
-                "state": "running",
-                "target_poll_seconds": self.settings.position_monitor_poll_seconds,
+                **initial_status,
+                "state": "running" if self._provider is not None else "blocked",
+                "target_poll_seconds": initial_runtime["position_monitor_poll_seconds"],
                 "started_at": utc_now_iso(),
             },
         )
         try:
+            previous_started: float | None = None
+            self._env_mtime_ns = ENV_PATH.stat().st_mtime_ns if ENV_PATH.exists() else None
             while not self._stop.is_set():
+                runtime_config = self.configuration.runtime_values()
+                if self._gmgn_limiter is not None:
+                    self._gmgn_limiter.requests_per_second = runtime_config["gmgn_global_rps"]
+                current_mtime = ENV_PATH.stat().st_mtime_ns if ENV_PATH.exists() else None
+                if self._provider is None or current_mtime != self._env_mtime_ns:
+                    try:
+                        if self._transport is not None:
+                            await self._transport.close()
+                        self._provider = self._build_provider()
+                        self._env_mtime_ns = current_mtime
+                    except Exception as exc:
+                        self.database.set_runtime_state(
+                            "position_monitor_status",
+                            {
+                                "state": "degraded",
+                                "target_poll_seconds": runtime_config["position_monitor_poll_seconds"],
+                                "last_error": f"configuration_reload_failed: {type(exc).__name__}: {exc}"[:500],
+                                "updated_at": utc_now_iso(),
+                            },
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                self._stop.wait(),
+                                timeout=min(3.0, runtime_config["position_monitor_poll_seconds"]),
+                            )
+                        except TimeoutError:
+                            pass
+                        continue
                 started = time.monotonic()
+                start_interval = started - previous_started if previous_started is not None else None
+                previous_started = started
+                cycle_started_at = utc_now_iso()
                 self._provider.reset_cycle_cache()
                 try:
                     report = await self.service.run_cycle(self._provider)
@@ -559,8 +634,10 @@ class PositionMonitorWorker:
                         "position_monitor_status",
                         {
                             "state": "running",
-                            "target_poll_seconds": self.settings.position_monitor_poll_seconds,
+                            "target_poll_seconds": runtime_config["position_monitor_poll_seconds"],
                             "last_cycle_seconds": elapsed,
+                            "last_cycle_started_at": cycle_started_at,
+                            "last_start_interval_seconds": start_interval,
                             **asdict(report),
                         },
                     )
@@ -571,8 +648,10 @@ class PositionMonitorWorker:
                         "position_monitor_status",
                         {
                             "state": "degraded",
-                            "target_poll_seconds": self.settings.position_monitor_poll_seconds,
+                            "target_poll_seconds": runtime_config["position_monitor_poll_seconds"],
                             "last_cycle_seconds": elapsed,
+                            "last_cycle_started_at": cycle_started_at,
+                            "last_start_interval_seconds": start_interval,
                             "last_error": message,
                             "updated_at": utc_now_iso(),
                         },
@@ -585,7 +664,7 @@ class PositionMonitorWorker:
                     )
                 wait_seconds = max(
                     0.1,
-                    float(self.settings.position_monitor_poll_seconds)
+                    float(runtime_config["position_monitor_poll_seconds"])
                     - (time.monotonic() - started),
                 )
                 try:

@@ -126,7 +126,8 @@ class GMGNEnrichmentProvider:
                 last_error = exc
                 if attempt < self.primary_attempts - 1 and self.primary_retry_seconds:
                     await self._sleep(self.primary_retry_seconds)
-        for position, fallback in enumerate(self.roles.realtime_fallback):
+        fallbacks = [slot for slot in self.roles.realtime_fallback if slot.index != primary.index]
+        for position, fallback in enumerate(fallbacks):
             if position and self.fallback_delay_seconds:
                 await self._sleep(self.fallback_delay_seconds)
             try:
@@ -200,6 +201,8 @@ class GMGNEnrichmentProvider:
                 if attempt < 2 and self.fallback_delay_seconds:
                     await self._sleep(self.fallback_delay_seconds)
         for fallback in self.roles.kline_fallback:
+            if fallback.index == primary.index:
+                continue
             try:
                 data = await self.client.request(
                     fallback,

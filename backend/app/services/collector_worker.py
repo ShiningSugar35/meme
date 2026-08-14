@@ -27,6 +27,7 @@ from ..collector import (
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..repositories.samples import SampleRecord, SampleRepository
+from .platform_configuration import ENV_PATH, PlatformConfigurationService
 from .sol_price import SolUsdPriceService
 
 
@@ -157,13 +158,17 @@ class CollectorWorker:
         settings: Settings | None = None,
         *,
         monitor_only: bool = False,
+        gmgn_limiter: AsyncRateLimiter | None = None,
     ) -> None:
         self.database = database
         self.settings = settings or get_settings()
+        self.configuration = PlatformConfigurationService(database)
         self.monitor_only = monitor_only
         self._stop = asyncio.Event()
         self._transport: HttpxTransport | None = None
         self._service: CollectorService | None = None
+        self._gmgn_limiter = gmgn_limiter
+        self._env_mtime_ns: int | None = None
         self._sol_price = SolUsdPriceService(database)
         existing_events = database.get_runtime_state("collector_events", [])
         seed = existing_events[-250:] if isinstance(existing_events, list) else []
@@ -239,8 +244,8 @@ class CollectorWorker:
 
     def _build(self) -> CollectorService:
         env = _env_values()
-        secrets = [env.get(f"GMGN_API_KEY_{index}", "") for index in range(1, 13)]
-        roles = ApiKeyRoles.from_secrets(secrets)
+        credentials = self.configuration.provider_credentials("gmgn")
+        roles = ApiKeyRoles.from_secrets(credentials)
         base_url = env.get("GMGN_API_BASE_URL", "")
         endpoints = CollectorEndpoints(
             trenches=env.get("GMGN_TRENCHES_PATH", "/v1/trenches"),
@@ -253,10 +258,14 @@ class CollectorWorker:
             created_tokens=env.get("GMGN_PORTFOLIO_CREATED_TOKENS_PATH", "/v1/user/created_tokens"),
         )
         self._transport = HttpxTransport()
+        runtime = self.configuration.runtime_values()
+        limiter = self._gmgn_limiter or AsyncRateLimiter(runtime["gmgn_global_rps"])
+        limiter.requests_per_second = runtime["gmgn_global_rps"]
+        self._gmgn_limiter = limiter
         client = GMGNDataClient(
             base_url=base_url,
             transport=self._transport,
-            limiter=AsyncRateLimiter(2.0),
+            limiter=limiter,
             endpoints=endpoints,
         )
         discovery = DiscoveryService(client, roles)
@@ -273,12 +282,30 @@ class CollectorWorker:
         try:
             self._service = self._build()
         except Exception as exc:
+            self._service = None
             self.database.set_runtime_state(
                 "collector_status",
                 {"state": "blocked", "reason": f"{type(exc).__name__}: {exc}"[:500]},
             )
-            return
+        self._env_mtime_ns = ENV_PATH.stat().st_mtime_ns if ENV_PATH.exists() else None
         while not self._stop.is_set():
+            runtime_config = self.configuration.runtime_values()
+            if self._gmgn_limiter is not None:
+                self._gmgn_limiter.requests_per_second = runtime_config["gmgn_global_rps"]
+            current_mtime = ENV_PATH.stat().st_mtime_ns if ENV_PATH.exists() else None
+            if self._service is None or current_mtime != self._env_mtime_ns:
+                try:
+                    if self._transport is not None:
+                        await self._transport.close()
+                    self._service = self._build()
+                    self._env_mtime_ns = current_mtime
+                except Exception as exc:
+                    self.database.set_runtime_state(
+                        "collector_status",
+                        {"state": "blocked", "reason": f"{type(exc).__name__}: {exc}"[:500]},
+                    )
+                    await asyncio.sleep(3.0)
+                    continue
             started = time.time()
             self._active_cycle_id = uuid.uuid4().hex[:10]
             requested_limit = min(self.settings.gmgn_trenches_limit, 80)

@@ -5,7 +5,7 @@ import numpy as np
 from .types import EconomicSlice, EvaluationMetrics
 
 FIXED_TRADE_USD = 50.0
-WIN_UNITS = 6.0
+WIN_UNITS = 5.0
 LOSS_UNITS = 1.0
 UNIT_USD = 5.0
 
@@ -27,9 +27,11 @@ def economic_sample_weights(economics: EconomicSlice) -> np.ndarray:
 
 
 def theoretical_profit_units(true_positives: int, false_positives: int) -> float:
-    """Net payoff units under +60% / -10% and fixed $50 entries.
+    """Friction-adjusted ranking proxy under +5 / -1 payoff units.
 
-    One loss is one unit (-$5) and one win is six units (+$30).
+    One loss is one unit (-$5). A labelled winner is deliberately haircut from
+    its gross +60% path to 5 units (+$25 on a fixed $50 entry) so threshold
+    search and model ranking reserve room for slippage and trading friction.
     """
     return WIN_UNITS * int(true_positives) - LOSS_UNITS * int(false_positives)
 
@@ -42,12 +44,15 @@ def theoretical_profit_from_precision_recall(
     """Return normalized fixed-payoff profit units from p/r.
 
     TP = recall * N+, FP = TP/precision - TP, therefore
-    U = N+ * recall * (7 - 1/precision). This is an evaluation identity,
-    not a differentiable training objective.
+    U = N+ * recall * (6 - 1/precision) for the current +5/-1 proxy.
+    This is an evaluation identity, not a differentiable training objective.
     """
     if precision <= 0 or recall <= 0 or positive_count <= 0:
         return 0.0
-    return float(positive_count) * float(recall) * (7.0 - 1.0 / float(precision))
+    payoff_multiple = WIN_UNITS + LOSS_UNITS
+    return float(positive_count) * float(recall) * (
+        payoff_multiple - LOSS_UNITS / float(precision)
+    )
 
 
 def _sigmoid(values: np.ndarray) -> np.ndarray:

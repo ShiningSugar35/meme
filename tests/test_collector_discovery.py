@@ -21,15 +21,21 @@ async def no_sleep(_: float) -> None:
     return None
 
 
-def test_twelve_key_role_layout_is_stable_and_redacted() -> None:
+def test_dynamic_key_role_layout_uses_all_configured_keys_and_redacts() -> None:
     roles = ApiKeyRoles.from_secrets([f"secret-{i}" for i in range(12)])
     assert [slot.index for slot in roles.discovery] == [0, 1]
-    assert roles.position_monitor.index == 2
-    assert roles.discovery_fallback.index == 3
-    assert [slot.index for slot in roles.realtime] == [4, 5, 6, 7]
-    assert [slot.index for slot in roles.realtime_fallback] == [8, 9]
-    assert [slot.index for slot in roles.kline] == [10, 11]
+    assert [slot.index for slot in roles.position_monitor] == list(range(12))
+    assert roles.discovery_fallback.index == 2
+    assert [slot.index for slot in roles.realtime] == list(range(12))
+    assert [slot.index for slot in roles.realtime_fallback] == list(range(12))
+    assert [slot.index for slot in roles.kline] == list(range(12))
+    assert [slot.index for slot in roles.all_slots] == list(range(12))
     assert "secret-0" not in repr(roles.discovery[0])
+
+    single = ApiKeyRoles.from_secrets(["one-key"])
+    assert [slot.index for slot in single.discovery] == [0, 0]
+    assert [slot.index for slot in single.position_monitor] == [0]
+    assert single.discovery_fallback.index == 0
 
 
 def test_discovery_payload_has_all_launchpads_and_prefilters() -> None:

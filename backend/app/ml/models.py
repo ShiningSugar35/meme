@@ -24,6 +24,8 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
+from ..services.platform_configuration import read_provider_credentials
+
 
 @dataclass(frozen=True)
 class CandidateSpec:
@@ -191,7 +193,7 @@ class TabPFNProductionClassifier(ClassifierMixin, BaseEstimator):
             n_estimators=1,
             show_progress_bar=False,
         )
-        return Path(probe.model_path).exists() or bool(os.getenv("TABPFN_TOKEN"))
+        return Path(probe.model_path).exists() or bool(read_provider_credentials("tabpfn")) or bool(os.getenv("TABPFN_TOKEN"))
 
     def _build(self, version):
         import torch
@@ -278,7 +280,7 @@ def _tabpfn_spec(random_state: int) -> CandidateSpec:
     )
     resolved_version = (
         "v3"
-        if Path(v3_probe.model_path).exists() or bool(os.getenv("TABPFN_TOKEN"))
+        if Path(v3_probe.model_path).exists() or bool(read_provider_credentials("tabpfn")) or bool(os.getenv("TABPFN_TOKEN"))
         else "v2"
     )
     return CandidateSpec(
