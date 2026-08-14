@@ -145,7 +145,7 @@ def normalize_token(raw: Mapping[str, Any], token_type: str) -> dict[str, Any]:
         "rat_trader_amount_rate": to_float(first(raw, ("rat_trader_amount_rate", "rat_trader_rate", "top_rat_trader_percentage"))),
         "sell_tax": to_float(first(raw, ("sell_tax", "sell_tax_rate", "sell_tax_percent"))),
         "buy_tax": to_float(first(raw, ("buy_tax", "buy_tax_rate", "buy_tax_percent"))),
-        "sniper_count": to_float(first(raw, ("sniper_count", "snipers", "sniper_trader_count"))),
+        "sniper_count": to_float(first(raw, ("sniper_count", "sniper_wallets", "snipers", "sniper_trader_count"))),
         "swaps_1h": to_float(first(raw, ("swaps_1h", "swaps1h", "trade_1h", "trades_1h"))),
         "volume_1h": to_float(first(raw, ("volume_1h", "volume1h", "volume_1h_usd", "volume_h1"))),
         "volume": to_float(first(raw, ("volume", "volume_usd", "volume_24h", "volume_h24"))),

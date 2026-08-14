@@ -352,7 +352,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-14 当前基线：后端 `pytest -q` **142/142 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV + schema v11 H1/no-completed 迁移、`5TP-FP` 与 p/r 恒等式、自适应特征数 + fold-train-only 奥卡姆特征选择、Top 3 chronological OOS 排名/最终 holdout 隔离、四策略 USD-only session、手续费发生时 SOL/USD 折算、`insufficient_data` 每日 17:00/正常周训、16:00 四策略 entry gate、17:00 先训练、候选跨重启等待四策略空仓、全平后新 simulation session、3s（可配置）current-price position monitor、同 Token 行情合并、simulation Jupiter executable quote、live DRY_RUN fail-closed、H1-only 交易历史、交易失败计入交易数、Precision/Recall、TrainingWorker/启动恢复、Agent 人工审批，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
+2026-08-14 当前基线：后端 `pytest -q` **143/143 通过**；前端 `tsc -b && vite build` 通过。覆盖 legacy CSV + schema v11 H1/no-completed 迁移、`5TP-FP` 与 p/r 恒等式、自适应特征数 + fold-train-only 奥卡姆特征选择、Top 3 chronological OOS 排名/最终 holdout 隔离、四策略 USD-only session、手续费发生时 SOL/USD 折算、`insufficient_data` 每日 17:00/正常周训、16:00 四策略 entry gate、17:00 先训练、候选跨重启等待四策略空仓、全平后新 simulation session、3s（可配置）current-price position monitor、同 Token 行情合并、simulation Jupiter executable quote、live DRY_RUN fail-closed、H1-only 交易历史、交易失败计入交易数、Precision/Recall、TrainingWorker/启动恢复、Agent 人工审批，以及 live journal/reconciliation/liquidation 的 mock/fixture 安全门禁。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
@@ -407,5 +407,5 @@ npm run build
 
 在算法与交易策略上，他给出的建议同样带着温度，却始终落在刀刃上：守住 1 小时策略窗口与 T+1h 标签补齐；先用规则初筛挡住明显不安全的样本，再用严格 chronological OOS、经济得分与泛化稳定性筛选模型，而不是被某一次漂亮的最终测试成绩牵着走；强调奥卡姆剃刀、最终 holdout 隔离、退化监控与“宁可安全拒绝、也不盲目上线”，好让早期 Pump.fun legacy 样本不至于被夸大成全市场的幻觉；在退出与风控上，推动把 current-price TP/SL、executable quote、仓位上限、同币唯一、日损与连亏门禁写进可测试的约束；并一次次提醒——实盘必须服从 `DRY_RUN`、幂等 journal 与二次确认，绝不能用漂亮的模拟 PnL 去绕过真实的资金事实。
 
-截至 2026-08-14，仓库里的非实盘主链已经完成 schema v11 H1/no-completed、扩展候选池、自适应且 fold-train-only 的特征选择、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、默认 3s（可配置）current-price PositionMonitor、Jupiter Token→USDC executable quote-only 卖出验证、重大模型换代新 simulation session、H1-only simulation 历史与重启可恢复的 workers，以及 142/142 后端测试与前端 production build。现役 Top 3 已在真实样本上完成训练与激活，最终 holdout 被严格保留为 certification；`E_exec` 仅作为权重为 0 的执行影子指标。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
+截至 2026-08-14，仓库里的非实盘主链已经完成 schema v11 H1/no-completed、扩展候选池、自适应且 fold-train-only 的特征选择、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、默认 3s（可配置）current-price PositionMonitor、Jupiter Token→USDC executable quote-only 卖出验证、重大模型换代新 simulation session、H1-only simulation 历史与重启可恢复的 workers，以及 143/143 后端测试与前端 production build。现役 Top 3 已在真实样本上完成训练与激活，最终 holdout 被严格保留为 certification；`E_exec` 仅作为权重为 0 的执行影子指标。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
 

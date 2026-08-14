@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.app.collector.filters import SafetyFilter
+from backend.app.collector.filters import SafetyFilter, normalize_token
 
 
 def valid_token() -> dict[str, object]:
@@ -38,6 +38,15 @@ def valid_token() -> dict[str, object]:
 
 def test_valid_token_passes_all_local_filters() -> None:
     assert SafetyFilter().evaluate(valid_token()).accepted
+
+
+def test_live_sniper_wallets_alias_maps_to_sniper_count() -> None:
+    raw = valid_token()
+    raw.pop("sniper_count")
+    raw["sniper_wallets"] = 5
+    normalized = normalize_token(raw, "new_creation")
+    assert normalized["sniper_count"] == 5
+    assert SafetyFilter().evaluate_required_facts(normalized).accepted
 
 
 def test_top_10_holder_rate_uses_new_inclusive_range() -> None:
