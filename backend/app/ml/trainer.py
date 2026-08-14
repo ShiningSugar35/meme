@@ -206,6 +206,24 @@ class ModelTrainer:
                     "tabpfn_device": getattr(model_step, "device_", None),
                     "tabpfn_n_estimators": getattr(model_step, "n_estimators_", None),
                 }
+            if model_step is not None and hasattr(model_step, "flaml_best_estimator_"):
+                runtime_metadata.update(
+                    {
+                        "flaml_best_estimator": getattr(model_step, "flaml_best_estimator_", None),
+                        "flaml_best_config": getattr(model_step, "flaml_best_config_", None),
+                        "flaml_time_budget_seconds": getattr(
+                            model_step, "flaml_time_budget_seconds_", None
+                        ),
+                        "flaml_split_type": getattr(model_step, "flaml_split_type_", None),
+                        "flaml_eval_method": getattr(model_step, "flaml_eval_method_", None),
+                        "flaml_validation_fraction": getattr(
+                            model_step, "flaml_validation_fraction_", None
+                        ),
+                        "flaml_estimator_list": list(
+                            getattr(model_step, "flaml_estimator_list_", ())
+                        ),
+                    }
+                )
             model_id = f"{now:%Y%m%dT%H%M%SZ}-{selected.algorithm}-{uuid.uuid4().hex[:8]}"
             thresholds = self._threshold_set(selected)
             common = dict(

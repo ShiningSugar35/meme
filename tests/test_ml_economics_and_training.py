@@ -22,7 +22,7 @@ from backend.app.ml.economics import (
     theoretical_profit_from_precision_recall,
     theoretical_profit_units,
 )
-from backend.app.ml.models import candidate_catalog
+from backend.app.ml.models import FLAMLTimeSafeClassifier, candidate_catalog
 
 
 def _learnable_frame(rows: int = 360, *, include_liquidity: bool = True) -> pd.DataFrame:
@@ -107,9 +107,44 @@ def test_candidate_catalog_is_expanded_and_optional_automl_is_explicit() -> None
     assert catalog["decision_tree"].available
     assert catalog["tabpfn"].family == "foundation"
     assert catalog["tabpfn"].feature_subset_sizes == (4, 8, 16, 24)
-    assert catalog["flaml_automl"].skip_reason is not None
+    assert catalog["catboost"].available
+    assert catalog["flaml_automl"].available
+    assert catalog["flaml_automl"].family == "automl"
+    assert catalog["flaml_automl"].feature_subset_sizes == (4, 8, 16, 24)
 
 
+
+
+
+def test_flaml_time_safe_adapter_uses_chronological_inner_holdout(tmp_path) -> None:
+    rng = np.random.default_rng(19)
+    X = pd.DataFrame(rng.normal(size=(120, 4)), columns=["a", "b", "c", "d"])
+    y = np.asarray([0, 1] * 60, dtype=int)
+    model = FLAMLTimeSafeClassifier(
+        random_state=19,
+        time_budget_seconds=0.5,
+        validation_fraction=0.20,
+        estimator_list=("rf",),
+    )
+    model.fit(X, y, sample_weight=np.ones(len(y), dtype=float))
+
+    probabilities = model.predict_proba(X.iloc[:5])
+    assert probabilities.shape == (5, 2)
+    assert model.flaml_best_estimator_ == "rf"
+    assert model.flaml_split_type_ == "time"
+    assert model.flaml_eval_method_ == "holdout"
+    assert model.flaml_validation_fraction_ == pytest.approx(0.20)
+    assert model.flaml_estimator_list_ == ("rf",)
+
+    import joblib
+
+    artifact = tmp_path / "flaml-timesafe.joblib"
+    joblib.dump(model, artifact)
+    restored = joblib.load(artifact)
+    assert np.allclose(restored.predict_proba(X.iloc[:5]), probabilities)
+
+    with pytest.raises(ValueError, match="equal-weight"):
+        model.fit(X, y, sample_weight=np.linspace(1.0, 2.0, len(y)))
 
 
 def test_default_feature_count_search_is_adaptive_and_explicit_override_is_preserved() -> None:
@@ -119,8 +154,10 @@ def test_default_feature_count_search_is_adaptive_and_explicit_override_is_prese
     overridden = ModelTrainer(TrainerConfig(feature_subset_sizes=(2, 5)))
     assert overridden._feature_subset_sizes(8) == (2, 5, 8)
 
-    tabpfn = {spec.name: spec for spec in candidate_catalog()}["tabpfn"]
+    catalog = {spec.name: spec for spec in candidate_catalog()}
+    tabpfn = catalog["tabpfn"]
     assert adaptive._feature_subset_sizes(31, tabpfn) == (4, 8, 16, 24, 31)
+    assert adaptive._feature_subset_sizes(31, catalog["flaml_automl"]) == (4, 8, 16, 24, 31)
 
 
 def test_occam_rule_never_accepts_more_than_eight_percent_score_drop() -> None:

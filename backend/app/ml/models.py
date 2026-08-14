@@ -129,6 +129,7 @@ def _catboost_spec(random_state: int) -> CandidateSpec:
             l2_leaf_reg=6.0,
             loss_function="Logloss",
             verbose=False,
+            allow_writing_files=False,
             random_seed=random_state,
             thread_count=1,
         )
@@ -298,27 +299,109 @@ def _tabpfn_spec(random_state: int) -> CandidateSpec:
     )
 
 
-def _flaml_spec(random_state: int) -> CandidateSpec:
-    """Expose FLAML in the candidate ledger without making it a hard dependency.
+class FLAMLTimeSafeClassifier(ClassifierMixin, BaseEstimator):
+    """FLAML adapter with a chronological inner holdout inside each outer train slice.
 
-    The production environment currently keeps AutoML optional. When FLAML is
-    installed, it should be integrated with an outer-fold-safe adapter rather
-    than receiving the global final holdout. Until that adapter is enabled this
-    candidate is deliberately skipped even if importable, avoiding accidental
-    leakage through an internal random split.
+    The outer ModelTrainer owns the real chronological development folds and final
+    holdout. FLAML only sees the already-isolated outer-training slice, keeps its
+    row order, tunes on the latest ``validation_fraction`` of that slice via
+    ``split_type='time'``, then retrains the selected recipe on the full outer
+    training slice. This prevents AutoML from seeing an outer validation/final row.
     """
+
+    def __init__(
+        self,
+        *,
+        random_state: int = 42,
+        time_budget_seconds: float = 5.0,
+        validation_fraction: float = 0.20,
+        estimator_list: tuple[str, ...] = (
+            "lgbm",
+            "rf",
+            "extra_tree",
+            "catboost",
+        ),
+    ) -> None:
+        self.random_state = random_state
+        self.time_budget_seconds = time_budget_seconds
+        self.validation_fraction = validation_fraction
+        self.estimator_list = estimator_list
+
+    def fit(self, X, y, sample_weight=None):
+        from flaml import AutoML
+
+        labels = np.asarray(y)
+        if labels.ndim != 1 or len(labels) != len(X):
+            raise ValueError("FLAML labels must be a one-dimensional array matching X")
+        if len(np.unique(labels)) != 2:
+            raise ValueError("FLAML production adapter requires binary training labels")
+        if sample_weight is not None:
+            weights = np.asarray(sample_weight, dtype=float)
+            if len(weights) != len(labels):
+                raise ValueError("FLAML sample_weight length must match y")
+            # The current model-training policy intentionally uses equal
+            # classification weights. FLAML 2.6 + sklearn 1.9 has a time-holdout
+            # length bug when an all-one sample_weight is passed, so validate the
+            # invariant and omit the redundant vector rather than weakening the
+            # chronological split.
+            if len(weights) and not np.allclose(weights, weights[0]):
+                raise ValueError(
+                    "FLAML adapter only supports the current equal-weight training policy"
+                )
+
+        if not 0.05 <= float(self.validation_fraction) <= 0.40:
+            raise ValueError("FLAML validation_fraction must be between 0.05 and 0.40")
+        if float(self.time_budget_seconds) <= 0:
+            raise ValueError("FLAML time_budget_seconds must be positive")
+
+        automl = AutoML()
+        automl.fit(
+            X_train=X,
+            y_train=labels,
+            task="classification",
+            metric="log_loss",
+            time_budget=float(self.time_budget_seconds),
+            estimator_list=list(self.estimator_list),
+            eval_method="holdout",
+            split_type="time",
+            split_ratio=float(self.validation_fraction),
+            retrain_full=True,
+            auto_augment=False,
+            allow_label_overlap=False,
+            seed=int(self.random_state),
+            n_jobs=1,
+            verbose=0,
+        )
+        self.automl_ = automl
+        self.classes_ = np.asarray(automl.classes_)
+        self.flaml_best_estimator_ = str(automl.best_estimator)
+        self.flaml_best_config_ = dict(automl.best_config or {})
+        self.flaml_time_budget_seconds_ = float(self.time_budget_seconds)
+        self.flaml_split_type_ = "time"
+        self.flaml_eval_method_ = "holdout"
+        self.flaml_validation_fraction_ = float(self.validation_fraction)
+        self.flaml_estimator_list_ = tuple(self.estimator_list)
+        return self
+
+    def predict_proba(self, X):
+        if not hasattr(self, "automl_"):
+            raise RuntimeError("FLAMLTimeSafeClassifier is not fitted")
+        return self.automl_.predict_proba(X)
+
+
+def _flaml_spec(random_state: int) -> CandidateSpec:
     if importlib.util.find_spec("flaml") is None:
         return _optional_missing("flaml_automl", "flaml", 8, "automl")
     return CandidateSpec(
         name="flaml_automl",
         complexity_rank=8,
-        available=False,
-        skip_reason=(
-            "FLAML is installed but the nested time-split adapter is not enabled; "
-            "candidate is skipped to protect the outer chronological holdout"
-        ),
-        builder=None,
+        available=True,
+        skip_reason=None,
+        builder=lambda: FLAMLTimeSafeClassifier(random_state=random_state),
         family="automl",
+        # AutoML already searches model/hyperparameter space internally. Use a
+        # sparse outer feature grid to keep daily scheduled training bounded.
+        feature_subset_sizes=(4, 8, 16, 24),
     )
 
 
