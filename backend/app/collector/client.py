@@ -40,8 +40,28 @@ class HttpxTransport:
             import httpx
         except ImportError as exc:  # pragma: no cover - dependency wiring
             raise RuntimeError("httpx is required to use HttpxTransport") from exc
+        self._httpx = httpx
         self._client = client or httpx.AsyncClient()
         self._owns_client = client is None
+        self._recycle_lock = asyncio.Lock()
+        self._recycle_count = 0
+
+    async def _recycle_after_transport_failure(self, failed_client: Any) -> None:
+        """Replace a poisoned/stale owned connection pool once per failure generation."""
+        if not self._owns_client:
+            return
+        async with self._recycle_lock:
+            if self._client is not failed_client:
+                return
+            try:
+                await failed_client.aclose()
+            finally:
+                self._client = self._httpx.AsyncClient()
+                self._recycle_count += 1
+
+    @property
+    def recycle_count(self) -> int:
+        return self._recycle_count
 
     async def request(
         self,
@@ -53,14 +73,22 @@ class HttpxTransport:
         json_body: Mapping[str, Any] | None,
         timeout: float,
     ) -> TransportResponse:
-        response = await self._client.request(
-            method,
-            url,
-            headers=dict(headers),
-            params=dict(params or {}),
-            json=dict(json_body) if json_body is not None else None,
-            timeout=timeout,
-        )
+        request_kwargs = {
+            "headers": dict(headers),
+            "params": dict(params or {}),
+            "json": dict(json_body) if json_body is not None else None,
+            "timeout": timeout,
+        }
+        client = self._client
+        try:
+            response = await client.request(method, url, **request_kwargs)
+        except self._httpx.TransportError:
+            if not self._owns_client:
+                raise
+            # Long-lived httpx pools can remain poisoned after a transient
+            # route/interface change. Rebuild the pool and retry exactly once.
+            await self._recycle_after_transport_failure(client)
+            response = await self._client.request(method, url, **request_kwargs)
         try:
             data: Any = response.json()
         except Exception:

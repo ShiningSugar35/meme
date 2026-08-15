@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .client import GMGNDataClient
-from .errors import CollectorError
+from .errors import CollectorError, CollectorNetworkError
 from .filters import FilterDecision, SafetyFilter, canonical_launchpad, first, normalize_token, to_float
 from .models import ApiKeyRoles, CollectedSample, Kline, TokenCandidate
 
@@ -122,6 +122,8 @@ class GMGNEnrichmentProvider:
         for attempt in range(self.primary_attempts):
             try:
                 return await self.client.request(primary, path, params=params)
+            except CollectorNetworkError:
+                raise
             except Exception as exc:
                 last_error = exc
                 if attempt < self.primary_attempts - 1 and self.primary_retry_seconds:
@@ -132,6 +134,8 @@ class GMGNEnrichmentProvider:
                 await self._sleep(self.fallback_delay_seconds)
             try:
                 return await self.client.request(fallback, path, params=params)
+            except CollectorNetworkError:
+                raise
             except Exception as exc:
                 last_error = exc
         raise CollectorError(f"Realtime enrichment failed for path={path}") from last_error
@@ -146,6 +150,8 @@ class GMGNEnrichmentProvider:
         ):
             try:
                 bundle[name] = await self._realtime_request(path, params=params)
+            except CollectorNetworkError:
+                raise
             except CollectorError:
                 # Missing API values remain absent and therefore fail closed in
                 # SafetyFilter.  They must never be rewritten as numeric zero.
@@ -196,6 +202,8 @@ class GMGNEnrichmentProvider:
                     timeout_seconds=max(self.client.timeout_seconds, 30.0),
                 )
                 return [Kline.from_mapping(item) for item in extract_items(data, ("klines", "list", "items", "rows", "data"))]
+            except CollectorNetworkError:
+                raise
             except Exception as exc:
                 last_error = exc
                 if attempt < 2 and self.fallback_delay_seconds:
@@ -211,6 +219,8 @@ class GMGNEnrichmentProvider:
                     timeout_seconds=max(self.client.timeout_seconds, 30.0),
                 )
                 return [Kline.from_mapping(item) for item in extract_items(data, ("klines", "list", "items", "rows", "data"))]
+            except CollectorNetworkError:
+                raise
             except Exception as exc:
                 last_error = exc
         raise CollectorError("Kline request failed after primary and idle fallback roles") from last_error

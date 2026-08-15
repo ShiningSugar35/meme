@@ -15,6 +15,7 @@ from ..collector import (
     AsyncRateLimiter,
     CollectedSample,
     CollectorEndpoints,
+    CollectorNetworkError,
     CollectorService,
     DiscoveryService,
     EnrichmentService,
@@ -151,6 +152,17 @@ def _env_values(path: Path = PROJECT_ROOT / ".env") -> dict[str, str]:
     return {str(key): str(value) for key, value in values.items() if value not in (None, "")}
 
 
+def _is_network_failure(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, CollectorNetworkError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class CollectorWorker:
     def __init__(
         self,
@@ -169,6 +181,7 @@ class CollectorWorker:
         self._service: CollectorService | None = None
         self._gmgn_limiter = gmgn_limiter
         self._env_mtime_ns: int | None = None
+        self._transport_rebuilds = 0
         self._sol_price = SolUsdPriceService(database)
         existing_events = database.get_runtime_state("collector_events", [])
         seed = existing_events[-250:] if isinstance(existing_events, list) else []
@@ -282,6 +295,15 @@ class CollectorWorker:
             SqliteCollectorSink(self.database),
         )
 
+    async def _rebuild_after_network_failure(self) -> None:
+        old_transport = self._transport
+        self._service = None
+        self._transport = None
+        if old_transport is not None:
+            await old_transport.close()
+        self._service = self._build()
+        self._transport_rebuilds += 1
+
     async def run_forever(self) -> None:
         self.database.set_runtime_state("collector_status", {"state": "starting"})
         try:
@@ -342,6 +364,7 @@ class CollectorWorker:
                 "type_stats": {},
             }
             finalized = 0
+            network_failure = False
 
             # Freeze a recent SOL/USD observation before any simulated execution.
             # Paper accounting consumes this cache at the actual fee timestamp;
@@ -350,6 +373,7 @@ class CollectorWorker:
             try:
                 await self._sol_price.refresh(self._service.provider, now_ts=int(time.time()))
             except Exception as exc:
+                network_failure = network_failure or _is_network_failure(exc)
                 self.database.audit(
                     category="simulation",
                     action="sol_usd_price_refresh_failed",
@@ -366,6 +390,7 @@ class CollectorWorker:
                 if finalized:
                     self._record_event("label_finalization", {"finalized": finalized})
             except Exception as exc:
+                network_failure = network_failure or _is_network_failure(exc)
                 message = f"{type(exc).__name__}: {exc}"[:500]
                 cycle_errors.append({"stage": "label_finalization", "error": message})
                 self._record_event("stage_error", {"stage": "label_finalization", "error": message})
@@ -393,6 +418,7 @@ class CollectorWorker:
                         "type_stats": {key: dict(value) for key, value in collection.type_stats.items()},
                     }
                 except Exception as exc:
+                    network_failure = network_failure or _is_network_failure(exc)
                     message = f"{type(exc).__name__}: {exc}"[:500]
                     cycle_errors.append({"stage": "discovery", "error": message})
                     self._record_event("stage_error", {"stage": "discovery", "error": message})
@@ -426,9 +452,43 @@ class CollectorWorker:
                     **collection_stats,
                     "finalized": finalized,
                     "errors": cycle_errors,
+                    "transport_rebuilds": self._transport_rebuilds,
                 },
             )
-            wait_seconds = max(1.0, self.settings.collector_poll_seconds - elapsed)
+            if network_failure:
+                try:
+                    await self._rebuild_after_network_failure()
+                    status = self.database.get_runtime_state("collector_status", {})
+                    status = status if isinstance(status, dict) else {}
+                    self.database.set_runtime_state(
+                        "collector_status",
+                        {
+                            **status,
+                            "state": "recovering",
+                            "transport_rebuilds": self._transport_rebuilds,
+                            "recovery_reason": "gmgn_network_failure",
+                            "recovered_at": utc_now_iso(),
+                        },
+                    )
+                    self.database.audit(
+                        category="collector",
+                        action="gmgn_transport_rebuilt",
+                        severity="warning",
+                        details={"transport_rebuilds": self._transport_rebuilds},
+                    )
+                except Exception as rebuild_exc:
+                    self._service = None
+                    self.database.set_runtime_state(
+                        "collector_status",
+                        {
+                            "state": "blocked",
+                            "mode": "monitor_only" if self.monitor_only else "collector",
+                            "reason": f"transport_rebuild_failed: {type(rebuild_exc).__name__}: {rebuild_exc}"[:500],
+                            "transport_rebuilds": self._transport_rebuilds,
+                            "updated_at": utc_now_iso(),
+                        },
+                    )
+            wait_seconds = 1.0 if network_failure else max(1.0, self.settings.collector_poll_seconds - elapsed)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=wait_seconds)
             except TimeoutError:

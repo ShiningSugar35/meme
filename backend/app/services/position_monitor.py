@@ -29,6 +29,8 @@ from .platform_configuration import ENV_PATH, PlatformConfigurationService
 class PositionMonitorCycle:
     checked_positions: int = 0
     market_requests: int = 0
+    market_data_failures: int = 0
+    network_failures: int = 0
     paper_closed: int = 0
     paper_pending: int = 0
     live_triggered: int = 0
@@ -73,7 +75,9 @@ class GMGNPositionMarketProvider:
                 bundle: Mapping[str, Any] = {"token_info": data}
                 self._cache[address] = bundle
                 return bundle
-            except (CollectorNetworkError, CollectorAPIError) as exc:
+            except CollectorNetworkError:
+                raise
+            except CollectorAPIError as exc:
                 last_error = exc
         if last_error is not None:
             raise last_error
@@ -152,7 +156,8 @@ class PositionMonitorService:
                     continue
             grouped.setdefault(str(row["token_address"]), []).append(row)
 
-        checked = market_requests = paper_closed = paper_pending = 0
+        checked = market_requests = market_data_failures = network_failures = 0
+        paper_closed = paper_pending = 0
         live_triggered = live_pending = blocked = 0
         paper_work: list[tuple[dict[str, Any], float]] = []
         for row in direct_retry:
@@ -195,6 +200,8 @@ class PositionMonitorService:
         for address, positions, snapshot, market_error in market_batches:
             if market_error is not None or snapshot is None:
                 message = f"{type(market_error).__name__}: {market_error}"[:300]
+                market_data_failures += 1
+                network_failures += int(isinstance(market_error, CollectorNetworkError))
                 checked += len(positions)
                 blocked += len(positions)
                 self.database.audit(
@@ -247,6 +254,8 @@ class PositionMonitorService:
         return PositionMonitorCycle(
             checked_positions=checked,
             market_requests=market_requests,
+            market_data_failures=market_data_failures,
+            network_failures=network_failures,
             paper_closed=paper_closed,
             paper_pending=paper_pending,
             live_triggered=live_triggered,
@@ -532,6 +541,16 @@ class PositionMonitorWorker:
         self._provider: GMGNPositionMarketProvider | None = None
         self._gmgn_limiter = gmgn_limiter
         self._env_mtime_ns: int | None = None
+        self._provider_rebuilds = 0
+
+    async def _rebuild_provider(self) -> None:
+        old_transport = self._transport
+        self._provider = None
+        self._transport = None
+        if old_transport is not None:
+            await old_transport.close()
+        self._provider = self._build_provider()
+        self._provider_rebuilds += 1
 
     def _build_provider(self) -> GMGNPositionMarketProvider:
         env = {
@@ -630,17 +649,52 @@ class PositionMonitorWorker:
                 try:
                     report = await self.service.run_cycle(self._provider)
                     elapsed = time.monotonic() - started
+                    state = "degraded" if report.market_data_failures else "running"
                     self.database.set_runtime_state(
                         "position_monitor_status",
                         {
-                            "state": "running",
+                            "state": state,
                             "target_poll_seconds": runtime_config["position_monitor_poll_seconds"],
                             "last_cycle_seconds": elapsed,
                             "last_cycle_started_at": cycle_started_at,
                             "last_start_interval_seconds": start_interval,
+                            "provider_rebuilds": self._provider_rebuilds,
                             **asdict(report),
                         },
                     )
+                    if report.network_failures:
+                        try:
+                            await self._rebuild_provider()
+                            status = self.database.get_runtime_state("position_monitor_status", {})
+                            status = status if isinstance(status, dict) else {}
+                            self.database.set_runtime_state(
+                                "position_monitor_status",
+                                {
+                                    **status,
+                                    "state": "recovering",
+                                    "provider_rebuilds": self._provider_rebuilds,
+                                    "recovery_reason": "gmgn_network_failure",
+                                    "recovered_at": utc_now_iso(),
+                                },
+                            )
+                            self.database.audit(
+                                category="trading",
+                                action="position_monitor_provider_rebuilt",
+                                severity="warning",
+                                details={"network_failures": report.network_failures, "provider_rebuilds": self._provider_rebuilds},
+                            )
+                        except Exception as rebuild_exc:
+                            self._provider = None
+                            self.database.set_runtime_state(
+                                "position_monitor_status",
+                                {
+                                    "state": "degraded",
+                                    "target_poll_seconds": runtime_config["position_monitor_poll_seconds"],
+                                    "last_error": f"provider_rebuild_failed: {type(rebuild_exc).__name__}: {rebuild_exc}"[:500],
+                                    "provider_rebuilds": self._provider_rebuilds,
+                                    "updated_at": utc_now_iso(),
+                                },
+                            )
                 except Exception as exc:
                     elapsed = time.monotonic() - started
                     message = f"{type(exc).__name__}: {exc}"[:500]

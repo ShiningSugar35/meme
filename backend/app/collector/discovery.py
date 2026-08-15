@@ -8,7 +8,7 @@ from typing import Any
 
 from .client import GMGNDataClient
 from .constants import DISCOVERY_TYPES, LAUNCHPADS, SOL_TRENCH_QUOTE_ADDRESS_TYPES
-from .errors import CollectorError, CollectorValidationError
+from .errors import CollectorError, CollectorNetworkError, CollectorValidationError
 from .models import ApiKeyRoles, TokenCandidate
 
 
@@ -103,6 +103,10 @@ class DiscoveryService:
                     json_body=body,
                 )
                 return extract_trench_candidates(data, token_type)[:limit]
+            except CollectorNetworkError:
+                # Network failures are transport/IP-level, not key-specific.
+                # The transport already retried once with a fresh connection pool.
+                raise
             except Exception as exc:
                 last_error = exc
                 if attempt < 2 and self.retry_delay_seconds:
@@ -116,6 +120,8 @@ class DiscoveryService:
                 json_body=body,
             )
             return extract_trench_candidates(data, token_type)[:limit]
+        except CollectorNetworkError:
+            raise
         except Exception as exc:
             last_error = exc
         raise CollectorError(
