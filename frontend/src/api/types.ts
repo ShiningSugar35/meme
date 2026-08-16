@@ -386,7 +386,7 @@ export interface PlatformConfiguration {
     gmgn_key_count: number;
     jupiter_key_count: number;
     alchemy_account_count: number;
-    ankr_freemium_count: number;
+
     rpc_fallback_order: string;
     gmgn_total_rps: number;
     jupiter_exit_concurrency: number;

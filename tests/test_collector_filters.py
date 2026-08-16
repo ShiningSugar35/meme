@@ -157,7 +157,7 @@ def test_top1_addr_type_zero_uses_strict_range() -> None:
     assert not safety.evaluate_top_holders([{"addr_type": 0, "rate": 0.056}]).accepted
 
 
-def test_age_must_be_strictly_between_two_and_240_minutes() -> None:
+def test_age_must_be_strictly_between_two_and_300_minutes() -> None:
     safety = SafetyFilter()
 
     lower = valid_token()
@@ -171,14 +171,14 @@ def test_age_must_be_strictly_between_two_and_240_minutes() -> None:
     assert safety.evaluate(just_over_lower).accepted
 
     accepted = valid_token()
-    accepted["age"] = 239.9999
+    accepted["age"] = 299.9999
     assert safety.evaluate(accepted).accepted
 
     upper = valid_token()
-    upper["age"] = 240.0
+    upper["age"] = 300.0
     decision = safety.evaluate(upper)
     assert not decision.accepted
-    assert "age<240" in decision.reasons
+    assert "age<300" in decision.reasons
 
 
 def test_missing_or_malformed_safety_facts_never_count_as_safe() -> None:

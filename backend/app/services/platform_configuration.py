@@ -50,13 +50,6 @@ PROVIDERS: dict[str, ProviderSpec] = {
         multiple=True,
         description="Solana 网络状态主 RPC 池。4 个独立 Free 账号轮换/fallback；仅低频网络状态请求，不做全链宽订阅。",
     ),
-    "ankr": ProviderSpec(
-        key="ankr",
-        label="Ankr Solana RPC",
-        env_prefix="ANKR_API_KEY_",
-        multiple=True,
-        description="Freemium HTTPS 灾备/回补池；不作为 WebSocket 来源。",
-    ),
     "tabpfn": ProviderSpec(
         key="tabpfn",
         label="TabPFN",
@@ -209,7 +202,6 @@ class PlatformConfigurationService:
         gmgn_count = len(self.provider_credentials("gmgn"))
         jupiter_count = len(self.provider_credentials("jupiter"))
         alchemy_count = len(self.provider_credentials("alchemy"))
-        ankr_count = len(self.provider_credentials("ankr"))
         row = self.database.fetch_one(
             "SELECT COUNT(DISTINCT token_address) AS count FROM positions WHERE status IN ('open','closing')"
         ) or {}
@@ -222,8 +214,7 @@ class PlatformConfigurationService:
                 "gmgn_key_count": gmgn_count,
                 "jupiter_key_count": jupiter_count,
                 "alchemy_account_count": alchemy_count,
-                "ankr_freemium_count": ankr_count,
-                "rpc_fallback_order": "Alchemy accounts -> Ankr HTTPS -> Solana public emergency",
+                "rpc_fallback_order": "Alchemy accounts -> Solana public emergency",
                 "gmgn_total_rps": runtime["gmgn_global_rps"],
                 "jupiter_exit_concurrency": max(1, min(8, jupiter_count or 1)),
                 "position_monitor_target_seconds": runtime["position_monitor_poll_seconds"],

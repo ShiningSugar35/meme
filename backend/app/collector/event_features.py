@@ -76,70 +76,43 @@ def ratio_nonnegative(numerator: Any, denominator: Any) -> float | None:
     return left / right
 
 
-def creator_status01(value: Any) -> int | None:
-    """1=creator sold/closed, 0=creator still holds, unknown stays missing."""
-    if value in (None, ""):
-        return None
-    normalized = str(value).strip().lower()
-    if normalized in {"creator_close", "close", "closed", "sell", "sold"}:
-        return 1
-    if normalized in {"creator_hold", "hold", "holding"}:
-        return 0
-    return None
+def price_change_from_history(
+    current_price: float,
+    klines: Sequence[Kline],
+    target_ts: int,
+    known_at: int,
+) -> float | None:
+    """Return price change versus the PIT price at ``target_ts``.
 
-
-def completed_bars(klines: Sequence[Kline], entry_time: int) -> list[Kline]:
-    """Return only 1m bars that were complete at the decision timestamp."""
-    return sorted(
-        (line for line in klines if int(line.timestamp) + 60 <= int(entry_time)),
-        key=lambda line: line.timestamp,
-    )
-
-
-def trailing_two_minute_volume(klines: Sequence[Kline], entry_time: int) -> float | None:
-    bars = completed_bars(klines, entry_time)
-    if len(bars) < 2:
-        return None
-    latest = bars[-2:]
-    # Require adjacent one-minute buckets.  We do not silently stretch a two
-    # minute feature over a gap or use a partially completed current bar.
-    if int(latest[1].timestamp) - int(latest[0].timestamp) > 65:
-        return None
-    if any(line.volume is None or float(line.volume) < 0 for line in latest):
-        return None
-    return float(latest[0].volume or 0.0) + float(latest[1].volume or 0.0)
-
-
-def price_change_from_history(current_price: float, klines: Sequence[Kline], target_ts: int) -> float | None:
-    # Kline timestamps are bucket-open times. Use only a bar whose close was
-    # already known at target_ts; selecting the bucket that starts at target_ts
-    # would shorten a nominal 2m lookback by almost one minute.
-    eligible = [
+    Kline timestamps are bucket-open times. Prefer the open of the bucket that
+    starts at the target timestamp because it is the price at T-60 and the whole
+    bucket is already known by entry time T. If that open is unavailable, fall
+    back to the latest close ending at or before the target. Gaps wider than one
+    minute stay missing rather than silently stretching the lookback.
+    """
+    exact = [
         line
         for line in klines
-        if int(line.timestamp) + 60 <= int(target_ts) and line.close not in (None, 0)
+        if int(line.timestamp) <= int(target_ts)
+        and int(line.timestamp) + 60 <= int(known_at)
+        and line.open not in (None, 0)
+        and 0 <= int(target_ts) - int(line.timestamp) <= 5
     ]
-    if not eligible:
-        return None
-    previous = max(eligible, key=lambda line: line.timestamp)
-    return current_price / float(previous.close) - 1.0
+    if exact:
+        anchor = max(exact, key=lambda line: line.timestamp)
+        return current_price / float(anchor.open) - 1.0
 
-
-def two_minute_volume_acceleration(klines: Sequence[Kline], entry_time: int) -> float | None:
-    """Bounded minute-2 vs minute-1 activity acceleration from completed bars."""
-    bars = completed_bars(klines, entry_time)
-    if len(bars) < 2:
+    completed = [
+        line
+        for line in klines
+        if int(line.timestamp) + 60 <= int(target_ts)
+        and line.close not in (None, 0)
+        and int(target_ts) - (int(line.timestamp) + 60) <= 65
+    ]
+    if not completed:
         return None
-    previous, latest = bars[-2:]
-    if int(latest.timestamp) - int(previous.timestamp) > 65:
-        return None
-    if previous.volume is None or latest.volume is None:
-        return None
-    older = float(previous.volume)
-    newer = float(latest.volume)
-    if older < 0 or newer < 0 or older + newer <= 0:
-        return None
-    return (newer - older) / (newer + older)
+    anchor = max(completed, key=lambda line: line.timestamp)
+    return current_price / float(anchor.close) - 1.0
 
 
 def build_gmgn_event_features(
@@ -152,11 +125,10 @@ def build_gmgn_event_features(
     holder_count: Any = None,
     marketcap: Any = None,
 ) -> dict[str, Any]:
-    """Build non-duplicative event features known no later than entry_time.
+    """Build non-duplicative Shadow features known no later than entry_time.
 
-    Missing provider facts stay ``None``.  No absent event is converted to zero.
-    The optional two-minute volume is constructed only from two completed 1m
-    OHLCV buckets, so it cannot reach past the admission/decision timestamp.
+    Missing provider facts stay ``None``. No absent event is converted to zero.
+    The 1m price-change fallback uses only a completed historical 1m bar.
     """
     volume_1m = first_recursive(source, ("volume_1m", "volume1m", "volume_m1"))
     swaps_1m = first_recursive(source, ("swaps_1m", "swaps1m", "trade_1m", "trades_1m"))
@@ -164,36 +136,28 @@ def build_gmgn_event_features(
     sells_1m = first_recursive(source, ("sells_1m", "sell_1m", "sell_count_1m"))
     buy_volume_1m = first_recursive(source, ("buy_volume_1m", "buyVolume1m", "buy_volume_m1"))
     sell_volume_1m = first_recursive(source, ("sell_volume_1m", "sellVolume1m", "sell_volume_m1"))
-    explicit_2m_volume = first_recursive(source, ("volume_2m", "volume2m", "volume_m2"))
-    volume_2m = to_float(explicit_2m_volume)
-    if volume_2m is None and history_klines:
-        volume_2m = trailing_two_minute_volume(history_klines, entry_time)
 
-    price_change_2m: float | None = None
-    old_price_2m = to_float(first_recursive(source, ("price_2m", "price2m", "price_m2")))
-    if old_price_2m not in (None, 0):
-        price_change_2m = current_price / float(old_price_2m) - 1.0
+    price_change_1m: float | None = None
+    old_price_1m = to_float(first_recursive(source, ("price_1m", "price1m", "price_m1")))
+    if old_price_1m not in (None, 0):
+        price_change_1m = current_price / float(old_price_1m) - 1.0
     elif history_klines:
-        price_change_2m = price_change_from_history(current_price, history_klines, entry_time - 120)
+        price_change_1m = price_change_from_history(
+            current_price, history_klines, entry_time - 60, entry_time
+        )
 
     return {
-        "price_change_2m": price_change_2m,
+        "price_change_1m": price_change_1m,
         "ln(volume_1m+1)": log1p_nonnegative(volume_1m),
-        "ln(swaps_1m+1)": log1p_nonnegative(swaps_1m),
         "buy_count_imbalance_1m": signed_imbalance(buys_1m, sells_1m),
         "buy_volume_imbalance_1m": signed_imbalance(buy_volume_1m, sell_volume_1m),
         "ln(volume_1m/swaps_1m+1)": log_volume_per_swap(volume_1m, swaps_1m),
-        "ln(volume_2m+1)": log1p_nonnegative(volume_2m),
-        "volume_acceleration_2m": two_minute_volume_acceleration(history_klines, entry_time),
         "holder_count/age": ratio_nonnegative(
             holder_count if holder_count not in (None, "") else first_recursive(source, ("holder_count", "holders")),
             age_minutes if age_minutes not in (None, "") else _age_minutes(source, entry_time),
         ),
         "ln(marketcap+1)": log1p_nonnegative(
             marketcap if marketcap not in (None, "") else first_recursive(source, ("marketcap", "market_cap", "marketCap"))
-        ),
-        "creator_token_status": creator_status01(
-            first_recursive(source, ("creator_token_status", "creatorTokenStatus"))
         ),
         "dexscr_ad": optional_bool01(first_recursive(source, ("dexscr_ad", "dexscreener_ad", "dexscrAd"))),
         "ln(dexscr_boost_fee+1)": log1p_nonnegative(

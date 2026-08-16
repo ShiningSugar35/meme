@@ -14,17 +14,13 @@ from .trainer import ModelTrainer, TrainerConfig
 
 
 TOKEN_LOCAL_FAMILY: tuple[str, ...] = (
-    "price_change_2m",
+    "price_change_1m",
     "ln(volume_1m+1)",
-    "ln(swaps_1m+1)",
     "buy_count_imbalance_1m",
     "buy_volume_imbalance_1m",
     "ln(volume_1m/swaps_1m+1)",
-    "ln(volume_2m+1)",
-    "volume_acceleration_2m",
     "holder_count/age",
     "ln(marketcap+1)",
-    "creator_token_status",
 )
 
 TOKEN_ATTENTION_FAMILY: tuple[str, ...] = (

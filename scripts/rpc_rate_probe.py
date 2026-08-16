@@ -19,7 +19,6 @@ async def main() -> int:
     report = await bounded_rate_probe(endpoints)
     report["configured_provider_counts"] = dict(counts)
     report["expected_independent_alchemy_accounts"] = 4
-    report["expected_ankr_freemium_projects"] = 2
     report["credentials_redacted"] = True
     target = PROJECT_ROOT / "artifacts" / "alchemy_same_ip_rate_probe.json"
     target.parent.mkdir(parents=True, exist_ok=True)

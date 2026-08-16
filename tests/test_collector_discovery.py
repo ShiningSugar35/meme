@@ -53,7 +53,7 @@ def test_discovery_payload_tracks_current_gmgn_contract_without_business_prefilt
     assert section["filters"] == ["offchain", "onchain"]
     assert section["quote_address_type"] == [4, 5, 3, 1, 13, 0]
     assert section["min_created"] == "2m"
-    assert section["max_created"] == "240m"
+    assert section["max_created"] == "300m"
     for business_filter in (
         "max_rug_ratio",
         "min_top_holder_rate",

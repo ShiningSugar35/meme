@@ -2,7 +2,7 @@
   "status": "INSUFFICIENT_DATA",
   "readiness": {
     "status": "INSUFFICIENT_DATA",
-    "generation": "event2m_regime_v2",
+    "generation": "event1m_regime_v3",
     "mature_samples": 0,
     "positives": 0,
     "negatives": 0,
@@ -15,7 +15,7 @@
       "negatives:0/50"
     ]
   },
-  "generation": "event2m_regime_v2",
+  "generation": "event1m_regime_v3",
   "baseline_features": [
     "ln(age+1)",
     "ln(price+1)",
@@ -52,30 +52,22 @@
   "families": {
     "local_event": {
       "features": [
-        "price_change_2m",
+        "price_change_1m",
         "ln(volume_1m+1)",
-        "ln(swaps_1m+1)",
         "buy_count_imbalance_1m",
         "buy_volume_imbalance_1m",
         "ln(volume_1m/swaps_1m+1)",
-        "ln(volume_2m+1)",
-        "volume_acceleration_2m",
         "holder_count/age",
-        "ln(marketcap+1)",
-        "creator_token_status"
+        "ln(marketcap+1)"
       ],
       "coverage": {
-        "price_change_2m": 0.0,
+        "price_change_1m": 0.0,
         "ln(volume_1m+1)": 0.0,
-        "ln(swaps_1m+1)": 0.0,
         "buy_count_imbalance_1m": 0.0,
         "buy_volume_imbalance_1m": 0.0,
         "ln(volume_1m/swaps_1m+1)": 0.0,
-        "ln(volume_2m+1)": 0.0,
-        "volume_acceleration_2m": 0.0,
         "holder_count/age": 0.0,
-        "ln(marketcap+1)": 0.0,
-        "creator_token_status": 0.0
+        "ln(marketcap+1)": 0.0
       },
       "status": "INSUFFICIENT_DATA"
     },

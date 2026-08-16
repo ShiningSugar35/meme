@@ -85,7 +85,7 @@ class DiscoveryService:
             "launchpad_platform": list(LAUNCHPADS),
             "quote_address_type": list(SOL_TRENCH_QUOTE_ADDRESS_TYPES),
             "min_created": "2m",
-            "max_created": "240m",
+            "max_created": "300m",
         }
         return {"version": "v2", token_type: section}
 

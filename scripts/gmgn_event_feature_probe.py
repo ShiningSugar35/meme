@@ -26,13 +26,13 @@ FIELDS = (
     "sells_1m",
     "buy_volume_1m",
     "sell_volume_1m",
-    "volume_2m",
+
     "dexscr_ad",
     "dexscr_boost_fee",
     "dexscr_trending_bar",
     "x_user_follower",
     "tg_call_count",
-    "creator_token_status",
+
     "holder_count",
     "marketcap",
 )

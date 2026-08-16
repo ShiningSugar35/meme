@@ -43,7 +43,7 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
     return Settings(**values)
 
 
-def test_event2m_features_use_only_completed_bars_and_include_acceleration() -> None:
+def test_event1m_features_use_only_completed_history() -> None:
     entry_time = 1_000
     klines = (
         Kline(timestamp=820, high=1.1, low=0.9, close=1.0, open=0.95, volume=10.0),
@@ -67,9 +67,9 @@ def test_event2m_features_use_only_completed_bars_and_include_acceleration() -> 
         history_klines=klines,
     )
 
-    assert features["price_change_2m"] == pytest.approx(0.20)
-    assert features["ln(volume_2m+1)"] == pytest.approx(math.log1p(50.0))
-    assert features["volume_acceleration_2m"] == pytest.approx(0.20)
+    assert features["price_change_1m"] == pytest.approx(1.2 / 1.1 - 1.0)
+    assert "ln(volume_2m+1)" not in features
+    assert "volume_acceleration_2m" not in features
     assert features["buy_count_imbalance_1m"] == pytest.approx(1 / 3)
     assert features["buy_volume_imbalance_1m"] == pytest.approx(0.4)
 
@@ -87,17 +87,20 @@ def test_secondary_shadow_features_preserve_unknowns_and_explicit_semantics() ->
         marketcap=10_000,
     )
     assert features["dexscr_ad"] is None
-    assert features["creator_token_status"] == 0
+    assert "creator_token_status" not in features
     assert features["holder_count/age"] == pytest.approx(16.0)
     assert features["ln(marketcap+1)"] == pytest.approx(math.log1p(10_000))
 
 
 def test_new_feature_generation_keeps_event_candidates_shadow_only() -> None:
-    assert "price_change_2m" in AVAILABLE_MODEL_FEATURES
-    assert "volume_acceleration_2m" in AVAILABLE_MODEL_FEATURES
+    assert "price_change_1m" in AVAILABLE_MODEL_FEATURES
+    assert "volume_acceleration_2m" not in AVAILABLE_MODEL_FEATURES
     assert "holder_count/age" in AVAILABLE_MODEL_FEATURES
-    assert "creator_token_status" in AVAILABLE_MODEL_FEATURES
-    assert "price_change_2m" not in DEFAULT_MODEL_TRAINING_FEATURES
+    assert "creator_token_status" not in AVAILABLE_MODEL_FEATURES
+    assert "ln(swaps_1m+1)" not in AVAILABLE_MODEL_FEATURES
+    assert "ln(volume_2m+1)" not in AVAILABLE_MODEL_FEATURES
+    assert len(AVAILABLE_MODEL_FEATURES) == 44
+    assert "price_change_1m" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "volume_acceleration_2m" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "holder_count/age" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "creator_token_status" not in DEFAULT_MODEL_TRAINING_FEATURES
@@ -106,7 +109,7 @@ def test_new_feature_generation_keeps_event_candidates_shadow_only() -> None:
     assert FEATURE_SCHEMA_VERSION in TrainingService.FEATURE_SELECTION_STATE_KEY
 
 
-def test_rpc_endpoint_order_uses_four_alchemy_then_two_ankr_then_public(tmp_path: Path) -> None:
+def test_rpc_endpoint_order_uses_four_alchemy_then_public(tmp_path: Path) -> None:
     env = tmp_path / ".env"
     env.write_text(
         "\n".join(
@@ -115,8 +118,6 @@ def test_rpc_endpoint_order_uses_four_alchemy_then_two_ankr_then_public(tmp_path
                 "ALCHEMY_API_KEY_2=a2",
                 "ALCHEMY_API_KEY_3=a3",
                 "ALCHEMY_API_KEY_4=a4",
-                "ANKR_API_KEY_1=n1",
-                "ANKR_API_KEY_2=n2",
             ]
         )
         + "\n",
@@ -128,8 +129,8 @@ def test_rpc_endpoint_order_uses_four_alchemy_then_two_ankr_then_public(tmp_path
         "alchemy",
         "alchemy",
         "alchemy",
-        "ankr",
-        "ankr",
+
+
         "solana_public",
     ]
     assert all(item.production_grade for item in endpoints[:-1])
@@ -138,12 +139,12 @@ def test_rpc_endpoint_order_uses_four_alchemy_then_two_ankr_then_public(tmp_path
 
 def test_rpc_http_error_redaction_never_persists_embedded_credential() -> None:
     credential = "fixture_credential_value"
-    endpoint = RpcEndpoint("ankr", 1, f"https://rpc.ankr.com/solana/{credential}")
+    endpoint = RpcEndpoint("alchemy", 1, f"https://solana-mainnet.g.alchemy.com/v2/{credential}")
     request = httpx.Request("POST", endpoint.url)
     response = httpx.Response(403, request=request)
     error = httpx.HTTPStatusError("forbidden", request=request, response=response)
     safe = SolanaRpcPool._safe_error(endpoint, error)
-    assert safe == "ankr:1:http_403"
+    assert safe == "alchemy:1:http_403"
     assert credential not in safe
 
 
@@ -318,7 +319,7 @@ def test_feature_family_audit_reports_insufficient_data_without_backfill(tmp_pat
     assert report["families"]["attention_entry"]["status"] == "INSUFFICIENT_DATA"
     assert report["families"]["attention"]["status"] == "INSUFFICIENT_DATA"
     assert len(LEGACY_BASELINE_FEATURES) == 31
-    assert "price_change_2m" not in LEGACY_BASELINE_FEATURES
+    assert "price_change_1m" not in LEGACY_BASELINE_FEATURES
     assert "baseline" not in report
 
 

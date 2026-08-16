@@ -1,6 +1,6 @@
 # Solana Meme Quant Trading System - Architecture Review
 
-> 本文主体保留架构审阅与设计门禁；实际实现状态以文末“2026-08-12 实现状态附录”、`README.md` 与 `开发文档.md` 为准。schema v12 / `event2m_regime_v2` / Top 3 / 固定 `rules_only` 基线 / 模拟盘单一 USD 会计 / 16:00-17:00 staged model rollover 是当前权威业务语义；历史三档字段与旧 SOL reserve 字段只允许作为数据库迁移兼容事实存在。
+> 本文主体保留架构审阅与设计门禁；实际实现状态以文末“2026-08-12 实现状态附录”、`README.md` 与 `开发文档.md` 为准。schema v12 / `event1m_regime_v3` / Top 3 / 固定 `rules_only` 基线 / 模拟盘单一 USD 会计 / 16:00-17:00 staged model rollover 是当前权威业务语义；历史三档字段与旧 SOL reserve 字段只允许作为数据库迁移兼容事实存在。
 
 ## 1. 审阅目标与原则
 
@@ -352,13 +352,13 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 4. **执行数据抗选择偏差**：只有持续覆盖所有规则准入样本的 `rules_only` route-validated closed positions 进入 `E_exec` 数据集；模型账户结果不作为该指标的唯一来源。
 5. **generation 隔离**：模型卡片的持仓/历史/审计必须同时绑定 current model id 与 selected_at；strategy slot 不是 model generation identity。
 
-## 2026-08-16 增量架构决议：Event2m + Market Regime + Adaptive Shadow
+## 2026-08-16 增量架构决议：Event1m + Market Regime + Adaptive Shadow
 
-1. **准入与快照分离**：当前严格 `2 < age_minutes < 240`，Trenches 仅用 `min_created=2m` 做 transport boundary；真实 `feature_snapshot_at` 单独持久化，不能把首个采样假定为恰好 2 分钟。
-2. **Token Local 与 Market Regime 分层**：Token 新增 1m/2m 事件特征只允许读取入场前已知事实与已闭合 1m bar；BTC/SOL/Network/Meme/Attention/Execution/Strategy 的 5m/15m/1h 等 lookback 属于全局状态，只要求 observation time 不晚于 decision time，不受 Token age 截断。
-3. **生产 31 与 Shadow catalog 分离**：`event2m_regime_v2` 可选 catalog 共 48 个，但默认训练池仍冻结原 31。新增 Event2m、GMGN marketing/social、holder/age、marketcap、creator status 与 `ln(liquidity_usd)` 先积累 Shadow 样本，只有 chronological family ablation、one-SE + 8% 与 final certification 支持时才可显式晋级。
-4. **数据源职责收敛**：GMGN 是 Token 与 Meme attention 主源；DEX Screener Public 仅低频补充缺失的 promotion 子家族；Coinbase Public 负责 BTC Crypto family，并只在本地/GMGN SOL 事实 stale 时提供 SOL fallback；Solana Network 采用 Alchemy → Ankr → Public emergency，底层 RPC 不重复重放 Token 全链交易。
+1. **准入与快照分离**：当前严格 `2 < age_minutes < 300`，Trenches transport boundary 为 `min_created=2m / max_created=300m`；真实 `feature_snapshot_at` 单独持久化，不能把首个采样假定为恰好 2 分钟。
+2. **Token Local 与 Market Regime 分层**：Token 新增 1m 事件特征只允许读取入场前已知事实；`price_change_1m` 的历史 fallback 只读取目标时点前已闭合的 1m bar。BTC/SOL/Network/Meme/Attention/Execution/Strategy 的 5m/15m/1h 等 lookback 属于全局状态，只要求 observation time 不晚于 decision time，不受 Token age 截断。
+3. **生产 31 与 Shadow catalog 分离**：`event1m_regime_v3` 可选 catalog 共 44 个，默认训练池仍冻结原 31。新增 Shadow 只保留 `price_change_1m`、1m volume/imbalance/平均成交额、holder/age、marketcap、GMGN marketing/social 与 `ln(liquidity_usd)`；`price_change_2m` 被替换，`ln(swaps_1m+1)`、`ln(volume_2m+1)`、`volume_acceleration_2m`、`creator_token_status` 已从 catalog 删除。只有 chronological family ablation、one-SE + 8% 与 final certification 支持时才可显式晋级。
+4. **数据源职责收敛**：GMGN 是 Token 与 Meme attention 主源；DEX Screener Public 仅低频补充缺失的 promotion 子家族；Coinbase Public 负责 BTC Crypto family，并只在本地/GMGN SOL 事实 stale 时提供 SOL fallback；Solana Network 采用 4 个 Alchemy 账号轮转 → Solana Public emergency，底层 RPC 不重复重放 Token 全链交易。
 5. **Provider failure 不等于 0**：任何 optional feed 的 429/5xx/network/malformed 都持久化为 missing/source-health 并降低 confidence，不能写成“市场事件为 0”。Public emergency/fallback 也必须带来源标记。
 6. **三模型 adaptive、rules-only 固定**：`model_1/2/3` 每 15 分钟只在 DEFENSIVE/NEUTRAL/EXPANSIVE 三动作间通过 `sigmoid(logit(base_threshold)+delta)` 调整入场门槛；`rules_only` 永久不调节。每个模型同时记录 neutral counterfactual、propensity 与 policy version。
 7. **Shadow/OPE 先于上线**：策略证据门在当前 generation 至少 120 个独立 sample cluster、40 个 policy-separating cluster 后才允许评估；chronological 70/30 development/certification 必须 development mean>0、certification 95% LCB>0 且三模型 certification mean 均不为负。探索率硬上限 5%，并由第二道独立 readiness gate 控制；未满足证据时实际模拟仍执行 Neutral。
-8. **代际不可回填**：开发中间态 `event2m_regime_v1` 因已关联模拟仓位不做破坏性删除；v1 pending 允许继续补 T+1h 标签与自然结算，但 v2 训练/健康/自适应证据从 0 重新累计。任何旧 generation 都禁止事后补造新特征。
+8. **代际不可回填**：`event2m_regime_v1/v2` 均作为历史代际保留；旧 pending 允许继续补 T+1h 标签与自然结算，但 `event1m_regime_v3` 的训练、健康与自适应证据从 0 重新累计。任何旧 generation 都禁止事后补造 v3 新特征。

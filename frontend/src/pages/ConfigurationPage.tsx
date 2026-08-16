@@ -101,7 +101,7 @@ export function ConfigurationPage() {
     ["持仓目标周期", `${data.derived.position_monitor_target_seconds.toFixed(1)}s`, `默认已收紧到 3s`],
     ["GMGN 总预算", `${data.derived.gmgn_total_rps.toFixed(1)} req/s`, `${data.derived.gmgn_key_count} 个 Key 共享 IP 预算`],
     ["Jupiter 退出并发", `${data.derived.jupiter_exit_concurrency}`, `${data.derived.jupiter_key_count} 个 Key 自动限并发`],
-    ["Solana RPC 主池", `${data.derived.alchemy_account_count} Alchemy`, `${data.derived.ankr_freemium_count} Ankr HTTPS 灾备`],
+    ["Solana RPC 主池", `${data.derived.alchemy_account_count} Alchemy`, "Solana Public 仅作应急灾备"],
     ["Regime 采样周期", `${data.runtime.regime_poll_seconds}s`, `${data.runtime.adaptive_action_interval_minutes} 分钟更新买入松紧动作`],
     ["3s 可覆盖唯一 Token", `${data.derived.gmgn_unique_tokens_per_target_cycle}`, `当前持仓 ${data.derived.open_unique_tokens} 个唯一 Token`],
     ["预计最短实际周期", `${data.derived.estimated_min_cycle_seconds.toFixed(1)}s`, data.derived.capacity_state === "within_target" ? "当前 API 预算可满足目标" : "当前 API 预算受限，将自动降级"]

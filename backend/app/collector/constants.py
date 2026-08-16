@@ -16,7 +16,7 @@ DISCOVERY_TYPES = ("new_creation", "near_completion")
 # collected before the event/regime upgrade remain auditable, but must never be
 # silently backfilled with values that were not observed at their original PIT.
 LEGACY_FEATURE_SCHEMA_VERSION = "legacy_pre_event_v1"
-FEATURE_SCHEMA_VERSION = "event2m_regime_v2"
+FEATURE_SCHEMA_VERSION = "event1m_regime_v3"
 
 LAUNCHPADS = (
     "Pump.fun",
@@ -49,7 +49,7 @@ class FilterThresholds:
     max_buy_tax: float = 0.025
     max_sniper_count: int = 10
     min_age_minutes: float = 2.0
-    max_age_minutes_exclusive: float = 240.0
+    max_age_minutes_exclusive: float = 300.0
     min_liquidity_per_holder: float = 50.0
     min_swaps_1h: int = 19
     min_volume_per_swap_1h: float = 31.0

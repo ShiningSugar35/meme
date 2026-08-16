@@ -53,7 +53,7 @@ launchpad_platform_v2 = true
 launchpad_platform = [Pump.fun, Moonshot, moonshot_app, letsbonk, jup_studio, bags, believe, heaven]
 quote_address_type = [4, 5, 3, 1, 13, 0]
 min_created = "2m"
-max_created = "240m"
+max_created = "300m"
 limit <= 80
 ```
 
@@ -74,7 +74,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 - 非洗盘，`rat_trader_amount_rate < 0.2`；
 - `29 < holder_count < 1000`，`marketcap > 5000`；
 - `sell_tax < 0.025`、`buy_tax < 0.025`；
-- `sniper_count < 10`、`2 < age < 240` 分钟；
+- `sniper_count < 10`、`2 < age < 300` 分钟；
 - `liquidity / holder_count > 50`；
 - `swaps_1h > 19`、`volume_1h / swaps_1h > 31`；
 - `(0.5 + smart_degen_count + renowned_count) * volume > 5000`；
@@ -86,9 +86,9 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 需要采集/导出的核心列如下：address	name	symbol	type	time	ln(age+1)	launchpad	price	ln(price+1)	ln(liquidity_usd)	price_1h_max/price	price_1h_min/price	final_1h_close_ratio	liquidity/holder_count	volume_1h/swaps_1h	has_twitter	has_website	ln(image_dup+1)	dexscr_update_link	cto_flag	ln(twitter_rename_count+1)	ln(twitter_del_post_token_count+1)	ln(twitter_create_token_count+1)	top_10_holder_rate	top_bot_degen_percentage	fresh_wallet_rate	bot_degen_rate	price/ath_price	stat.holder_count/market_cap	ln(smart_degen_count+1)	ln(renowned_count+1)	entrapment_ratio	dev_team_hold_rate	top70_sniper_hold_rate	ln(twitter_dup+1)	ln(website_dup+1)	ln(visiting_count+1)	price_change_1h	price_change_5m	ln(creator_open_count+1)	creator_open_ratio	ln(top_wallets+1)	tag。数据库仍保留旧 `price_2h_*` 审计列，仅用于历史 provenance，不再由新标签链路写入或参与训练/交易。
 
-自 `event2m_regime_v2` 起，可选 feature catalog 为 48 个入场时数值/布尔特征，默认训练候选为除 `ln(liquidity_usd)` 外的 47 个。新增 Event2m / marketing / social 字段只是获得参加 fold-train-only chronological OOS、one-SE + 8% 奥卡姆选择和 final holdout certification 的资格，并不等于自动进入最终生产模型；`ln(liquidity_usd)` 继续作为 opt-in 候选，待同代样本覆盖充分后再开启。训练候选池按 feature generation 单独持久化，手动训练、每日/周训、启动补跑和退化重训都从该代已批准候选池重新开始，不能继承上一代冠军已经压缩后的子集造成代际单向收缩。每个算法在这份候选池内默认从 4 个特征起逐维扫描到可用全量；特征排序严格在每个 chronological development fold 的训练段内用浅层 XGBoost + TreeSHAP interaction contribution 完成，使主要通过交互起作用的弱单变量特征也有进入前 k 的机会，若交互排序器不可用才回退 mutual information。维度选择同时满足 one-standard-error 与“相对该算法最佳开发期 S 不得下降超过 8%”两个门槛，再取最小维度。最终生产列名只用 final-train 重新排序确定，最终 holdout 不参与任何特征选择。`launchpad` 仅作为样本来源元数据保存，不进入模型输入矩阵；`tag` 仅作为二分类 target。
+自 `event1m_regime_v3` 起，可选 feature catalog 为 **44 个**入场时数值/布尔特征，生产默认训练候选继续冻结为原 **31 个**。新增的 1m / marketing / social 字段先作为 Shadow catalog 积累同代样本，只有完成 fold-train-only chronological OOS、one-SE + 8% 奥卡姆选择和 final holdout certification 后，才允许显式晋级生产训练池；`ln(liquidity_usd)` 仍为可选 Shadow 特征。训练候选池按 feature generation 单独持久化，手动训练、每日/周训、启动补跑和退化重训都从该代已批准候选池重新开始，不能继承上一代冠军已经压缩后的子集造成代际单向收缩。每个算法在批准池内从最小可行维度逐步扫描；特征排序严格只读取 chronological development fold 的训练段，最终 holdout 不参与特征、阈值或模型选择。`launchpad` 仅作为样本来源元数据保存，不进入模型输入矩阵；`tag` 仅作为二分类 target。
 
-`event2m_regime_v2` 新增的候选只补当前 31 特征未覆盖的信息：`price_change_2m`、1m volume/swaps、1m 买卖笔数/金额 imbalance、1m 平均成交额、两根已完成 1m K 线构成的 `volume_2m` 与 `volume_acceleration_2m`、holder/age、marketcap、creator status，以及 GMGN 已集成的 DexScreener promotion、X follower、TG call。已有 `fresh_wallet_rate`、smart/renowned wallet、holder 集中度、dev/sniper/bot、5m/1h momentum 等不重复采集。所有 2m 衍生仅使用 `feature_snapshot_at` 之前已经闭合的 1m K 线；T+1h 标签阶段禁止回填入场时缺失特征。历史 `legacy_pre_event_v1` 与开发热重载期间产生的 `event2m_regime_v1` 试运行样本均保留审计但不进入正式 v2 训练、健康统计或 Regime 策略表现；v1 已有 23 个关联模拟仓位，故采用整代封存而非破坏性删除。正式 `event2m_regime_v2` 在 SQLite 物理备份后从 0 重新积累。
+`event1m_regime_v3` 的新增 Shadow 候选只补当前 31 特征未覆盖的信息：`price_change_1m`、`ln(volume_1m+1)`、1m 买卖笔数 imbalance、1m 买卖金额 imbalance、`ln(volume_1m/swaps_1m+1)`、`holder_count/age`、`ln(marketcap+1)`，以及 GMGN 已集成的 DexScreener promotion、X follower、TG call。`ln(swaps_1m+1)`、`ln(volume_2m+1)`、`volume_acceleration_2m`、`creator_token_status` 已从候选特征池删除；`price_change_2m` 被 `price_change_1m` 替代。1m price-change 只允许使用 `feature_snapshot_at` 之前已完成的历史 1m bar 或入场时已知的 1m 价格事实，T+1h 标签阶段禁止回填入场时缺失特征。历史 `legacy_pre_event_v1`、`event2m_regime_v1` 与 `event2m_regime_v2` 均保留审计但不进入 v3 训练、健康统计或 Adaptive 证据；切换 v3 时 v2 仅有 4 条 pending、无关联仓位，因此保留其后续补标而不做破坏性删除，v3 从 0 重新积累。
 
 `tag` 为分类标签列，只作为 target，不进入模型输入矩阵。`age_minutes` 与 `samples.entry_price` 继续保存/使用 raw 入场事实：前者用于严格准入边界，后者用于标签、收益、仓位和交易核算；模型输入不再直接使用旧 `age=ln(age_minutes)` 或 raw `price`，而统一使用 `ln(age+1)` 与 `ln(price+1)`。`ln(liquidity_usd)` 从新样本开始持续采集并作为可选训练特征，但由于 legacy CSV 不含 raw entry liquidity，当前默认训练集先不启用它；后续新样本积累充分后可在模型中心勾选该特征重新训练。数据库仍单独保存 raw entry liquidity，供单笔资金公式和真实美元收益评价使用。`launchpad` 仅用于准入、展示、审计与导出。
 
@@ -117,7 +117,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 #### 2026-08-13 age<240 样本池迁移
 
-该次历史迁移当时把业务准入池收窄为严格 `1 < age_minutes < 240`；**自 2026-08-16 起当前生产准入已进一步升级为严格 `2 < age_minutes < 240`，Trenches 同步使用 `min_created=2m`**。历史 legacy CSV/export 的旧 `age` 列为 `ln(age_minutes)`，`CsvImporter` 继续兼容该旧格式并先还原 raw age 做当前等价边界判断，导入后统一规范为模型特征 `ln(age+1)`；当前新采集/导出也使用 `ln(age+1)`。迁移前备份 `data/backups/meme_quant_pre_age240_20260813T0318Z.db`。本次从 2353 条样本中删除 497 条不合规样本（449 mature negative、46 mature positive、2 pending），并同步删除其 201 条 prediction、45 个 simulation position 和 88 条 trade；迁移后剩余 **1856 条 mature H1 v4 样本，344 正 / 1512 负，正类率 18.53%**，age 违规数为 0。
+该次历史迁移当时把业务准入池收窄为严格 `1 < age_minutes < 240`；**自 2026-08-16 最新口径起当前生产准入已进一步升级为严格 `2 < age_minutes < 300`，Trenches 同步使用 `min_created=2m / max_created=300m`**。历史 legacy CSV/export 的旧 `age` 列为 `ln(age_minutes)`，`CsvImporter` 继续兼容该旧格式并先还原 raw age 做当前等价边界判断，导入后统一规范为模型特征 `ln(age+1)`；当前新采集/导出也使用 `ln(age+1)`。迁移前备份 `data/backups/meme_quant_pre_age240_20260813T0318Z.db`。本次从 2353 条样本中删除 497 条不合规样本（449 mature negative、46 mature positive、2 pending），并同步删除其 201 条 prediction、45 个 simulation position 和 88 条 trade；迁移后剩余 **1856 条 mature H1 v4 样本，344 正 / 1512 负，正类率 18.53%**，age 违规数为 0。
 
 #### 2026-08-13 Top10 / 成交均额样本池迁移
 
@@ -348,7 +348,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-16 当前基线：后端 `pytest -q` **163/163 通过**；前端 `tsc -b && vite build` 通过。在原 143 项基础上新增 schema v12 / `event2m_regime_v2` 代际隔离、严格 `2 < age < 240`、PIT-safe 1m/2m Event 特征、GMGN event contract、DEX Screener 非关键 fallback、Coinbase BTC/SOL public market fallback、Alchemy/Ankr/Public RPC failover、Market Regime、neutral counterfactual、Adaptive Shadow/OPE evidence gate 与 family-audit `INSUFFICIENT_DATA` fail-closed 回归。外部真实只读探针与 mock 测试都不关闭 DRY RUN、不签名、不广播交易。
+2026-08-16 当前基线：后端 `pytest -q` **163/163 通过**；前端 `tsc -b && vite build` 通过。当前正式代际为 `event1m_regime_v3`：严格 `2 < age < 300`，可选 catalog 44 / 生产默认 31，PIT-safe 1m Event 特征、GMGN event contract、DEX Screener 非关键 fallback、Coinbase BTC/SOL public market fallback、4×Alchemy→Solana Public emergency、Market Regime、neutral counterfactual、Adaptive Shadow/OPE evidence gate 与 family-audit `INSUFFICIENT_DATA` fail-closed 回归均受测试覆盖。外部真实只读探针与 mock 测试都不关闭 DRY RUN、不签名、不广播交易。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
@@ -375,19 +375,19 @@ npm run build
 
 历史数据本身仍有客观边界：
 
-- 2319 条 legacy 样本跨度约 25 天且全部来自 Pump.fun；它们只保留历史审计与旧模型 provenance，`event2m_regime_v2` 起不再进入任何新训练、Model Health 或自适应策略证据。旧 Top 3 仅作为新代样本积累期的暂时 scorer，下一次换代必须完全由 event2m 新样本训练；
+- 2319 条 legacy 样本跨度约 25 天且全部来自 Pump.fun；它们只保留历史审计与旧模型 provenance，当前 `event1m_regime_v3` 不读取 legacy/v1/v2 作为新训练、Model Health 或自适应策略证据。旧 Top 3 仅作为 v3 样本积累期的暂时 scorer，下一次换代必须完全由 v3 同代样本训练；
 - 旧 CSV 缺失新的 Event/Regime 字段，也无法严格复现新 `feature_snapshot_at`，因此不做零填充、均值填充或事后重构；新训练集从 0 重新累计；
-- `ln(liquidity_usd)` 继续随 event2m 新样本采集并留在模型中心可选 catalog，默认 recipe 暂不启用，待同代样本积累充分后再交由 OOS 选择判断；
+- `ln(liquidity_usd)` 继续随 v3 新样本采集并留在模型中心可选 Shadow catalog，生产默认 31 暂不启用，待同代样本积累充分后再交由 OOS 选择判断；
 - 本项目按 localhost 单用户交付。公网认证、session/CSRF、多租户不是当前本地版的“漏开发功能”；如果未来改成公网服务，必须先补正式身份认证与 CSRF/权限边界；
 - SQLite 适合当前单进程第一版；跨进程/多服务器扩展时再引入正式 migration/lease/PostgreSQL，不把扩展架构伪装成当前版本阻塞项。
 
 ### 9.2 2026-08-16 Event/Regime 自适应层
 
-市场状态与 Token Alpha 分层：Token 局部新特征只描述入场前已发生的 1m/2m 事件；Regime 则允许使用截至决策时点的 SOL 5m/15m/1h、Solana TPS/priority fee、Meme breadth、GMGN Hot Search/Smart Money/KOL/Dex promotion、执行质量及三模型近期聚类后表现。`rules_only` 永久保持固定规则基线；`model_1/2/3` 记录 `DEFENSIVE / NEUTRAL / EXPANSIVE` 的 logit 阈值反事实。当前策略默认处于 **shadow gate**：即使 Regime 推荐收紧或放宽，实际阈值仍为 Neutral，直到当前 feature generation 至少获得 120 个独立 sample cluster、至少 40 个动作会改变选择的 cluster，并且 chronological 70/30 development/certification 的 +5/-1 excess utility 满足 development>0、certification 95% LCB>0、三个模型各自 certification 均不为负。在线探索另有第二道 `adaptive_exploration_ready` 门，且最大 5%；未通过证据门时 `.env` 单独设置探索率也不能启用探索。
+市场状态与 Token Alpha 分层：Token 局部新特征只描述入场前已发生的 1m 事件，`price_change_1m` 的历史 fallback 仅使用目标时点前已闭合的 1m bar；Regime 则允许使用截至决策时点的 SOL 5m/15m/1h、Solana TPS/priority fee、Meme breadth、GMGN Hot Search/Smart Money/KOL/Dex promotion、执行质量及三模型近期聚类后表现。`rules_only` 永久保持固定规则基线；`model_1/2/3` 记录 `DEFENSIVE / NEUTRAL / EXPANSIVE` 的 logit 阈值反事实。当前策略默认处于 **shadow gate**：即使 Regime 推荐收紧或放宽，实际阈值仍为 Neutral，直到当前 feature generation 至少获得 120 个独立 sample cluster、至少 40 个动作会改变选择的 cluster，并且 chronological 70/30 development/certification 的 +5/-1 excess utility 满足 development>0、certification 95% LCB>0、三个模型各自 certification 均不为负。在线探索另有第二道 `adaptive_exploration_ready` 门，且最大 5%；未通过证据门时 `.env` 单独设置探索率也不能启用探索。
 
-Provider fallback 采用“主源优先、缺失不伪造为 0”：GMGN Key Pool 是 Token/Trending/Hot Search/Smart Money/KOL/DexScreener 集成字段主源；GMGN 整体不可用，或其 Signal 中 Dex promotion 子族单独缺失时，才以 DEX Screener Public API 的最新 Solana Ads/Boosts 做低频、家族级 attention fallback。Solana Network 状态按 `4×Alchemy 独立 Free account → 2×Ankr Freemium HTTPS → Solana Public RPC emergency` 降级；Public RPC 只允许应急且降低 Regime confidence。Ankr Freemium 官方当前为 200M credits/月、Solana HTTPS 500 credits/request、约 1800 req/min guaranteed，且 Freemium 仅 HTTPS；Alchemy Free 当前为每账号 30M CU，`getRecentPerformanceSamples=20 CU`、`getRecentPrioritizationFees=10 CU`，因此一分钟一次网络状态远低于免费预算。DEX Screener 官方 Public API 仍为无鉴权免费接口，Ads/Boost 类 60 RPM、Pair/Token 类 300 RPM；官方 API Terms 同时确认存在付费 API，但公开网页未给出可验证的个人免费 Key/付费价目表，因此当前不把它设为关键生产依赖。
+Provider fallback 采用“主源优先、缺失不伪造为 0”：GMGN Key Pool 是 Token/Trending/Hot Search/Smart Money/KOL/DexScreener 集成字段主源；GMGN 整体不可用，或其 Signal 中 Dex promotion 子族单独缺失时，才以 DEX Screener Public API 的最新 Solana Ads/Boosts 做低频、家族级 attention fallback。Solana Network 状态按 `4×Alchemy 独立 Free account → Solana Public RPC emergency` 降级；Public RPC 只允许应急且降低 Regime confidence。Alchemy Free 当前为每账号 30M CU，`getRecentPerformanceSamples=20 CU`、`getRecentPrioritizationFees=10 CU`，因此一分钟一次网络状态远低于免费预算。DEX Screener 官方 Public API 仍为无鉴权免费接口，Ads/Boost 类 60 RPM、Pair/Token 类 300 RPM；官方 API Terms 同时确认存在付费 API，但公开网页未给出可验证的个人免费 Key/付费价目表，因此当前不把它设为关键生产依赖。
 
-投研依据只用于确定“应研究什么”，不直接授予生产权：2025 *Finance Research Letters* DOI `10.1016/j.frl.2025.108356` 显示 Crypto momentum 明显依赖市场状态；2025 *Journal of Banking & Finance* DOI `10.1016/j.jbankfin.2025.107518` 显示异常社交注意力与当期/下一日收益有关且主要来自用户 ticker 帖；2026 *International Review of Financial Analysis* DOI `10.1016/j.irfa.2026.105137` 的 Crypto Factor Zoo 显示少数流动性/交易成本和 blockchain-native 因子已能压缩大部分 factor zoo。以上均非 2 分钟 Solana Meme H1 的直接证据，所以所有 Event/Regime family 仍必须经过本系统 chronological OOS / shadow / certification。
+投研依据只用于确定“应研究什么”，不直接授予生产权：2025 *Finance Research Letters* DOI `10.1016/j.frl.2025.108356` 显示 Crypto momentum 明显依赖市场状态；2025 *Journal of Banking & Finance* DOI `10.1016/j.jbankfin.2025.107518` 显示异常社交注意力与当期/下一日收益有关且主要来自用户 ticker 帖；2026 *International Review of Financial Analysis* DOI `10.1016/j.irfa.2026.105137` 的 Crypto Factor Zoo 显示少数流动性/交易成本和 blockchain-native 因子已能压缩大部分 factor zoo。以上均非 1 分钟入场特征下 Solana Meme H1 的直接证据，所以所有 Event/Regime family 仍必须经过本系统 chronological OOS / shadow / certification。
 
 ### 9.3 实盘接口刻意停放
 

@@ -165,17 +165,13 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "ln(visiting_count+1)",
     "price_change_1h",
     "price_change_5m",
-    "price_change_2m",
+    "price_change_1m",
     "ln(volume_1m+1)",
-    "ln(swaps_1m+1)",
     "buy_count_imbalance_1m",
     "buy_volume_imbalance_1m",
     "ln(volume_1m/swaps_1m+1)",
-    "ln(volume_2m+1)",
-    "volume_acceleration_2m",
     "holder_count/age",
     "ln(marketcap+1)",
-    "creator_token_status",
     "dexscr_ad",
     "ln(dexscr_boost_fee+1)",
     "dexscr_trending_bar",
@@ -186,7 +182,7 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "ln(top_wallets+1)",
 )
 
-# Event2m samples are generation-isolated from legacy CSV/pre-event rows;
+# Event1m samples are generation-isolated from legacy CSV/pre-event rows;
 # event features participate in chronological OOS competition rather than being auto-promoted.
 # The trainer's feature-state key is also namespaced by feature generation.
 DEFAULT_MODEL_TRAINING_FEATURES: tuple[str, ...] = (

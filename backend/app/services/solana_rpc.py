@@ -69,7 +69,7 @@ def _split_urls(raw: str) -> list[str]:
 
 
 def configured_rpc_endpoints(path: Path | None = None) -> tuple[RpcEndpoint, ...]:
-    """Build a secret-safe provider order: Alchemy -> Ankr -> public emergency.
+    """Build a secret-safe provider order: Alchemy -> public emergency.
 
     Four independent Alchemy accounts are treated as independent auth/failure
     domains.  We do not assume their same-IP rate limiting is independent; the
@@ -95,14 +95,6 @@ def configured_rpc_endpoints(path: Path | None = None) -> tuple[RpcEndpoint, ...
         for index, url in enumerate(alchemy_urls[: max(4, len(alchemy_urls))])
         if url.startswith(("http://", "https://"))
     ]
-    ankr_keys = [
-        value for key, value in sorted(env.items())
-        if key.startswith("ANKR_API_KEY_") and value.strip()
-    ]
-    endpoints.extend(
-        RpcEndpoint("ankr", index + 1, f"https://rpc.ankr.com/solana/{key}")
-        for index, key in enumerate(ankr_keys)
-    )
     # Public RPC is deliberately last and marked non-production.  A snapshot
     # sourced from it lowers Regime confidence rather than silently becoming a
     # normal production feed.
@@ -164,7 +156,7 @@ class SolanaRpcPool:
         text = str(exc)
         if text.startswith(("rate_limited:", "rpc_error:")):
             return text[:120]
-        # Provider URLs may embed API tokens (notably Ankr). Never persist an
+        # Provider URLs may embed API tokens. Never persist an
         # arbitrary exception message from an HTTP client.
         return f"{endpoint.label}:{type(exc).__name__}"
 
