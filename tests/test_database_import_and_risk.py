@@ -97,6 +97,7 @@ def test_label_finalization_preserves_legacy_utility_ineligibility(tmp_path: Pat
             liquidity_estimated=True,
             utility_eligible=False,
             features={"price_change_1h": None},
+            feature_schema_version="older_generation",
             label_status="pending",
             label_source="legacy_csv_migration",
         )

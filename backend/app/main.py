@@ -19,6 +19,7 @@ from .services.position_monitor import PositionMonitorWorker
 from .services.platform_configuration import PlatformConfigurationService
 from .services.prediction import PredictionWorker
 from .services.reconciliation import ReconciliationWorker
+from .services.regime import MarketRegimeWorker
 from .services.training_worker import TrainingWorker
 
 
@@ -40,6 +41,7 @@ async def lifespan(_: FastAPI):
     liquidation_worker: LiquidationWorker | None = None
     model_health_worker: ModelHealthWorker | None = None
     position_monitor_worker: PositionMonitorWorker | None = None
+    regime_worker: MarketRegimeWorker | None = None
     training_worker: TrainingWorker | None = None
 
     if settings.app_env != "test":
@@ -111,6 +113,9 @@ async def lifespan(_: FastAPI):
                 )
             )
 
+        regime_worker = MarketRegimeWorker(database, settings.regime_poll_seconds)
+        tasks.append(asyncio.create_task(regime_worker.run_forever(), name="market-regime-worker"))
+
         prediction_worker = PredictionWorker(database, settings)
         tasks.append(asyncio.create_task(prediction_worker.run_forever(), name="prediction-worker"))
         if settings.collector_enabled:
@@ -139,6 +144,8 @@ async def lifespan(_: FastAPI):
             model_health_worker.stop()
         if position_monitor_worker:
             position_monitor_worker.stop()
+        if regime_worker:
+            regime_worker.stop()
         if training_worker:
             training_worker.stop()
         if tasks:

@@ -10,7 +10,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .config import get_settings
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def utc_now_iso() -> str:
@@ -301,6 +301,30 @@ class Database:
                 SELECT RAISE(ABORT, 'completed lifecycle is not supported');
             END;
             """
+        )
+
+        # v12: isolate the event/regime feature generation from legacy samples
+        # and persist neutral-vs-adaptive decision facts for causal/OPE review.
+        cls._ensure_column(
+            connection,
+            "samples",
+            "feature_schema_version",
+            "TEXT NOT NULL DEFAULT 'legacy_pre_event_v1'",
+        )
+        cls._ensure_column(connection, "samples", "feature_snapshot_at", "INTEGER")
+        for column, definition in (
+            ("base_threshold", "REAL"),
+            ("neutral_selected", "INTEGER"),
+            ("adaptive_action", "TEXT"),
+            ("adaptive_delta_logit", "REAL"),
+            ("regime_snapshot_id", "INTEGER"),
+            ("action_propensity", "REAL"),
+            ("policy_version", "TEXT"),
+        ):
+            cls._ensure_column(connection, "predictions", column, definition)
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_samples_feature_generation_time "
+            "ON samples(feature_schema_version,entry_time)"
         )
 
     @classmethod
@@ -631,6 +655,8 @@ CREATE TABLE IF NOT EXISTS samples (
     utility_eligible INTEGER NOT NULL DEFAULT 1 CHECK(utility_eligible IN (0,1)),
     holder_count REAL,
     features_json TEXT NOT NULL,
+    feature_schema_version TEXT NOT NULL DEFAULT 'legacy_pre_event_v1',
+    feature_snapshot_at INTEGER,
     price_2h_max_ratio REAL,
     price_2h_min_ratio REAL,
     price_1h_max_ratio REAL,
@@ -697,6 +723,13 @@ CREATE TABLE IF NOT EXISTS predictions (
     strategy_key TEXT NOT NULL,
     threshold REAL NOT NULL CHECK(threshold>=0 AND threshold<=1),
     selected INTEGER NOT NULL CHECK(selected IN (0,1)),
+    base_threshold REAL,
+    neutral_selected INTEGER CHECK(neutral_selected IN (0,1) OR neutral_selected IS NULL),
+    adaptive_action TEXT,
+    adaptive_delta_logit REAL,
+    regime_snapshot_id INTEGER,
+    action_propensity REAL,
+    policy_version TEXT,
     predicted_at TEXT NOT NULL,
     UNIQUE(sample_id,model_id,strategy_key)
 );
@@ -826,6 +859,60 @@ CREATE TABLE IF NOT EXISTS agent_proposals (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_proposals_status_created
     ON agent_proposals(status,created_at DESC);
+
+CREATE TABLE IF NOT EXISTS collector_cycle_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at INTEGER NOT NULL,
+    discovered INTEGER NOT NULL DEFAULT 0,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    rejected INTEGER NOT NULL DEFAULT 0,
+    new_creation_returned INTEGER NOT NULL DEFAULT 0,
+    near_completion_returned INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_collector_cycle_observed
+    ON collector_cycle_snapshots(observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_regime_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at INTEGER NOT NULL UNIQUE,
+    regime_score REAL NOT NULL CHECK(regime_score>=0 AND regime_score<=1),
+    regime_label TEXT NOT NULL CHECK(regime_label IN ('cold','neutral','hot')),
+    confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
+    features_json TEXT NOT NULL DEFAULT '{}',
+    source_health_json TEXT NOT NULL DEFAULT '{}',
+    reasons_json TEXT NOT NULL DEFAULT '[]',
+    policy_version TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_market_regime_observed
+    ON market_regime_snapshots(observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS adaptive_policy_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    interval_start INTEGER NOT NULL UNIQUE,
+    regime_snapshot_id INTEGER REFERENCES market_regime_snapshots(id),
+    action TEXT NOT NULL CHECK(action IN ('DEFENSIVE','NEUTRAL','EXPANSIVE')),
+    delta_logit REAL NOT NULL,
+    propensity REAL NOT NULL CHECK(propensity>0 AND propensity<=1),
+    exploration INTEGER NOT NULL DEFAULT 0 CHECK(exploration IN (0,1)),
+    confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
+    policy_version TEXT NOT NULL,
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS adaptive_policy_feedback (
+    prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id) ON DELETE CASCADE,
+    decision_id INTEGER REFERENCES adaptive_policy_decisions(id),
+    reward_proxy REAL,
+    neutral_reward_proxy REAL,
+    excess_reward_proxy REAL,
+    actual_net_pnl_usd REAL,
+    matured_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
 
 CREATE TABLE IF NOT EXISTS runtime_state (
     key TEXT PRIMARY KEY,

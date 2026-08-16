@@ -147,6 +147,21 @@
 - 不存在自动 live BUY pipeline
 - 不使用模拟钱包数字绕过实盘门禁
 
+## Phase 9：Event2m / Market Regime / Adaptive Shadow — COMPLETE / DATA-GATED
+
+- [x] 正式准入统一为严格 `2 < age_minutes < 240`；Trenches `min_created=2m`；`feature_snapshot_at` 单独记录真实入场快照时刻。
+- [x] 正式 feature generation 为 `event2m_regime_v2`。开发中间态 v1 已有 23 个关联历史模拟仓位，因此整代封存、不强删；v1 pending 继续标签成熟/自然结算，但不进入 v2 训练、Model Health 或 adaptive evidence。
+- [x] 原生产 31 特征保持默认训练池；48 项可选 catalog 中新增 Event2m / marketing / social / holder-age / marketcap / creator-status 与 `ln(liquidity_usd)` 仅 Shadow，禁止默认自动启用。
+- [x] GMGN 真实脱敏 contract probe：3/3 样本确认 1m volume/swaps/buy/sell、creator status、Dex promotion、X follower、TG call、holder_count、marketcap；`volume_2m` 无原生字段，按 PIT 规则只从两根已闭合 1m K 线派生。
+- [x] DEX Screener Public 只做低频非关键 fallback；Coinbase Public 提供 BTC Crypto family，并只在本地/GMGN SOL 事实 stale 时回补 SOL；optional provider 失败保留 missing/source-health，禁止伪造 0。
+- [x] Solana Network：Alchemy 4 账号轮转 → Ankr 2 项目 fallback → Solana Public emergency。Alchemy 同 IP bounded probe 300 请求观察到 299×HTTP 200 + 1×ConnectTimeout + 0×429，只能表述为“未观察到小型严格共享硬桶”，不能证明任意负载完全独立。
+- [ ] Ankr 现场健康：当前两个项目对 `getSlot / getRecentPerformanceSamples / getRecentPrioritizationFees` 仍统一 HTTP 403；官方 endpoint 格式已核对正确，属于部署凭据/项目授权 blocker，不阻断 Alchemy 主路径与 Public emergency failover。
+- [x] Market Regime 持久化 Crypto / SOL / Network / Meme breadth / Attention / Execution / Strategy Performance、score/label/confidence/source health/reasons；Token Local 与全局 Regime lookback 严格 PIT 分层。
+- [x] `model_1/2/3` 具备 15m DEFENSIVE/NEUTRAL/EXPANSIVE logit-threshold Shadow policy；`rules_only` 固定；每个模型记录 neutral counterfactual/propensity/policy version。
+- [x] Safe activation fail-closed：至少 120 独立 sample cluster + 40 separating cluster，chronological 70/30 development/certification，development mean>0、certification 95% LCB>0、三模型 certification mean 均>=0；探索另需独立 readiness gate且硬上限 5%。当前 v2 数据不足，保持 Shadow-only。
+- [x] `scripts/feature_family_audit.py` 提供 chronological family audit；新代未达到 200 mature / 25 positive / 50 negative 时明确 `INSUFFICIENT_DATA`，禁止 legacy/v1 backfill；达到门槛后执行 fold-train-only 排序、one-SE + 8% Occam、final holdout certification-only，并对不稳定家族给出整族删除建议。
+- [x] 最终验收：后端 `pytest` 163/163、前端 production build 通过；Coinbase BTC/SOL 与 DEX Screener Public 现场只读探针健康，GMGN event probe 健康；秘密值扫描 33 项 × 172 文件无命中；重启后 backend/frontend 均 200，Collector / Prediction / Regime / Reconciliation / ModelHealth / Training 均 running，`DRY_RUN=true`，Adaptive 仍 `policy_ready=false / exploration_ready=false`。
+
 ## 环境事实
 
 - repo：`D:\meme` / `https://github.com/ShiningSugar35/meme.git` / `main`

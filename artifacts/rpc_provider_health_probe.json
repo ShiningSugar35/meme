@@ -1,0 +1,99 @@
+{
+  "credentials_redacted": true,
+  "providers": [
+    {
+      "errors": [],
+      "healthy": true,
+      "latency_ms": 317.3321000067517,
+      "method_status": {
+        "getRecentPerformanceSamples": "ok",
+        "getRecentPrioritizationFees": "ok",
+        "getSlot": "ok"
+      },
+      "non_vote_tps_available": true,
+      "priority_fee_p50_available": true,
+      "priority_fee_p90_available": true,
+      "provider": "alchemy:1",
+      "slot_rate_available": true
+    },
+    {
+      "errors": [],
+      "healthy": true,
+      "latency_ms": 315.129799884744,
+      "method_status": {
+        "getRecentPerformanceSamples": "ok",
+        "getRecentPrioritizationFees": "ok",
+        "getSlot": "ok"
+      },
+      "non_vote_tps_available": true,
+      "priority_fee_p50_available": true,
+      "priority_fee_p90_available": true,
+      "provider": "alchemy:2",
+      "slot_rate_available": true
+    },
+    {
+      "errors": [],
+      "healthy": true,
+      "latency_ms": 313.562500057742,
+      "method_status": {
+        "getRecentPerformanceSamples": "ok",
+        "getRecentPrioritizationFees": "ok",
+        "getSlot": "ok"
+      },
+      "non_vote_tps_available": true,
+      "priority_fee_p50_available": true,
+      "priority_fee_p90_available": true,
+      "provider": "alchemy:3",
+      "slot_rate_available": true
+    },
+    {
+      "errors": [],
+      "healthy": true,
+      "latency_ms": 307.5536999385804,
+      "method_status": {
+        "getRecentPerformanceSamples": "ok",
+        "getRecentPrioritizationFees": "ok",
+        "getSlot": "ok"
+      },
+      "non_vote_tps_available": true,
+      "priority_fee_p50_available": true,
+      "priority_fee_p90_available": true,
+      "provider": "alchemy:4",
+      "slot_rate_available": true
+    },
+    {
+      "errors": [
+        "ankr:1:http_403"
+      ],
+      "healthy": false,
+      "latency_ms": null,
+      "method_status": {
+        "getRecentPerformanceSamples": "ankr:1:http_403",
+        "getRecentPrioritizationFees": "ankr:1:http_403",
+        "getSlot": "ankr:1:http_403"
+      },
+      "non_vote_tps_available": false,
+      "priority_fee_p50_available": false,
+      "priority_fee_p90_available": false,
+      "provider": "ankr:1",
+      "slot_rate_available": false
+    },
+    {
+      "errors": [
+        "ankr:2:http_403"
+      ],
+      "healthy": false,
+      "latency_ms": null,
+      "method_status": {
+        "getRecentPerformanceSamples": "ankr:2:http_403",
+        "getRecentPrioritizationFees": "ankr:2:http_403",
+        "getSlot": "ankr:2:http_403"
+      },
+      "non_vote_tps_available": false,
+      "priority_fee_p50_available": false,
+      "priority_fee_p90_available": false,
+      "provider": "ankr:2",
+      "slot_rate_available": false
+    }
+  ]
+}

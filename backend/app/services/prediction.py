@@ -10,12 +10,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..collector.constants import FEATURE_SCHEMA_VERSION
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..ml.features import materialize_entry_feature
 from ..ml.registry import ModelRegistry
 from ..repositories.models import ModelRepository
 from ..strategy import MODEL_STRATEGIES, RULES_ONLY, model_strategy
+from .adaptive_policy import AdaptivePolicyService
 from .paper_trading import PaperTradingService
 
 
@@ -41,6 +43,7 @@ class PredictionService:
         self.settings = settings or get_settings()
         self.models = ModelRepository(database)
         self.paper = PaperTradingService(database, self.settings)
+        self.adaptive = AdaptivePolicyService(database, self.settings)
 
     def run_cycle(
         self,
@@ -60,6 +63,7 @@ class PredictionService:
 
         predictions_written = selected = scored = 0
         active_ids: list[str] = []
+        adaptive_decision = self.adaptive.decision(now_ts=int(moment.timestamp()))
         for slot, model in enumerate(active, start=1):
             bundle = self._load_bundle(model)
             active_ids.append(str(model["id"]))
@@ -76,6 +80,7 @@ class PredictionService:
                 SELECT s.*
                 FROM samples s
                 WHERE s.entry_time >= ?
+                  AND s.feature_schema_version=?
                   AND s.token_type IN ('new_creation','near_completion')
                   AND NOT EXISTS(
                       SELECT 1 FROM predictions p
@@ -84,7 +89,7 @@ class PredictionService:
                 ORDER BY s.entry_time,s.id
                 LIMIT ?
                 """,
-                (entry_cutoff, model["id"], limit),
+                (entry_cutoff, FEATURE_SCHEMA_VERSION, model["id"], limit),
             )
             strategy = model_strategy(slot)
             if not rows:
@@ -98,19 +103,25 @@ class PredictionService:
                 raise RuntimeError("model returned a prediction count that does not match the batch")
             for row, raw_probability in zip(rows, probabilities, strict=True):
                 probability = float(raw_probability)
-                threshold = float(bundle.threshold)
+                base_threshold = float(bundle.threshold)
+                threshold = self.adaptive.effective_threshold(base_threshold, adaptive_decision)
+                neutral_chosen = probability >= base_threshold
                 chosen = probability >= threshold
                 with self.database.transaction(immediate=True) as connection:
                     cursor = connection.execute(
                         """
                         INSERT INTO predictions(
-                            sample_id,model_id,probability,strategy_key,threshold,selected,predicted_at
-                        ) VALUES(?,?,?,?,?,?,?)
+                            sample_id,model_id,probability,strategy_key,threshold,selected,
+                            base_threshold,neutral_selected,adaptive_action,adaptive_delta_logit,
+                            regime_snapshot_id,action_propensity,policy_version,predicted_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(sample_id,model_id,strategy_key) DO NOTHING
                         """,
                         (
                             row["id"], model["id"], probability, strategy, threshold,
-                            int(chosen), moment.isoformat(),
+                            int(chosen), base_threshold, int(neutral_chosen), adaptive_decision.action,
+                            adaptive_decision.delta_logit, adaptive_decision.regime_snapshot_id,
+                            adaptive_decision.propensity, adaptive_decision.policy_version, moment.isoformat(),
                         ),
                     )
                     if cursor.rowcount == 1:
@@ -120,6 +131,7 @@ class PredictionService:
 
         opened, stale, blocked = self._reconcile_model_signals(moment=moment)
         rule_opened, rule_stale, rule_blocked = self._reconcile_rule_only(moment=moment, limit=limit)
+        self.adaptive.settle_feedback()
         settled = 0 if self.settings.paper_market_monitor_enabled else self.paper.settle_mature_positions()
         result = PredictionCycleResult(
             model_ids=tuple(active_ids),
@@ -169,13 +181,15 @@ class PredictionService:
             JOIN active_model_slots a ON a.model_id=p.model_id
             WHERE p.selected=1
               AND p.strategy_key IN ('model_1','model_2','model_3')
+              AND s.feature_schema_version=?
               AND s.token_type IN ('new_creation','near_completion')
               AND NOT EXISTS(
                   SELECT 1 FROM positions pos
                   WHERE pos.prediction_id=p.id AND pos.strategy_key=p.strategy_key
               )
             ORDER BY s.entry_time,p.id
-            """
+            """,
+            (FEATURE_SCHEMA_VERSION,),
         )
         opened = stale = blocked = 0
         now_epoch = int(moment.timestamp())
@@ -219,6 +233,7 @@ class PredictionService:
             SELECT s.id,s.entry_time
             FROM samples s
             WHERE s.entry_time>=?
+              AND s.feature_schema_version=?
               AND s.token_type IN ('new_creation','near_completion')
               AND NOT EXISTS(
                   SELECT 1 FROM positions pos
@@ -228,7 +243,7 @@ class PredictionService:
             ORDER BY s.entry_time,s.id
             LIMIT ?
             """,
-            (admission_cutoff, session["id"], limit),
+            (admission_cutoff, FEATURE_SCHEMA_VERSION, session["id"], limit),
         )
         opened = stale = blocked = 0
         rollover_paused = bool(

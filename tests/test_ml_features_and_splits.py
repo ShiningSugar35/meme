@@ -78,6 +78,9 @@ def test_production_feature_allowlist_includes_entry_price_and_excludes_launchpa
     ).prepare(frame)
 
     assert prepared.feature_names == MODEL_TRAINING_FEATURES
+    assert len(prepared.feature_names) == len(MODEL_TRAINING_FEATURES)
+    assert "price_change_2m" not in prepared.feature_names
+    assert "volume_acceleration_2m" not in prepared.feature_names
     assert len(prepared.feature_names) == 31
     assert AGE_LOG1P_FEATURE in prepared.feature_names
     assert PRICE_LOG1P_FEATURE in prepared.feature_names

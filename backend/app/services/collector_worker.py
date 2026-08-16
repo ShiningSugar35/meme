@@ -19,6 +19,7 @@ from ..collector import (
     CollectorService,
     DiscoveryService,
     EnrichmentService,
+    FEATURE_SCHEMA_VERSION,
     GMGNDataClient,
     GMGNEnrichmentProvider,
     HttpxTransport,
@@ -27,6 +28,7 @@ from ..collector import (
 )
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..collector.market_regime import GMGNMarketRegimeProvider
 from ..repositories.samples import SampleRecord, SampleRepository
 from .platform_configuration import ENV_PATH, PlatformConfigurationService
 from .sol_price import SolUsdPriceService
@@ -41,8 +43,8 @@ class SqliteCollectorSink:
 
     async def has_unfinished_address(self, address: str) -> bool:
         row = self.database.fetch_one(
-            "SELECT 1 AS found FROM samples WHERE chain='sol' AND address=? AND label_status='pending' LIMIT 1",
-            (address,),
+            "SELECT 1 AS found FROM samples WHERE chain='sol' AND address=? AND label_status='pending' AND feature_schema_version=? LIMIT 1",
+            (address, FEATURE_SCHEMA_VERSION),
         )
         return row is not None
 
@@ -56,12 +58,16 @@ class SqliteCollectorSink:
                 symbol=_source_text(source, "symbol", "base_symbol"),
                 token_type=sample.token_type,
                 entry_time=sample.entry_time,
+                age_minutes=sample.age_minutes,
+                holder_count=sample.holder_count,
                 entry_price=sample.entry_price,
                 launchpad=sample.launchpad,
                 liquidity=sample.liquidity,
                 liquidity_estimated=False,
                 utility_eligible=True,
                 features=dict(sample.features),
+                feature_schema_version=sample.feature_schema_version,
+                feature_snapshot_at=sample.feature_snapshot_at or sample.entry_time,
                 label_status="pending",
                 raw=source,
             )
@@ -104,10 +110,11 @@ class SqliteCollectorSink:
             if row is None:
                 return
             features = json.loads(row["features_json"] or "{}")
-            if features.get("price_change_1h") is None and result.price_change_1h is not None:
-                features["price_change_1h"] = result.price_change_1h
-            if features.get("price_change_5m") is None and result.price_change_5m is not None:
-                features["price_change_5m"] = result.price_change_5m
+            # Entry features are immutable after feature_snapshot_at; label finalization only writes target facts.
+            # price_change_1h is deliberately not reconstructed at T+1h.
+            # No mutation of the frozen entry feature payload.
+            # price_change_5m is deliberately not reconstructed at T+1h.
+            # Missing entry facts remain missing rather than being rewritten as zero or hindsight data.
             connection.execute(
                 """
                 UPDATE samples SET tag=?, price_1h_max_ratio=?, price_1h_min_ratio=?,
@@ -179,6 +186,7 @@ class CollectorWorker:
         self._stop = asyncio.Event()
         self._transport: HttpxTransport | None = None
         self._service: CollectorService | None = None
+        self._regime_provider: GMGNMarketRegimeProvider | None = None
         self._gmgn_limiter = gmgn_limiter
         self._env_mtime_ns: int | None = None
         self._transport_rebuilds = 0
@@ -260,6 +268,27 @@ class CollectorWorker:
         self._events.append(event)
         self.database.set_runtime_state("collector_events", list(self._events))
 
+    def _persist_cycle_snapshot(self, stats: Mapping[str, Any]) -> None:
+        type_stats = stats.get("type_stats") if isinstance(stats.get("type_stats"), Mapping) else {}
+        self.database.execute(
+            """
+            INSERT INTO collector_cycle_snapshots(
+                observed_at,discovered,accepted,rejected,new_creation_returned,
+                near_completion_returned,payload_json,recorded_at
+            ) VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(time.time()),
+                int(stats.get("discovered") or 0),
+                int(stats.get("accepted") or 0),
+                int(stats.get("rejected") or 0),
+                int((type_stats.get("new_creation") or {}).get("returned") or 0),
+                int((type_stats.get("near_completion") or {}).get("returned") or 0),
+                json.dumps(dict(stats), ensure_ascii=False, separators=(",", ":")),
+                utc_now_iso(),
+            ),
+        )
+
     def _build(self) -> CollectorService:
         env = _env_values()
         credentials = self.configuration.provider_credentials("gmgn")
@@ -273,6 +302,8 @@ class CollectorWorker:
             top_holders=env.get("GMGN_TOKEN_HOLDERS_PATH", "/v1/market/token_top_holders"),
             kline=env.get("GMGN_KLINE_PATH", "/v1/market/token_kline"),
             trending=env.get("GMGN_TRENDING_PATH", "/v1/market/rank"),
+            signal=env.get("GMGN_SIGNAL_PATH", "/v1/market/token_signal"),
+            hot_searches=env.get("GMGN_HOT_SEARCHES_PATH", "/v1/market/hot_searches"),
             created_tokens=env.get("GMGN_PORTFOLIO_CREATED_TOKENS_PATH", "/v1/user/created_tokens"),
         )
         self._transport = HttpxTransport()
@@ -288,6 +319,7 @@ class CollectorWorker:
         )
         discovery = DiscoveryService(client, roles)
         provider = GMGNEnrichmentProvider(client, roles)
+        self._regime_provider = GMGNMarketRegimeProvider(client, roles)
         return CollectorService(
             discovery,
             EnrichmentService(provider),
@@ -381,6 +413,18 @@ class CollectorWorker:
                     details={"error": f"{type(exc).__name__}: {exc}"[:300]},
                 )
 
+            # Refresh aggregate GMGN attention/event state with the existing key
+            # pool. Optional endpoint failures only reduce Regime confidence.
+            if self._regime_provider is not None:
+                try:
+                    market_feed = await self._regime_provider.snapshot()
+                    self.database.set_runtime_state("gmgn_market_regime_feed", market_feed)
+                except Exception as exc:
+                    self.database.set_runtime_state(
+                        "gmgn_market_regime_feed",
+                        {"available": False, "errors": [f"{type(exc).__name__}:market_regime_feed"]},
+                    )
+
             # Position exits are handled by PositionMonitorWorker on its own
             # current-market cadence. Collector remains discovery/label-only.
 
@@ -417,6 +461,7 @@ class CollectorWorker:
                         "rejection_reasons": dict(collection.rejection_reasons),
                         "type_stats": {key: dict(value) for key, value in collection.type_stats.items()},
                     }
+                    self._persist_cycle_snapshot(collection_stats)
                 except Exception as exc:
                     network_failure = network_failure or _is_network_failure(exc)
                     message = f"{type(exc).__name__}: {exc}"[:500]

@@ -33,6 +33,10 @@ class AgentDecisionRequest(BaseModel):
 class PlatformRuntimeConfigRequest(BaseModel):
     position_monitor_poll_seconds: float = Field(ge=1.0, le=60.0)
     gmgn_global_rps: float = Field(gt=0, le=50.0)
+    regime_poll_seconds: int = Field(default=60, ge=15, le=3600)
+    adaptive_action_interval_minutes: int = Field(default=15, ge=5, le=60)
+    adaptive_min_confidence: float = Field(default=0.55, ge=0, le=1)
+    adaptive_exploration_rate: float = Field(default=0.0, ge=0, le=0.05)
     gmgn_base_url: str | None = Field(default=None, max_length=500)
     jupiter_quote_url: str | None = Field(default=None, max_length=500)
 

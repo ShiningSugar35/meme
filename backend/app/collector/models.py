@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from .constants import FEATURE_SCHEMA_VERSION
 from .errors import CollectorValidationError
 
 
@@ -101,15 +102,23 @@ class CollectedSample:
     launchpad: str
     liquidity: float
     features: Mapping[str, Any]
+    age_minutes: float | None = None
+    holder_count: float | None = None
+    feature_schema_version: str = FEATURE_SCHEMA_VERSION
+    feature_snapshot_at: int | None = None
     source: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class Kline:
+    # Keep the original positional field order for backward compatibility with
+    # existing tests/helpers. New OHLCV facts are keyword-friendly extensions.
     timestamp: int
     high: float | None
     low: float | None
     close: float | None
+    open: float | None = None
+    volume: float | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "Kline":
@@ -137,5 +146,6 @@ class Kline:
             high=number(first("high", "h")),
             low=number(first("low", "l")),
             close=number(first("close", "c")),
+            open=number(first("open", "o")),
+            volume=number(first("volume", "v", "volume_usd", "quote_volume")),
         )
-

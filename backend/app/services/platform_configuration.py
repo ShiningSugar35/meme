@@ -43,6 +43,20 @@ PROVIDERS: dict[str, ProviderSpec] = {
         base_url_env="PAPER_JUPITER_QUOTE_URL",
         description="模拟盘退出时的 Token→USDC 可执行只读报价。并发上限自动不超过当前 Key 数。",
     ),
+    "alchemy": ProviderSpec(
+        key="alchemy",
+        label="Alchemy Solana RPC",
+        env_prefix="ALCHEMY_API_KEY_",
+        multiple=True,
+        description="Solana 网络状态主 RPC 池。4 个独立 Free 账号轮换/fallback；仅低频网络状态请求，不做全链宽订阅。",
+    ),
+    "ankr": ProviderSpec(
+        key="ankr",
+        label="Ankr Solana RPC",
+        env_prefix="ANKR_API_KEY_",
+        multiple=True,
+        description="Freemium HTTPS 灾备/回补池；不作为 WebSocket 来源。",
+    ),
     "tabpfn": ProviderSpec(
         key="tabpfn",
         label="TabPFN",
@@ -139,11 +153,23 @@ class PlatformConfigurationService:
             return default
         return min(maximum, max(minimum, value))
 
-    def runtime_values(self) -> dict[str, float]:
+    def runtime_values(self) -> dict[str, Any]:
         env = _read_env(self.env_path)
         return {
             "position_monitor_poll_seconds": self._bounded_float(
                 env.get("POSITION_MONITOR_POLL_SECONDS"), default=3.0, minimum=1.0, maximum=60.0
+            ),
+            "regime_poll_seconds": int(self._bounded_float(
+                env.get("REGIME_POLL_SECONDS"), default=60.0, minimum=15.0, maximum=3600.0
+            )),
+            "adaptive_action_interval_minutes": int(self._bounded_float(
+                env.get("ADAPTIVE_ACTION_INTERVAL_MINUTES"), default=15.0, minimum=5.0, maximum=60.0
+            )),
+            "adaptive_min_confidence": self._bounded_float(
+                env.get("ADAPTIVE_MIN_CONFIDENCE"), default=0.55, minimum=0.0, maximum=1.0
+            ),
+            "adaptive_exploration_rate": self._bounded_float(
+                env.get("ADAPTIVE_EXPLORATION_RATE"), default=0.0, minimum=0.0, maximum=0.05
             ),
             "gmgn_global_rps": self._bounded_float(
                 env.get("GMGN_GLOBAL_RPS"), default=10.0, minimum=0.1, maximum=50.0
@@ -182,6 +208,8 @@ class PlatformConfigurationService:
             )
         gmgn_count = len(self.provider_credentials("gmgn"))
         jupiter_count = len(self.provider_credentials("jupiter"))
+        alchemy_count = len(self.provider_credentials("alchemy"))
+        ankr_count = len(self.provider_credentials("ankr"))
         row = self.database.fetch_one(
             "SELECT COUNT(DISTINCT token_address) AS count FROM positions WHERE status IN ('open','closing')"
         ) or {}
@@ -193,6 +221,9 @@ class PlatformConfigurationService:
             "derived": {
                 "gmgn_key_count": gmgn_count,
                 "jupiter_key_count": jupiter_count,
+                "alchemy_account_count": alchemy_count,
+                "ankr_freemium_count": ankr_count,
+                "rpc_fallback_order": "Alchemy accounts -> Ankr HTTPS -> Solana public emergency",
                 "gmgn_total_rps": runtime["gmgn_global_rps"],
                 "jupiter_exit_concurrency": max(1, min(8, jupiter_count or 1)),
                 "position_monitor_target_seconds": runtime["position_monitor_poll_seconds"],
@@ -215,14 +246,26 @@ class PlatformConfigurationService:
         *,
         position_monitor_poll_seconds: float,
         gmgn_global_rps: float,
+        regime_poll_seconds: int = 60,
+        adaptive_action_interval_minutes: int = 15,
+        adaptive_min_confidence: float = 0.55,
+        adaptive_exploration_rate: float = 0.0,
         gmgn_base_url: str | None = None,
         jupiter_quote_url: str | None = None,
     ) -> dict[str, Any]:
         poll = self._bounded_float(position_monitor_poll_seconds, default=3.0, minimum=1.0, maximum=60.0)
         rps = self._bounded_float(gmgn_global_rps, default=10.0, minimum=0.1, maximum=50.0)
+        regime_poll = int(self._bounded_float(regime_poll_seconds, default=60.0, minimum=15.0, maximum=3600.0))
+        action_interval = int(self._bounded_float(adaptive_action_interval_minutes, default=15.0, minimum=5.0, maximum=60.0))
+        min_confidence = self._bounded_float(adaptive_min_confidence, default=0.55, minimum=0.0, maximum=1.0)
+        exploration_rate = self._bounded_float(adaptive_exploration_rate, default=0.0, minimum=0.0, maximum=0.05)
         updates: dict[str, str | None] = {
             "POSITION_MONITOR_POLL_SECONDS": f"{poll:g}",
             "GMGN_GLOBAL_RPS": f"{rps:g}",
+            "REGIME_POLL_SECONDS": str(regime_poll),
+            "ADAPTIVE_ACTION_INTERVAL_MINUTES": str(action_interval),
+            "ADAPTIVE_MIN_CONFIDENCE": f"{min_confidence:g}",
+            "ADAPTIVE_EXPLORATION_RATE": f"{exploration_rate:g}",
         }
         if gmgn_base_url is not None:
             updates["GMGN_API_BASE_URL"] = gmgn_base_url.strip() or None

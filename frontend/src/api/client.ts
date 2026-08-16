@@ -62,7 +62,7 @@ export const api = {
   rejectAgentProposal: (proposalId: string, note?: string) => request<AgentProposal>(`/api/agent/proposals/${encodeURIComponent(proposalId)}/reject`, { method: "POST", body: JSON.stringify({ note }) }),
   runtime: () => request<{ runtime: RuntimeStatus; risk: RiskStatus }>("/api/runtime"),
   configuration: () => request<PlatformConfiguration>("/api/configuration"),
-  saveRuntimeConfiguration: (payload: { position_monitor_poll_seconds: number; gmgn_global_rps: number; gmgn_base_url?: string | null; jupiter_quote_url?: string | null }) => request<PlatformConfiguration>("/api/configuration/runtime", { method: "PUT", body: JSON.stringify(payload) }),
+  saveRuntimeConfiguration: (payload: { position_monitor_poll_seconds: number; gmgn_global_rps: number; regime_poll_seconds: number; adaptive_action_interval_minutes: number; adaptive_min_confidence: number; adaptive_exploration_rate: number; gmgn_base_url?: string | null; jupiter_quote_url?: string | null }) => request<PlatformConfiguration>("/api/configuration/runtime", { method: "PUT", body: JSON.stringify(payload) }),
   addProviderCredential: (provider: string, credential: string) => request<PlatformConfiguration>(`/api/configuration/providers/${encodeURIComponent(provider)}/credentials`, { method: "POST", body: JSON.stringify({ credential }) }),
   deleteProviderCredential: (provider: string, slot: number) => request<PlatformConfiguration>(`/api/configuration/providers/${encodeURIComponent(provider)}/credentials/${slot}`, { method: "DELETE" }),
   collectorEvents: (limit = 200) => request<{ items: CollectorEvent[] }>(`/api/runtime/collector-events?limit=${limit}`),

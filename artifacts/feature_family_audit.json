@@ -1,0 +1,191 @@
+{
+  "status": "INSUFFICIENT_DATA",
+  "readiness": {
+    "status": "INSUFFICIENT_DATA",
+    "generation": "event2m_regime_v2",
+    "mature_samples": 0,
+    "positives": 0,
+    "negatives": 0,
+    "min_mature_samples": 200,
+    "min_positive_samples": 25,
+    "min_negative_samples": 50,
+    "reasons": [
+      "mature_samples:0/200",
+      "positives:0/25",
+      "negatives:0/50"
+    ]
+  },
+  "generation": "event2m_regime_v2",
+  "baseline_features": [
+    "ln(age+1)",
+    "ln(price+1)",
+    "liquidity/holder_count",
+    "volume_1h/swaps_1h",
+    "has_twitter",
+    "has_website",
+    "ln(image_dup+1)",
+    "dexscr_update_link",
+    "cto_flag",
+    "ln(twitter_rename_count+1)",
+    "ln(twitter_del_post_token_count+1)",
+    "ln(twitter_create_token_count+1)",
+    "top_10_holder_rate",
+    "top_bot_degen_percentage",
+    "fresh_wallet_rate",
+    "bot_degen_rate",
+    "price/ath_price",
+    "stat.holder_count/market_cap",
+    "ln(smart_degen_count+1)",
+    "ln(renowned_count+1)",
+    "entrapment_ratio",
+    "dev_team_hold_rate",
+    "top70_sniper_hold_rate",
+    "ln(twitter_dup+1)",
+    "ln(website_dup+1)",
+    "ln(visiting_count+1)",
+    "price_change_1h",
+    "price_change_5m",
+    "ln(creator_open_count+1)",
+    "creator_open_ratio",
+    "ln(top_wallets+1)"
+  ],
+  "families": {
+    "local_event": {
+      "features": [
+        "price_change_2m",
+        "ln(volume_1m+1)",
+        "ln(swaps_1m+1)",
+        "buy_count_imbalance_1m",
+        "buy_volume_imbalance_1m",
+        "ln(volume_1m/swaps_1m+1)",
+        "ln(volume_2m+1)",
+        "volume_acceleration_2m",
+        "holder_count/age",
+        "ln(marketcap+1)",
+        "creator_token_status"
+      ],
+      "coverage": {
+        "price_change_2m": 0.0,
+        "ln(volume_1m+1)": 0.0,
+        "ln(swaps_1m+1)": 0.0,
+        "buy_count_imbalance_1m": 0.0,
+        "buy_volume_imbalance_1m": 0.0,
+        "ln(volume_1m/swaps_1m+1)": 0.0,
+        "ln(volume_2m+1)": 0.0,
+        "volume_acceleration_2m": 0.0,
+        "holder_count/age": 0.0,
+        "ln(marketcap+1)": 0.0,
+        "creator_token_status": 0.0
+      },
+      "status": "INSUFFICIENT_DATA"
+    },
+    "attention_entry": {
+      "features": [
+        "dexscr_ad",
+        "ln(dexscr_boost_fee+1)",
+        "dexscr_trending_bar",
+        "ln(x_user_follower+1)",
+        "ln(tg_call_count+1)"
+      ],
+      "coverage": {
+        "dexscr_ad": 0.0,
+        "ln(dexscr_boost_fee+1)": 0.0,
+        "dexscr_trending_bar": 0.0,
+        "ln(x_user_follower+1)": 0.0,
+        "ln(tg_call_count+1)": 0.0
+      },
+      "status": "INSUFFICIENT_DATA"
+    },
+    "meme_regime": {
+      "features": [
+        "meme_discovery_breadth",
+        "meme_acceptance_rate",
+        "meme_new_creation_breadth",
+        "meme_near_completion_breadth",
+        "market_buy_count_imbalance_1m",
+        "market_buy_volume_imbalance_1m"
+      ],
+      "coverage": {
+        "meme_discovery_breadth": 0.0,
+        "meme_acceptance_rate": 0.0,
+        "meme_new_creation_breadth": 0.0,
+        "meme_near_completion_breadth": 0.0,
+        "market_buy_count_imbalance_1m": 0.0,
+        "market_buy_volume_imbalance_1m": 0.0
+      },
+      "status": "INSUFFICIENT_DATA"
+    },
+    "sol_network": {
+      "features": [
+        "sol_return_5m",
+        "sol_return_15m",
+        "sol_return_60m",
+        "sol_realized_vol_15m",
+        "solana_non_vote_tps",
+        "solana_slot_rate",
+        "solana_priority_fee_p50",
+        "solana_priority_fee_p90"
+      ],
+      "coverage": {
+        "sol_return_5m": 0.0,
+        "sol_return_15m": 0.0,
+        "sol_return_60m": 0.0,
+        "sol_realized_vol_15m": 0.0,
+        "solana_non_vote_tps": 0.0,
+        "solana_slot_rate": 0.0,
+        "solana_priority_fee_p50": 0.0,
+        "solana_priority_fee_p90": 0.0
+      },
+      "status": "INSUFFICIENT_DATA"
+    },
+    "crypto_market": {
+      "features": [
+        "btc_return_5m",
+        "btc_return_15m",
+        "btc_return_60m",
+        "btc_realized_vol_15m"
+      ],
+      "coverage": {
+        "btc_return_5m": 0.0,
+        "btc_return_15m": 0.0,
+        "btc_return_60m": 0.0,
+        "btc_realized_vol_15m": 0.0
+      },
+      "status": "INSUFFICIENT_DATA"
+    },
+    "attention": {
+      "features": [
+        "trending_count_1m",
+        "hot_search_count_1m",
+        "hot_search_visits_1m",
+        "signal_smart_money_buy_15m",
+        "signal_kol_buy_15m",
+        "signal_large_buy_15m",
+        "signal_multi_buy_15m",
+        "signal_dex_ad_15m",
+        "signal_dex_boost_15m",
+        "signal_dex_trending_15m",
+        "dexscreener_sol_ads_latest_count",
+        "dexscreener_sol_boosts_latest_count",
+        "dexscreener_sol_boost_amount_latest"
+      ],
+      "coverage": {
+        "trending_count_1m": 0.0,
+        "hot_search_count_1m": 0.0,
+        "hot_search_visits_1m": 0.0,
+        "signal_smart_money_buy_15m": 0.0,
+        "signal_kol_buy_15m": 0.0,
+        "signal_large_buy_15m": 0.0,
+        "signal_multi_buy_15m": 0.0,
+        "signal_dex_ad_15m": 0.0,
+        "signal_dex_boost_15m": 0.0,
+        "signal_dex_trending_15m": 0.0,
+        "dexscreener_sol_ads_latest_count": 0.0,
+        "dexscreener_sol_boosts_latest_count": 0.0,
+        "dexscreener_sol_boost_amount_latest": 0.0
+      },
+      "status": "INSUFFICIENT_DATA"
+    }
+  },
+  "selection_rule": "development chronological OOS family lift with fold-train-only ranking and one-SE + 8% Occam protection; final holdout is certification-only; this audit never mutates feature selection or active models"
+}

@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     paper_market_monitor_enabled: bool = True
     position_monitor_enabled: bool = True
     position_monitor_poll_seconds: float = Field(default=3.0, ge=1.0, le=60.0)
+    regime_poll_seconds: int = Field(default=60, ge=15, le=3_600)
+    adaptive_policy_enabled: bool = True
+    adaptive_action_interval_minutes: int = Field(default=15, ge=5, le=60)
+    adaptive_min_confidence: float = Field(default=0.55, ge=0, le=1)
+    adaptive_exploration_rate: float = Field(default=0.0, ge=0, le=0.05)
+    adaptive_min_regime_snapshots: int = Field(default=12, ge=1, le=10_000)
     reconciliation_poll_seconds: int = Field(default=30, ge=5, le=3_600)
     liquidation_poll_seconds: int = Field(default=5, ge=1, le=300)
     background_workers_enabled: bool = True

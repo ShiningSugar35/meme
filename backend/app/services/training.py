@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 import pandas as pd
 
+from ..collector.constants import FEATURE_SCHEMA_VERSION
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..ml.features import (
@@ -33,7 +34,9 @@ TrainingTrigger = Literal["manual", "weekly", "daily", "startup_catchup", "degra
 class TrainingService:
     """Persistent Top-3 model training and atomic active-set installation."""
 
-    FEATURE_SELECTION_STATE_KEY = "model_training_feature_pool"
+    # Generation-scoped selection prevents the saved legacy 31-feature pool from
+    # silently excluding new event2m candidates after the sample reset.
+    FEATURE_SELECTION_STATE_KEY = f"model_training_feature_pool:{FEATURE_SCHEMA_VERSION}"
 
     def __init__(self, database: Database, settings: Settings | None = None) -> None:
         self.database = database

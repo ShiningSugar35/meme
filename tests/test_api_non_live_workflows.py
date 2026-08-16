@@ -35,6 +35,8 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
     assert catalog["selected_features"] == catalog["default_features"]
     assert "price" not in catalog["available_features"]
     assert "ln(liquidity_usd)" not in catalog["default_features"]
+    assert "price_change_2m" not in catalog["default_features"]
+    assert "volume_acceleration_2m" not in catalog["default_features"]
     assert "ln(liquidity_usd)" in catalog["available_features"]
 
     saved = client.put(

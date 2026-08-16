@@ -165,16 +165,62 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "ln(visiting_count+1)",
     "price_change_1h",
     "price_change_5m",
+    "price_change_2m",
+    "ln(volume_1m+1)",
+    "ln(swaps_1m+1)",
+    "buy_count_imbalance_1m",
+    "buy_volume_imbalance_1m",
+    "ln(volume_1m/swaps_1m+1)",
+    "ln(volume_2m+1)",
+    "volume_acceleration_2m",
+    "holder_count/age",
+    "ln(marketcap+1)",
+    "creator_token_status",
+    "dexscr_ad",
+    "ln(dexscr_boost_fee+1)",
+    "dexscr_trending_bar",
+    "ln(x_user_follower+1)",
+    "ln(tg_call_count+1)",
     "ln(creator_open_count+1)",
     "creator_open_ratio",
     "ln(top_wallets+1)",
 )
 
-# `ln(liquidity_usd)` is collected for new samples but intentionally excluded
-# from the default recipe because the legacy CSV cannot reconstruct raw entry
-# liquidity. Operators may opt it in later once enough new samples have it.
-DEFAULT_MODEL_TRAINING_FEATURES: tuple[str, ...] = tuple(
-    feature for feature in AVAILABLE_MODEL_FEATURES if feature != "ln(liquidity_usd)"
+# Event2m samples are generation-isolated from legacy CSV/pre-event rows;
+# event features participate in chronological OOS competition rather than being auto-promoted.
+# The trainer's feature-state key is also namespaced by feature generation.
+DEFAULT_MODEL_TRAINING_FEATURES: tuple[str, ...] = (
+    AGE_LOG1P_FEATURE,
+    PRICE_LOG1P_FEATURE,
+    "liquidity/holder_count",
+    "volume_1h/swaps_1h",
+    "has_twitter",
+    "has_website",
+    "ln(image_dup+1)",
+    "dexscr_update_link",
+    "cto_flag",
+    "ln(twitter_rename_count+1)",
+    "ln(twitter_del_post_token_count+1)",
+    "ln(twitter_create_token_count+1)",
+    "top_10_holder_rate",
+    "top_bot_degen_percentage",
+    "fresh_wallet_rate",
+    "bot_degen_rate",
+    "price/ath_price",
+    "stat.holder_count/market_cap",
+    "ln(smart_degen_count+1)",
+    "ln(renowned_count+1)",
+    "entrapment_ratio",
+    "dev_team_hold_rate",
+    "top70_sniper_hold_rate",
+    "ln(twitter_dup+1)",
+    "ln(website_dup+1)",
+    "ln(visiting_count+1)",
+    "price_change_1h",
+    "price_change_5m",
+    "ln(creator_open_count+1)",
+    "creator_open_ratio",
+    "ln(top_wallets+1)",
 )
 # Backward-compatible name used by existing services/tests: this always means
 # the default production feature set, not the full selectable catalog.

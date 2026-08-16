@@ -376,11 +376,18 @@ export interface PlatformConfiguration {
   runtime: {
     position_monitor_poll_seconds: number;
     gmgn_global_rps: number;
+    regime_poll_seconds: number;
+    adaptive_action_interval_minutes: number;
+    adaptive_min_confidence: number;
+    adaptive_exploration_rate: number;
   };
   providers: PlatformProviderConfig[];
   derived: {
     gmgn_key_count: number;
     jupiter_key_count: number;
+    alchemy_account_count: number;
+    ankr_freemium_count: number;
+    rpc_fallback_order: string;
     gmgn_total_rps: number;
     jupiter_exit_concurrency: number;
     position_monitor_target_seconds: number;

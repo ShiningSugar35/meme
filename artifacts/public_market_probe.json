@@ -1,0 +1,16 @@
+{
+  "credentials_required": false,
+  "coinbase": {
+    "source": "coinbase_exchange_public",
+    "btc_available": true,
+    "sol_available": true,
+    "available_feature_count": 8,
+    "errors": []
+  },
+  "dexscreener": {
+    "source": "dexscreener_public_fallback",
+    "available": true,
+    "coverage": 1.0,
+    "errors": []
+  }
+}

@@ -6,7 +6,7 @@ without making a network request.
 """
 
 from .client import CollectorEndpoints, GMGNDataClient, HttpxTransport
-from .constants import DISCOVERY_TYPES, LAUNCHPADS, FilterThresholds, LabelPolicy
+from .constants import DISCOVERY_TYPES, FEATURE_SCHEMA_VERSION, LAUNCHPADS, FilterThresholds, LabelPolicy
 from .discovery import DiscoveryService
 from .enrichment import EnrichmentService, GMGNEnrichmentProvider
 from .errors import (
@@ -38,6 +38,7 @@ __all__ = [
     "DISCOVERY_TYPES",
     "DiscoveryService",
     "EnrichmentService",
+    "FEATURE_SCHEMA_VERSION",
     "FilterDecision",
     "FilterThresholds",
     "GMGNDataClient",

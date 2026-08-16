@@ -12,7 +12,9 @@ from ..risk.service import RiskService
 from ..services.agent_service import AgentService
 from ..services.csv_importer import CsvImporter
 from ..services.dashboard import DashboardService
+from ..services.adaptive_policy import AdaptivePolicyService
 from ..services.paper_trading import PaperTradingService
+from ..services.regime import MarketRegimeService
 from ..services.platform_configuration import PlatformConfigurationService
 from ..services.runtime import RuntimeService
 from ..services.sample_export import SampleExportService
@@ -178,6 +180,16 @@ def runtime_status() -> dict:
     return {"runtime": RuntimeService(database).status(), "risk": RiskService(database).status()}
 
 
+@router.get("/regime")
+def market_regime_status() -> dict:
+    return MarketRegimeService(get_database()).public_status()
+
+
+@router.get("/adaptive-policy")
+def adaptive_policy_status() -> dict:
+    return AdaptivePolicyService(get_database()).status()
+
+
 @router.get("/configuration")
 def platform_configuration() -> dict:
     return PlatformConfigurationService(get_database()).configuration()
@@ -189,6 +201,10 @@ def save_platform_runtime_configuration(request: PlatformRuntimeConfigRequest) -
         return PlatformConfigurationService(get_database()).save_runtime(
             position_monitor_poll_seconds=request.position_monitor_poll_seconds,
             gmgn_global_rps=request.gmgn_global_rps,
+            regime_poll_seconds=request.regime_poll_seconds,
+            adaptive_action_interval_minutes=request.adaptive_action_interval_minutes,
+            adaptive_min_confidence=request.adaptive_min_confidence,
+            adaptive_exploration_rate=request.adaptive_exploration_rate,
             gmgn_base_url=request.gmgn_base_url,
             jupiter_quote_url=request.jupiter_quote_url,
         )

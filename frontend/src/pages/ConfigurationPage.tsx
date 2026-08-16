@@ -13,6 +13,10 @@ export function ConfigurationPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [pollSeconds, setPollSeconds] = useState(3);
   const [gmgnRps, setGmgnRps] = useState(10);
+  const [regimePollSeconds, setRegimePollSeconds] = useState(60);
+  const [adaptiveInterval, setAdaptiveInterval] = useState(15);
+  const [adaptiveMinConfidence, setAdaptiveMinConfidence] = useState(0.55);
+  const [adaptiveExplorationRate, setAdaptiveExplorationRate] = useState(0);
   const [gmgnBaseUrl, setGmgnBaseUrl] = useState("");
   const [jupiterQuoteUrl, setJupiterQuoteUrl] = useState("");
   const [newCredentials, setNewCredentials] = useState<Record<string, string>>({});
@@ -24,6 +28,10 @@ export function ConfigurationPage() {
       setData(result);
       setPollSeconds(result.runtime.position_monitor_poll_seconds);
       setGmgnRps(result.runtime.gmgn_global_rps);
+      setRegimePollSeconds(result.runtime.regime_poll_seconds);
+      setAdaptiveInterval(result.runtime.adaptive_action_interval_minutes);
+      setAdaptiveMinConfidence(result.runtime.adaptive_min_confidence);
+      setAdaptiveExplorationRate(result.runtime.adaptive_exploration_rate);
       setGmgnBaseUrl(result.providers.find((item) => item.key === "gmgn")?.base_url ?? "");
       setJupiterQuoteUrl(result.providers.find((item) => item.key === "jupiter")?.base_url ?? "");
     } catch (cause) {
@@ -42,6 +50,10 @@ export function ConfigurationPage() {
       const result = await api.saveRuntimeConfiguration({
         position_monitor_poll_seconds: pollSeconds,
         gmgn_global_rps: gmgnRps,
+        regime_poll_seconds: regimePollSeconds,
+        adaptive_action_interval_minutes: adaptiveInterval,
+        adaptive_min_confidence: adaptiveMinConfidence,
+        adaptive_exploration_rate: adaptiveExplorationRate,
         gmgn_base_url: gmgnBaseUrl,
         jupiter_quote_url: jupiterQuoteUrl
       });
@@ -89,6 +101,8 @@ export function ConfigurationPage() {
     ["持仓目标周期", `${data.derived.position_monitor_target_seconds.toFixed(1)}s`, `默认已收紧到 3s`],
     ["GMGN 总预算", `${data.derived.gmgn_total_rps.toFixed(1)} req/s`, `${data.derived.gmgn_key_count} 个 Key 共享 IP 预算`],
     ["Jupiter 退出并发", `${data.derived.jupiter_exit_concurrency}`, `${data.derived.jupiter_key_count} 个 Key 自动限并发`],
+    ["Solana RPC 主池", `${data.derived.alchemy_account_count} Alchemy`, `${data.derived.ankr_freemium_count} Ankr HTTPS 灾备`],
+    ["Regime 采样周期", `${data.runtime.regime_poll_seconds}s`, `${data.runtime.adaptive_action_interval_minutes} 分钟更新买入松紧动作`],
     ["3s 可覆盖唯一 Token", `${data.derived.gmgn_unique_tokens_per_target_cycle}`, `当前持仓 ${data.derived.open_unique_tokens} 个唯一 Token`],
     ["预计最短实际周期", `${data.derived.estimated_min_cycle_seconds.toFixed(1)}s`, data.derived.capacity_state === "within_target" ? "当前 API 预算可满足目标" : "当前 API 预算受限，将自动降级"]
   ] : [], [data]);
@@ -122,6 +136,10 @@ export function ConfigurationPage() {
         <div className="configuration-form-grid">
           <label><span>持仓轮询频率（秒）</span><input type="number" min="1" max="60" step="0.5" value={pollSeconds} onChange={(event) => setPollSeconds(Number(event.target.value))} /></label>
           <label><span>GMGN 全局预算（req/s）</span><input type="number" min="0.1" max="50" step="0.1" value={gmgnRps} onChange={(event) => setGmgnRps(Number(event.target.value))} /></label>
+          <label><span>市场状态采样（秒）</span><input type="number" min="15" max="3600" step="15" value={regimePollSeconds} onChange={(event) => setRegimePollSeconds(Number(event.target.value))} /></label>
+          <label><span>自适应动作周期（分钟）</span><input type="number" min="5" max="60" step="5" value={adaptiveInterval} onChange={(event) => setAdaptiveInterval(Number(event.target.value))} /></label>
+          <label><span>自适应最低置信度</span><input type="number" min="0" max="1" step="0.05" value={adaptiveMinConfidence} onChange={(event) => setAdaptiveMinConfidence(Number(event.target.value))} /></label>
+          <label><span>安全探索率（0–5%）</span><input type="number" min="0" max="0.05" step="0.01" value={adaptiveExplorationRate} onChange={(event) => setAdaptiveExplorationRate(Number(event.target.value))} /></label>
           <label><span>GMGN Base URL</span><input value={gmgnBaseUrl} onChange={(event) => setGmgnBaseUrl(event.target.value)} placeholder="按当前部署填写" /></label>
           <label><span>Jupiter Quote URL</span><input value={jupiterQuoteUrl} onChange={(event) => setJupiterQuoteUrl(event.target.value)} placeholder="https://api.jup.ag/swap/v2/order" /></label>
         </div>

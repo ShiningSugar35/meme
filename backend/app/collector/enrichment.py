@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .client import GMGNDataClient
+from .constants import FEATURE_SCHEMA_VERSION
 from .errors import CollectorError, CollectorNetworkError
+from .event_features import build_gmgn_event_features
 from .filters import FilterDecision, SafetyFilter, canonical_launchpad, first, normalize_token, to_float
 from .models import ApiKeyRoles, CollectedSample, Kline, TokenCandidate
 
@@ -358,23 +360,34 @@ class EnrichmentService:
         entry_time = int(now_ts or time.time())
         price_change_1h = _price_change(price, source, ("price_1h", "price1h", "price_h1"))
         price_change_5m = _price_change(price, source, ("price_5m", "price5m", "price_m5"))
-        if price_change_1h is None or price_change_5m is None:
-            try:
-                history_klines = await self.provider.klines(
-                    candidate.address,
-                    entry_time - 60 * 60,
-                    entry_time,
-                )
-            except Exception:
-                history_klines = ()
-            if price_change_1h is None:
-                price_change_1h = _historical_change_from_klines(
-                    price, history_klines, entry_time - 60 * 60
-                )
-            if price_change_5m is None:
-                price_change_5m = _historical_change_from_klines(
-                    price, history_klines, entry_time - 5 * 60
-                )
+        # One bounded pre-entry OHLCV request supplies the optional 2m event
+        # feature and also remains the existing fallback for 5m/1h momentum.
+        # No kline with a timestamp after entry_time is consumed.
+        try:
+            history_klines = tuple(
+                line for line in await self.provider.klines(
+                    candidate.address, entry_time - 60 * 60, entry_time
+                ) if line.timestamp <= entry_time
+            )
+        except Exception:
+            history_klines = ()
+        if price_change_1h is None:
+            price_change_1h = _historical_change_from_klines(
+                price, history_klines, entry_time - 60 * 60
+            )
+        if price_change_5m is None:
+            price_change_5m = _historical_change_from_klines(
+                price, history_klines, entry_time - 5 * 60
+            )
+        event_features = build_gmgn_event_features(
+            source,
+            current_price=price,
+            entry_time=entry_time,
+            history_klines=history_klines,
+            age_minutes=normalized.get("age"),
+            holder_count=normalized.get("holder_count"),
+            marketcap=normalized.get("marketcap"),
+        )
         features = {
             "ln(age+1)": _ln1p(normalized.get("age")),
             "ln(liquidity_usd)": _ln(liquidity),
@@ -404,6 +417,7 @@ class EnrichmentService:
             "ln(visiting_count+1)": _ln1p(recursive_find(source, ("visiting_count", "visitingCount"))),
             "price_change_1h": price_change_1h,
             "price_change_5m": price_change_5m,
+            **event_features,
             "ln(creator_open_count+1)": _ln1p(recursive_find([source, created_tokens], ("creator_open_count", "open_count"))),
             "creator_open_ratio": recursive_find([source, created_tokens], ("creator_open_ratio", "open_ratio")),
             "ln(top_wallets+1)": _ln1p(recursive_find(source, ("top_wallets", "topWallets"))),
@@ -416,6 +430,10 @@ class EnrichmentService:
             launchpad=canonical_launchpad(normalized.get("launchpad")),
             liquidity=liquidity,
             features=features,
+            age_minutes=to_float(normalized.get("age")),
+            holder_count=to_float(normalized.get("holder_count")),
+            feature_schema_version=FEATURE_SCHEMA_VERSION,
+            feature_snapshot_at=entry_time,
             source=source,
         )
         return EnrichmentResult(sample, FilterDecision(True, ()))

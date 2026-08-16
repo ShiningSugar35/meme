@@ -52,7 +52,7 @@ def test_discovery_payload_tracks_current_gmgn_contract_without_business_prefilt
     assert section["launchpad_platform_v2"] is True
     assert section["filters"] == ["offchain", "onchain"]
     assert section["quote_address_type"] == [4, 5, 3, 1, 13, 0]
-    assert section["min_created"] == "1m"
+    assert section["min_created"] == "2m"
     assert section["max_created"] == "240m"
     for business_filter in (
         "max_rug_ratio",

@@ -26,6 +26,7 @@ ml_models/*
 *.pkl
 *.onnx
 *.zip
+artifacts/*.xml
 meme数据.csv
 *.pem
 *.key

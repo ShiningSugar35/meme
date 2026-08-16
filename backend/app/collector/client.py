@@ -113,6 +113,8 @@ class CollectorEndpoints:
     top_holders: str = "/v1/market/token_top_holders"
     kline: str = "/v1/market/token_kline"
     trending: str = "/v1/market/rank"
+    signal: str = "/v1/market/token_signal"
+    hot_searches: str = "/v1/market/hot_searches"
     created_tokens: str = "/v1/user/created_tokens"
 
 
@@ -185,11 +187,11 @@ class GMGNDataClient:
 
     @staticmethod
     def route_weight(path: str) -> int:
-        """GMGN documented leaky-bucket weights, applied atop the 2-RPS gate."""
+        """GMGN documented leaky-bucket weights, applied atop the configured shared gate."""
         normalized = path.lower()
         if "token_top_holders" in normalized or "token_top_traders" in normalized:
             return 5
-        if "trenches" in normalized:
+        if "trenches" in normalized or "token_signal" in normalized or "hot_searches" in normalized:
             return 3
         if "token_kline" in normalized or "created_tokens" in normalized:
             return 2

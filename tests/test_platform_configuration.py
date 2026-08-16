@@ -35,7 +35,12 @@ def test_configuration_masks_credentials_and_derives_capacity(tmp_path: Path) ->
 
     payload = service.configuration()
 
-    assert payload["runtime"] == {"position_monitor_poll_seconds": 3.0, "gmgn_global_rps": 2.0}
+    assert payload["runtime"]["position_monitor_poll_seconds"] == 3.0
+    assert payload["runtime"]["gmgn_global_rps"] == 2.0
+    assert payload["runtime"]["regime_poll_seconds"] == 60
+    assert payload["runtime"]["adaptive_action_interval_minutes"] == 15
+    assert payload["runtime"]["adaptive_min_confidence"] == 0.55
+    assert payload["runtime"]["adaptive_exploration_rate"] == 0.0
     assert payload["derived"]["gmgn_key_count"] == 3
     assert payload["derived"]["jupiter_exit_concurrency"] == 2
     assert payload["derived"]["gmgn_unique_tokens_per_target_cycle"] == 6
