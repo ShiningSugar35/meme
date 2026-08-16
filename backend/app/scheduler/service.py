@@ -56,6 +56,9 @@ class TrainingScheduler:
         self._stop.set()
 
     def schedule_mode(self) -> str:
+        readiness = TrainingService(self.database, self.settings).automatic_training_readiness()
+        if not readiness.ready:
+            return "data_collection_only"
         health = self.database.get_runtime_state("model_health_status", {})
         state = str(health.get("state") or "") if isinstance(health, dict) else ""
         return "daily" if state == "insufficient_data" else "weekly"
@@ -110,6 +113,15 @@ class TrainingScheduler:
 
     def refresh_entry_gate(self, *, now: datetime | None = None) -> bool:
         """Persist and return whether model_1/2/3 entries must be paused."""
+        readiness = TrainingService(self.database, self.settings).automatic_training_readiness()
+        if not readiness.ready:
+            self._set_entry_gate(
+                paused=False,
+                scheduled_for="",
+                mode="data_collection_only",
+                reason=readiness.reason,
+            )
+            return False
         tz = ZoneInfo(self.settings.training_timezone)
         current = (now or datetime.now(tz)).astimezone(tz)
         rollover = self.database.get_runtime_state("model_rollover_status", {})
@@ -204,13 +216,19 @@ class TrainingScheduler:
     def _store_status(self, *, next_due: datetime, next_freeze: datetime) -> None:
         gate = self.database.get_runtime_state("model_entry_rollover_gate", {})
         rollover = self.database.get_runtime_state("model_rollover_status", {})
+        readiness = TrainingService(self.database, self.settings).automatic_training_readiness()
+        mode = self.schedule_mode()
         self.database.set_runtime_state(
             "scheduler_status",
             {
                 "state": "running",
-                "schedule_mode": self.schedule_mode(),
-                "next_training_at": next_due.astimezone(timezone.utc).isoformat(),
-                "next_entry_freeze_at": next_freeze.astimezone(timezone.utc).isoformat(),
+                "schedule_mode": mode,
+                "next_training_at": None if not readiness.ready else next_due.astimezone(timezone.utc).isoformat(),
+                "next_entry_freeze_at": None if not readiness.ready else next_freeze.astimezone(timezone.utc).isoformat(),
+                "automatic_training_eligible": readiness.ready,
+                "mature_samples": readiness.mature_samples,
+                "min_mature_samples": readiness.min_mature_samples,
+                "reason": readiness.reason,
                 "model_entries_paused": bool(gate.get("paused")) if isinstance(gate, dict) else False,
                 "pending_activation_run_id": (
                     rollover.get("run_id")
@@ -230,6 +248,24 @@ class TrainingScheduler:
         now: datetime | None = None,
     ) -> str | None:
         self.refresh_entry_gate(now=now)
+        readiness = TrainingService(self.database, self.settings).automatic_training_readiness()
+        if not readiness.ready:
+            self.database.set_runtime_state(
+                "scheduler_status",
+                {
+                    "state": "running",
+                    "schedule_mode": "data_collection_only",
+                    "next_training_at": None,
+                    "next_entry_freeze_at": None,
+                    "automatic_training_eligible": False,
+                    "mature_samples": readiness.mature_samples,
+                    "min_mature_samples": readiness.min_mature_samples,
+                    "reason": readiness.reason,
+                    "model_entries_paused": False,
+                    "pending_activation_run_id": None,
+                },
+            )
+            return None
         scheduled = self.most_recent_scheduled_at(now)
         scheduled_utc = scheduled.astimezone(timezone.utc)
         scheduled_key = scheduled_utc.isoformat()

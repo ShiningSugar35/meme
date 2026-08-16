@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     training_holdout_days: int = Field(default=30, ge=7)
     training_max_retries: int = Field(default=2, ge=0, le=10)
     training_worker_poll_seconds: int = Field(default=5, ge=1, le=300)
+    # New feature generations need a sufficiently large same-generation sample
+    # base before any automatic model lifecycle is allowed to resume. Until then
+    # the runtime is deliberately data-collection-first and paper trading is
+    # rules-only.
+    modeling_min_mature_samples: int = Field(default=1_000, ge=0)
     min_precision: float = Field(default=0.35, ge=0, le=1)
     promotion_min_pnl_lift: float = Field(default=0.05, ge=0)
 

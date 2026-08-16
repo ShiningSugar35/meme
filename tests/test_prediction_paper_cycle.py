@@ -83,6 +83,7 @@ def test_prediction_cycle_scores_top3_opens_models_and_rule_baseline_idempotentl
         _env_file=None,
         sqlite_path=str(tmp_path / "test.db"),
         background_workers_enabled=False,
+        modeling_min_mature_samples=0,
         signal_max_age_seconds=300,
         paper_market_monitor_enabled=False,
     )
@@ -130,7 +131,7 @@ def test_prediction_cycle_scores_top3_opens_models_and_rule_baseline_idempotentl
 def test_stale_oos_signals_and_rule_baseline_are_not_retroactively_filled(tmp_path):
     database = Database(tmp_path / "test.db")
     database.initialize()
-    settings = Settings(_env_file=None, sqlite_path=str(tmp_path / "test.db"), background_workers_enabled=False, signal_max_age_seconds=60)
+    settings = Settings(_env_file=None, sqlite_path=str(tmp_path / "test.db"), background_workers_enabled=False, modeling_min_mature_samples=0, signal_max_age_seconds=60)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     seed_top3(
         database,
@@ -163,6 +164,7 @@ def test_rollover_gate_blocks_all_four_simulation_strategies(tmp_path):
         _env_file=None,
         sqlite_path=str(tmp_path / "rollover.db"),
         background_workers_enabled=False,
+        modeling_min_mature_samples=0,
         signal_max_age_seconds=300,
     )
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -209,6 +211,7 @@ def test_prediction_to_four_strategy_market_exit_e2e(tmp_path):
         app_env="test",
         sqlite_path=str(tmp_path / "unused.db"),
         background_workers_enabled=False,
+        modeling_min_mature_samples=0,
         signal_max_age_seconds=300,
         paper_market_monitor_enabled=True,
     )

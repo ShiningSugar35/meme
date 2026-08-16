@@ -20,7 +20,7 @@ def make_database(tmp_path: Path) -> Database:
     return database
 
 
-def make_settings(tmp_path: Path, *, retries: int = 2) -> Settings:
+def make_settings(tmp_path: Path, *, retries: int = 2, min_mature: int = 0) -> Settings:
     return Settings(
         _env_file=None,
         app_env="test",
@@ -31,6 +31,7 @@ def make_settings(tmp_path: Path, *, retries: int = 2) -> Settings:
         training_hour=17,
         training_minute=0,
         training_max_retries=retries,
+        modeling_min_mature_samples=min_mature,
     )
 
 
@@ -64,6 +65,26 @@ def test_insufficient_data_accelerates_schedule_to_daily_1700_bjt(tmp_path: Path
     assert scheduler.next_scheduled_at(before) == datetime(2026, 8, 10, 17, 0, tzinfo=tz)
     assert scheduler.most_recent_scheduled_at(after) == datetime(2026, 8, 10, 17, 0, tzinfo=tz)
     assert scheduler.next_scheduled_at(after) == datetime(2026, 8, 11, 17, 0, tzinfo=tz)
+
+
+@pytest.mark.asyncio
+async def test_sample_floor_disables_automatic_training_and_rollover_gate(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path, min_mature=1_000)
+    scheduler = TrainingScheduler(database, settings)
+    now = datetime(2026, 8, 10, 17, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    run_id = await scheduler._schedule_if_due(startup=False, now=now)
+
+    assert run_id is None
+    assert scheduler.schedule_mode() == "data_collection_only"
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM training_runs")["n"] == 0
+    assert database.get_runtime_state("model_entries_paused_for_rollover") is False
+    status = database.get_runtime_state("scheduler_status")
+    assert status["automatic_training_eligible"] is False
+    assert status["mature_samples"] == 0
+    assert status["min_mature_samples"] == 1_000
+    assert status["next_training_at"] is None
 
 
 def test_due_day_entry_gate_freezes_at_1600_until_new_generation_activates(tmp_path: Path) -> None:

@@ -12,7 +12,6 @@ from .database import get_database, utc_now_iso
 from .collector.rate_limit import AsyncRateLimiter
 from .scheduler.service import TrainingScheduler
 from .services.collector_worker import CollectorWorker
-from .services.csv_importer import CsvImporter
 from .services.liquidation import LiquidationWorker
 from .services.model_health import ModelHealthWorker
 from .services.position_monitor import PositionMonitorWorker
@@ -30,8 +29,8 @@ async def lifespan(_: FastAPI):
     database.initialize()
     platform_configuration = PlatformConfigurationService(database)
     gmgn_limiter = AsyncRateLimiter(platform_configuration.runtime_values()["gmgn_global_rps"])
-    if settings.csv_import_path.exists():
-        CsvImporter(database).import_file(settings.csv_import_path)
+    # Legacy CSV import is an explicit maintenance action only. Startup must not
+    # repopulate pre-current-generation samples after a feature-contract reset.
 
     tasks: list[asyncio.Task] = []
     collector: CollectorWorker | None = None

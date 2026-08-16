@@ -171,13 +171,13 @@ Top 3 更新规则：
 4. 最近最终 holdout 只做 certification，禁止反向调模型或阈值；
 5. 三个 Top 模型工件必须可加载，Rank 1 历史版本保留可回滚链。
 
-自动训练与模型切换从 schema v10 起拆成两个阶段，当前数据库 schema 为 v12。正常状态按每周约定日（当前为周日）北京时间 **17:00** 训练；当模型健康为 `insufficient_data` 时临时加速为**每天 17:00**。每个到期日 16:00 起冻结 `model_1 / model_2 / model_3 / rules_only` 四策略的新买入，已有仓位继续由默认 3s（可配置）current-price 持仓监控正常退出；17:00 无论旧模型是否仍持仓都先训练并持久化候选 Top 3，待四策略全部空仓后立即原子切换并创建新的 simulation session，四账本统一回到 1000 USD。系统在 17:00 未运行时，下次启动会补训对应计划点。手动训练与 Rank 1 rollback 同样要求四策略全平后切新 session。
+自动训练与模型切换从 schema v10 起拆成两个阶段，当前数据库 schema 为 v12；**模型生命周期现在先受当前特征代的成熟样本门槛约束**。`event1m_regime_v3` 中 `label_status='mature' AND tag IN (0,1)` 的样本少于 **1000** 条时，系统进入 `data_collection_only`：每日/每周/启动补训/健康降级补训均不排队，16:00 rollover freeze 也不生效；即使数据库意外残留 active model，Prediction 也不做模型打分和 `model_1/2/3` 模拟，只继续 `rules_only` 无模型模拟，以便积累可执行性事实。成熟样本达到 1000 条后，自动模型生命周期才重新取得资格：正常状态按每周约定日（当前为周日）北京时间 **17:00** 训练，模型健康为 `insufficient_data` 时临时加速为每天 17:00；后续继续遵守既有 16:00 freeze、17:00 durable training、全平后原子切换规则。手动训练仍属于显式运维动作，不由该自动门槛主动触发。
 
 ## 4. 交易与风控
 
 ### 4.1 四策略模拟账本与实盘边界
 
-- `model_1 / model_2 / model_3 / rules_only` 四个模拟策略各自拥有 `1000 USD` 单一 USD 独立账本；模拟盘不维护 SOL 余额，同 Token 可在不同策略、不同批次同时存在。重大模型换代/rollback 在四策略全平后创建新 simulation session，四账本统一重置。
+- 模型生命周期就绪时，`model_1 / model_2 / model_3 / rules_only` 四个模拟策略各自拥有 `1000 USD` 单一 USD 独立账本；模拟盘不维护 SOL 余额，同 Token 可在不同策略、不同批次同时存在。当前代成熟样本 `<1000` 时只有 `rules_only` 账本允许产生新模拟仓位，`model_1/2/3` 不打分、不交易。达到门槛后，重大模型换代/rollback 仍在四策略全平后创建新 simulation session，四账本统一重置。
 - 四策略统一复用同一 BUY/SELL、滑点、费用、0.9x 止损、1.6x 止盈、1h 到期和卖出失败重试链；差别只在是否经过某个模型决策线。每次实际发生的网络费仍以 SOL 原始数量记录，并使用手续费发生时的 SOL/USD 折算成 USD 直接进入现金与 PnL。
 - 已存在的 simulation/live 持仓统一由独立 `PositionMonitorWorker` 以默认 3s（可配置）current-price cadence 监控。同 Token 多仓仍合并为一次 GMGN current-market 请求；GMGN Key 数量不再固定为 12 个，所有已配置 Key 进入轮换/fallback 池，但 Collector 与 PositionMonitor 共享同一个默认 10 req/s IP 总预算，避免多 Key 误放大公网请求。simulation 命中退出条件后先冻结同一触发价/触发时刻，再按当前 Jupiter Key 数进行受控并发 executable quote，避免四策略因串行报价人为错开数秒。实盘自动 BUY 仍刻意停放；live 退出只有在 `DRY_RUN=false` 且 runtime gate 已武装时才进入既有幂等执行链，否则 fail-closed。
 
@@ -277,10 +277,10 @@ Set-Location D:\meme
 启动时会：
 
 1. 创建/迁移 `data/meme_quant.db`（当前 schema v12）；v8 完成 `profile`/三档账户迁移，v9 增加可审计的 SOL/USD 价格表及每笔交易的 `platform_fee_usd / sol_usd_price / network_fee_usd / slippage_cost_usd / fee_occurred_at`，v10 将 `daily` 纳入 durable training trigger 并支持候选 Top 3 跨重启等待空仓，v11 增加 H1 审计字段并用数据库 trigger 禁止 `completed` 生命周期重新写入，v12 增加 feature generation / `feature_snapshot_at`、Market Regime、adaptive decision/feedback 与 neutral counterfactual 审计字段；旧交易没有当时 FX 事实时不会用今天价格回填；
-2. 若根目录存在 `meme数据.csv`，按文件哈希与样本键幂等导入；当前真实库已完成 2319 条 legacy 数据迁移；
+2. **不再自动导入根目录 `meme数据.csv`**。legacy CSV importer 仅保留为显式维护 API/脚本能力，启动链禁止把 pre-v3 样本重新灌回 current-generation-only 运行库；
 3. 在任何新信号 worker 启动前运行一次订单 journal 对账：有 `provider_order_id` 只查询原单，无法确认的 submit 保持 `submission_unknown` 并暂停新开仓；
-4. 恢复上次进程中断的 `running` 训练任务，再启动唯一 `TrainingWorker` 串行消费手动/每日/周训/启动补跑任务，并持续检查已训练候选是否已满足“四策略全部空仓”的换代条件；满足后激活 Top 3 并创建新的 simulation session；
-5. 启动健康感知的模型调度器：`insufficient_data` 时每天 16:00 冻结四策略新买入、17:00 训练；其他状态只在每周约定日执行同一流程。同时运行 7 日 Top 3 模型健康监控、三模型实时 prediction、`rules_only` 基线、持久化 liquidation/reconciliation；
+4. 启动唯一 `TrainingWorker`；任何非 manual 训练任务在真正执行前都先复核当前代 1000 mature+tag 门槛，未达标即 `skipped`，因此历史 queued/running 状态不能在重启后绕过门槛；达到门槛后才恢复既有 durable 训练与四策略全平换代链；
+5. 启动模型调度器与 Prediction worker：当前代 `<1000` 时 scheduler=`data_collection_only`、Top3 prediction/model simulation 全停，仅运行 `rules_only`；达到门槛后才恢复健康感知的日/周 16:00-17:00 调度与三模型 prediction。liquidation/reconciliation 仍按既有持久化安全边界运行；
 6. 独立启动 `PositionMonitorWorker`：默认每 3 秒（配置页可改）获取 simulation/live 持仓的 current price/liquidity，同 Token 合并请求；GMGN 使用动态 Key 池并与 Collector 共享总 RPS 预算。simulation 命中退出条件时先冻结同一 current-price 触发事实，再按 Jupiter Key 数进行受控并发 SELL quote，避免四策略串行报价把同一触发事件人为拉开数秒；live 仅在既有安全门禁已武装时执行退出。运行态同时记录目标周期、单次 cycle 耗时和真实 start-to-start 周期。`COLLECTOR_ENABLED=true` 时 Collector 只负责 SOL/USD 费用事实刷新、discovery、enrichment 与 T+1h 标签补齐，不再承载持仓退出。
 
 健康检查：`http://127.0.0.1:8000/health`；OpenAPI：`http://127.0.0.1:8000/docs`。
@@ -315,7 +315,7 @@ Invoke-RestMethod -Method Post `
   -Body '{"reason":"manual","features":["ln(price+1)","price_change_1h"]}'
 ```
 
-HTTP 只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；浏览器断开或后端重启不会静默丢任务。自动调度统一使用北京时间 17:00：7 日模型健康为 `insufficient_data` 时每天训练，否则按每周约定日训练；到期日 16:00 先冻结 `model_1/model_2/model_3/rules_only` 四策略的新买入。训练本身不等待旧仓位，完成后候选 Top 3 以 `promoted=0 + activation.waiting_for_flat` 持久化；`TrainingWorker` 独立轮询四策略是否全空仓，满足后才原子替换 Top 3，并创建新的 simulation session，使四策略统一从 1000 USD/0 交易重新开始后再解除冻结。系统错过 17:00 时在下次启动按同一 `scheduled_for` 幂等补训。模型健康服务只报告 `healthy / insufficient_data / degraded`，不再绕过该生命周期插队启动另一条自动训练。自动训练读取模型中心持久化的长期候选池；实际胜出模型可在 one-SE + 8% 相对性能保护下缩减到更小特征子集。
+HTTP 手动训练仍只创建 durable `training_runs` 队列项，真正训练由单一 `TrainingWorker` 串行执行；自动训练则先经过 **1000 条当前代 mature+tag 样本硬门槛**。门槛未满足时 scheduler 固定为 `data_collection_only`，不会创建 daily / weekly / startup-catchup run，Worker 对任何历史遗留的非 manual queued run 还会再次检查并将其 `skipped`，因此重启也不能绕过门槛。达到门槛后才恢复原自动调度：北京时间 17:00，7 日模型健康为 `insufficient_data` 时每天训练，否则按每周约定日训练；到期日 16:00 先冻结四策略新买入，完成训练后候选 Top 3 持久等待全平再原子切换。模型健康服务也服从相同样本门槛，不得另开降级重训旁路。自动训练读取模型中心持久化的长期候选池；实际胜出模型可在 one-SE + 8% 相对性能保护下缩减到更小特征子集。
 
 2026-08-13 age<240 迁移后执行正式手动重训 run `3aa752e0-7557-4602-aa79-22d9b5381c7f`。首轮本地训练进程因工具 180 秒调用上限被中断，durable TrainingWorker 按既有恢复规则将同一 run `retry_count=1` 后继续执行，没有创建重复任务。训练集为 1856 条 mature H1 v4 样本；完成于 `2026-08-13T03:35:38.461429+00:00`，四策略当时全平，因此于 `2026-08-13T03:35:38.499689+00:00` 立即激活并创建 `sim_ed9d999af1964ee194c9bfdd74fbb12d`（`created_reason=model_generation_upgrade`）。该代 Top 3 为 Random Forest / AdaBoost / HistGradientBoosting，分别使用 8 / 8 / 6 个特征。
 
@@ -348,7 +348,7 @@ Set-Location D:\meme\frontend
 npm run build
 ```
 
-2026-08-16 当前基线：后端 `pytest -q` **163/163 通过**；前端 `tsc -b && vite build` 通过。当前正式代际为 `event1m_regime_v3`：严格 `2 < age < 300`，可选 catalog 44 / 生产默认 31，PIT-safe 1m Event 特征、GMGN event contract、DEX Screener 非关键 fallback、Coinbase BTC/SOL public market fallback、4×Alchemy→Solana Public emergency、Market Regime、neutral counterfactual、Adaptive Shadow/OPE evidence gate 与 family-audit `INSUFFICIENT_DATA` fail-closed 回归均受测试覆盖。外部真实只读探针与 mock 测试都不关闭 DRY RUN、不签名、不广播交易。
+2026-08-16 当前基线：后端 `pytest -q` **165/165 通过**；前端 `tsc -b && vite build` 通过。当前正式代际为 `event1m_regime_v3`：严格 `2 < age < 300`，可选 catalog 44 / 生产默认 31，PIT-safe 1m Event 特征、GMGN event contract、DEX Screener 非关键 fallback、Coinbase BTC/SOL public market fallback、4×Alchemy→Solana Public emergency、Market Regime、neutral counterfactual、Adaptive Shadow/OPE evidence gate、family-audit fail-closed，以及 **1000 current-generation mature 样本建模门槛 / rules-only-only 低样本模式**均受测试覆盖。外部真实只读探针与 mock 测试都不关闭 DRY RUN、不签名、不广播交易。
 
 部署环境还有一个只读数据链 smoke：`.\.venv\Scripts\python.exe scripts\collector_smoke.py`。它只构造现有 GMGN data adapter、执行 `new_creation` discovery 和至多一个 enrichment，不写 SQLite、不签名、不交易、也不打印 API Key/token address。2026-08-10 当前环境已实测 discovery/enrichment 通路可达；同时发现 GMGN 可能返回超过请求 limit 的候选，因此 `DiscoveryService` 还会在本地再次按 limit 截断。
 
@@ -371,13 +371,13 @@ npm run build
 
 ### 9.1 非实盘本地版
 
-截至 2026-08-14，单机/单用户/localhost 范围内的非实盘主链已经闭环：legacy CSV → schema v11 SQLite → 持续采集/入场特征 → T+1h 标签 → chronological OOS + 奥卡姆候选训练 → Top 3 + rules-only → 四策略 USD-only 模拟 → 手续费发生时 SOL/USD 冻结折算 → 默认 3s（可配置）current-price 持仓监控 → Jupiter executable SELL quote → H1 route-aware 净 USD PnL/Precision/Recall/交易数 → 健康感知的 16:00/17:00 日/周训练 → 候选持久化等待四策略空仓 → 原子换模并创建新的 simulation session → Rank 1 历史回滚同样切新 session。训练任务、待激活候选、模拟会话和 Agent 提案均为持久化对象并支持重启恢复；`rules_only` 作为独立无模型基线运行，但其统计边界与当前 simulation session 一致。
+截至 2026-08-16，单机/单用户/localhost 范围内的非实盘主链已切换到 **current-generation only**：`event1m_regime_v3` 持续采集/入场特征 → T+1h 标签 → 当前代成熟样本计数门槛 → 达到 1000 后才允许 chronological OOS + 奥卡姆候选训练 → Top 3 + rules-only → 四策略 USD-only 模拟。门槛前系统刻意停在“采集 + 打 Tag + rules-only 可执行性基线”阶段，不加载旧 Top3、不产生模型 predictions/positions，也不会日训、周训或启动补训。旧模型代的持久化训练/交易/模拟会话已作为无效历史清空；未来达到 1000 条后，新的模型、会话与交易历史只从 v3 同代证据重新建立。
 
-历史数据本身仍有客观边界：
+当前数据边界：
 
-- 2319 条 legacy 样本跨度约 25 天且全部来自 Pump.fun；它们只保留历史审计与旧模型 provenance，当前 `event1m_regime_v3` 不读取 legacy/v1/v2 作为新训练、Model Health 或自适应策略证据。旧 Top 3 仅作为 v3 样本积累期的暂时 scorer，下一次换代必须完全由 v3 同代样本训练；
-- 旧 CSV 缺失新的 Event/Regime 字段，也无法严格复现新 `feature_snapshot_at`，因此不做零填充、均值填充或事后重构；新训练集从 0 重新累计；
-- `ln(liquidity_usd)` 继续随 v3 新样本采集并留在模型中心可选 Shadow catalog，生产默认 31 暂不启用，待同代样本积累充分后再交由 OOS 选择判断；
+- legacy / `event2m_regime_v1` / `event2m_regime_v2` 均缺失或不满足当前 v3 特征契约，已从主库删除，不再保留为训练、Model Health、自适应策略或旧 Top3 scorer 的输入；旧模型 registry、active slots、模型工件、training runs、predictions、simulation sessions、positions、trades、旧 collector cycle 和旧 SQLite 备份也同步清除；
+- 不对旧样本做零填充、均值填充或事后特征重构；`event1m_regime_v3` 是新的数据起点，成熟样本数只从同代真实采集与 T+1h 标签重新累计；
+- `ln(liquidity_usd)` 继续随 v3 新样本采集并留在模型中心可选 Shadow catalog，生产默认 31 暂不启用；达到 1000 条只是“允许重新训练”的下限，不等于任何 Shadow 特征自动晋级，仍须交由同代 chronological OOS / one-SE / final certification 判断；
 - 本项目按 localhost 单用户交付。公网认证、session/CSRF、多租户不是当前本地版的“漏开发功能”；如果未来改成公网服务，必须先补正式身份认证与 CSRF/权限边界；
 - SQLite 适合当前单进程第一版；跨进程/多服务器扩展时再引入正式 migration/lease/PostgreSQL，不把扩展架构伪装成当前版本阻塞项。
 

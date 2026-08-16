@@ -18,6 +18,7 @@ from ..ml.registry import ModelRegistry
 from ..repositories.models import ModelRepository
 from ..strategy import MODEL_STRATEGIES, RULES_ONLY, model_strategy
 from .adaptive_policy import AdaptivePolicyService
+from .modeling_gate import persist_modeling_readiness
 from .paper_trading import PaperTradingService
 
 
@@ -52,14 +53,25 @@ class PredictionService:
         now: datetime | None = None,
     ) -> PredictionCycleResult:
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        readiness = persist_modeling_readiness(self.database, self.settings)
         active = self.models.active_models()
-        if len(active) != 3:
-            settled = 0 if self.settings.paper_market_monitor_enabled else self.paper.settle_mature_positions()
-            return PredictionCycleResult(
-                model_ids=tuple(item.get("id") for item in active),
-                paper_positions_settled=settled,
-                reason="active_top3_not_ready",
+        if not readiness.ready or len(active) != 3:
+            rule_opened, rule_stale, rule_blocked = self._reconcile_rule_only(
+                moment=moment,
+                limit=limit,
+                ignore_model_rollover_gate=not readiness.ready,
             )
+            settled = 0 if self.settings.paper_market_monitor_enabled else self.paper.settle_mature_positions()
+            result = PredictionCycleResult(
+                model_ids=tuple(item.get("id") for item in active) if readiness.ready else (),
+                rule_positions_opened=rule_opened,
+                paper_positions_settled=settled,
+                stale_signals=rule_stale,
+                blocked_signals=rule_blocked,
+                reason=readiness.reason if not readiness.ready else "active_top3_not_ready",
+            )
+            self.database.set_runtime_state("prediction_worker_last_cycle", asdict(result))
+            return result
 
         predictions_written = selected = scored = 0
         active_ids: list[str] = []
@@ -170,7 +182,12 @@ class PredictionService:
         }
         return pd.DataFrame.from_records([record], columns=list(feature_names))
 
-    def _reconcile_model_signals(self, *, moment: datetime) -> tuple[int, int, int]:
+    def _reconcile_model_signals(
+        self,
+        *,
+        moment: datetime,
+        ignore_model_rollover_gate: bool = False,
+    ) -> tuple[int, int, int]:
         if not self.settings.simulation_enabled:
             return 0, 0, 0
         rows = self.database.fetch_all(
@@ -193,7 +210,7 @@ class PredictionService:
         )
         opened = stale = blocked = 0
         now_epoch = int(moment.timestamp())
-        rollover_paused = bool(
+        rollover_paused = (not ignore_model_rollover_gate) and bool(
             self.database.get_runtime_state("model_entries_paused_for_rollover", False)
         )
         for row in rows:
@@ -215,7 +232,13 @@ class PredictionService:
                 blocked += 1
         return opened, stale, blocked
 
-    def _reconcile_rule_only(self, *, moment: datetime, limit: int) -> tuple[int, int, int]:
+    def _reconcile_rule_only(
+        self,
+        *,
+        moment: datetime,
+        limit: int,
+        ignore_model_rollover_gate: bool = False,
+    ) -> tuple[int, int, int]:
         if not self.settings.simulation_enabled:
             return 0, 0, 0
         session = self.paper.ensure_simulation_session()
@@ -246,7 +269,7 @@ class PredictionService:
             (admission_cutoff, FEATURE_SCHEMA_VERSION, session["id"], limit),
         )
         opened = stale = blocked = 0
-        rollover_paused = bool(
+        rollover_paused = (not ignore_model_rollover_gate) and bool(
             self.database.get_runtime_state("model_entries_paused_for_rollover", False)
         )
         for row in rows:

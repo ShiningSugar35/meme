@@ -26,6 +26,7 @@ from ..ml.registry import ModelRegistry
 from ..ml.trainer import ModelTrainer, TrainerConfig
 from ..repositories.models import ModelRepository
 from ..repositories.samples import SampleRepository
+from .modeling_gate import ModelingReadiness, persist_modeling_readiness
 
 
 TrainingTrigger = Literal["manual", "weekly", "daily", "startup_catchup", "degraded"]
@@ -44,6 +45,9 @@ class TrainingService:
         self.samples = SampleRepository(database)
         self.models = ModelRepository(database)
         self.registry = ModelRegistry(self.settings.model_directory)
+
+    def automatic_training_readiness(self) -> ModelingReadiness:
+        return persist_modeling_readiness(self.database, self.settings)
 
     def create_run(
         self,
@@ -133,6 +137,26 @@ class TrainingService:
         row = self.database.fetch_one("SELECT * FROM training_runs WHERE id=?", (run_id,))
         if not row:
             raise ValueError("training run not found")
+        if str(row.get("trigger") or "manual") != "manual":
+            readiness = self.automatic_training_readiness()
+            if not readiness.ready:
+                completed_at = utc_now_iso()
+                self.database.execute(
+                    """
+                    UPDATE training_runs
+                    SET status='skipped', completed_at=?, error_message=?
+                    WHERE id=? AND status IN ('queued','running')
+                    """,
+                    (completed_at, readiness.reason, run_id),
+                )
+                self.database.audit(
+                    category="model",
+                    action="automatic_training_skipped_sample_floor",
+                    entity_type="training_run",
+                    entity_id=run_id,
+                    details=readiness.as_dict(),
+                )
+                return
         with self.database.transaction(immediate=True) as connection:
             running = connection.execute(
                 "SELECT id FROM training_runs WHERE status='running' AND id<>? LIMIT 1",

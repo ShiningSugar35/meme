@@ -173,6 +173,9 @@ class ModelHealthService:
         rank1: dict[str, Any],
         moment: datetime,
     ) -> tuple[str | None, str]:
+        readiness = self.training.automatic_training_readiness()
+        if not readiness.ready:
+            return None, f"automatic retraining disabled: {readiness.reason}"
         active = self.database.fetch_one(
             "SELECT id FROM training_runs WHERE status IN ('queued','running') LIMIT 1"
         )

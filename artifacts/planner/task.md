@@ -150,7 +150,7 @@
 ## Phase 9：Event1m / Market Regime / Adaptive Shadow — COMPLETE / DATA-GATED
 
 - [x] 正式准入统一为严格 `2 < age_minutes < 300`；Trenches `min_created=2m / max_created=300m`；`feature_snapshot_at` 单独记录真实入场快照时刻。
-- [x] 正式 feature generation 为 `event1m_regime_v3`。`legacy_pre_event_v1 / event2m_regime_v1 / event2m_regime_v2` 均保留历史审计；切换时 v2 仅有 4 条 pending、0 个关联仓位，因此不做破坏性删除，旧 pending 可继续自然补标但不进入 v3 训练、Model Health 或 Adaptive evidence。
+- [x] 正式 feature generation 为 `event1m_regime_v3`。后续用户明确要求新增特征前的样本全部作废，因此 `legacy_pre_event_v1 / event2m_regime_v1 / event2m_regime_v2` 已从运行库删除，不再保留旧 pending、旧模型或旧成交作为 v3 运行输入。
 - [x] 原生产 31 特征保持默认训练池；v3 可选 catalog 为 44 项。`price_change_2m` 已替换为 `price_change_1m`，并删除 `ln(swaps_1m+1)`、`ln(volume_2m+1)`、`volume_acceleration_2m`、`creator_token_status`；其余新增 1m / marketing / social / holder-age / marketcap 与 `ln(liquidity_usd)` 仅 Shadow，禁止默认自动启用。
 - [x] GMGN 真实脱敏 contract probe 用于确认保留字段的 presence/type/nullability：1m volume/swaps/buy/sell、Dex promotion、X follower、TG call、holder_count、marketcap；已删除的 creator status/2m volume 不再作为候选特征契约。
 - [x] DEX Screener Public 只做低频非关键 fallback；Coinbase Public 提供 BTC Crypto family，并只在本地/GMGN SOL 事实 stale 时回补 SOL；optional provider 失败保留 missing/source-health，禁止伪造 0。
@@ -160,6 +160,14 @@
 - [x] Safe activation fail-closed：至少 120 独立 sample cluster + 40 separating cluster，chronological 70/30 development/certification，development mean>0、certification 95% LCB>0、三模型 certification mean 均>=0；探索另需独立 readiness gate且硬上限 5%。当前 v3 数据不足，保持 Shadow-only。
 - [x] `scripts/feature_family_audit.py` 提供 chronological family audit；新代未达到 200 mature / 25 positive / 50 negative 时明确 `INSUFFICIENT_DATA`，禁止 legacy/v1 backfill；达到门槛后执行 fold-train-only 排序、one-SE + 8% Occam、final holdout certification-only，并对不稳定家族给出整族删除建议。
 - [x] 最终验收：后端 `pytest` 163/163、前端 production build 通过；Coinbase BTC/SOL 与 DEX Screener Public 现场只读探针健康，GMGN event probe 健康；秘密值扫描 33 项 × 172 文件无命中；重启后 backend/frontend 均 200，Collector / Prediction / Regime / Reconciliation / ModelHealth / Training 均 running，`DRY_RUN=true`，Adaptive 仍 `policy_ready=false / exploration_ready=false`。
+
+## Phase 10：Current-generation reset / 1000-sample modeling gate — COMPLETE
+
+- [x] 模型资格只统计当前 `event1m_regime_v3` 的 `mature + tag` 样本；默认硬门槛 1000。
+- [x] `<1000` 时 Scheduler 不创建 daily / weekly / startup-catchup run；TrainingWorker 对遗留的非 manual run 二次 fail-closed；ModelHealth 不允许 degraded retraining 旁路。
+- [x] `<1000` 时 Prediction 完全跳过 Top3 打分、prediction 写入和 `model_1/2/3` 模拟仓位，但继续 `rules_only` 无模型模拟与正常结算；旧 rollover freeze 不能阻塞该基线。
+- [x] 旧 generation 样本、模型 registry/active slots、模型工件、training runs、predictions、simulation sessions、positions、trades、adaptive policy 历史、collector cycle、模型/交易 runtime state、SQLite backups 与未使用 legacy DB 一次性清理；Market Regime PIT 市场事实保留。
+- [x] 发布验收：全量 pytest **165/165**、frontend production build、`git diff --check` 均通过；清理后主库只保留 v3 的 `5 mature + 4 pending`，旧模型/Top3/predictions/training/positions/trades 全为 0，72 个模型工件、10 个历史备份库及 legacy DB 已删除；重启后 backend/frontend=200，Collector 一轮 120 candidates / errors=[]，scheduler=`data_collection_only`，Prediction `model_ids=[] / scored=0 / predictions=0 / model_positions=0`，`DRY_RUN=true / live_trading_enabled=false`。Git push 见本次提交。
 
 ## 环境事实
 

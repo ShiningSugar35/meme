@@ -1,6 +1,6 @@
 # Solana Meme Quant Trading System - Architecture Review
 
-> 本文主体保留架构审阅与设计门禁；实际实现状态以文末“2026-08-12 实现状态附录”、`README.md` 与 `开发文档.md` 为准。schema v12 / `event1m_regime_v3` / Top 3 / 固定 `rules_only` 基线 / 模拟盘单一 USD 会计 / 16:00-17:00 staged model rollover 是当前权威业务语义；历史三档字段与旧 SOL reserve 字段只允许作为数据库迁移兼容事实存在。
+> 本文主体保留架构审阅与设计门禁；实际实现状态以文末实现状态附录、`README.md` 与 `开发文档.md` 为准。schema v12 / `event1m_regime_v3` / current-generation-only / 1000 mature 样本模型门槛 / 固定 `rules_only` 基线 / 模拟盘单一 USD 会计是当前权威业务语义；达到样本门槛后才恢复 Top 3 与 16:00-17:00 staged model rollover。历史三档字段与旧 SOL reserve 字段只允许作为数据库迁移兼容事实存在。
 
 ## 1. 审阅目标与原则
 
@@ -361,4 +361,5 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 5. **Provider failure 不等于 0**：任何 optional feed 的 429/5xx/network/malformed 都持久化为 missing/source-health 并降低 confidence，不能写成“市场事件为 0”。Public emergency/fallback 也必须带来源标记。
 6. **三模型 adaptive、rules-only 固定**：`model_1/2/3` 每 15 分钟只在 DEFENSIVE/NEUTRAL/EXPANSIVE 三动作间通过 `sigmoid(logit(base_threshold)+delta)` 调整入场门槛；`rules_only` 永久不调节。每个模型同时记录 neutral counterfactual、propensity 与 policy version。
 7. **Shadow/OPE 先于上线**：策略证据门在当前 generation 至少 120 个独立 sample cluster、40 个 policy-separating cluster 后才允许评估；chronological 70/30 development/certification 必须 development mean>0、certification 95% LCB>0 且三模型 certification mean 均不为负。探索率硬上限 5%，并由第二道独立 readiness gate 控制；未满足证据时实际模拟仍执行 Neutral。
-8. **代际不可回填**：`event2m_regime_v1/v2` 均作为历史代际保留；旧 pending 允许继续补 T+1h 标签与自然结算，但 `event1m_regime_v3` 的训练、健康与自适应证据从 0 重新累计。任何旧 generation 都禁止事后补造 v3 新特征。
+8. **代际不可回填且运行库只保留当前代**：`legacy_pre_event_v1`、`event2m_regime_v1/v2` 缺少 v3 特征契约，禁止事后补造并已从运行库清除；旧模型、active slots、训练、prediction、模拟交易、collector cycle 与旧 SQLite backups 同步失效。`event1m_regime_v3` 是唯一新的训练/健康/自适应样本起点。
+9. **1000 mature 硬门槛**：门槛只计当前 generation 的 mature+tag 样本。`<1000` 时 scheduler/worker/model-health 三层禁止自动训练，Prediction 完全跳过 Top3 模型链，只运行 `rules_only`；达到 1000 后才恢复既有日/周训练、Top3 和 staged rollover。

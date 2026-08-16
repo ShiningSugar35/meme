@@ -10,6 +10,7 @@ from typing import Any
 
 from ..config import Settings, get_settings
 from ..database import Database
+from .modeling_gate import modeling_readiness
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +178,7 @@ class RuntimeService:
             "app_env": self.settings.app_env,
             "dry_run": self.settings.dry_run,
             "simulation_enabled": self.settings.simulation_enabled,
+            "modeling": modeling_readiness(self.database, self.settings).as_dict(),
             "live_trading_enabled": bool(self.database.get_runtime_state("live_trading_enabled", False)),
             "trading_provider": self.settings.trading_provider,
             "wallet": self._mask_wallet(self.settings.wallet_public_key),
