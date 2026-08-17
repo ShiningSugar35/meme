@@ -86,7 +86,7 @@ class DashboardService:
             row["model_label"] = self._short_model_label(row)
         return rows
 
-    def sample_ledger(self, *, limit: int = 500) -> dict[str, Any]:
+    def sample_ledger(self, *, page: int = 1, page_size: int = 100) -> dict[str, Any]:
         """Return every hard-rule-admitted sample, independent of model scoring/buying."""
         total = int((self.database.fetch_one(
             """
@@ -97,6 +97,9 @@ class DashboardService:
             """,
             (FEATURE_SCHEMA_VERSION,),
         ) or {"count": 0})["count"])
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        resolved_page = min(max(1, page), total_pages)
+        offset = (resolved_page - 1) * page_size
         rows = self.database.fetch_all(
             """
             SELECT s.id,s.address,s.name,s.symbol,s.launchpad,s.entry_time,s.collected_at,
@@ -125,9 +128,9 @@ class DashboardService:
             WHERE s.feature_schema_version=?
               AND s.token_type IN ('new_creation','near_completion')
             ORDER BY s.entry_time DESC,s.id DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (FEATURE_SCHEMA_VERSION, limit),
+            (FEATURE_SCHEMA_VERSION, page_size, offset),
         )
         for row in rows:
             age_minutes = row.pop("age_minutes", None)
@@ -139,6 +142,9 @@ class DashboardService:
         return {
             "items": rows,
             "total": total,
+            "page": resolved_page,
+            "page_size": page_size,
+            "total_pages": total_pages,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
         }
 

@@ -1,4 +1,4 @@
-import { Download, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, Search } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { useApiData } from "../api/useApiData";
@@ -27,7 +27,9 @@ const sampleTime = (value: string | null | undefined) => {
 };
 
 export function SignalsPage() {
-  const loader = useCallback(() => api.samples(), []);
+  const [page, setPage] = useState(1);
+  const pageSize = 100;
+  const loader = useCallback(() => api.samples(page, pageSize), [page]);
   const { data, loading, error, refresh } = useApiData(loader);
   const [query, setQuery] = useState("");
   const [labelStatus, setLabelStatus] = useState<"all" | "pending" | "mature">("all");
@@ -88,23 +90,31 @@ export function SignalsPage() {
           <StatusBadge label={data.feature_schema_version} />
         </div>
         {items.length ? (
-          <div className="table-scroll"><table>
-            <thead><tr><th>入样时间</th><th>Token</th><th>Launchpad</th><th>Age</th><th>标签状态</th><th>标签</th><th>模型评分</th><th>模型入选</th><th>模拟买入</th></tr></thead>
-            <tbody>{items.map((item) => {
-              const bought = item.bought_strategies.map((key) => strategyLabels[key] ?? key);
-              return <tr key={item.id}>
-                <td>{sampleTime(item.collected_at)}</td>
-                <td><strong>{item.symbol ?? item.name ?? "Unknown"}</strong><span className="table-sub mono">{item.address.slice(0, 6)}…{item.address.slice(-5)}</span></td>
-                <td>{item.launchpad ?? "—"}</td>
-                <td className="mono">{item.age_seconds == null ? "—" : `${item.age_seconds}s`}</td>
-                <td><StatusBadge tone={item.label_status === "mature" ? "blue" : "gold"} label={item.label_status === "mature" ? "已成熟" : "待成熟"} /></td>
-                <td>{item.tag == null ? "—" : `tag ${item.tag}`}</td>
-                <td>{item.prediction_count ? `${item.prediction_count}/3` : "未评分"}</td>
-                <td><StatusBadge tone={item.selected_count ? "blue" : "neutral"} label={item.selected_count ? `${item.selected_count} 个模型入选` : "未入选"} /></td>
-                <td>{bought.length ? bought.join("、") : "未买入"}</td>
-              </tr>;
-            })}</tbody>
-          </table></div>
+          <>
+            <div className="table-scroll"><table>
+              <thead><tr><th>入样时间</th><th>Token</th><th>Launchpad</th><th>Age</th><th>标签状态</th><th>标签</th><th>模型评分</th><th>模型入选</th><th>模拟买入</th></tr></thead>
+              <tbody>{items.map((item) => {
+                const bought = item.bought_strategies.map((key) => strategyLabels[key] ?? key);
+                return <tr key={item.id}>
+                  <td>{sampleTime(item.collected_at)}</td>
+                  <td><strong>{item.symbol ?? item.name ?? "Unknown"}</strong><span className="table-sub mono">{item.address.slice(0, 6)}…{item.address.slice(-5)}</span></td>
+                  <td>{item.launchpad ?? "—"}</td>
+                  <td className="mono">{item.age_seconds == null ? "—" : `${item.age_seconds}s`}</td>
+                  <td><StatusBadge tone={item.label_status === "mature" ? "blue" : "gold"} label={item.label_status === "mature" ? "已成熟" : "待成熟"} /></td>
+                  <td>{item.tag == null ? "—" : `tag ${item.tag}`}</td>
+                  <td>{item.prediction_count ? `${item.prediction_count}/3` : "未评分"}</td>
+                  <td><StatusBadge tone={item.selected_count ? "blue" : "neutral"} label={item.selected_count ? `${item.selected_count} 个模型入选` : "未入选"} /></td>
+                  <td>{bought.length ? bought.join("、") : "未买入"}</td>
+                </tr>;
+              })}</tbody>
+            </table></div>
+            <div className="pagination-bar">
+              <span>共 {data.total} 条</span>
+              <button className="icon-button pagination-button" disabled={data.page <= 1} onClick={() => setPage(Math.max(1, data.page - 1))} aria-label="上一页"><ChevronLeft size={16} /></button>
+              <span>第 {data.page} / {data.total_pages} 页</span>
+              <button className="icon-button pagination-button" disabled={data.page >= data.total_pages} onClick={() => setPage(Math.min(data.total_pages, data.page + 1))} aria-label="下一页"><ChevronRight size={16} /></button>
+            </div>
+          </>
         ) : <EmptyState title="没有匹配样本" detail="只有未通过硬编码规则的池子不会进入这里；通过后会先写入 samples，再进入模型评分和模拟交易链路。" />}
       </section>
     </div>

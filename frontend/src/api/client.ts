@@ -36,7 +36,7 @@ export const api = {
   dashboard: () => request<DashboardData>("/api/dashboard"),
   models: () => request<{ champion: ModelVersion | null; active_models: ModelVersion[]; items: ModelVersion[]; feature_catalog: ModelFeatureCatalog; training_runs: TrainingRun[] }>("/api/models"),
   signals: () => request<{ items: Signal[] }>("/api/signals"),
-  samples: () => request<{ items: SampleLedgerItem[]; total: number; feature_schema_version: string }>("/api/samples?limit=500"),
+  samples: (page = 1, pageSize = 100) => request<{ items: SampleLedgerItem[]; total: number; page: number; page_size: number; total_pages: number; feature_schema_version: string }>(`/api/samples?page=${page}&page_size=${pageSize}`),
   exportSamples: async () => {
     const response = await fetch("/api/samples/export.csv");
     if (!response.ok) throw new Error(`样本集导出失败: ${response.status}`);

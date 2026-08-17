@@ -96,8 +96,11 @@ def signals(limit: int = Query(default=100, ge=1, le=500)) -> dict:
 
 
 @router.get("/samples")
-def samples(limit: int = Query(default=500, ge=1, le=2_000)) -> dict:
-    return DashboardService(get_database()).sample_ledger(limit=limit)
+def samples(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=10, le=200),
+) -> dict:
+    return DashboardService(get_database()).sample_ledger(page=page, page_size=page_size)
 
 
 @router.get("/samples/export.csv")
