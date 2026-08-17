@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..collector.constants import FEATURE_SCHEMA_VERSION
 from ..database import Database
 from ..repositories.models import ModelRepository
 from ..repositories.samples import SampleRepository
@@ -85,6 +86,62 @@ class DashboardService:
             row["model_label"] = self._short_model_label(row)
         return rows
 
+    def sample_ledger(self, *, limit: int = 500) -> dict[str, Any]:
+        """Return every hard-rule-admitted sample, independent of model scoring/buying."""
+        total = int((self.database.fetch_one(
+            """
+            SELECT COUNT(*) AS count
+            FROM samples
+            WHERE feature_schema_version=?
+              AND token_type IN ('new_creation','near_completion')
+            """,
+            (FEATURE_SCHEMA_VERSION,),
+        ) or {"count": 0})["count"])
+        rows = self.database.fetch_all(
+            """
+            SELECT s.id,s.address,s.name,s.symbol,s.launchpad,s.entry_time,s.collected_at,
+                   s.age_minutes,s.label_status,s.tag,s.feature_schema_version,
+                   COALESCE(pr.prediction_count,0) AS prediction_count,
+                   COALESCE(pr.selected_count,0) AS selected_count,
+                   COALESCE(pos.position_count,0) AS position_count,
+                   pos.bought_strategies
+            FROM samples s
+            LEFT JOIN (
+                SELECT sample_id,
+                       COUNT(*) AS prediction_count,
+                       SUM(CASE WHEN selected=1 THEN 1 ELSE 0 END) AS selected_count
+                FROM predictions
+                WHERE strategy_key IN ('model_1','model_2','model_3')
+                GROUP BY sample_id
+            ) pr ON pr.sample_id=s.id
+            LEFT JOIN (
+                SELECT sample_id,
+                       COUNT(*) AS position_count,
+                       GROUP_CONCAT(DISTINCT strategy_key) AS bought_strategies
+                FROM positions
+                WHERE sample_id IS NOT NULL AND status<>'failed'
+                GROUP BY sample_id
+            ) pos ON pos.sample_id=s.id
+            WHERE s.feature_schema_version=?
+              AND s.token_type IN ('new_creation','near_completion')
+            ORDER BY s.entry_time DESC,s.id DESC
+            LIMIT ?
+            """,
+            (FEATURE_SCHEMA_VERSION, limit),
+        )
+        for row in rows:
+            age_minutes = row.pop("age_minutes", None)
+            row["age_seconds"] = (
+                int(round(float(age_minutes) * 60.0)) if age_minutes is not None else None
+            )
+            strategies = str(row.get("bought_strategies") or "")
+            row["bought_strategies"] = [item for item in strategies.split(",") if item]
+        return {
+            "items": rows,
+            "total": total,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        }
+
     def list_positions(
         self,
         *,
@@ -158,7 +215,10 @@ class DashboardService:
         """
         current = self.database.fetch_all(
             f"""
-            SELECT p.*,s.launchpad AS launchpad
+            SELECT p.*,s.launchpad AS launchpad,
+                   CASE WHEN s.age_minutes IS NULL THEN NULL
+                        ELSE CAST(ROUND(s.age_minutes * 60.0) AS INTEGER)
+                   END AS sample_entry_age_seconds
             {join_from}
             WHERE {current_where}
             ORDER BY p.entry_time DESC
@@ -184,7 +244,10 @@ class DashboardService:
         offset = (resolved_page - 1) * page_size
         history = self.database.fetch_all(
             f"""
-            SELECT p.*,s.launchpad AS launchpad
+            SELECT p.*,s.launchpad AS launchpad,
+                   CASE WHEN s.age_minutes IS NULL THEN NULL
+                        ELSE CAST(ROUND(s.age_minutes * 60.0) AS INTEGER)
+                   END AS sample_entry_age_seconds
             {join_from}
             WHERE {history_where}
             ORDER BY p.exit_time DESC,p.entry_time DESC
@@ -249,6 +312,13 @@ class DashboardService:
             metadata = {}
         snapshot = metadata.get("market_snapshot") if isinstance(metadata, dict) else None
         snapshot = snapshot if isinstance(snapshot, dict) else {}
+        sample_age_seconds = result.pop("sample_entry_age_seconds", None)
+        recorded_age_seconds = metadata.get("entry_age_seconds") if isinstance(metadata, dict) else None
+        result["entry_age_seconds"] = (
+            int(recorded_age_seconds)
+            if recorded_age_seconds is not None
+            else (int(sample_age_seconds) if sample_age_seconds is not None else None)
+        )
         result["current_price"] = snapshot.get("price")
         result["current_liquidity_usd"] = snapshot.get("liquidity_usd")
         result["current_market_cap_usd"] = snapshot.get("market_cap_usd")

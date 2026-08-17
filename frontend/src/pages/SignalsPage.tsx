@@ -1,32 +1,44 @@
 import { Download, Search } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { StrategyKey } from "../api/types";
 import { useApiData } from "../api/useApiData";
 import { EmptyState } from "../components/EmptyState";
 import { PageError, PageLoading } from "../components/PageState";
 import { StatusBadge } from "../components/StatusBadge";
 
-const strategyLabels: Record<StrategyKey, string> = {
+const strategyLabels: Record<string, string> = {
   model_1: "模型 1",
   model_2: "模型 2",
   model_3: "模型 3",
   rules_only: "不用模型"
 };
 
+const sampleTime = (value: string | null | undefined) => {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).format(new Date(value));
+};
+
 export function SignalsPage() {
-  const loader = useCallback(() => api.signals(), []);
+  const loader = useCallback(() => api.samples(), []);
   const { data, loading, error, refresh } = useApiData(loader);
   const [query, setQuery] = useState("");
-  const [strategy, setStrategy] = useState<"all" | StrategyKey>("all");
+  const [labelStatus, setLabelStatus] = useState<"all" | "pending" | "mature">("all");
   const [exporting, setExporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const items = useMemo(
     () => (data?.items ?? []).filter(
-      (item) => (strategy === "all" || item.strategy_key === strategy)
-        && `${item.symbol ?? ""} ${item.address}`.toLowerCase().includes(query.toLowerCase())
+      (item) => (labelStatus === "all" || item.label_status === labelStatus)
+        && `${item.symbol ?? ""} ${item.name ?? ""} ${item.address}`.toLowerCase().includes(query.toLowerCase())
     ),
-    [data, strategy, query]
+    [data, labelStatus, query]
   );
 
   const exportSamples = async () => {
@@ -56,39 +68,44 @@ export function SignalsPage() {
   return (
     <div className="page-stack">
       <section className="page-heading">
-        <div><p className="eyebrow">SAMPLE LEDGER</p><h1>样本预览</h1></div>
+        <div><p className="eyebrow">SAMPLE LEDGER</p><h1>样本采集</h1><p>所有通过硬编码规则筛选并写入当前特征代际的数据都会在这里出现，与模型是否评分或买入无关。</p></div>
         <div className="heading-actions">
+          <StatusBadge label={`${data.total} 条入样`} tone="blue" />
           <button className="button button-secondary" disabled={exporting} onClick={() => void exportSamples()}>
-            <Download size={17} />{exporting ? "导出中…" : "样本集导出"}
+            <Download size={17} />{exporting ? "导出中…" : "成熟样本导出"}
           </button>
         </div>
       </section>
       {notice && <div className="inline-notice">{notice}</div>}
       <section className="panel table-panel">
         <div className="table-toolbar">
-          <label className="search-box"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索 symbol 或地址" /></label>
-          <select value={strategy} onChange={(e) => setStrategy(e.target.value as "all" | StrategyKey)}>
-            <option value="all">全部模型</option>
-            <option value="model_1">模型 1</option>
-            <option value="model_2">模型 2</option>
-            <option value="model_3">模型 3</option>
+          <label className="search-box"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索名称、symbol 或地址" /></label>
+          <select value={labelStatus} onChange={(e) => setLabelStatus(e.target.value as "all" | "pending" | "mature")}>
+            <option value="all">全部标签状态</option>
+            <option value="pending">待成熟</option>
+            <option value="mature">已成熟</option>
           </select>
+          <StatusBadge label={data.feature_schema_version} />
         </div>
         {items.length ? (
           <div className="table-scroll"><table>
-            <thead><tr><th>时间</th><th>Token</th><th>Launchpad</th><th>排名</th><th>模型分 / 入选线</th><th>决策</th><th>成熟标签</th><th>模型</th></tr></thead>
-            <tbody>{items.map((item) => <tr key={item.id}>
-              <td>{new Date(item.predicted_at).toLocaleString("zh-CN")}</td>
-              <td><strong>{item.symbol ?? item.name ?? "Unknown"}</strong><span className="table-sub mono">{item.address.slice(0, 6)}…{item.address.slice(-5)}</span></td>
-              <td>{item.launchpad ?? "—"}</td>
-              <td><StatusBadge label={item.active_slot ? `Top ${item.active_slot}` : strategyLabels[item.strategy_key]} /></td>
-              <td className="mono">{(item.probability * 100).toFixed(1)}% / {(item.threshold * 100).toFixed(1)}%</td>
-              <td><StatusBadge tone={item.selected ? "blue" : "neutral"} label={item.selected ? "入选" : "仅记录"} /></td>
-              <td>{item.tag == null ? "待补齐" : `tag ${item.tag}`}</td>
-              <td className="mono muted-cell">{item.model_label}</td>
-            </tr>)}</tbody>
+            <thead><tr><th>入样时间</th><th>Token</th><th>Launchpad</th><th>Age</th><th>标签状态</th><th>标签</th><th>模型评分</th><th>模型入选</th><th>模拟买入</th></tr></thead>
+            <tbody>{items.map((item) => {
+              const bought = item.bought_strategies.map((key) => strategyLabels[key] ?? key);
+              return <tr key={item.id}>
+                <td>{sampleTime(item.collected_at)}</td>
+                <td><strong>{item.symbol ?? item.name ?? "Unknown"}</strong><span className="table-sub mono">{item.address.slice(0, 6)}…{item.address.slice(-5)}</span></td>
+                <td>{item.launchpad ?? "—"}</td>
+                <td className="mono">{item.age_seconds == null ? "—" : `${item.age_seconds}s`}</td>
+                <td><StatusBadge tone={item.label_status === "mature" ? "blue" : "gold"} label={item.label_status === "mature" ? "已成熟" : "待成熟"} /></td>
+                <td>{item.tag == null ? "—" : `tag ${item.tag}`}</td>
+                <td>{item.prediction_count ? `${item.prediction_count}/3` : "未评分"}</td>
+                <td><StatusBadge tone={item.selected_count ? "blue" : "neutral"} label={item.selected_count ? `${item.selected_count} 个模型入选` : "未入选"} /></td>
+                <td>{bought.length ? bought.join("、") : "未买入"}</td>
+              </tr>;
+            })}</tbody>
           </table></div>
-        ) : <EmptyState title="没有匹配样本" detail="采集器和 Top 3 模型开始运行后，评分记录会自动出现。" />}
+        ) : <EmptyState title="没有匹配样本" detail="只有未通过硬编码规则的池子不会进入这里；通过后会先写入 samples，再进入模型评分和模拟交易链路。" />}
       </section>
     </div>
   );

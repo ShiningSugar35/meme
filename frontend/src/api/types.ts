@@ -200,6 +200,24 @@ export interface Signal {
   active_slot: number | null;
 }
 
+export interface SampleLedgerItem {
+  id: number;
+  address: string;
+  name: string | null;
+  symbol: string | null;
+  launchpad: string | null;
+  entry_time: number;
+  collected_at: string;
+  age_seconds: number | null;
+  label_status: "pending" | "mature" | string;
+  tag: number | null;
+  feature_schema_version: string;
+  prediction_count: number;
+  selected_count: number;
+  position_count: number;
+  bought_strategies: string[];
+}
+
 export interface SimulationAccount {
   session_id: string;
   strategy_key: StrategyKey;
@@ -280,6 +298,7 @@ export interface Position {
   strategy_key?: StrategyKey | null;
   status: string;
   entry_time: string;
+  entry_age_seconds?: number | null;
   expires_at: string;
   exit_time?: string | null;
   invested_usd: number;

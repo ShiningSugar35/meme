@@ -95,6 +95,11 @@ def signals(limit: int = Query(default=100, ge=1, le=500)) -> dict:
     return {"items": DashboardService(get_database()).list_signals(limit=limit)}
 
 
+@router.get("/samples")
+def samples(limit: int = Query(default=500, ge=1, le=2_000)) -> dict:
+    return DashboardService(get_database()).sample_ledger(limit=limit)
+
+
 @router.get("/samples/export.csv")
 def export_samples() -> Response:
     text, count = SampleExportService(get_database()).render_csv()
