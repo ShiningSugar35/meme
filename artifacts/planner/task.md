@@ -34,7 +34,7 @@
 - [x] p/r 恒等式测试：`U = N_positive × recall × (7 - 1/precision)`
 - [x] 固定 $50 仅用于模型公平离线排名：`fixed_profit_usd = 5 × U`
 - [x] 实际模拟/实盘 sizing 不变：`min(1% × entry liquidity, $50)`，并继续计滑点/平台费/网络费
-- [x] 经济得分 `E = mean(clip((5TP-FP)/(5N+), -1, 1))`
+- [x] 经济得分 `E = mean(clip((4TP-FP)/(4N+), -1, 1))`
 - [x] 泛化得分 `G = 0.60×AP Skill + 0.20×Stability + 0.20×Decay`
 - [x] 综合分 `S = 0.60×E + 0.40×G`
 - [x] 最终 holdout certification-only，不参与模型、feature、threshold 或 Top 3 排名
@@ -168,6 +168,16 @@
 - [x] `<1000` 时 Prediction 完全跳过 Top3 打分、prediction 写入和 `model_1/2/3` 模拟仓位，但继续 `rules_only` 无模型模拟与正常结算；旧 rollover freeze 不能阻塞该基线。
 - [x] 旧 generation 样本、模型 registry/active slots、模型工件、training runs、predictions、simulation sessions、positions、trades、adaptive policy 历史、collector cycle、模型/交易 runtime state、SQLite backups 与未使用 legacy DB 一次性清理；Market Regime PIT 市场事实保留。
 - [x] 发布验收：全量 pytest **165/165**、frontend production build、`git diff --check` 均通过；清理后主库只保留 v3 的 `5 mature + 4 pending`，旧模型/Top3/predictions/training/positions/trades 全为 0，72 个模型工件、10 个历史备份库及 legacy DB 已删除；重启后 backend/frontend=200，Collector 一轮 120 candidates / errors=[]，scheduler=`data_collection_only`，Prediction `model_ids=[] / scored=0 / predictions=0 / model_positions=0`，`DRY_RUN=true / live_trading_enabled=false`。Git push 见本次提交。
+
+## Phase 11：+4/-1 economics / execution audit / 2s monitor — COMPLETE
+
+- [x] 模型经济代理由 `+5/-1` 收紧为 `+4/-1`：`U=4TP-FP`，固定 $50 为 +$20/-$5，盈亏平衡 Precision=20%；E 归一化同步为 `clip((4TP-FP)/(4N+),-1,1)`，ModelHealth 与 Adaptive Policy 共用 `WIN_UNITS=4`。
+- [x] 新模型写入 `economic_objective_version=fixed_4_to_1_v2`；Prediction fail-closed 检查 active Top3 objective version，旧 +5/-1 模型不得在 1000-sample gate 刚解除时短暂恢复评分。
+- [x] rules-only 会计逐笔审计确认不存在滑点/平台费/网络费双扣；旧“滑点”统计把跨源/跨时点 execution deviation 混入 slippage，170 笔 Jupiter route SELL 从 `$393.28` 重分类为真实 route price impact `$96.72`，PnL 不变并保留 legacy deviation 审计。
+- [x] PositionMonitor 修复跨 Token head-of-line blocking：GMGN market response 逐个完成即处理，对应 paper SELL 立即并发启动；触发时刻改用实际行情响应时刻。回归覆盖 fast Token 在 slow Token 返回前已完成退出。
+- [x] 默认/运行态 poll 由 3s 收紧为 2s；生产已观察 `target_poll_seconds=2.0`、`last_start_interval_seconds=2.0`。
+- [x] 新增 `scripts/audit_rules_only_execution.py` 与 `scripts/reclassify_route_slippage.py`，前者持续核验会计恒等式并拆分 stop market gap / route price impact，后者默认 dry-run、仅显式 `--apply` 才修历史审计字段。
+- [x] 最终验收：后端 pytest **168/168**，frontend production build 通过；运行态 PositionMonitor `target_poll_seconds=2.0 / last_start_interval_seconds=2.0`，当前 modeling gate 为 `193/1000`、模型评分继续关闭，live trading 保持未武装。
 
 ## 环境事实
 

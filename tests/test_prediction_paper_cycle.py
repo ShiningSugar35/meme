@@ -7,6 +7,7 @@ import numpy as np
 from backend.app.collector.models import Kline
 from backend.app.config import Settings
 from backend.app.database import Database, utc_now_iso
+from backend.app.ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from backend.app.ml.registry import ModelRegistry
 from backend.app.ml.types import ModelBundle, ThresholdSet
 from backend.app.repositories.models import ModelRepository
@@ -64,7 +65,7 @@ def seed_top3(database: Database, model_dir, now: datetime, *, probability: floa
                 "validation_window_start": None,
                 "validation_window_end": None,
                 "feature_names": list(feature_names),
-                "parameters": {},
+                "parameters": {"economic_objective_version": ECONOMIC_OBJECTIVE_VERSION},
                 "thresholds": bundle.thresholds.as_dict(),
                 "metrics": {"composite_score": 0.8 - slot * 0.1},
                 "artifact_path": str(artifact),
@@ -74,6 +75,43 @@ def seed_top3(database: Database, model_dir, now: datetime, *, probability: floa
     models.set_active_models(active)
     selected_at = (activation_at or (now - timedelta(seconds=30))).isoformat()
     database.execute("UPDATE active_model_slots SET selected_at=?", (selected_at,))
+
+
+def test_stale_economic_objective_keeps_models_off_and_rules_only_running(tmp_path):
+    database = Database(tmp_path / "stale-objective.db")
+    database.initialize()
+    settings = Settings(
+        _env_file=None,
+        sqlite_path=str(tmp_path / "stale-objective.db"),
+        background_workers_enabled=False,
+        modeling_min_mature_samples=0,
+        signal_max_age_seconds=300,
+        paper_market_monitor_enabled=False,
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    seed_sol_price(database, now - timedelta(seconds=10))
+    seed_top3(database, tmp_path / "stale-models", now)
+    database.execute("UPDATE models SET parameters_json='{}'")
+    SampleRepository(database).insert(
+        SampleRecord(
+            address="StaleObjective111111111111111111111111111111",
+            token_type="new_creation",
+            entry_time=int((now - timedelta(seconds=10)).timestamp()),
+            entry_price=1.0,
+            liquidity=10_000.0,
+            features={"feature_a": 1.0},
+            label_status="pending",
+        )
+    )
+
+    result = PredictionService(database, settings).run_cycle(now=now)
+
+    assert result.reason == "active_top3_economic_objective_stale"
+    assert result.predictions_written == 0
+    assert result.model_positions_opened == 0
+    assert result.rule_positions_opened == 1
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM predictions")["n"] == 0
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key='rules_only'")["n"] == 1
 
 
 def test_prediction_cycle_scores_top3_opens_models_and_rule_baseline_idempotently(tmp_path):
@@ -234,7 +272,7 @@ def test_prediction_to_four_strategy_market_exit_e2e(tmp_path):
             training_end=now - timedelta(minutes=1),
         )
         artifact = registry.save(bundle)
-        models.register({"id": model_id, "version": model_id, "algorithm": "constant", "status": "candidate", "early_stage": True, "trained_at": now.isoformat(), "training_window_start": int((now - timedelta(days=10)).timestamp()), "training_window_end": int((now - timedelta(minutes=1)).timestamp()), "feature_names": ["price", "feature_a"], "parameters": {}, "thresholds": bundle.thresholds.as_dict(), "metrics": {}, "artifact_path": str(artifact)})
+        models.register({"id": model_id, "version": model_id, "algorithm": "constant", "status": "candidate", "early_stage": True, "trained_at": now.isoformat(), "training_window_start": int((now - timedelta(days=10)).timestamp()), "training_window_end": int((now - timedelta(minutes=1)).timestamp()), "feature_names": ["price", "feature_a"], "parameters": {"economic_objective_version": ECONOMIC_OBJECTIVE_VERSION}, "thresholds": bundle.thresholds.as_dict(), "metrics": {}, "artifact_path": str(artifact)})
         active.append({"id": model_id, "composite_score": 0.8 - slot * 0.1, "threshold": bundle.threshold, "metrics": {}})
     models.set_active_models(active)
 

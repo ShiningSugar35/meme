@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from ..collector.constants import FEATURE_SCHEMA_VERSION
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..ml.economics import LOSS_UNITS, WIN_UNITS
 from .regime import MarketRegimeService
 
 POLICY_VERSION = "adaptive_regime_bandit_v2_shadow_gate"
@@ -61,7 +62,7 @@ class AdaptivePolicyService:
 
     The regime mapper always produces a *shadow recommendation*.  Actual model
     thresholds remain neutral until chronological full-information replay on the
-    new feature generation certifies that the frozen mapping improves the +5/-1
+    new feature generation certifies that the frozen mapping improves the +4/-1
     utility proxy.  ``rules_only`` never calls this service.
 
     The 5% exploration mechanism exists for future contextual-bandit learning,
@@ -215,7 +216,7 @@ class AdaptivePolicyService:
         with self.database.transaction(immediate=True) as connection:
             for row in rows:
                 tag = int(row["tag"])
-                utility = 5.0 if tag == 1 else -1.0
+                utility = WIN_UNITS if tag == 1 else -LOSS_UNITS
                 adaptive_reward = utility if int(row.get("selected") or 0) else 0.0
                 neutral_reward = utility if int(row.get("neutral_selected") or 0) else 0.0
 

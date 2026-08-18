@@ -13,6 +13,7 @@ import pandas as pd
 from ..collector.constants import FEATURE_SCHEMA_VERSION
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from ..ml.features import (
     AGE_LOG1P_FEATURE,
     AVAILABLE_MODEL_FEATURES,
@@ -205,6 +206,7 @@ class TrainingService:
                     "trade_count": candidate.final_metrics.trade_count if candidate.final_metrics else 0,
                     "fixed_profit_usd": candidate.final_metrics.fixed_profit_usd if candidate.final_metrics else None,
                     "profit_units": candidate.final_metrics.profit_units if candidate.final_metrics else None,
+                    "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
                     "economic_score": candidate.economic_score,
                     "execution_score": candidate.execution_score,
                     "e_exec": candidate.execution_score,
@@ -244,6 +246,7 @@ class TrainingService:
                         "parameters": {
                             "candidate_pool": list(TrainerConfig().candidate_names),
                             "selection": "top3_oos_fixed_payoff_decay_occam",
+                            "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
                             "economic_weight": TrainerConfig().economic_weight,
                             "generalization_weight": TrainerConfig().generalization_weight,
                             "gap_hours": result.plan.gap_hours,

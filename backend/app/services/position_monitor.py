@@ -114,7 +114,7 @@ class PositionMonitorService:
         *,
         now_ts: int | None = None,
     ) -> PositionMonitorCycle:
-        current_ts = int(now_ts or time.time())
+        # Observation timestamps are captured when each market response arrives.
         if not self.settings.position_monitor_enabled:
             return PositionMonitorCycle(completed_at=utc_now_iso())
 
@@ -159,7 +159,16 @@ class PositionMonitorService:
         checked = market_requests = market_data_failures = network_failures = 0
         paper_closed = paper_pending = 0
         live_triggered = live_pending = blocked = 0
-        paper_work: list[tuple[dict[str, Any], float]] = []
+        jupiter_key_count = len(
+            self.configuration.provider_credentials("jupiter") or self.settings.jupiter_api_keys
+        )
+        exit_concurrency = max(1, min(8, jupiter_key_count or 1))
+        semaphore = asyncio.Semaphore(exit_concurrency)
+        paper_tasks: list[asyncio.Task[str]] = []
+
+        async def run_paper(row: dict[str, Any], price: float, observed_ts: int) -> str:
+            async with semaphore:
+                return await self._monitor_paper(row, price, observed_ts)
         for row in direct_retry:
             checked += 1
             try:
@@ -178,9 +187,11 @@ class PositionMonitorService:
                 else 0.0
             )
             if str(row["account_kind"]) == "simulation":
-                paper_work.append((row, reference_price))
+                paper_tasks.append(
+                    asyncio.create_task(run_paper(row, reference_price, int(now_ts or time.time())))
+                )
             else:
-                outcome = self._monitor_live(row, reference_price, current_ts)
+                outcome = self._monitor_live(row, reference_price, int(now_ts or time.time()))
                 live_triggered += int(outcome == "triggered")
                 live_pending += int(outcome == "pending")
                 blocked += int(outcome == "blocked")
@@ -193,11 +204,17 @@ class PositionMonitorService:
             except Exception as exc:
                 return address, positions, None, exc
 
-        market_batches = await asyncio.gather(
-            *(fetch_current_market(address, positions) for address, positions in grouped.items())
-        )
+        market_tasks = [
+            asyncio.create_task(fetch_current_market(address, positions))
+            for address, positions in grouped.items()
+        ]
         market_requests += len(grouped)
-        for address, positions, snapshot, market_error in market_batches:
+        # Process each token as soon as its current-price response arrives.
+        # Waiting for the slowest GMGN request used to create head-of-line
+        # blocking across every open position in the cycle.
+        for market_task in asyncio.as_completed(market_tasks):
+            address, positions, snapshot, market_error = await market_task
+            observation_ts = int(now_ts or time.time())
             if market_error is not None or snapshot is None:
                 message = f"{type(market_error).__name__}: {market_error}"[:300]
                 market_data_failures += 1
@@ -223,27 +240,17 @@ class PositionMonitorService:
                 self._persist_snapshot(str(row["id"]), snapshot)
                 checked += 1
                 if str(row["account_kind"]) == "simulation":
-                    paper_work.append((row, price))
+                    paper_tasks.append(
+                        asyncio.create_task(run_paper(row, price, observation_ts))
+                    )
                 else:
-                    outcome = self._monitor_live(row, price, current_ts)
+                    outcome = self._monitor_live(row, price, observation_ts)
                     live_triggered += int(outcome == "triggered")
                     live_pending += int(outcome == "pending")
                     blocked += int(outcome == "blocked")
 
-        if paper_work:
-            jupiter_key_count = len(
-                self.configuration.provider_credentials("jupiter") or self.settings.jupiter_api_keys
-            )
-            exit_concurrency = max(1, min(8, jupiter_key_count or 1))
-            semaphore = asyncio.Semaphore(exit_concurrency)
-
-            async def run_paper(row: dict[str, Any], price: float) -> str:
-                async with semaphore:
-                    return await self._monitor_paper(row, price, current_ts)
-
-            outcomes = await asyncio.gather(
-                *(run_paper(row, price) for row, price in paper_work)
-            )
+        if paper_tasks:
+            outcomes = await asyncio.gather(*paper_tasks)
             paper_closed += sum(int(outcome == "closed") for outcome in outcomes)
             paper_pending += sum(int(outcome == "pending") for outcome in outcomes)
             blocked += sum(int(outcome == "blocked") for outcome in outcomes)

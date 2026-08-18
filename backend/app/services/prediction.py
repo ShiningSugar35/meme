@@ -13,6 +13,7 @@ import pandas as pd
 from ..collector.constants import FEATURE_SCHEMA_VERSION
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from ..ml.features import materialize_entry_feature
 from ..ml.registry import ModelRegistry
 from ..repositories.models import ModelRepository
@@ -55,20 +56,31 @@ class PredictionService:
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         readiness = persist_modeling_readiness(self.database, self.settings)
         active = self.models.active_models()
-        if not readiness.ready or len(active) != 3:
+        active_objective_current = len(active) == 3 and all(
+            str((item.get("parameters") or {}).get("economic_objective_version") or "")
+            == ECONOMIC_OBJECTIVE_VERSION
+            for item in active
+        )
+        if not readiness.ready or not active_objective_current:
             rule_opened, rule_stale, rule_blocked = self._reconcile_rule_only(
                 moment=moment,
                 limit=limit,
-                ignore_model_rollover_gate=not readiness.ready,
+                ignore_model_rollover_gate=True,
             )
             settled = 0 if self.settings.paper_market_monitor_enabled else self.paper.settle_mature_positions()
+            if not readiness.ready:
+                blocked_reason = readiness.reason
+            elif len(active) != 3:
+                blocked_reason = "active_top3_not_ready"
+            else:
+                blocked_reason = "active_top3_economic_objective_stale"
             result = PredictionCycleResult(
-                model_ids=tuple(item.get("id") for item in active) if readiness.ready else (),
+                model_ids=tuple(item.get("id") for item in active) if active_objective_current else (),
                 rule_positions_opened=rule_opened,
                 paper_positions_settled=settled,
                 stale_signals=rule_stale,
                 blocked_signals=rule_blocked,
-                reason=readiness.reason if not readiness.ready else "active_top3_not_ready",
+                reason=blocked_reason,
             )
             self.database.set_runtime_state("prediction_worker_last_cycle", asdict(result))
             return result

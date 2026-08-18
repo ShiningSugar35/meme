@@ -40,9 +40,30 @@ class CurrentMarketProvider:
         }
 
 
+class VariableDelayMarketProvider:
+    def __init__(self, delays: dict[str, float], *, price: float = 0.89, liquidity: float = 10_000.0) -> None:
+        self.delays = delays
+        self.price = price
+        self.liquidity = liquidity
+
+    async def token_bundle(self, address: str):
+        await asyncio.sleep(self.delays.get(address, 0.0))
+        return {
+            "token_info": {
+                "data": {
+                    "address": address,
+                    "price": self.price,
+                    "liquidity": self.liquidity,
+                    "decimals": 6,
+                }
+            }
+        }
+
+
 class FixedRouteProbe:
-    def __init__(self, out_amount_raw: int = 44_000_000) -> None:
+    def __init__(self, out_amount_raw: int = 44_000_000, *, price_impact_pct: float | None = None) -> None:
         self.out_amount_raw = out_amount_raw
+        self.price_impact_pct = price_impact_pct
         self.calls: list[dict] = []
 
     async def quote_sell(self, **kwargs):
@@ -51,6 +72,7 @@ class FixedRouteProbe:
             "quoted",
             "jupiter-test",
             out_amount_raw=self.out_amount_raw,
+            price_impact_pct=self.price_impact_pct,
             route_count=1,
         )
 
@@ -204,7 +226,7 @@ async def test_current_price_stop_triggers_same_cycle_executable_quote(tmp_path:
     opened = datetime.now(timezone.utc) - timedelta(minutes=5)
     seed_paper(database, position_id="paper-stop", address="stop-token", opened=opened)
     provider = CurrentMarketProvider(0.89)
-    route_probe = FixedRouteProbe(out_amount_raw=44_000_000)
+    route_probe = FixedRouteProbe(out_amount_raw=44_000_000, price_impact_pct=0.0123)
     paper = PaperTradingService(database, settings, sol_price_service=FixedSolPrice())
     paper_monitor = PaperPositionMonitor(
         database,
@@ -233,6 +255,13 @@ async def test_current_price_stop_triggers_same_cycle_executable_quote(tmp_path:
     assert metadata["execution_policy_version"] == "h1_route_aware_v1"
     assert metadata["exit_route_probe"]["state"] == "quoted"
     assert metadata["exit_trigger_at"] >= int(opened.timestamp())
+    assert metadata["exit_execution_deviation_bps"] == pytest.approx((0.88 - 0.89) / 0.89 * 10_000)
+    sell = database.fetch_one(
+        "SELECT slippage_bps,slippage_cost_usd,requested_amount FROM trades "
+        "WHERE position_id='paper-stop' AND side='sell'"
+    )
+    assert sell["slippage_bps"] == pytest.approx(123.0)
+    assert sell["slippage_cost_usd"] == pytest.approx(float(sell["requested_amount"]) * 0.0123)
 
 
 @pytest.mark.asyncio
@@ -312,3 +341,30 @@ async def test_same_asset_paper_exits_quote_concurrently_and_record_execution_de
         assert metadata["exit_execution_delay_ms"] >= 0
         assert isinstance(metadata["exit_execution_deviation_bps"], float)
         assert metadata["exit_fee_occurred_at"] == metadata["exit_route_probe"]["quoted_at"]
+
+@pytest.mark.asyncio
+async def test_fast_market_response_exits_before_slow_asset_returns(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_paper(database, position_id="paper-fast", address="fast-token", opened=opened)
+    seed_paper(database, position_id="paper-slow", address="slow-token", opened=opened)
+    provider = VariableDelayMarketProvider({"fast-token": 0.01, "slow-token": 0.30})
+    route_probe = FixedRouteProbe(out_amount_raw=44_000_000, price_impact_pct=0.01)
+    paper = PaperTradingService(database, settings, sol_price_service=FixedSolPrice())
+    paper_monitor = PaperPositionMonitor(
+        database, settings, paper_service=paper, route_probe=route_probe
+    )
+    service = PositionMonitorService(
+        database, settings, paper_service=paper, paper_monitor=paper_monitor
+    )
+
+    task = asyncio.create_task(service.run_cycle(provider))
+    await asyncio.sleep(0.10)
+
+    assert database.fetch_one("SELECT status FROM positions WHERE id='paper-fast'")["status"] == "closed"
+    assert database.fetch_one("SELECT status FROM positions WHERE id='paper-slow'")["status"] == "open"
+
+    report = await task
+    assert report.paper_closed == 2
+    assert database.fetch_one("SELECT status FROM positions WHERE id='paper-slow'")["status"] == "closed"

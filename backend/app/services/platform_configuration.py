@@ -150,7 +150,7 @@ class PlatformConfigurationService:
         env = _read_env(self.env_path)
         return {
             "position_monitor_poll_seconds": self._bounded_float(
-                env.get("POSITION_MONITOR_POLL_SECONDS"), default=3.0, minimum=1.0, maximum=60.0
+                env.get("POSITION_MONITOR_POLL_SECONDS"), default=2.0, minimum=1.0, maximum=60.0
             ),
             "regime_poll_seconds": int(self._bounded_float(
                 env.get("REGIME_POLL_SECONDS"), default=60.0, minimum=15.0, maximum=3600.0
@@ -244,7 +244,7 @@ class PlatformConfigurationService:
         gmgn_base_url: str | None = None,
         jupiter_quote_url: str | None = None,
     ) -> dict[str, Any]:
-        poll = self._bounded_float(position_monitor_poll_seconds, default=3.0, minimum=1.0, maximum=60.0)
+        poll = self._bounded_float(position_monitor_poll_seconds, default=2.0, minimum=1.0, maximum=60.0)
         rps = self._bounded_float(gmgn_global_rps, default=10.0, minimum=0.1, maximum=50.0)
         regime_poll = int(self._bounded_float(regime_poll_seconds, default=60.0, minimum=15.0, maximum=3600.0))
         action_interval = int(self._bounded_float(adaptive_action_interval_minutes, default=15.0, minimum=5.0, maximum=60.0))

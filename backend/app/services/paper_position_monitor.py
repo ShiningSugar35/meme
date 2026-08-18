@@ -266,12 +266,16 @@ class PaperPositionMonitor:
             if gross_usd > 0:
                 # USDC uses six decimal places on Solana.
                 fill_price = gross_usd / quantity
-                reference_price = float(pending_exit.get("reference_price") or 0.0)
-                slippage = (
-                    max(0.0, (reference_price - fill_price) / reference_price * 10_000.0)
-                    if reference_price > 0
-                    else 0.0
-                )
+                # Jupiter's own route priceImpact is the execution slippage metric.
+                # The GMGN current-price -> Jupiter fill difference is a separate
+                # execution-deviation fact and is persisted by PaperTradingService.
+                # Mixing those two effects materially overstates "slippage" when
+                # the market gaps through a stop between observations.
+                try:
+                    route_price_impact = max(0.0, float(result.price_impact_pct or 0.0))
+                except (TypeError, ValueError):
+                    route_price_impact = 0.0
+                slippage = route_price_impact * 10_000.0
                 return ExecutionQuote(
                     success=True,
                     fill_price=fill_price,

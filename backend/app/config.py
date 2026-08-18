@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     signal_max_age_seconds: int = Field(default=300, ge=30, le=3_600)
     paper_market_monitor_enabled: bool = True
     position_monitor_enabled: bool = True
-    position_monitor_poll_seconds: float = Field(default=3.0, ge=1.0, le=60.0)
+    position_monitor_poll_seconds: float = Field(default=2.0, ge=1.0, le=60.0)
     regime_poll_seconds: int = Field(default=60, ge=15, le=3_600)
     adaptive_policy_enabled: bool = True
     adaptive_action_interval_minutes: int = Field(default=15, ge=5, le=60)

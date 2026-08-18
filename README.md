@@ -161,7 +161,7 @@ pnl_i = capital_i × realized_return_i
 cumulative_pnl = Σ pnl_i
 ```
 
-实际模拟/实盘执行继续使用上述逐笔本金和真实交易摩擦；离线 Top 3 排名仍使用统一固定 $50，但从 gross 标签的 `+6/-1` 主动 haircut 为 `+5/-1` 摩擦调整代理：正类按 +$25、负类按 -$5 计入排序，从模型选择阶段为滑点、平台费、网络费和执行摩擦预留空间，同时不让不同样本的流动性规模污染模型优劣。系统另从 `rules_only` 的 route-validated 平仓中采集 `E_exec` shadow 指标，用于观察手续费、滑点和 no-route 对真实可执行收益的影响；`E_exec` 当前权重固定为 0，不参与模型排名。模型概率与决策线都来自开发期 OOS；最终 holdout 只生成审计成绩单，不再参与阈值或排名。
+实际模拟/实盘执行继续使用上述逐笔本金和真实交易摩擦；离线 Top 3 排名仍使用统一固定 $50；2026-08-18 结合 route-aware 执行摩擦，将经济代理进一步收紧为 `+4/-1`：正类按 +$20、负类按 -$5 计入排序，盈亏平衡 Precision 为 20%，从模型选择阶段为滑点、平台费、网络费和执行摩擦预留空间，同时不让不同样本的流动性规模污染模型优劣。系统另从 `rules_only` 的 route-validated 平仓中采集 `E_exec` shadow 指标，用于观察手续费、滑点和 no-route 对真实可执行收益的影响；`E_exec` 当前权重固定为 0，不参与模型排名。模型概率与决策线都来自开发期 OOS；最终 holdout 只生成审计成绩单，不再参与阈值或排名。
 
 Top 3 更新规则：
 
@@ -179,11 +179,11 @@ Top 3 更新规则：
 
 - 模型生命周期就绪时，`model_1 / model_2 / model_3 / rules_only` 四个模拟策略各自拥有 `1000 USD` 单一 USD 独立账本；模拟盘不维护 SOL 余额，同 Token 可在不同策略、不同批次同时存在。当前代成熟样本 `<1000` 时只有 `rules_only` 账本允许产生新模拟仓位，`model_1/2/3` 不打分、不交易。达到门槛后，重大模型换代/rollback 仍在四策略全平后创建新 simulation session，四账本统一重置。
 - 四策略统一复用同一 BUY/SELL、滑点、费用、0.9x 止损、1.6x 止盈、1h 到期和卖出失败重试链；差别只在是否经过某个模型决策线。每次实际发生的网络费仍以 SOL 原始数量记录，并使用手续费发生时的 SOL/USD 折算成 USD 直接进入现金与 PnL。
-- 已存在的 simulation/live 持仓统一由独立 `PositionMonitorWorker` 以默认 3s（可配置）current-price cadence 监控。同 Token 多仓仍合并为一次 GMGN current-market 请求；GMGN Key 数量不再固定为 12 个，所有已配置 Key 进入轮换/fallback 池，但 Collector 与 PositionMonitor 共享同一个默认 10 req/s IP 总预算，避免多 Key 误放大公网请求。simulation 命中退出条件后先冻结同一触发价/触发时刻，再按当前 Jupiter Key 数进行受控并发 executable quote，避免四策略因串行报价人为错开数秒。实盘自动 BUY 仍刻意停放；live 退出只有在 `DRY_RUN=false` 且 runtime gate 已武装时才进入既有幂等执行链，否则 fail-closed。
+- 已存在的 simulation/live 持仓统一由独立 `PositionMonitorWorker` 以默认 2s（可配置）current-price cadence 监控。同 Token 多仓仍合并为一次 GMGN current-market 请求；GMGN Key 数量不再固定为 12 个，所有已配置 Key 进入轮换/fallback 池，但 Collector 与 PositionMonitor 共享同一个默认 10 req/s IP 总预算，避免多 Key 误放大公网请求。simulation 命中退出条件后立即冻结该 Token 实际行情响应时的触发价/触发时刻，并在该响应到达时立刻启动受控并发 executable quote；不同 Token 不再等待整批 GMGN 行情中最慢请求返回，避免 head-of-line blocking。实盘自动 BUY 仍刻意停放；live 退出只有在 `DRY_RUN=false` 且 runtime gate 已武装时才进入既有幂等执行链，否则 fail-closed。
 
 理论标签收益、模拟可执行收益和真实链上收益必须分开展示，不能混成一个 PnL。
 
-模拟 BUY 包含可复现的滑点、价格影响、1% 平台费、网络费、延迟和可注入失败；SELL 由本轮 current market price 触发，并在 token decimals 可审计时调用 Jupiter Token→USDC `GET /swap/v2/order` 做 quote-only executable 路由验证（不传 `taker`，响应不包含待签交易），绝不签名或调用 `/execute`。明确无路由进入 `no_route` 重试/终态全损；429、网络或 API 故障只记为 quote unavailable，并降级到“当前流动性 + 本地冲击模型”，不得误判为 rug。网络费的会计单位为 USD，但原始 `network_fee_sol`、手续费发生时 `sol_usd_price` 与折算后的 `network_fee_usd` 同时保留。模型标签效用仍按用户冻结的“忽略交易费”口径计算，二者用途不同。2026-08-13 起交易历史只保留 `h1_route_aware_v1` simulation 成交事实，旧 legacy simulation position/trade 已清除。
+模拟 BUY 包含可复现的滑点、价格影响、1% 平台费、网络费、延迟和可注入失败；SELL 由本轮 current market price 触发，并在 token decimals 可审计时调用 Jupiter Token→USDC `GET /swap/v2/order` 做 quote-only executable 路由验证（不传 `taker`，响应不包含待签交易），绝不签名或调用 `/execute`。Jupiter quoted route 的 `priceImpact` 单独作为滑点/价格冲击审计；GMGN 当前价到 Jupiter fill 的差异另记 `exit_execution_deviation_bps`，不得再次归类为 slippage。明确无路由进入 `no_route` 重试/终态全损；429、网络或 API 故障只记为 quote unavailable，并降级到“当前流动性 + 本地冲击模型”，不得误判为 rug。网络费的会计单位为 USD，但原始 `network_fee_sol`、手续费发生时 `sol_usd_price` 与折算后的 `network_fee_usd` 同时保留。模型标签效用仍按用户冻结的“忽略交易费”口径计算，二者用途不同。2026-08-13 起交易历史只保留 `h1_route_aware_v1` simulation 成交事实，旧 legacy simulation position/trade 已清除。
 
 ### 4.2 持仓和退出
 
@@ -383,13 +383,21 @@ npm run build
 
 ### 9.2 2026-08-16 Event/Regime 自适应层
 
-市场状态与 Token Alpha 分层：Token 局部新特征只描述入场前已发生的 1m 事件，`price_change_1m` 的历史 fallback 仅使用目标时点前已闭合的 1m bar；Regime 则允许使用截至决策时点的 SOL 5m/15m/1h、Solana TPS/priority fee、Meme breadth、GMGN Hot Search/Smart Money/KOL/Dex promotion、执行质量及三模型近期聚类后表现。`rules_only` 永久保持固定规则基线；`model_1/2/3` 记录 `DEFENSIVE / NEUTRAL / EXPANSIVE` 的 logit 阈值反事实。当前策略默认处于 **shadow gate**：即使 Regime 推荐收紧或放宽，实际阈值仍为 Neutral，直到当前 feature generation 至少获得 120 个独立 sample cluster、至少 40 个动作会改变选择的 cluster，并且 chronological 70/30 development/certification 的 +5/-1 excess utility 满足 development>0、certification 95% LCB>0、三个模型各自 certification 均不为负。在线探索另有第二道 `adaptive_exploration_ready` 门，且最大 5%；未通过证据门时 `.env` 单独设置探索率也不能启用探索。
+市场状态与 Token Alpha 分层：Token 局部新特征只描述入场前已发生的 1m 事件，`price_change_1m` 的历史 fallback 仅使用目标时点前已闭合的 1m bar；Regime 则允许使用截至决策时点的 SOL 5m/15m/1h、Solana TPS/priority fee、Meme breadth、GMGN Hot Search/Smart Money/KOL/Dex promotion、执行质量及三模型近期聚类后表现。`rules_only` 永久保持固定规则基线；`model_1/2/3` 记录 `DEFENSIVE / NEUTRAL / EXPANSIVE` 的 logit 阈值反事实。当前策略默认处于 **shadow gate**：即使 Regime 推荐收紧或放宽，实际阈值仍为 Neutral，直到当前 feature generation 至少获得 120 个独立 sample cluster、至少 40 个动作会改变选择的 cluster，并且 chronological 70/30 development/certification 的 +4/-1 excess utility 满足 development>0、certification 95% LCB>0、三个模型各自 certification 均不为负。在线探索另有第二道 `adaptive_exploration_ready` 门，且最大 5%；未通过证据门时 `.env` 单独设置探索率也不能启用探索。
 
 Provider fallback 采用“主源优先、缺失不伪造为 0”：GMGN Key Pool 是 Token/Trending/Hot Search/Smart Money/KOL/DexScreener 集成字段主源；GMGN 整体不可用，或其 Signal 中 Dex promotion 子族单独缺失时，才以 DEX Screener Public API 的最新 Solana Ads/Boosts 做低频、家族级 attention fallback。Solana Network 状态按 `4×Alchemy 独立 Free account → Solana Public RPC emergency` 降级；Public RPC 只允许应急且降低 Regime confidence。Alchemy Free 当前为每账号 30M CU，`getRecentPerformanceSamples=20 CU`、`getRecentPrioritizationFees=10 CU`，因此一分钟一次网络状态远低于免费预算。DEX Screener 官方 Public API 仍为无鉴权免费接口，Ads/Boost 类 60 RPM、Pair/Token 类 300 RPM；官方 API Terms 同时确认存在付费 API，但公开网页未给出可验证的个人免费 Key/付费价目表，因此当前不把它设为关键生产依赖。
 
 投研依据只用于确定“应研究什么”，不直接授予生产权：2025 *Finance Research Letters* DOI `10.1016/j.frl.2025.108356` 显示 Crypto momentum 明显依赖市场状态；2025 *Journal of Banking & Finance* DOI `10.1016/j.jbankfin.2025.107518` 显示异常社交注意力与当期/下一日收益有关且主要来自用户 ticker 帖；2026 *International Review of Financial Analysis* DOI `10.1016/j.irfa.2026.105137` 的 Crypto Factor Zoo 显示少数流动性/交易成本和 blockchain-native 因子已能压缩大部分 factor zoo。以上均非 1 分钟入场特征下 Solana Meme H1 的直接证据，所以所有 Event/Regime family 仍必须经过本系统 chronological OOS / shadow / certification。
 
-### 9.3 实盘接口刻意停放
+### 9.3 2026-08-18 执行摩擦复审
+
+对当前 active simulation 的 rules-only 账本做了逐笔会计重建。审计时 176 笔 closed 中 132 笔为 `stop_loss_0_9x`；每笔按 `token_amount × exit_price - invested_usd - platform_fee - network_fee` 重算，与 `positions.net_pnl_usd` 176/176 一致，最大差异仅浮点误差约 `2.84e-14`，因此不存在滑点或手续费重复扣款。0.9x 是**触发线**而不是保证成交价：高波动 Meme 可能在两次 current-price 观测之间直接跌穿；历史止损成交价中位约为入场价 `0.826x`，说明不少额外损失在第一次观察到止损条件时已经发生。
+
+同时修复两项执行/审计缺陷：第一，旧 `trades.slippage_*` 把 GMGN current price 到 Jupiter fill 的跨源/跨时点差异当成滑点；170 笔 route-validated 历史 SELL 的该字段由 `$393.28` 按 Jupiter 自带 `priceImpact` 重分类为 `$96.72`，约 `$296.56` 被纠正为非 slippage execution deviation。该历史修复不改变任何 fill、现金或 PnL，旧 deviation 保留在 trade `response_json`。第二，旧 PositionMonitor 会等待整批 GMGN 持仓行情全部返回后才处理 paper SELL，最慢 Token 会阻塞其它 Token；现在每个 market response 一到即按实际响应时刻判断，并立刻启动受 Jupiter-key semaphore 限制的退出任务。默认轮询目标同时从 3s 收紧到 **2s**，生产已观测 `target_poll_seconds=2.0 / last_start_interval_seconds=2.0`。
+
+模型经济目标同步从 `+5/-1` 收紧为 **`+4/-1`**：`U=4TP-FP`，固定 $50 代理为赢 +$20 / 输 -$5，盈亏平衡 Precision=20%；H1 `1.6x/0.9x` 标签与实际交易规则不变。新模型写入 `economic_objective_version=fixed_4_to_1_v2`；旧 +5/-1 active Top 3 即使未来 v3 mature 达到 1000，也不会恢复模型评分，必须等新目标模型训练并原子切换。
+
+### 9.4 实盘接口刻意停放
 
 实盘代码保留 quote/swap/status、幂等 journal、启动对账、二次确认和持久化清仓接口；自动 live BUY 当前保持停放。未来实盘使用当时 active Top 3 的 Rank 1 模型及其单一决策线，不再存在 `profile`。真正启用实盘前仍必须接入并现场验收：
 
