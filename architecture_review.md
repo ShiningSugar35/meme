@@ -371,3 +371,8 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - Jupiter route SELL 的 slippage 定义改为 Jupiter `priceImpact`；GMGN current-price→Jupiter fill 差异保留为独立 `exit_execution_deviation_bps`。历史 170 笔 route SELL 的错误 slippage 统计由 `$393.28` 重分类为 `$96.72`，PnL 不变。
 - PositionMonitor 从 batch `gather` 改为 per-token `as_completed` + immediate paper exit task，消除慢行情请求对其它 Token 的 head-of-line blocking；poll 目标同步为 2s。
 - 模型经济目标为 `fixed_4_to_1_v2` / `U=4TP-FP`，break-even Precision=20%；旧 objective active model fail-closed，直到新目标重新训练并切换。
+
+### 2026-08-19 Modern Standby runtime correction
+
+- 生产机 HP ProBook 450 G8 采用 S0 Modern Standby；即使 AC `STANDBYIDLE/HIBERNATEIDLE=0`，屏幕关闭后仍可因 Idle Timeout 进入连接待机并暂停 Win32 Python worker。2026-08-18 22:07→2026-08-19 08:06 的 Collector cycle 空窗与 Kernel-Power 506/507 时间线一致，supervisor/OS 均未重启。
+- 新增 AC-aware `SystemAwakeService`：Collector 活跃且接交流电时持有 `ES_CONTINUOUS|ES_SYSTEM_REQUIRED`，允许显示器熄灭但阻止 idle-triggered Modern Standby；电池/退出时自动释放。状态持久化为 `system_awake_request` 并加入 RuntimeService，后续运维可直接区分 runtime 崩溃与系统电源冻结。

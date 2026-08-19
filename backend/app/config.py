@@ -82,6 +82,7 @@ class Settings(BaseSettings):
 
     collector_poll_seconds: int = Field(default=120, ge=15)
     collector_enabled: bool = True
+    prevent_sleep_while_collecting: bool = True
     # Older collector deployments used 200. The current GMGN endpoint accepts
     # at most 80 per request; the worker clamps the effective request while
     # retaining backward-compatible .env loading.

@@ -281,7 +281,8 @@ Set-Location D:\meme
 3. 在任何新信号 worker 启动前运行一次订单 journal 对账：有 `provider_order_id` 只查询原单，无法确认的 submit 保持 `submission_unknown` 并暂停新开仓；
 4. 启动唯一 `TrainingWorker`；任何非 manual 训练任务在真正执行前都先复核当前代 1000 mature+tag 门槛，未达标即 `skipped`，因此历史 queued/running 状态不能在重启后绕过门槛；达到门槛后才恢复既有 durable 训练与四策略全平换代链；
 5. 启动模型调度器与 Prediction worker：当前代 `<1000` 时 scheduler=`data_collection_only`、Top3 prediction/model simulation 全停，仅运行 `rules_only`；达到门槛后才恢复健康感知的日/周 16:00-17:00 调度与三模型 prediction。liquidation/reconciliation 仍按既有持久化安全边界运行；
-6. 独立启动 `PositionMonitorWorker`：默认每 3 秒（配置页可改）获取 simulation/live 持仓的 current price/liquidity，同 Token 合并请求；GMGN 使用动态 Key 池并与 Collector 共享总 RPS 预算。simulation 命中退出条件时先冻结同一 current-price 触发事实，再按 Jupiter Key 数进行受控并发 SELL quote，避免四策略串行报价把同一触发事件人为拉开数秒；live 仅在既有安全门禁已武装时执行退出。运行态同时记录目标周期、单次 cycle 耗时和真实 start-to-start 周期。`COLLECTOR_ENABLED=true` 时 Collector 只负责 SOL/USD 费用事实刷新、discovery、enrichment 与 T+1h 标签补齐，不再承载持仓退出。
+6. 独立启动 `PositionMonitorWorker`：默认每 2 秒（配置页可改）获取 simulation/live 持仓的 current price/liquidity，同 Token 合并请求；GMGN 使用动态 Key 池并与 Collector 共享总 RPS 预算。simulation 命中退出条件时先冻结同一 current-price 触发事实，再按 Jupiter Key 数进行受控并发 SELL quote，避免四策略串行报价把同一触发事件人为拉开数秒；live 仅在既有安全门禁已武装时执行退出。运行态同时记录目标周期、单次 cycle 耗时和真实 start-to-start 周期。`COLLECTOR_ENABLED=true` 时 Collector 只负责 SOL/USD 费用事实刷新、discovery、enrichment 与 T+1h 标签补齐，不再承载持仓退出。
+7. Windows 上默认启用 `PREVENT_SLEEP_WHILE_COLLECTING=true`：Collector 运行且机器接交流电时，后端持有 Win32 `ES_SYSTEM_REQUIRED`，允许显示器正常熄灭但阻止 idle-triggered Modern Standby 暂停桌面进程；拔掉交流电、关闭 Collector 或后端退出时自动释放。运行态写入 `system_awake_request`，用于区分“采集器停机”和“系统进入 S0 待机”。
 
 健康检查：`http://127.0.0.1:8000/health`；OpenAPI：`http://127.0.0.1:8000/docs`。
 

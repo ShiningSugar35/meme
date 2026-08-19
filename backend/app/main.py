@@ -19,6 +19,7 @@ from .services.platform_configuration import PlatformConfigurationService
 from .services.prediction import PredictionWorker
 from .services.reconciliation import ReconciliationWorker
 from .services.regime import MarketRegimeWorker
+from .services.system_awake import SystemAwakeService
 from .services.training_worker import TrainingWorker
 
 
@@ -42,6 +43,7 @@ async def lifespan(_: FastAPI):
     position_monitor_worker: PositionMonitorWorker | None = None
     regime_worker: MarketRegimeWorker | None = None
     training_worker: TrainingWorker | None = None
+    system_awake_service: SystemAwakeService | None = None
 
     if settings.app_env != "test":
         # Reconcile durable non-terminal orders before any worker can create new
@@ -71,6 +73,15 @@ async def lifespan(_: FastAPI):
             )
 
     if settings.background_workers_enabled and settings.app_env != "test":
+        if settings.collector_enabled and settings.prevent_sleep_while_collecting:
+            system_awake_service = SystemAwakeService(database, enabled=True)
+            tasks.append(
+                asyncio.create_task(
+                    system_awake_service.run_forever(),
+                    name="system-awake-request",
+                )
+            )
+
         training_worker = TrainingWorker(database, settings)
         # Recover interrupted runs before any producer (scheduler/model health/API)
         # can enqueue more work; subsequent execution is serialized by this worker.
@@ -147,6 +158,8 @@ async def lifespan(_: FastAPI):
             regime_worker.stop()
         if training_worker:
             training_worker.stop()
+        if system_awake_service:
+            system_awake_service.stop()
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=10)
             for task in pending:

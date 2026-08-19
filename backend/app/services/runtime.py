@@ -183,6 +183,9 @@ class RuntimeService:
             "trading_provider": self.settings.trading_provider,
             "wallet": self._mask_wallet(self.settings.wallet_public_key),
             "collector": self.database.get_runtime_state("collector_status", {"state": "stopped"}),
+            "system_awake": self.database.get_runtime_state(
+                "system_awake_request", {"state": "not_requested"}
+            ),
             "prediction_worker": self.database.get_runtime_state("prediction_worker_status", {"state": "stopped"}),
             "scheduler": self.database.get_runtime_state("scheduler_status", {"state": "stopped"}),
             "paper_monitor": self.database.get_runtime_state("position_monitor_status", {"state": "stopped"}),
