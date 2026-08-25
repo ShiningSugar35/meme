@@ -61,7 +61,13 @@ class TrainingScheduler:
             return "data_collection_only"
         health = self.database.get_runtime_state("model_health_status", {})
         state = str(health.get("state") or "") if isinstance(health, dict) else ""
-        return "daily" if state == "insufficient_data" else "weekly"
+        recovery_states = {
+            "insufficient_data",
+            "active_top3_not_ready",
+            "active_top3_phase16_contract_stale",
+            "deployment_certification_blocked",
+        }
+        return "daily" if state in recovery_states else "weekly"
 
     def next_scheduled_at(self, now: datetime | None = None) -> datetime:
         tz = ZoneInfo(self.settings.training_timezone)
@@ -145,7 +151,7 @@ class TrainingScheduler:
                 committed = committed.astimezone(tz)
             except ValueError:
                 committed = None
-            if committed is not None and not self._activation_satisfies(committed):
+            if committed is not None and not self._schedule_cycle_satisfies(committed):
                 self._set_entry_gate(
                     paused=True,
                     scheduled_for=committed.astimezone(timezone.utc).isoformat(),
@@ -162,7 +168,7 @@ class TrainingScheduler:
             else recent_due
         )
         freeze_at = target - self.ENTRY_FREEZE_LEAD
-        paused = current >= freeze_at and not self._activation_satisfies(target)
+        paused = current >= freeze_at and not self._schedule_cycle_satisfies(target)
         self._set_entry_gate(
             paused=paused,
             scheduled_for=target.astimezone(timezone.utc).isoformat() if paused else "",
@@ -174,6 +180,26 @@ class TrainingScheduler:
             ),
         )
         return paused
+
+    def _schedule_cycle_satisfies(self, scheduled: datetime) -> bool:
+        if self._activation_satisfies(scheduled):
+            return True
+        # Recovery cadence must not keep all simulation strategies frozen after
+        # a completed attempt that was intentionally rejected by certification.
+        # A waiting-for-flat candidate is handled earlier in refresh_entry_gate
+        # and therefore still retains the stronger rollover pause.
+        if self.schedule_mode() != "daily":
+            return False
+        raw = self.database.get_runtime_state("last_training_completed_at")
+        if not isinstance(raw, str) or not raw:
+            return False
+        try:
+            completed = datetime.fromisoformat(raw)
+        except ValueError:
+            return False
+        if completed.tzinfo is None:
+            completed = completed.replace(tzinfo=timezone.utc)
+        return completed.astimezone(timezone.utc) >= scheduled.astimezone(timezone.utc)
 
     def _activation_satisfies(self, scheduled: datetime) -> bool:
         values: list[str] = []

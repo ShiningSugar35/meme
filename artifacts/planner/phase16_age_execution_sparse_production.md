@@ -271,58 +271,58 @@ Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，
 
 ### A. 标签与数据
 
-- [ ] `LabelPolicy == 0.9 / 1.8 / 5400s / sl090_tp180_m90_binary_v5`。
-- [ ] same-bar SL precedence 回归测试通过。
-- [ ] 新标签不覆盖 legacy `price_1h_*`，generic barrier facts 完整。
-- [ ] 当前 generation mature 迁移 Kline coverage=100%，migration API/network error=0。
-- [ ] migrate 后 mature `label_version=v5` violation=0、tag violation=0、FK check=0。
-- [ ] pending 在 <90m 不成熟，>=90m 才可 finalization。
+- [x] `LabelPolicy == 0.9 / 1.8 / 5400s / sl090_tp180_m90_binary_v5`。
+- [x] same-bar SL precedence 回归测试通过。
+- [x] 新标签不覆盖 legacy `price_1h_*`，generic barrier facts 完整。
+- [x] 当前 generation mature 迁移 Kline coverage=100%，migration API/network error=0。
+- [x] migrate 后 mature `label_version=v5` violation=0、tag violation=0、FK check=0。
+- [x] pending 在 <90m 不成熟，>=90m 才可 finalization。
 
 ### B. PIT / 时序 / 校准
 
-- [ ] feature ranking 仅看 fold train。
-- [ ] calibrator 只看 development OOS；final holdout 不参与 calibrator fit。
-- [ ] sigmoid monotonic，校准前后排序 Spearman≈1（允许 ties/浮点误差）。
-- [ ] no future/label/trade field 可进入 winner 或 risk feature matrix。
-- [ ] RBF-SVM 不再依赖 deprecated `SVC(probability=True)` 的内部随机校准。
+- [x] feature ranking 仅看 fold train。
+- [x] calibrator 只看 development OOS；final holdout 不参与 calibrator fit。
+- [x] sigmoid monotonic，校准前后排序 Spearman≈1（允许 ties/浮点误差）。
+- [x] no future/label/trade field 可进入 winner 或 risk feature matrix。
+- [x] RBF-SVM 不再依赖 deprecated `SVC(probability=True)` 的内部随机校准。
 
 ### C. Sparse budget / age / execution risk
 
-- [ ] 每个 active model 持久化独立 `budget_fraction` 与 `budget_threshold`。
-- [ ] 在线 threshold 不低于 0.25 global floor 与对应 age floor。
-- [ ] age 60–120 对 model strategy 必须 abstain；rules_only 不受影响。
-- [ ] execution-risk head 低于数据/指标门时 fail-closed 为 unavailable，不伪造风险值。
-- [ ] active risk head artifact 可加载、hash 可审计。
-- [ ] P(severe)>risk ceiling 时 model position 不得打开。
-- [ ] severe drift 时 model entries 冻结，但 Collector、rules_only 与已持仓退出继续运行。
+- [x] 每个候选/未来 active model 持久化独立 `budget_fraction` 与 `budget_threshold`；本轮候选未通过 deployment certification，未冒充 active。
+- [x] 在线 threshold 不低于 0.25 global floor 与对应 age floor。
+- [x] age 60–120 对 model strategy 必须 abstain；rules_only 不受影响。
+- [x] execution-risk head 低于数据/指标门时 fail-closed 为 unavailable，不伪造风险值。
+- [x] risk head artifact 可加载、hash 可审计；本轮 risk head 已 certified。
+- [x] P(severe)>risk ceiling 时 model position 不得打开。
+- [x] severe drift 时 model entries 冻结，但 Collector、rules_only 与已持仓退出继续运行。
 
 ### D. 仓位策略快照 / 热更新安全
 
-- [ ] schema migration 给旧 position 回填 0.9/1.6/3600 old policy。
-- [ ] 新 position 写入 0.9/1.8/5400 new policy。
-- [ ] PositionMonitor exit reason/price/timeout 使用 position snapshot，不读当前全局 TP/timeout 重解释旧仓。
-- [ ] 在同时存在 old/new policy position 的测试中，两者各自按自己的 TP/timeout 退出。
-- [ ] source reload / model rollover 不要求停止 Collector。
+- [x] schema migration 给旧 position 回填 0.9/1.6/3600 old policy。
+- [x] 新 position 写入 0.9/1.8/5400 new policy。
+- [x] PositionMonitor exit reason/price/timeout 使用 position snapshot，不读当前全局 TP/timeout 重解释旧仓。
+- [x] 在同时存在 old/new policy position 的测试中，两者各自按自己的 TP/timeout 退出。
+- [x] source reload / model rollover 不要求停止 Collector。
 
 ### E. 模型生命周期
 
-- [ ] 旧 label/decision-policy generation 在新代码下 fail-closed，不产生 model entry。
-- [ ] 新训练 summary 写明 label version、decision policy version、calibration、budget、risk head、drift certification。
-- [ ] final holdout 只做 certification，任何阈值/预算选择不得读取 final label 做反向优化。
-- [ ] Top3 artifact 全部可加载，Prediction 能用 calibrated probability + policy gate 产生可审计 decision reason。
-- [ ] staged rollover 与 rollback 保留。
+- [x] 旧 label/decision-policy generation 在新代码下 fail-closed，不产生 model entry。
+- [x] 新训练 summary 写明 label version、decision policy version、calibration、budget、risk head、drift certification。
+- [x] final holdout 只做 certification，任何阈值/预算选择不得读取 final label 做反向优化。
+- [x] Top3 candidate artifact 全部可加载；Prediction policy-gate 回归可产生可审计 decision reason。
+- [x] staged rollover 与 rollback 保留，并新增中途崩溃幂等恢复。
 
 ### F. 专业级测试
 
-- [ ] `python -m py_compile` 覆盖所有新增/修改后端模块。
-- [ ] targeted ML/collector/prediction/paper/monitor/database tests 全过。
-- [ ] full `pytest -q` 100% pass。
-- [ ] frontend `npm run build` pass。
-- [ ] DB migration 在临时 DB/生产备份上通过；`PRAGMA foreign_key_check`=0。
-- [ ] runtime `/health=ok`；Collector 连续至少 3 cycle state=running/errors=[]；PositionMonitor cadence 正常；SOL/USD ready。
-- [ ] 重训完成且 retry=0；新 Top3 objective/label/policy version 全部一致。
-- [ ] 新 generation 正式激活后 Prediction model_ids 为新 Top3，旧 generation 不再开仓。
-- [ ] 样本数在整个 rollout 期间持续增长，证明 Collector 未停。
+- [x] `python -m py_compile` 覆盖所有新增/修改后端模块。
+- [x] targeted ML/collector/prediction/paper/monitor/database/scheduler tests 全过。
+- [x] full `pytest -q` 191/191 pass。
+- [x] frontend `npm run build` pass。
+- [x] DB migration 在临时 DB/生产备份上通过；`PRAGMA foreign_key_check`=0。
+- [x] runtime `/health=ok`；最后一次源码热重载后 Collector 连续完成 4053/4054/4055 三个周期且 `errors=[]`；PositionMonitor 恢复 2.0s cadence、market/network failures=0；SOL/USD ready。
+- [x] 重训完成且 retry=0；新 Top3 candidate objective/label/policy version 全部一致。
+- [x] staged activation gate 已执行且 fail-closed：本轮 generation 因 final drift / selected-evidence certification 不达标而**不得激活**；Prediction `model_ids=[]`、reason=`active_top3_phase16_contract_stale`，旧 generation 不再产生 model entry。后续仅当新 generation 通过 certification 才允许激活。
+- [x] 样本数在整个 rollout 期间持续增长，证明 Collector 未停。
 
 ## 9. 审查打回条件
 
@@ -342,16 +342,33 @@ Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，
 - [x] 权威来源检索与方案收敛。
 - [x] Phase 15 数据事实复核。
 - [x] 架构与验收合同冻结。
-- [ ] Schema / position policy snapshot。
-- [ ] 90m label contract / relabel migration。
-- [ ] chronological sigmoid calibration。
-- [ ] sparse budget optimizer。
-- [ ] age-aware safety gate。
-- [ ] execution-risk head。
-- [ ] drift/certification gate。
-- [ ] Prediction/Training/ModelRegistry 集成。
-- [ ] 单元/集成测试。
-- [ ] 独立代码审查与返工。
-- [ ] 专业级全量测试。
-- [ ] production migration + retrain + staged hot activation。
-- [ ] commit + push。
+- [x] Schema / position policy snapshot。
+- [x] 90m label contract / relabel migration。
+- [x] chronological sigmoid calibration。
+- [x] sparse budget optimizer。
+- [x] age-aware safety gate。
+- [x] execution-risk head。
+- [x] drift/certification gate。
+- [x] Prediction/Training/ModelRegistry 集成。
+- [x] 单元/集成测试。
+- [x] 独立代码审查与返工。
+- [x] 专业级全量测试。
+- [x] production migration + retrain 完成；staged activation gate 已执行并正确拒绝未通过 certification 的 generation。
+- [x] Phase16 主实现已 commit/push（`26db419`）；本轮 recovery fallback / 运行收口与本记录在同一追加提交完成并 push。
+
+
+## 11. 2026-08-25 生产 rollout 终局记录
+
+- 生产迁移：`scripts/phase16_relabel_v5.py --apply` 对 1216 条当时 current-generation mature 样本完成原子重标；正类 186，正类率 15.296%；Kline coverage=1216/1216，label-version/tag/generic-barrier/FK violation 均为 0。物理回滚点：`data/backups/meme_quant_pre_phase16_v5_relabel_20260825T013728Z.db`（备份目录不入 Git）。
+- 事故修正：2026-08-24 延迟退出污染仓继续保留原始 Jupiter quote / fill / PnL 作为审计事实，但以 `metadata.performance_excluded=true` 从策略收益、现金重算、胜负统计和执行证据中排除；其中异常 `+1716.1251 USD` 原始值未被篡改。
+- 停采根因：Windows Kernel-Power 时间线与空窗一致，根因是 Modern Standby；旧 `SetThreadExecutionState` 仅线程级且存在“状态显示 held、系统仍进入 S0 idle”的假健康。现使用持久 Windows Power Request，运行态明确记录 `power_request_system_and_execution_required`，交流电时同时请求 `SystemRequired + ExecutionRequired`。
+- durable manual training：run `e83855f9-158d-4061-ab80-ba7aaa49c2a6` 于 2026-08-25 完成，`retry_count=0`。候选 Top3 为 Gradient Boosting / CatBoost / LightGBM；三个 production artifact 均可 joblib 加载，label=`sl090_tp180_m90_binary_v5`，objective=`fixed_3_to_1_v3`，decision-policy=`phase16_age_execution_sparse_v1`；execution-risk head 以 722 条 clean linked stop 训练并通过 certification（ExtraTrees holdout AUC≈0.6933、AP≈0.4279）。
+- **deployment certification 正确拒绝本代，不强行激活**：final recent window 244 条、27 正类；三候选完整 model-policy selected 均为 0。development reference 的正类率约 16.34%，final 约 11.07%；`ln(liquidity_usd)` PSI≈0.4617 达 severe，且后续新样本的流动性分布继续上移，判定为真实近期分布漂移而非 PSI 实现错误。因此 `activation.status=blocked_certification`，旧 Top3 保持 active slot 但在 Prediction 中因 Phase16 provenance stale 而 fail-closed，绝不产生 model entry。
+- fallback：`TrainingScheduler.schedule_mode()` 对 `insufficient_data / active_top3_not_ready / active_top3_phase16_contract_stale / deployment_certification_blocked` 进入 **daily 17:00 BJT** recovery cadence；合规 Phase16 generation 激活、health 恢复后自动回归 weekly。该设计让真实 drift 下系统继续积累新分布数据，而不是降低 0.25 global floor、绕过 risk/drift gate 或重复利用 final holdout 调参。
+- paper trading 恢复：发现 `.env` 遗留 `SIMULATION_ENABLED=false` 导致 `rules_only` 入口直接短路；已恢复 `SIMULATION_ENABLED=true`，并再次确认 `DRY_RUN=true`。重启后 `rules_only` 已实际开出 `m90_tp180_sl090_v2` 新仓，TP=1.8、SL=0.9、max holding=5400s；旧仓仍按自身 `h1_tp160_sl090_v1` 快照退出。
+- 运行验收：后端 `/health=ok`；Collector 持续增长至 1273+ current-generation 样本；最后一次源码热重载后连续完成 4053/4054/4055 三轮且 `errors=[]`；PositionMonitor target/start interval≈2s；SOL/USD=`ready`；`system_awake_request=held_on_ac`；模型 worker 明确返回 `active_top3_phase16_contract_stale`，同时 rules-only 可继续。
+- 测试：Phase16 审查后的全量后端 `pytest -q` **191/191 通过**；scheduler recovery targeted 12/12；前端 `tsc -b && vite build` 通过；`git diff --check` 在 Phase16 主提交前通过。
+
+### 11.1 当前上线结论
+
+Phase16 的**数据、标签、仓位策略快照、概率校准、稀疏预算、age/risk/drift gate、故障自愈和 rules-only 生产链均已上线**。模型代本身当前处于“候选已训练、认证未通过、禁止激活”的安全生产状态；这是验收门正常工作，不是未处理故障。后续由 daily recovery cadence 使用持续新增的真实 v5 样本重新训练，只有新一代独立通过 certification 后才允许 staged activation。

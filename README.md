@@ -408,7 +408,19 @@ Provider fallback 采用“主源优先、缺失不伪造为 0”：GMGN Key Poo
 
 本次热更新后正式手动重训 run `b040425e-3043-4dd5-9752-f6685d83f4b9` 使用 **1080 条 current-generation mature 样本 + 当前持久化 44 特征候选池**，`retry_count=0`、无训练错误。开发期选出的新 Top 3 为：Rank 1 **Extra Trees**（35 features，threshold `0.2454529`，E `0.139676`，G `0.459697`，S `0.267685`）；Rank 2 **Decision Tree**（4 features，threshold `0.42`，E `0.124905`，G `0.437260`，S `0.249847`）；Rank 3 **Random Forest**（20 features，threshold `0.2763549`，E `0.118388`，G `0.447422`，S `0.250002`）。三者工件均写入 `fixed_3_to_1_v3`。final holdout 继续只做 certification：Extra Trees / Decision Tree / Random Forest 的 Precision 分别约 `28.57% / 20.00% / 19.51%`；该结果不反向改变开发期 Top 3。训练完成后候选按既有 staged rollover 进入 `waiting_for_flat`，并冻结四策略新开仓；已有 `rules_only` 仓位继续按原 TP/SL/1h 路径自然退出，禁止为换模强平。
 
-### 9.4 实盘接口刻意停放
+### 9.4 2026-08-25 Phase16 当前生产态
+
+当前非实盘生产合同已从 H1 1.6x 切换到 **`SL 0.9 / TP 1.8 / 90min / sl090_tp180_m90_binary_v5`**。新模拟仓使用不可变 `m90_tp180_sl090_v2` 快照，旧仓继续按各自 legacy snapshot 退出；标签层使用 generic barrier audit，避免覆盖历史 `price_1h_*`。生产迁移时 1216 条 current-generation mature 全量重标，Kline coverage 100%，FK/label/tag violation 均为 0。
+
+Phase16 模型层新增 chronological sigmoid calibration、model-specific sparse budget、age-aware threshold、execution-risk head、development-reference PSI drift 与 final deployment certification。2026-08-25 durable run `e83855f9-158d-4061-ab80-ba7aaa49c2a6` retry=0 完成，候选 Top3 为 Gradient Boosting / CatBoost / LightGBM，risk head 认证通过；但 final recent 发生真实流动性分布漂移（`ln(liquidity_usd)` PSI≈0.462）且完整 model-policy selected 不足，因此本代 **blocked_certification，未激活**。旧 Top3 虽仍保留在 active slot 作为历史对象，但 Prediction 因 Phase16 provenance stale fail-closed，不再开 model 仓。
+
+fallback 已固定：active Top3 not-ready/stale 或 certification blocked 时，scheduler 自动进入 **daily 17:00 BJT** recovery cadence；通过认证并激活后恢复 weekly。`rules_only` 继续作为无模型可执行性基线。运行收口还修复了 `.env` 中误留的 `SIMULATION_ENABLED=false`；当前 `SIMULATION_ENABLED=true`、`DRY_RUN=true`，已实测新 rules-only 1.8/90m 仓正常建立。
+
+Windows 侧对 2026-08-24/25 停采事故的根因定位为 Modern Standby；防休眠从线程级 `SetThreadExecutionState` 升级为持久 Power Request (`SystemRequired + ExecutionRequired`)。异常 `+1716 USD` 延迟退出仓保留原始成交事实，但通过 `performance_excluded=true` 从收益、现金重算、胜负与训练执行证据中隔离。
+
+本轮最终后端 `pytest -q` **191/191**，scheduler recovery targeted 12/12，前端 `tsc -b && vite build` 通过。
+
+### 9.5 实盘接口刻意停放
 
 实盘代码保留 quote/swap/status、幂等 journal、启动对账、二次确认和持久化清仓接口；自动 live BUY 当前保持停放。未来实盘使用当时 active Top 3 的 Rank 1 模型及其单一决策线，不再存在 `profile`。真正启用实盘前仍必须接入并现场验收：
 

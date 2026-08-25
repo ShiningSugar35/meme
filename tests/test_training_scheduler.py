@@ -67,6 +67,18 @@ def test_insufficient_data_accelerates_schedule_to_daily_1700_bjt(tmp_path: Path
     assert scheduler.next_scheduled_at(after) == datetime(2026, 8, 11, 17, 0, tzinfo=tz)
 
 
+@pytest.mark.parametrize(
+    "state",
+    ("active_top3_not_ready", "active_top3_phase16_contract_stale", "deployment_certification_blocked"),
+)
+def test_phase16_recovery_states_accelerate_schedule_to_daily(tmp_path: Path, state: str) -> None:
+    database = make_database(tmp_path)
+    set_health(database, state)
+    scheduler = TrainingScheduler(database, make_settings(tmp_path))
+
+    assert scheduler.schedule_mode() == "daily"
+
+
 @pytest.mark.asyncio
 async def test_sample_floor_disables_automatic_training_and_rollover_gate(tmp_path: Path) -> None:
     database = make_database(tmp_path)
@@ -108,6 +120,23 @@ def test_due_day_entry_gate_freezes_at_1600_until_new_generation_activates(tmp_p
     )
     assert not scheduler.refresh_entry_gate(now=datetime(2026, 8, 9, 17, 32, tzinfo=tz))
     assert database.get_runtime_state("model_entries_paused_for_rollover") is False
+
+
+def test_daily_recovery_completed_attempt_releases_old_due_until_next_freeze(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    set_health(database, "active_top3_phase16_contract_stale")
+    scheduler = TrainingScheduler(database, make_settings(tmp_path))
+    tz = ZoneInfo("Asia/Shanghai")
+    database.set_runtime_state(
+        "last_training_completed_at",
+        datetime(2026, 8, 25, 9, 51, tzinfo=tz).astimezone(timezone.utc).isoformat(),
+    )
+
+    assert not scheduler.refresh_entry_gate(now=datetime(2026, 8, 25, 10, 0, tzinfo=tz))
+    assert database.get_runtime_state("model_entries_paused_for_rollover") is False
+    assert scheduler.refresh_entry_gate(now=datetime(2026, 8, 25, 16, 0, tzinfo=tz))
+    gate = database.get_runtime_state("model_entry_rollover_gate")
+    assert gate["scheduled_for"] == "2026-08-25T09:00:00+00:00"
 
 
 @pytest.mark.asyncio
