@@ -30,6 +30,10 @@ class SampleRecord:
     price_1h_max_ratio: float | None = None
     price_1h_min_ratio: float | None = None
     final_1h_close_ratio: float | None = None
+    label_max_price_ratio: float | None = None
+    label_min_price_ratio: float | None = None
+    label_final_close_ratio: float | None = None
+    label_window_seconds: int | None = None
     final_close_ratio: float | None = None
     first_take_profit_at: int | None = None
     first_stop_loss_at: int | None = None
@@ -39,7 +43,7 @@ class SampleRecord:
     return_source: str | None = None
     tag: int | None = None
     label_status: str = "pending"
-    label_version: str = "sl090_tp160_h1_binary_v4"
+    label_version: str = LabelPolicy().label_version
     label_source: str = "collector"
     terminal_return_estimated: bool = False
     feature_schema_version: str = FEATURE_SCHEMA_VERSION
@@ -67,8 +71,9 @@ class SampleRepository:
                     launchpad, entry_price, liquidity, liquidity_estimated, utility_eligible, holder_count,
                     features_json, feature_schema_version, feature_snapshot_at,
                     price_2h_max_ratio, price_2h_min_ratio,
-                    price_1h_max_ratio, price_1h_min_ratio, final_1h_close_ratio, final_close_ratio,
-                    first_take_profit_at, first_stop_loss_at, exit_reason, same_bar_conflict,
+                    price_1h_max_ratio, price_1h_min_ratio, final_1h_close_ratio,
+                    label_max_price_ratio, label_min_price_ratio, label_final_close_ratio, label_window_seconds,
+                    final_close_ratio, first_take_profit_at, first_stop_loss_at, exit_reason, same_bar_conflict,
                     gross_return_rate, return_source,
                     tag, label_status, label_version, label_source, terminal_return_estimated,
                     raw_json, collected_at, updated_at
@@ -77,8 +82,9 @@ class SampleRepository:
                     :launchpad, :entry_price, :liquidity, :liquidity_estimated, :utility_eligible, :holder_count,
                     :features_json, :feature_schema_version, :feature_snapshot_at,
                     :price_2h_max_ratio, :price_2h_min_ratio,
-                    :price_1h_max_ratio, :price_1h_min_ratio, :final_1h_close_ratio, :final_close_ratio,
-                    :first_take_profit_at, :first_stop_loss_at, :exit_reason, :same_bar_conflict,
+                    :price_1h_max_ratio, :price_1h_min_ratio, :final_1h_close_ratio,
+                    :label_max_price_ratio, :label_min_price_ratio, :label_final_close_ratio, :label_window_seconds,
+                    :final_close_ratio, :first_take_profit_at, :first_stop_loss_at, :exit_reason, :same_bar_conflict,
                     :gross_return_rate, :return_source,
                     :tag, :label_status, :label_version, :label_source, :terminal_return_estimated,
                     :raw_json, :collected_at, :updated_at
@@ -115,7 +121,7 @@ class SampleRepository:
         max_ratio: float,
         min_ratio: float,
         final_close_ratio: float,
-        label_version: str = "sl090_tp160_h1_binary_v4",
+        label_version: str | None = None,
         first_take_profit_at: int | None = None,
         first_stop_loss_at: int | None = None,
         exit_reason: str | None = None,
@@ -123,15 +129,21 @@ class SampleRepository:
     ) -> None:
         if tag not in {0, 1}:
             raise ValueError("tag must be 0 or 1")
-        gross_return_rate = 0.60 if tag == 1 else -0.10
+        policy = LabelPolicy()
+        resolved_label_version = label_version or policy.label_version
+        gross_return_rate = (
+            policy.take_profit_ratio - 1.0
+            if tag == 1
+            else policy.stop_loss_ratio - 1.0
+        )
         self.database.execute(
             """
             UPDATE samples
-            SET tag=?, price_1h_max_ratio=?, price_1h_min_ratio=?, final_1h_close_ratio=?,
-                first_take_profit_at=?, first_stop_loss_at=?, exit_reason=?, same_bar_conflict=?,
-                gross_return_rate=?, return_source='collector_kline',
-                label_status='mature', label_version=?, label_source='collector',
-                terminal_return_estimated=0, updated_at=?
+            SET tag=?, label_max_price_ratio=?, label_min_price_ratio=?, label_final_close_ratio=?,
+                label_window_seconds=?, first_take_profit_at=?, first_stop_loss_at=?,
+                exit_reason=?, same_bar_conflict=?, gross_return_rate=?,
+                return_source='collector_kline', label_status='mature', label_version=?,
+                label_source='collector', terminal_return_estimated=0, updated_at=?
             WHERE id=?
             """,
             (
@@ -139,12 +151,13 @@ class SampleRepository:
                 max_ratio,
                 min_ratio,
                 final_close_ratio,
+                policy.window_seconds,
                 first_take_profit_at,
                 first_stop_loss_at,
                 exit_reason,
                 int(same_bar_conflict),
                 gross_return_rate,
-                label_version,
+                resolved_label_version,
                 utc_now_iso(),
                 sample_id,
             ),

@@ -205,7 +205,7 @@ class SafetyFilter:
         reject_gt("liquidity", token.get("liquidity"), t.min_liquidity)
 
         top10 = _ratio_float(token.get("top_10_holder_rate"))
-        if top10 is not None and not t.min_top_10_holder_rate <= top10 <= t.max_top_10_holder_rate:
+        if top10 is not None and not t.min_top_10_holder_rate < top10 < t.max_top_10_holder_rate:
             fail.append("top_10_holder_rate")
         reject_lt("fresh_wallet_rate", token.get("fresh_wallet_rate"), t.max_fresh_wallet_rate)
 
@@ -287,7 +287,7 @@ class SafetyFilter:
         lt("bundler_rate", token.get("bundler_rate"), t.max_bundler_rate)
         gt("liquidity", token.get("liquidity"), t.min_liquidity)
         top10 = _ratio_float(token.get("top_10_holder_rate"))
-        if top10 is None or not t.min_top_10_holder_rate <= top10 <= t.max_top_10_holder_rate:
+        if top10 is None or not t.min_top_10_holder_rate < top10 < t.max_top_10_holder_rate:
             fail.append("top_10_holder_rate")
         lt("fresh_wallet_rate", token.get("fresh_wallet_rate"), t.max_fresh_wallet_rate)
         if str(token.get("burn_status") or "").strip().lower() != "burn":

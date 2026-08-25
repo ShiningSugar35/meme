@@ -331,6 +331,16 @@ class DashboardService:
         result["market_snapshot_at"] = snapshot.get("as_of")
         result["sell_failed"] = bool(metadata.get("sell_failed")) or str(result.get("exit_reason") or "").startswith("sell_failed_")
         result["sell_failure_reason"] = metadata.get("sell_failure_reason")
+        performance_excluded = bool(metadata.get("performance_excluded"))
+        result["performance_excluded"] = performance_excluded
+        result["performance_exclusion_reason"] = metadata.get("performance_exclusion_reason")
+        if performance_excluded:
+            # Keep raw execution facts visible for audit, but never let an
+            # incident-contaminated delayed exit render as strategy profit.
+            result["raw_gross_pnl_usd"] = result.get("gross_pnl_usd")
+            result["raw_net_pnl_usd"] = result.get("net_pnl_usd")
+            result["gross_pnl_usd"] = 0.0
+            result["net_pnl_usd"] = 0.0
         result.pop("metadata_json", None)
         return result
 
@@ -389,10 +399,11 @@ class DashboardService:
     def _strategy_performance(self, session_id: str) -> list[dict[str, Any]]:
         rows = self.database.fetch_all(
             """
-            SELECT strategy_key,COUNT(*) AS positions,
-                   COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+            SELECT strategy_key,
+                   COALESCE(SUM(CASE WHEN status!='closed' OR COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN 1 ELSE 0 END),0) AS positions,
+                   COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN 1 ELSE 0 END),0) AS closed_positions,
                    COALESCE(SUM(CASE WHEN status IN ('open','opening','closing') THEN 1 ELSE 0 END),0) AS open_positions,
-                   COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+                   COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
             FROM positions
             WHERE simulation_session_id=?
               AND strategy_key IN ('model_1','model_2','model_3','rules_only')
@@ -436,6 +447,7 @@ class DashboardService:
             FROM positions
             WHERE status='closed' AND exit_time>=?
               AND (account_kind='live' OR simulation_session_id=?)
+              AND (account_kind='live' OR COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0)
             GROUP BY COALESCE(strategy_key,'live')
             """,
             (since, session_id),
@@ -455,6 +467,7 @@ class DashboardService:
             FROM positions
             WHERE status='closed' AND exit_time>=?
               AND (account_kind='live' OR simulation_session_id=?)
+              AND (account_kind='live' OR COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0)
             GROUP BY substr(exit_time,1,10),COALESCE(strategy_key,'live') ORDER BY date
             """,
             (since, session_id),

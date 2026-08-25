@@ -49,19 +49,23 @@ def test_live_sniper_wallets_alias_maps_to_sniper_count() -> None:
     assert SafetyFilter().evaluate_required_facts(normalized).accepted
 
 
-def test_top_10_holder_rate_uses_new_inclusive_range() -> None:
+def test_top_10_holder_rate_uses_new_strict_range() -> None:
     safety = SafetyFilter()
-    for accepted in (0.125, 0.28):
+    for accepted in (0.140001, 0.2, 0.249999):
         token = valid_token()
         token["top_10_holder_rate"] = accepted
         assert safety.evaluate(token).accepted
+        assert safety.evaluate_discovery_prefilter(token).accepted
 
-    for rejected in (0.124999, 0.280001):
+    for rejected in (0.139999, 0.14, 0.25, 0.250001):
         token = valid_token()
         token["top_10_holder_rate"] = rejected
         decision = safety.evaluate(token)
         assert not decision.accepted
         assert "top_10_holder_rate" in decision.reasons
+        prefilter = safety.evaluate_discovery_prefilter(token)
+        assert not prefilter.accepted
+        assert "top_10_holder_rate" in prefilter.reasons
 
 
 def test_volume_per_swap_must_be_strictly_above_31() -> None:

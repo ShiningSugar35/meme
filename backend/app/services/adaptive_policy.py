@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from ..collector.constants import FEATURE_SCHEMA_VERSION
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..ml.decision_policy import DECISION_POLICY_VERSION
 from ..ml.economics import LOSS_UNITS, WIN_UNITS
 from .regime import MarketRegimeService
 
@@ -62,7 +63,7 @@ class AdaptivePolicyService:
 
     The regime mapper always produces a *shadow recommendation*.  Actual model
     thresholds remain neutral until chronological full-information replay on the
-    new feature generation certifies that the frozen mapping improves the +4/-1
+    new feature generation certifies that the frozen mapping improves the +3/-1
     utility proxy.  ``rules_only`` never calls this service.
 
     The 5% exploration mechanism exists for future contextual-bandit learning,
@@ -207,10 +208,11 @@ class AdaptivePolicyService:
             )
             WHERE f.prediction_id IS NULL AND s.label_status='mature' AND s.tag IN (0,1)
               AND s.feature_schema_version=?
+              AND p.decision_policy_version=?
               AND p.strategy_key IN ('model_1','model_2','model_3')
             ORDER BY s.entry_time,p.id LIMIT ?
             """,
-            (FEATURE_SCHEMA_VERSION, limit),
+            (FEATURE_SCHEMA_VERSION, DECISION_POLICY_VERSION, limit),
         )
         settled = 0
         with self.database.transaction(immediate=True) as connection:
@@ -225,7 +227,9 @@ class AdaptivePolicyService:
                 )
                 base_threshold = float(row.get("base_threshold") or 0.0)
                 probability = float(row.get("probability") or 0.0)
-                shadow_threshold = adaptive_threshold(base_threshold, ACTION_DELTA[recommended])
+                shadow_threshold = max(
+                    base_threshold, adaptive_threshold(base_threshold, ACTION_DELTA[recommended])
+                )
                 shadow_selected = probability >= shadow_threshold
                 shadow_reward = utility if shadow_selected else 0.0
                 shadow_excess = shadow_reward - neutral_reward

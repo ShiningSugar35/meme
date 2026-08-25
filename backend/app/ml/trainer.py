@@ -21,9 +21,12 @@ from .models import (
     candidate_catalog,
     fit_pipeline,
     positive_probabilities,
+    positive_raw_scores,
 )
+from .calibration import fit_sigmoid_calibrator
+from .decision_policy import DECISION_POLICY_VERSION
+from .sparse_budget import select_sparse_budget
 from .splits import TemporalSplitConfig, TemporalSplitter
-from .thresholds import ThresholdSearchConfig, optimize_thresholds
 from .types import (
     CandidateEvaluation,
     EvaluationMetrics,
@@ -235,6 +238,9 @@ class ModelTrainer:
                 early_stage=plan.early_stage,
                 training_start=dataset.timestamps.iloc[plan.active_indices[0]].to_pydatetime(),
                 training_end=dataset.timestamps.iloc[plan.active_indices[-1]].to_pydatetime(),
+                calibrator=selected.calibrator,
+                sparse_budget=selected.sparse_budget,
+                decision_policy_version=DECISION_POLICY_VERSION,
             )
             bundles.append(
                 ModelBundle(
@@ -251,6 +257,9 @@ class ModelTrainer:
                         "utility_eligible": refit_economics.utility_eligible,
                         "utility_blockers": refit_economics.blockers,
                         "model_runtime": runtime_metadata,
+                        "calibration": selected.calibrator.provenance() if selected.calibrator else None,
+                        "sparse_budget": selected.sparse_budget.provenance() if selected.sparse_budget else None,
+                        "decision_policy_version": DECISION_POLICY_VERSION,
                         "evaluation_only": False,
                     },
                     **common,
@@ -267,6 +276,9 @@ class ModelTrainer:
                         "generalization": asdict(selected.generalization) if selected.generalization else {},
                         "composite_score": selected.composite_score,
                         "model_runtime": runtime_metadata,
+                        "calibration": selected.calibrator.provenance() if selected.calibrator else None,
+                        "sparse_budget": selected.sparse_budget.provenance() if selected.sparse_budget else None,
+                        "decision_policy_version": DECISION_POLICY_VERSION,
                         "evaluation_only": True,
                         "trained_through": dataset.timestamps.iloc[
                             plan.final_split.train_indices[-1]
@@ -412,7 +424,10 @@ class ModelTrainer:
         for item in top:
             estimator = final_estimators[item.algorithm]
             features = item.feature_names
-            probs = positive_probabilities(estimator, dataset.X.loc[rows, features])
+            if item.calibrator is None:
+                raise ValueError(f"{item.algorithm} is missing development calibrator")
+            raw_scores = positive_raw_scores(estimator, dataset.X.loc[rows, features])
+            probs = item.calibrator.transform(raw_scores)
             probabilities[item.algorithm] = probs
             selections[item.algorithm] = probs >= float(item.threshold)
             families[item.algorithm] = specs[item.algorithm].family
@@ -577,7 +592,7 @@ class ModelTrainer:
         feature_count: int,
     ) -> CandidateEvaluation:
         oos_positions: list[np.ndarray] = []
-        oos_probabilities: list[np.ndarray] = []
+        oos_scores: list[np.ndarray] = []
         for fold in plan.development_folds:
             y_train = dataset.y.iloc[fold.train_indices]
             if y_train.nunique() < 2:
@@ -595,28 +610,41 @@ class ModelTrainer:
                 economic_sample_weights(dataset.economic_slice(fold.train_indices)),
             )
             oos_positions.append(fold.test_indices)
-            oos_probabilities.append(
-                positive_probabilities(estimator, dataset.X.loc[fold.test_indices, fold_features])
+            oos_scores.append(
+                positive_raw_scores(estimator, dataset.X.loc[fold.test_indices, fold_features])
             )
 
         positions = np.concatenate(oos_positions)
-        probabilities = np.concatenate(oos_probabilities)
+        scores = np.concatenate(oos_scores)
         order = np.argsort(positions, kind="stable")
         positions = positions[order]
-        probabilities = probabilities[order]
-        threshold_result = optimize_thresholds(
-            dataset.y.iloc[positions].to_numpy(dtype=int),
+        scores = scores[order]
+        labels = dataset.y.iloc[positions].to_numpy(dtype=int)
+        calibrator = fit_sigmoid_calibrator(
+            scores,
+            labels,
+            source_indices=positions.tolist(),
+            source_start=dataset.timestamps.iloc[positions[0]].isoformat(),
+            source_end=dataset.timestamps.iloc[positions[-1]].isoformat(),
+        )
+        probabilities = calibrator.transform(scores)
+        sparse_budget, development_metrics = select_sparse_budget(
+            labels,
             probabilities,
             dataset.economic_slice(positions),
-            ThresholdSearchConfig(min_trades=self.config.min_trades),
+            min_trades=self.config.min_trades,
         )
-        threshold = float(threshold_result.thresholds.decision)
+        threshold = float(sparse_budget.policy_base_threshold)
 
+        # Transform each chronological OOS fold with the calibrator learned only
+        # from development OOS predictions. The final holdout is never an input
+        # to either sigmoid fitting or sparse-budget tuning.
+        fold_probabilities = [calibrator.transform(values) for values in oos_scores]
         fold_metrics: list[EvaluationMetrics] = []
         average_precisions: list[float] = []
         ap_skills: list[float] = []
         fold_composites: list[float] = []
-        for fold_positions, fold_probs in zip(oos_positions, oos_probabilities, strict=True):
+        for fold_positions, fold_probs in zip(oos_positions, fold_probabilities, strict=True):
             y_fold = dataset.y.iloc[fold_positions].to_numpy(dtype=int)
             metric = evaluate_probabilities(
                 y_fold,
@@ -653,11 +681,8 @@ class ModelTrainer:
         execution_score, execution_observations, execution_selected, execution_net_pnl = (
             self._execution_score(dataset, positions, probabilities, threshold)
         )
-        execution_weight = 0.0  # E_exec is reported only; ranking remains the established E proxy.
-        ranking_economic_score = float(
-            (1.0 - execution_weight) * economic_score
-            + execution_weight * (execution_score if execution_score is not None else economic_score)
-        )
+        execution_weight = 0.0
+        ranking_economic_score = float(economic_score)
         composite = float(
             self.config.economic_weight * ranking_economic_score
             + self.config.generalization_weight * generalization_score
@@ -676,8 +701,6 @@ class ModelTrainer:
             decay_score=decay_score,
             score=generalization_score,
         )
-        # Convert the selected feature-count hyperparameter into concrete names
-        # using final-train data only. The recent holdout is untouched.
         final_feature_order = self._rank_features(dataset, plan.final_split.train_indices)
         feature_names = tuple(final_feature_order[:feature_count])
         return CandidateEvaluation(
@@ -686,7 +709,7 @@ class ModelTrainer:
             status="ok",
             threshold=threshold,
             feature_names=feature_names,
-            development_metrics=threshold_result.metrics,
+            development_metrics=development_metrics,
             fold_metrics=tuple(fold_metrics),
             generalization=generalization,
             economic_score=economic_score,
@@ -699,6 +722,8 @@ class ModelTrainer:
             execution_net_pnl_usd=execution_net_pnl,
             execution_weight=execution_weight,
             ranking_economic_score=ranking_economic_score,
+            calibrator=calibrator,
+            sparse_budget=sparse_budget,
         )
 
     def _execution_score(
@@ -751,7 +776,10 @@ class ModelTrainer:
             dataset.y.iloc[final_train],
             economic_sample_weights(dataset.economic_slice(final_train)),
         )
-        probabilities = positive_probabilities(estimator, dataset.X.loc[final_test, features])
+        if evaluation.calibrator is None:
+            raise ValueError("development sigmoid calibrator is missing")
+        raw_scores = positive_raw_scores(estimator, dataset.X.loc[final_test, features])
+        probabilities = evaluation.calibrator.transform(raw_scores)
         final_metrics = evaluate_probabilities(
             dataset.y.iloc[final_test].to_numpy(dtype=int),
             probabilities,

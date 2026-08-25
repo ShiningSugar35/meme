@@ -12,6 +12,24 @@ from ..database import Database, utc_now_iso
 
 ES_SYSTEM_REQUIRED = 0x00000001
 ES_CONTINUOUS = 0x80000000
+POWER_REQUEST_CONTEXT_VERSION = 0
+POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x00000001
+POWER_REQUEST_SYSTEM_REQUIRED = 1
+POWER_REQUEST_EXECUTION_REQUIRED = 3
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class _ReasonUnion(ctypes.Union):
+    _fields_ = [("SimpleReasonString", wintypes.LPWSTR)]
+
+
+class _ReasonContext(ctypes.Structure):
+    _anonymous_ = ("Reason",)
+    _fields_ = [
+        ("Version", wintypes.ULONG),
+        ("Flags", wintypes.DWORD),
+        ("Reason", _ReasonUnion),
+    ]
 
 
 class PowerApi(Protocol):
@@ -32,7 +50,13 @@ class _SystemPowerStatus(ctypes.Structure):
 
 
 class WindowsPowerApi:
-    """Keep Windows awake for critical background collection without forcing the display on."""
+    """Hold a process-scoped Windows power request while collection is critical.
+
+    ``SetThreadExecutionState`` is thread-scoped and proved insufficient on this
+    Modern Standby host. A Power Request object is a durable kernel handle owned
+    by the process and explicitly carries both SystemRequired and
+    ExecutionRequired until it is released.
+    """
 
     def __init__(self) -> None:
         if sys.platform != "win32":
@@ -40,8 +64,16 @@ class WindowsPowerApi:
         self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self.kernel32.GetSystemPowerStatus.argtypes = [ctypes.POINTER(_SystemPowerStatus)]
         self.kernel32.GetSystemPowerStatus.restype = wintypes.BOOL
-        self.kernel32.SetThreadExecutionState.argtypes = [wintypes.DWORD]
-        self.kernel32.SetThreadExecutionState.restype = wintypes.DWORD
+        self.kernel32.PowerCreateRequest.argtypes = [ctypes.POINTER(_ReasonContext)]
+        self.kernel32.PowerCreateRequest.restype = wintypes.HANDLE
+        self.kernel32.PowerSetRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+        self.kernel32.PowerSetRequest.restype = wintypes.BOOL
+        self.kernel32.PowerClearRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+        self.kernel32.PowerClearRequest.restype = wintypes.BOOL
+        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel32.CloseHandle.restype = wintypes.BOOL
+        self._request_handle: int | None = None
+        self.mechanism = "power_request_system_and_execution_required"
 
     def ac_line_status(self) -> int:
         status = _SystemPowerStatus()
@@ -49,10 +81,54 @@ class WindowsPowerApi:
             raise OSError(ctypes.get_last_error(), "GetSystemPowerStatus failed")
         return int(status.ACLineStatus)
 
+    def _create_request(self) -> int:
+        reason_text = "Meme quant Collector and position-monitor runtime"
+        context = _ReasonContext(
+            Version=POWER_REQUEST_CONTEXT_VERSION,
+            Flags=POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+            Reason=_ReasonUnion(SimpleReasonString=reason_text),
+        )
+        handle = self.kernel32.PowerCreateRequest(ctypes.byref(context))
+        value = int(handle or 0)
+        if not value or value == INVALID_HANDLE_VALUE:
+            raise OSError(ctypes.get_last_error(), "PowerCreateRequest failed")
+        return value
+
     def set_system_required(self, required: bool) -> None:
-        flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if required else 0)
-        if self.kernel32.SetThreadExecutionState(flags) == 0:
-            raise OSError(ctypes.get_last_error(), "SetThreadExecutionState failed")
+        if required:
+            if self._request_handle is not None:
+                return
+            handle = self._create_request()
+            system_set = False
+            try:
+                if not self.kernel32.PowerSetRequest(handle, POWER_REQUEST_SYSTEM_REQUIRED):
+                    raise OSError(ctypes.get_last_error(), "PowerSetRequest(SystemRequired) failed")
+                system_set = True
+                if not self.kernel32.PowerSetRequest(handle, POWER_REQUEST_EXECUTION_REQUIRED):
+                    raise OSError(ctypes.get_last_error(), "PowerSetRequest(ExecutionRequired) failed")
+            except Exception:
+                if system_set:
+                    self.kernel32.PowerClearRequest(handle, POWER_REQUEST_SYSTEM_REQUIRED)
+                self.kernel32.CloseHandle(handle)
+                raise
+            self._request_handle = handle
+            return
+
+        handle = self._request_handle
+        if handle is None:
+            return
+        errors: list[str] = []
+        for request_type, name in (
+            (POWER_REQUEST_EXECUTION_REQUIRED, "ExecutionRequired"),
+            (POWER_REQUEST_SYSTEM_REQUIRED, "SystemRequired"),
+        ):
+            if not self.kernel32.PowerClearRequest(handle, request_type):
+                errors.append(f"PowerClearRequest({name}) failed: {ctypes.get_last_error()}")
+        if not self.kernel32.CloseHandle(handle):
+            errors.append(f"CloseHandle failed: {ctypes.get_last_error()}")
+        self._request_handle = None
+        if errors:
+            raise OSError("; ".join(errors))
 
 
 @dataclass(slots=True)
@@ -79,6 +155,8 @@ class SystemAwakeService:
             "platform": sys.platform,
             "ac_line_status": ac_line_status,
             "system_required": bool(self._held),
+            "execution_required": bool(self._held),
+            "mechanism": getattr(self.power_api, "mechanism", "abstract_power_api"),
             "updated_at": utc_now_iso(),
         }
         if error:

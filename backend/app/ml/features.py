@@ -40,6 +40,8 @@ _FUTURE_PATTERNS = (
     re.compile(r"(^|[/_])final_?2h"),
     re.compile(r"(^|[/_])future([/_]|$)"),
     re.compile(r"(^|[/_])exit_(time|price|reason)"),
+    re.compile(r"(^|[/_])label_(max_price_ratio|min_price_ratio|final_close_ratio|window_seconds)"),
+    re.compile(r"(^|[/_])first_(take_profit|stop_loss)_at"),
     re.compile(r"(^|[/_])(gross|net)_return"),
     re.compile(r"(^|[/_])same_bar_conflict"),
     re.compile(r"^tag([/_]|$)"),

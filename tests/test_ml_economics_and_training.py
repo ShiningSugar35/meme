@@ -23,6 +23,7 @@ from backend.app.ml.economics import (
     theoretical_profit_units,
 )
 from backend.app.ml.models import FLAMLTimeSafeClassifier, candidate_catalog
+from backend.app.services.drift import build_drift_reference, evaluate_final_certification_drift
 
 
 def _learnable_frame(rows: int = 360, *, include_liquidity: bool = True) -> pd.DataFrame:
@@ -70,10 +71,10 @@ def test_realized_return_and_fixed_payoff_formula_are_exact() -> None:
         prepared.y.to_numpy(), np.array([0.9, 0.9, 0.9]), 0.5, economics
     )
     assert economics.capital.tolist() == [10.0, 40.0, 50.0]
-    assert economics.realized_return.tolist() == pytest.approx([-0.10, 0.60, -0.10])
-    assert metrics.cumulative_pnl_usd == pytest.approx(-1 + 24 - 5)
-    assert metrics.profit_units == pytest.approx(2.0)  # 4*TP - FP = 4 - 2
-    assert metrics.fixed_profit_usd == pytest.approx(10.0)
+    assert economics.realized_return.tolist() == pytest.approx([-0.10, 0.80, -0.10])
+    assert metrics.cumulative_pnl_usd == pytest.approx(-1 + 32 - 5)
+    assert metrics.profit_units == pytest.approx(1.0)  # 3*TP - FP = 3 - 2
+    assert metrics.fixed_profit_usd == pytest.approx(5.0)
 
 
 def test_precision_recall_identity_matches_tp_fp_payoff() -> None:
@@ -83,13 +84,13 @@ def test_precision_recall_identity_matches_tp_fp_payoff() -> None:
     from_counts = theoretical_profit_units(tp, fp)
     from_pr = theoretical_profit_from_precision_recall(precision, recall, positives)
     assert from_counts == pytest.approx(from_pr)
-    assert from_pr == pytest.approx(positives * recall * (5 - 1 / precision))
+    assert from_pr == pytest.approx(positives * recall * (4 - 1 / precision))
 
 
-def test_four_to_one_proxy_break_even_precision_is_twenty_percent() -> None:
-    assert theoretical_profit_from_precision_recall(0.20, 1.0, 100) == pytest.approx(0.0)
-    assert theoretical_profit_from_precision_recall(0.21, 1.0, 100) > 0.0
-    assert theoretical_profit_from_precision_recall(0.19, 1.0, 100) < 0.0
+def test_three_to_one_proxy_break_even_precision_is_twenty_five_percent() -> None:
+    assert theoretical_profit_from_precision_recall(0.25, 1.0, 100) == pytest.approx(0.0)
+    assert theoretical_profit_from_precision_recall(0.26, 1.0, 100) > 0.0
+    assert theoretical_profit_from_precision_recall(0.24, 1.0, 100) < 0.0
 
 
 def test_candidate_catalog_is_expanded_and_optional_automl_is_explicit() -> None:
@@ -345,6 +346,27 @@ def test_trainer_returns_top3_one_threshold_each_and_keeps_final_holdout_separat
     train_end = dataset.timestamps.iloc[result.plan.final_split.train_indices].max()
     test_start = dataset.timestamps.iloc[result.plan.final_split.test_indices].min()
     assert train_end + pd.Timedelta(hours=1) <= test_start
+    for bundle in result.bundles:
+        assert bundle.calibrator is not None
+        assert bundle.calibrator.method == "chronological_sigmoid_platt_v1"
+        # Calibration provenance ends strictly before the final certification
+        # holdout; the final holdout can never be an input to Platt fitting.
+        assert pd.Timestamp(bundle.calibrator.source_end) < test_start
+        assert bundle.sparse_budget is not None
+        assert bundle.sparse_budget.budget_fraction in {0.05, 0.075, 0.10, 0.15}
+        assert bundle.sparse_budget.policy_base_threshold >= 0.25
+        assert bundle.sparse_budget.sample_count == bundle.calibrator.source_rows
+        reference = build_drift_reference(
+            dataset, result.plan.final_split.train_indices, bundle.feature_names
+        )
+        assert reference["reference_kind"] == "development_pre_final_holdout"
+        assert pd.Timestamp(reference["reference_end"]) < test_start
+        certification_drift = evaluate_final_certification_drift(
+            dataset, result.plan.final_split.test_indices, reference
+        )
+        assert certification_drift["state"] in {"normal", "caution", "severe"}
+        assert "max_feature_psi" in certification_drift
+        assert "label_prior_relative_decline" in certification_drift
 
 
 class _ScoreEstimator:

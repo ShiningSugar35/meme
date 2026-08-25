@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-08-24T04:17:49.047635+00:00",
+  "rule": {
+    "window_minutes": 120,
+    "tp_multiple": 2.0,
+    "hard_sl_multiple": 0.8,
+    "dynamic_stop": "rolling_10m_peak_to_current_low_drawdown >=20%",
+    "same_bar": "loss_first"
+  },
+  "dataset_total_mature": 1177,
+  "old_positive": 217,
+  "old_positive_rate": 0.18436703483432457,
+  "replayed_ok": 1177,
+  "errors": 0,
+  "new_positive": 101,
+  "new_positive_rate": 0.08581138487680544,
+  "exit_reasons": {
+    "dynamic_10m_drawdown_20": 442,
+    "hard_sl_20": 569,
+    "tp_100": 101,
+    "timeout_2h": 65
+  },
+  "label_transitions": {
+    "old0_new1": 11,
+    "old1_new0": 127,
+    "old1_new1": 90,
+    "old0_new0": 949
+  },
+  "error_examples": []
+}

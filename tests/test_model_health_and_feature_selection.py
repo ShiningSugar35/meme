@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.collector.constants import LabelPolicy
 from backend.app.config import Settings
 from backend.app.database import Database
+from backend.app.ml.decision_policy import DECISION_POLICY_VERSION
+from backend.app.ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from backend.app.ml.registry import ModelRegistry
 from backend.app.ml.types import ModelBundle, ThresholdSet
 from backend.app.repositories.models import ModelRepository
@@ -55,7 +58,12 @@ def seed_top3(database: Database, now: datetime, *, baseline_capture: float = 0.
                 "validation_window_start": int((now - timedelta(days=7)).timestamp()),
                 "validation_window_end": int((now - timedelta(days=1)).timestamp()),
                 "feature_names": ["price", "price_change_1h"],
-                "parameters": {"requested_feature_pool": ["price", "price_change_1h"]},
+                "parameters": {
+                    "requested_feature_pool": ["price", "price_change_1h"],
+                    "label_version": LabelPolicy().label_version,
+                    "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
+                    "decision_policy_version": DECISION_POLICY_VERSION,
+                },
                 "thresholds": {"decision": 0.5},
                 "metrics": {"final_recent_window": {"economic_capture": baseline_capture}},
                 "artifact_path": "ml_models/not-needed-for-health.joblib",
@@ -90,10 +98,12 @@ def seed_recent_predictions(database: Database, model_ids: list[str], now: datet
         for slot, model_id in enumerate(model_ids, start=1):
             database.execute(
                 """
-                INSERT INTO predictions(sample_id,model_id,probability,strategy_key,threshold,selected,predicted_at)
-                VALUES(?,?,0.9,?,0.5,1,?)
+                INSERT INTO predictions(
+                    sample_id,model_id,probability,strategy_key,threshold,selected,
+                    decision_policy_version,decision_reason,predicted_at
+                ) VALUES(?,?,0.9,?,0.5,1,?,'selected',?)
                 """,
-                (sample_id, model_id, f"model_{slot}", entry.isoformat()),
+                (sample_id, model_id, f"model_{slot}", DECISION_POLICY_VERSION, entry.isoformat()),
             )
 
 
@@ -197,3 +207,16 @@ def test_rank1_rollback_requires_loadable_retired_artifact_and_rebuilds_top3(tmp
     assert restored["id"] == "rollback-old"
     assert repo.active_models()[0]["id"] == "rollback-old"
     assert len(repo.active_models()) == 3
+
+def test_stale_phase16_contract_fails_model_health_closed(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    now = datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc)
+    seed_top3(database, now)
+    database.execute(
+        "UPDATE models SET parameters_json='{}' WHERE id IN ('health-model-1','health-model-2','health-model-3')"
+    )
+    report = ModelHealthService(database, settings).evaluate(now=now)
+    assert report.state == "active_top3_phase16_contract_stale"
+    assert not report.degraded
+    assert report.training_run_id is None

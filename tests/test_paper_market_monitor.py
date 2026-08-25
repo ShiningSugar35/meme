@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.app.collector.constants import EXIT_POLICY_VERSION, LEGACY_EXIT_POLICY_VERSION
 from backend.app.collector.models import Kline
 from backend.app.config import Settings
 from backend.app.database import Database, utc_now_iso
@@ -132,6 +133,9 @@ def seed_position(
     opened_at: datetime,
     entry_price: float = 1.0,
     liquidity: float = 10_000.0,
+    take_profit_ratio: float = 1.6,
+    holding_seconds: int = 3600,
+    exit_policy_version: str = LEGACY_EXIT_POLICY_VERSION,
 ) -> None:
     samples = SampleRepository(database)
     samples.insert(
@@ -181,8 +185,9 @@ def seed_position(
         INSERT INTO positions(
             id,token_address,account_kind,strategy_key,status,simulation_session_id,sample_id,prediction_id,model_id,
             entry_time,expires_at,invested_usd,token_amount,entry_price,
-            stop_loss_price,take_profit_price,metadata_json
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            stop_loss_price,take_profit_price,exit_policy_version,stop_loss_ratio,
+            take_profit_ratio,max_holding_seconds,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             position_id,
@@ -195,12 +200,16 @@ def seed_position(
             prediction_id,
             model_id,
             opened_at.isoformat(),
-            (opened_at + timedelta(hours=1)).isoformat(),
+            (opened_at + timedelta(seconds=holding_seconds)).isoformat(),
             50.0,
             50.0 / entry_price,
             entry_price,
             entry_price * 0.9,
-            entry_price * 1.6,
+            entry_price * take_profit_ratio,
+            exit_policy_version,
+            0.9,
+            take_profit_ratio,
+            holding_seconds,
             json.dumps({"entry_fee_usd": 0.0}),
         ),
     )
@@ -559,3 +568,60 @@ async def test_quoted_route_uses_usdc_output_as_paper_fill(tmp_path: Path) -> No
     assert metadata["exit_route_probe"]["output_asset"] == "USDC"
     assert metadata["exit_route_probe"]["output_decimals"] == 6
     assert len(route_probe.calls) == 1
+
+def test_legacy_and_phase16_positions_keep_independent_exit_policy_snapshots(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime(2026, 8, 25, 0, 0, tzinfo=timezone.utc)
+    seed_position(
+        database,
+        address="legacy-token",
+        position_id="legacy-position",
+        strategy_key="model_1",
+        opened_at=opened,
+        take_profit_ratio=1.6,
+        holding_seconds=3600,
+        exit_policy_version=LEGACY_EXIT_POLICY_VERSION,
+    )
+    seed_position(
+        database,
+        address="phase16-token",
+        position_id="phase16-position",
+        strategy_key="model_2",
+        opened_at=opened,
+        take_profit_ratio=1.8,
+        holding_seconds=5400,
+        exit_policy_version=EXIT_POLICY_VERSION,
+    )
+    service = PaperTradingService(
+        database,
+        settings,
+        quote_provider=ExitQuoteProvider(),
+        sol_price_service=FixedSolPrice(),
+    )
+    at_10m = int((opened + timedelta(minutes=10)).timestamp())
+    legacy = service.monitor_position(
+        "legacy-position", [Kline(at_10m, 1.70, 0.95, 1.70)], now_ts=at_10m
+    )
+    phase16 = service.monitor_position(
+        "phase16-position", [Kline(at_10m, 1.70, 0.95, 1.70)], now_ts=at_10m
+    )
+    assert legacy.state == "closed"
+    assert database.fetch_one("SELECT exit_reason FROM positions WHERE id='legacy-position'")["exit_reason"] == "take_profit_1_6x"
+    assert phase16.state == "open"
+    assert database.fetch_one("SELECT status FROM positions WHERE id='phase16-position'")["status"] == "open"
+
+    at_91m = int((opened + timedelta(minutes=91)).timestamp())
+    timeout = service.monitor_position(
+        "phase16-position",
+        [Kline(int((opened + timedelta(minutes=89)).timestamp()), 1.70, 0.95, 1.70)],
+        now_ts=at_91m,
+    )
+    assert timeout.state == "closed"
+    row = database.fetch_one(
+        "SELECT exit_reason,exit_policy_version,take_profit_ratio,max_holding_seconds FROM positions WHERE id='phase16-position'"
+    )
+    assert row["exit_reason"] == "timeout_90m"
+    assert row["exit_policy_version"] == EXIT_POLICY_VERSION
+    assert row["take_profit_ratio"] == pytest.approx(1.8)
+    assert row["max_holding_seconds"] == 5400

@@ -401,7 +401,7 @@ class EnrichmentService:
             "ln(twitter_rename_count+1)": _ln1p(twitter_rename),
             "ln(twitter_del_post_token_count+1)": _ln1p(recursive_find(source, ("twitter_del_post_token_count", "twitterDelPostTokenCount"))),
             "ln(twitter_create_token_count+1)": _ln1p(recursive_find(source, ("twitter_create_token_count", "twitterCreateTokenCount"))),
-            "top_10_holder_rate": first(stat, ("top_10_holder_rate", "top10_holder_rate", "top10HolderRate"), normalized.get("top_10_holder_rate")),
+            "top_10_holder_rate": normalized.get("top_10_holder_rate"),
             "top_bot_degen_percentage": first(stat, ("top_bot_degen_percentage", "topBotDegenPercentage"), recursive_find(source, ("top_bot_degen_percentage",))),
             "fresh_wallet_rate": first(stat, ("fresh_wallet_rate", "freshWalletRate"), normalized.get("fresh_wallet_rate")),
             "bot_degen_rate": first(stat, ("bot_degen_rate", "botDegenRate"), recursive_find(source, ("bot_degen_rate", "botDegenRate"))),

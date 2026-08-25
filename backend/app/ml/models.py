@@ -523,7 +523,7 @@ def candidate_catalog(random_state: int = 42) -> tuple[CandidateSpec, ...]:
                 C=1.0,
                 gamma="scale",
                 kernel="rbf",
-                probability=True,
+                probability=False,
                 random_state=random_state,
             ),
             scale_numeric=True,
@@ -611,3 +611,25 @@ def positive_probabilities(pipeline: Pipeline, X: pd.DataFrame) -> np.ndarray:
     if probabilities.ndim != 2 or len(positive_columns) != 1:
         raise ValueError("candidate estimator must return binary probabilities")
     return probabilities[:, int(positive_columns[0])]
+
+def positive_raw_scores(pipeline: Pipeline, X: pd.DataFrame) -> np.ndarray:
+    """Return an auditable one-dimensional score before project calibration."""
+    if hasattr(pipeline, "decision_function"):
+        scores = np.asarray(pipeline.decision_function(X), dtype=float)
+        if scores.ndim == 2:
+            classes = np.asarray(pipeline.classes_)
+            positive_columns = np.flatnonzero(classes == 1)
+            if len(positive_columns) != 1:
+                raise ValueError("candidate estimator has no unique positive decision score")
+            scores = scores[:, int(positive_columns[0])]
+        return np.asarray(scores, dtype=float).reshape(-1)
+    probabilities = np.clip(positive_probabilities(pipeline, X), 1e-8, 1.0 - 1e-8)
+    return np.log(probabilities / (1.0 - probabilities))
+
+
+def raw_probability_proxy(pipeline: Pipeline, X: pd.DataFrame) -> np.ndarray:
+    """Return native probability when available, otherwise sigmoid(decision score)."""
+    if hasattr(pipeline, "predict_proba"):
+        return np.clip(positive_probabilities(pipeline, X), 0.0, 1.0)
+    scores = np.clip(positive_raw_scores(pipeline, X), -50.0, 50.0)
+    return 1.0 / (1.0 + np.exp(-scores))

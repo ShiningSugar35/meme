@@ -115,20 +115,23 @@ class SqliteCollectorSink:
             # No mutation of the frozen entry feature payload.
             # price_change_5m is deliberately not reconstructed at T+1h.
             # Missing entry facts remain missing rather than being rewritten as zero or hindsight data.
+            policy = LabelPolicy()
             connection.execute(
                 """
-                UPDATE samples SET tag=?, price_1h_max_ratio=?, price_1h_min_ratio=?,
-                    final_1h_close_ratio=?, first_take_profit_at=?, first_stop_loss_at=?,
-                    exit_reason=?, same_bar_conflict=?, gross_return_rate=?,
-                    return_source='collector_kline', label_status='mature', label_version=?,
-                    label_source='collector', terminal_return_estimated=0,
-                    utility_eligible=?, features_json=?, updated_at=? WHERE id=?
+                UPDATE samples SET tag=?, label_max_price_ratio=?, label_min_price_ratio=?,
+                    label_final_close_ratio=?, label_window_seconds=?,
+                    first_take_profit_at=?, first_stop_loss_at=?, exit_reason=?, same_bar_conflict=?,
+                    gross_return_rate=?, return_source='collector_kline',
+                    label_status='mature', label_version=?, label_source='collector',
+                    terminal_return_estimated=0, utility_eligible=?, features_json=?, updated_at=?
+                WHERE id=?
                 """,
                 (
                     result.tag,
                     result.max_price_ratio,
                     result.min_price_ratio,
                     result.final_close_ratio,
+                    policy.window_seconds,
                     result.first_take_profit_at,
                     result.first_stop_loss_at,
                     result.exit_reason,
@@ -136,7 +139,11 @@ class SqliteCollectorSink:
                         result.first_take_profit_at is not None
                         and result.first_take_profit_at == result.first_stop_loss_at
                     ),
-                    0.60 if result.tag == 1 else -0.10,
+                    (
+                        policy.take_profit_ratio - 1.0
+                        if result.tag == 1
+                        else policy.stop_loss_ratio - 1.0
+                    ),
                     result.label_version,
                     int(bool(row["utility_eligible"])),
                     json.dumps(features, ensure_ascii=False, separators=(",", ":")),

@@ -10,9 +10,15 @@ from typing import Any, Literal
 
 import pandas as pd
 
-from ..collector.constants import FEATURE_SCHEMA_VERSION
+from ..collector.constants import FEATURE_SCHEMA_VERSION, LabelPolicy
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..ml.decision_policy import (
+    DECISION_POLICY_VERSION,
+    RISK_CEILING_CAUTION,
+    RISK_CEILING_NORMAL,
+    age_gate,
+)
 from ..ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from ..ml.features import (
     AGE_LOG1P_FEATURE,
@@ -25,8 +31,11 @@ from ..ml.features import (
 )
 from ..ml.registry import ModelRegistry
 from ..ml.trainer import ModelTrainer, TrainerConfig
+from ..ml.types import ThresholdSet
 from ..repositories.models import ModelRepository
 from ..repositories.samples import SampleRepository
+from .drift import build_drift_reference, evaluate_final_certification_drift
+from .execution_risk import ExecutionRiskTrainer
 from .modeling_gate import ModelingReadiness, persist_modeling_readiness
 
 
@@ -184,15 +193,177 @@ class TrainingService:
             except (TypeError, json.JSONDecodeError):
                 request_payload = {}
             selected_features = self.normalize_feature_selection(request_payload.get("feature_names"))
-            rows = self.samples.list_mature()
+            all_mature = self.samples.list_mature()
+            rows = [
+                row for row in all_mature
+                if row.get("feature_schema_version") == FEATURE_SCHEMA_VERSION
+                and row.get("label_version") == LabelPolicy().label_version
+                and row.get("token_type") in {"new_creation", "near_completion"}
+            ]
+            if not rows:
+                raise ValueError("no current Phase16 v5 mature samples are available")
             frame, data_hash = self._training_frame(rows)
             dataset = FeatureBuilder(
                 FeaturePolicy(feature_allowlist=selected_features)
             ).prepare(frame)
             result = ModelTrainer(TrainerConfig()).train(dataset)
+            execution_risk = ExecutionRiskTrainer(self.database).train()
+            self.database.set_runtime_state("execution_risk_training", execution_risk.as_dict())
+            if not execution_risk.certified or execution_risk.model is None:
+                self.database.audit(
+                    category="model",
+                    action="execution_risk_head_uncertified",
+                    severity="warning",
+                    entity_type="training_run",
+                    entity_id=run_id,
+                    details=execution_risk.as_dict(),
+                )
+            candidate_map = result.candidates_by_algorithm
+            final_train = result.plan.final_split.train_indices
+            final_test = result.plan.final_split.test_indices
+            references: dict[str, dict[str, Any]] = {}
+            final_drift: dict[str, dict[str, Any]] = {}
+            certification_models: list[dict[str, Any]] = []
+            has_minimum_final_evidence = False
+            certification_blockers: list[str] = []
+
+            evaluation_by_algorithm = {
+                bundle.algorithm: bundle for bundle in result.evaluation_bundles
+            }
+            final_source_rows = [rows[int(dataset.source_rows[position])] for position in final_test]
+            final_labels = dataset.y.iloc[final_test].to_numpy(dtype=int)
+            for bundle in result.bundles:
+                candidate = candidate_map[bundle.algorithm]
+                reference = build_drift_reference(dataset, final_train, bundle.feature_names)
+                drift_cert = evaluate_final_certification_drift(dataset, final_test, reference)
+                references[bundle.algorithm] = reference
+                final_drift[bundle.algorithm] = drift_cert
+                original_threshold = float(bundle.threshold)
+                evaluation_bundle = evaluation_by_algorithm[bundle.algorithm]
+                probabilities = evaluation_bundle.predict_probabilities(
+                    dataset.X.loc[final_test, evaluation_bundle.feature_names]
+                )
+                selected_mask: list[bool] = []
+                risk_probabilities: list[float | None] = []
+                risk_ceiling = (
+                    RISK_CEILING_CAUTION
+                    if drift_cert.get("state") == "caution"
+                    else RISK_CEILING_NORMAL
+                )
+                for row_source, probability in zip(
+                    final_source_rows, probabilities, strict=True
+                ):
+                    age = age_gate(row_source.get("age_minutes"))
+                    hard_threshold = max(
+                        0.25, original_threshold, float(age.probability_floor)
+                    )
+                    risk_probability: float | None = None
+                    if execution_risk.model is not None:
+                        try:
+                            risk_probability = float(
+                                execution_risk.model.predict_probability(row_source)
+                            )
+                        except Exception:
+                            risk_probability = None
+                    risk_probabilities.append(risk_probability)
+                    selected_mask.append(
+                        bool(
+                            age.allowed
+                            and risk_probability is not None
+                            and risk_probability <= risk_ceiling
+                            and float(probability) >= hard_threshold
+                        )
+                    )
+                selected_count = int(sum(selected_mask))
+                true_positives = int(
+                    sum(
+                        1
+                        for selected, label in zip(selected_mask, final_labels, strict=True)
+                        if selected and int(label) == 1
+                    )
+                )
+                false_positives = selected_count - true_positives
+                profit_units = float(3 * true_positives - false_positives)
+                limited_evidence = selected_count < 8
+                certification_margin = 0.03 if limited_evidence else 0.0
+                if certification_margin:
+                    bundle.thresholds = ThresholdSet(
+                        decision=min(0.999999, original_threshold + certification_margin)
+                    )
+                has_minimum_final_evidence = has_minimum_final_evidence or selected_count >= 5
+                model_blockers: list[str] = []
+                if selected_count >= 8 and profit_units < 0:
+                    model_blockers.append("final_profit_units_negative_with_8plus_selected")
+                    certification_blockers.append(
+                        f"{bundle.algorithm}:final_profit_units_negative_with_8plus_selected"
+                    )
+                if drift_cert.get("state") == "severe":
+                    model_blockers.append("final_recent_drift_severe")
+                    certification_blockers.append(f"{bundle.algorithm}:final_recent_drift_severe")
+                certification_models.append(
+                    {
+                        "model_id": bundle.model_id,
+                        "algorithm": bundle.algorithm,
+                        "final_model_policy_selected": selected_count,
+                        "final_model_policy_true_positives": true_positives,
+                        "final_model_policy_false_positives": false_positives,
+                        "final_model_policy_profit_units": profit_units,
+                        "probability_only_selected": int(
+                            candidate.final_metrics.trade_count if candidate.final_metrics else 0
+                        ),
+                        "limited_evidence": limited_evidence,
+                        "certification_margin": certification_margin,
+                        "development_budget_threshold": original_threshold,
+                        "production_threshold": float(bundle.threshold),
+                        "risk_ceiling": risk_ceiling,
+                        "risk_available_count": int(
+                            sum(value is not None for value in risk_probabilities)
+                        ),
+                        "final_drift": drift_cert,
+                        "blockers": model_blockers,
+                    }
+                )
+
+            if not has_minimum_final_evidence:
+                certification_blockers.append("no_top3_model_has_5_final_selected")
+            if not execution_risk.certified or execution_risk.model is None:
+                certification_blockers.append("execution_risk_head_uncertified")
+            deployment_certification = {
+                "version": "phase16_final_recent_certification_v1",
+                "eligible": not certification_blockers,
+                "has_top3_model_with_5plus_model_policy_selected": has_minimum_final_evidence,
+                "blockers": certification_blockers,
+                "models": certification_models,
+                "final_window_start": dataset.timestamps.iloc[final_test[0]].isoformat(),
+                "final_window_end": dataset.timestamps.iloc[final_test[-1]].isoformat(),
+                "final_holdout_usage": "certification_only",
+            }
+
+            for bundle in (*result.bundles, *result.evaluation_bundles):
+                bundle.label_version = LabelPolicy().label_version
+                bundle.economic_objective_version = ECONOMIC_OBJECTIVE_VERSION
+                bundle.decision_policy_version = DECISION_POLICY_VERSION
+                bundle.execution_risk_model = execution_risk.model
+                bundle.drift_reference = references[bundle.algorithm]
+                model_cert = next(
+                    item for item in certification_models if item["algorithm"] == bundle.algorithm
+                )
+                bundle.metrics = {
+                    **dict(bundle.metrics),
+                    "label_version": LabelPolicy().label_version,
+                    "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
+                    "decision_policy_version": DECISION_POLICY_VERSION,
+                    "calibration": bundle.calibrator.provenance() if bundle.calibrator else None,
+                    "sparse_budget": bundle.sparse_budget.provenance() if bundle.sparse_budget else None,
+                    "execution_risk": execution_risk.as_dict(),
+                    "drift_reference": dict(bundle.drift_reference),
+                    "final_drift_certification": final_drift[bundle.algorithm],
+                    "deployment_certification": model_cert,
+                    "training_hash": data_hash,
+                    "feature_names": list(bundle.feature_names),
+                }
 
             registered: list[dict[str, Any]] = []
-            candidate_map = result.candidates_by_algorithm
             for rank, (bundle, evaluation_bundle) in enumerate(
                 zip(result.bundles, result.evaluation_bundles, strict=True), start=1
             ):
@@ -206,7 +377,18 @@ class TrainingService:
                     "trade_count": candidate.final_metrics.trade_count if candidate.final_metrics else 0,
                     "fixed_profit_usd": candidate.final_metrics.fixed_profit_usd if candidate.final_metrics else None,
                     "profit_units": candidate.final_metrics.profit_units if candidate.final_metrics else None,
+                    "label_version": LabelPolicy().label_version,
                     "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
+                    "decision_policy_version": DECISION_POLICY_VERSION,
+                    "calibration": bundle.calibrator.provenance() if bundle.calibrator else None,
+                    "sparse_budget": bundle.sparse_budget.provenance() if bundle.sparse_budget else None,
+                    "execution_risk": execution_risk.as_dict(),
+                    "drift_reference": dict(bundle.drift_reference),
+                    "final_drift_certification": final_drift[bundle.algorithm],
+                    "deployment_certification": next(
+                        item for item in certification_models if item["algorithm"] == bundle.algorithm
+                    ),
+                    "training_hash": data_hash,
                     "economic_score": candidate.economic_score,
                     "execution_score": candidate.execution_score,
                     "e_exec": candidate.execution_score,
@@ -246,7 +428,19 @@ class TrainingService:
                         "parameters": {
                             "candidate_pool": list(TrainerConfig().candidate_names),
                             "selection": "top3_oos_fixed_payoff_decay_occam",
+                            "label_version": LabelPolicy().label_version,
                             "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
+                            "decision_policy_version": DECISION_POLICY_VERSION,
+                            "calibration": bundle.calibrator.provenance() if bundle.calibrator else None,
+                            "sparse_budget": bundle.sparse_budget.provenance() if bundle.sparse_budget else None,
+                            "execution_risk_model": (
+                                execution_risk.model.provenance() if execution_risk.model is not None else execution_risk.as_dict()
+                            ),
+                            "drift_reference": dict(bundle.drift_reference),
+                            "final_drift_certification": final_drift[bundle.algorithm],
+                            "deployment_certification": next(
+                                item for item in certification_models if item["algorithm"] == bundle.algorithm
+                            ),
                             "economic_weight": TrainerConfig().economic_weight,
                             "generalization_weight": TrainerConfig().generalization_weight,
                             "gap_hours": result.plan.gap_hours,
@@ -294,12 +488,18 @@ class TrainingService:
                 "candidates": [asdict(candidate) for candidate in result.candidates],
                 "diversity": dict(result.diversity_metrics),
                 "warnings": list(result.warnings),
+                "execution_risk": execution_risk.as_dict(),
+                "label_version": LabelPolicy().label_version,
+                "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
+                "decision_policy_version": DECISION_POLICY_VERSION,
+                "deployment_certification": deployment_certification,
                 "activation": {
-                    "status": "waiting_for_flat",
+                    "status": "waiting_for_flat" if deployment_certification["eligible"] else "blocked_certification",
                     "required_flat_strategies": ["model_1", "model_2", "model_3", "rules_only"],
+                    "certification_blockers": list(deployment_certification["blockers"]),
                 },
                 "selection_formula": {
-                    "economic": "mean_clip((5*TP-FP)/(5*N_positive),-1,1) [friction-adjusted E_proxy]",
+                    "economic": "mean_clip((3*TP-FP)/(3*N_positive),-1,1) [friction-adjusted E_proxy]",
                     "execution": "E_exec shadow metric from route-validated rules-only net PnL; never used for ranking",
                     "ranking_economic": "E_proxy only; E_exec is shadow/audit-only and has zero ranking weight",
                     "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",
@@ -375,26 +575,56 @@ class TrainingService:
             )
         pending: dict[str, Any] | None = None
         top_models: list[dict[str, Any]] = []
+        pending_already_active = False
         for row in candidates:
             try:
                 summary = json.loads(row.get("summary_json") or "{}")
             except (TypeError, json.JSONDecodeError):
                 continue
             proposed = summary.get("top_models") if isinstance(summary, dict) else None
+            certification = summary.get("deployment_certification") if isinstance(summary, dict) else None
+            if not isinstance(certification, dict) or not bool(certification.get("eligible")):
+                continue
             if not isinstance(proposed, list) or len(proposed) != 3:
                 continue
             ids = [str(item.get("id") or "") for item in proposed if isinstance(item, dict)]
             if len(ids) != 3 or not all(ids):
                 continue
             statuses = self.database.fetch_all(
-                f"SELECT id,status FROM models WHERE id IN ({','.join('?' for _ in ids)})",
+                f"SELECT id,status,parameters_json,metrics_json FROM models WHERE id IN ({','.join('?' for _ in ids)})",
                 tuple(ids),
             )
             status_map = {str(item["id"]): str(item["status"]) for item in statuses}
-            if not all(status_map.get(model_id) == "candidate" for model_id in ids):
+            active_ids = [str(item["id"]) for item in self.models.active_models()]
+            already_active = active_ids == ids
+            if not already_active and not all(status_map.get(model_id) == "candidate" for model_id in ids):
+                continue
+            if already_active and not all(
+                status_map.get(model_id) in {"candidate", "champion"} for model_id in ids
+            ):
+                continue
+            contract_current = True
+            for item in statuses:
+                try:
+                    parameters = json.loads(item.get("parameters_json") or "{}")
+                    metrics = json.loads(item.get("metrics_json") or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    contract_current = False
+                    break
+                risk = metrics.get("execution_risk") or {}
+                if (
+                    parameters.get("label_version") != LabelPolicy().label_version
+                    or parameters.get("economic_objective_version") != ECONOMIC_OBJECTIVE_VERSION
+                    or parameters.get("decision_policy_version") != DECISION_POLICY_VERSION
+                    or not bool(risk.get("certified"))
+                ):
+                    contract_current = False
+                    break
+            if not contract_current:
                 continue
             pending = row
             top_models = [dict(item) for item in proposed]
+            pending_already_active = already_active
             break
         if pending is None:
             return None
@@ -439,13 +669,27 @@ class TrainingService:
             return None
 
         activated_at = utc_now_iso()
-        self.models.set_active_models(top_models)
+        deterministic_session_id = f"sim_upgrade_{pending['id']}"
+        self.database.set_runtime_state(
+            "model_rollover_status",
+            {
+                "state": "activating",
+                "run_id": str(pending["id"]),
+                "model_ids": [str(item["id"]) for item in top_models],
+                "simulation_session_id": deterministic_session_id,
+                "models_already_active": bool(pending_already_active),
+                "updated_at": activated_at,
+            },
+        )
+        if not pending_already_active:
+            self.models.set_active_models(top_models)
         # Import locally to keep the training module independent of simulation
         # implementation details during module import.
         from .paper_trading import PaperTradingService
 
         simulation = PaperTradingService(self.database, self.settings).reset_simulation(
-            created_reason="model_generation_upgrade"
+            created_reason="model_generation_upgrade",
+            session_id=deterministic_session_id,
         )
         try:
             summary = json.loads(pending.get("summary_json") or "{}")
@@ -457,10 +701,6 @@ class TrainingService:
             "required_flat_strategies": ["model_1", "model_2", "model_3", "rules_only"],
             "simulation_session_id": simulation["session"]["id"],
         }
-        self.database.execute(
-            "UPDATE training_runs SET promoted=1, summary_json=? WHERE id=? AND promoted=0",
-            (json.dumps(summary, ensure_ascii=False), pending["id"]),
-        )
         self.database.set_runtime_state("last_model_activation_at", activated_at)
         self.database.set_runtime_state("model_entries_paused_for_rollover", False)
         self.database.set_runtime_state(
@@ -483,6 +723,14 @@ class TrainingService:
                 "open_model_positions": 0,
                 "simulation_session_id": simulation["session"]["id"],
             },
+        )
+        # ``promoted`` is the final commit marker. If the process dies before
+        # this write, the next scheduler cycle re-enters this method, detects
+        # that the same Top-3 is already active, reuses the deterministic
+        # simulation session, and safely completes the rollover.
+        self.database.execute(
+            "UPDATE training_runs SET promoted=1, summary_json=? WHERE id=? AND promoted=0",
+            (json.dumps(summary, ensure_ascii=False), pending["id"]),
         )
         self.database.audit(
             category="model",
@@ -621,7 +869,7 @@ class TrainingService:
                     "tag": row["tag"],
                     "launchpad": row.get("launchpad"),
                     "liquidity_usd": row.get("liquidity"),
-                    "final_close_ratio": row.get("final_close_ratio"),
+                    "final_close_ratio": row.get("label_final_close_ratio"),
                     "return_is_estimated": bool(row.get("terminal_return_estimated")),
                     "execution_invested_usd": (execution.get(int(row["id"])) or {}).get("invested_usd"),
                     "execution_net_pnl_usd": (execution.get(int(row["id"])) or {}).get("net_pnl_usd"),
@@ -645,6 +893,7 @@ class TrainingService:
               AND strategy_key='rules_only'
               AND status='closed'
               AND sample_id IS NOT NULL
+              AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0
             ORDER BY exit_time DESC,id DESC
             """
         )

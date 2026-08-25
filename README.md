@@ -67,7 +67,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 - quote 资产属于 `SOL/USDC/USDT`，且目标 Token 不属于 `SOL/USDT/USDC/PYUSD/WBTC/WETH`；
 - `rug_ratio < 0.2`、`insider_ratio < 0.2`、`bundler_rate < 0.2`；
 - `liquidity > 4800`；
-- `0.125 <= top_10_holder_rate <= 0.28`；
+- `0.14 < top_10_holder_rate < 0.25`；
 - `fresh_wallet_rate < 0.2`；
 - `burn_status == "burn"`；
 - `renounced_mint == 1` 且 `renounced_freeze_account == 1`；
@@ -125,6 +125,12 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 迁移前备份 `data/backups/meme_quant_pre_filter_top028_vps31_20260813T050755Z.db`。从 1858 条样本中删除 182 条不合格样本，其中 165 条 mature negative、17 条 mature positive；Top10 不合格 42 条（4 条 `<0.125`、38 条 `>0.28`），成交均额 `<=31` 的 144 条，二者有 4 条重叠。同步删除 36 条关联 prediction；4 个关联 simulation position 均已关闭，因此只解绑其 sample/prediction 引用，保留 8 条历史 trade 与账户流水。迁移后剩余 **1676 条样本：1674 mature（327 正 / 1347 负）+ 2 pending**，新筛选口径违规数为 0。
 
+#### 2026-08-22 Top10 严格区间迁移
+
+当前生产准入进一步收紧为严格开区间 `0.14 < top_10_holder_rate < 0.25`，因此 `0.14` 与 `0.25` 两个边界值本身也拒绝。`top_10_holder_rate` 的准入判断与模型特征统一读取同一个 `normalize_token()` 权威值；local discovery prefilter、authoritative `SafetyFilter`、`CsvImporter` 与 legacy `量化训练采集.py` 使用完全一致的严格边界，Trenches 仍只负责 transport/lifecycle 范围，不下发该业务阈值。
+
+迁移前使用 SQLite backup API 创建 `data/backups/meme_quant_pre_top10_014_025_20260822T145311Z.db`。迁移快照从 **1009** 条样本中删除 **210** 条不合规样本（200 mature：28 正 / 172 负；10 pending），并将其关联的 **158** 个 `rules_only` simulation position 解除 `sample_id` 引用以保留真实账本与成交事实，其中当时 **2** 个仍未平仓的模拟仓继续按原 PositionMonitor 退出链自然结算，不做规则变更驱动的强平；关联 prediction 为 0。迁移后剩余 **799 条样本：789 mature（157 正 / 632 负）+ 10 pending**，raw 权威值与 `features_json` 新规则违规数均为 0，`PRAGMA foreign_key_check` 为 0。
+
 ## 3. 模型与收益评价
 
 ### 3.1 Top 3 模型 + 不用模型基线
@@ -139,7 +145,7 @@ GMGN 返回 pool 后按资产语义校验交易对：quote 侧只允许 `SOL/USD
 
 一次训练按开发期 chronological OOS 结果选出 **Top 3**。三个模型分别保存自己的特征子集、单一决策线、经济得分、泛化得分和综合分，并映射到 `model_1 / model_2 / model_3`。此外 `rules_only` 作为“不用模型”基线：所有通过规则初筛的新样本都进入同样的模拟执行链，只跳过模型二筛。
 
-模型拟合仍是标准二分类问题，交易目标不直接写成训练 loss。离线经济评价自 2026-08-14 起使用摩擦调整固定收益单位 `U = 5×TP - FP`；若以 Precision `p`、Recall `r` 和同一评估池真实正类数 `N+` 表示，则等价于 `U = N+ × r × (6 - 1/p)`。固定 $50 只用于模型间公平离线评价，对应理论美元收益 `$5 × U`；实际交易本金仍执行 `min(1% × entry liquidity, $50)`。开发期经济得分 `E = mean(clip((5×TP-FP)/(5×N+), -1, 1))`；泛化得分 `G` 综合 AP Skill、跨时间窗口稳定性和近期衰减；综合分固定为 `S = 0.60×E + 0.40×G`。Top 3 只按开发期 OOS 的 `S` 排名，最终时间留出集只做 certification。每个算法内部不再固定 12 / 20 / 全量档位，而是在可行特征数上自适应搜索；每个 chronological development fold 只能用该 fold 的训练段进行特征排序，测试段不得参与特征选择。最终仍采用 one-standard-error 奥卡姆规则：性能没有显著低于最佳方案时选择更小维度；最终 holdout 始终只做 certification。
+模型拟合仍是标准二分类问题，交易目标不直接写成训练 loss。自 **2026-08-24** 起，当前离线经济评价使用摩擦调整固定收益单位 `U = 3×TP - FP`；若以 Precision `p`、Recall `r` 和同一评估池真实正类数 `N+` 表示，则等价于 `U = N+ × r × (4 - 1/p)`。固定 $50 只用于模型间公平离线评价，对应理论美元收益 `$5 × U`，即正类代理 +$15、负类 -$5；实际交易本金仍执行 `min(1% × entry liquidity, $50)`。开发期经济得分 `E = mean(clip((3×TP-FP)/(3×N+), -1, 1))`；泛化得分 `G` 综合 AP Skill、跨时间窗口稳定性和近期衰减；综合分固定为 `S = 0.60×E + 0.40×G`。Top 3 只按开发期 OOS 的 `S` 排名，最终时间留出集只做 certification。每个算法内部不再固定 12 / 20 / 全量档位，而是在可行特征数上自适应搜索；每个 chronological development fold 只能用该 fold 的训练段进行特征排序，测试段不得参与特征选择。最终仍采用 one-standard-error 奥卡姆规则：性能没有显著低于最佳方案时选择更小维度；最终 holdout 始终只做 certification。
 
 ### 3.2 时间切分
 
@@ -161,7 +167,7 @@ pnl_i = capital_i × realized_return_i
 cumulative_pnl = Σ pnl_i
 ```
 
-实际模拟/实盘执行继续使用上述逐笔本金和真实交易摩擦；离线 Top 3 排名仍使用统一固定 $50；2026-08-18 结合 route-aware 执行摩擦，将经济代理进一步收紧为 `+4/-1`：正类按 +$20、负类按 -$5 计入排序，盈亏平衡 Precision 为 20%，从模型选择阶段为滑点、平台费、网络费和执行摩擦预留空间，同时不让不同样本的流动性规模污染模型优劣。系统另从 `rules_only` 的 route-validated 平仓中采集 `E_exec` shadow 指标，用于观察手续费、滑点和 no-route 对真实可执行收益的影响；`E_exec` 当前权重固定为 0，不参与模型排名。模型概率与决策线都来自开发期 OOS；最终 holdout 只生成审计成绩单，不再参与阈值或排名。
+实际模拟/实盘执行继续使用上述逐笔本金和真实交易摩擦；离线 Top 3 排名仍使用统一固定 $50。自 **2026-08-24** 起，当前模型经济代理进一步收紧为 `+3/-1`：正类按 +$15、负类按 -$5 计入排序，盈亏平衡 Precision 为 25%，以更贴近当前累计交易样本下的可执行收益结构；该调整只影响模型选择、决策线搜索、ModelHealth 与 Adaptive/OPE 的经济效用，不改变 H1 `1.6x/0.9x` 标签与真实交易退出规则。系统另从 `rules_only` 的 route-validated 平仓中采集 `E_exec` shadow 指标，用于观察手续费、滑点和 no-route 对真实可执行收益的影响；`E_exec` 当前权重固定为 0，不参与模型排名。模型概率与决策线都来自开发期 OOS；最终 holdout 只生成审计成绩单，不再参与阈值或排名。
 
 Top 3 更新规则：
 
@@ -384,7 +390,7 @@ npm run build
 
 ### 9.2 2026-08-16 Event/Regime 自适应层
 
-市场状态与 Token Alpha 分层：Token 局部新特征只描述入场前已发生的 1m 事件，`price_change_1m` 的历史 fallback 仅使用目标时点前已闭合的 1m bar；Regime 则允许使用截至决策时点的 SOL 5m/15m/1h、Solana TPS/priority fee、Meme breadth、GMGN Hot Search/Smart Money/KOL/Dex promotion、执行质量及三模型近期聚类后表现。`rules_only` 永久保持固定规则基线；`model_1/2/3` 记录 `DEFENSIVE / NEUTRAL / EXPANSIVE` 的 logit 阈值反事实。当前策略默认处于 **shadow gate**：即使 Regime 推荐收紧或放宽，实际阈值仍为 Neutral，直到当前 feature generation 至少获得 120 个独立 sample cluster、至少 40 个动作会改变选择的 cluster，并且 chronological 70/30 development/certification 的 +4/-1 excess utility 满足 development>0、certification 95% LCB>0、三个模型各自 certification 均不为负。在线探索另有第二道 `adaptive_exploration_ready` 门，且最大 5%；未通过证据门时 `.env` 单独设置探索率也不能启用探索。
+市场状态与 Token Alpha 分层：Token 局部新特征只描述入场前已发生的 1m 事件，`price_change_1m` 的历史 fallback 仅使用目标时点前已闭合的 1m bar；Regime 则允许使用截至决策时点的 SOL 5m/15m/1h、Solana TPS/priority fee、Meme breadth、GMGN Hot Search/Smart Money/KOL/Dex promotion、执行质量及三模型近期聚类后表现。`rules_only` 永久保持固定规则基线；`model_1/2/3` 记录 `DEFENSIVE / NEUTRAL / EXPANSIVE` 的 logit 阈值反事实。当前策略默认处于 **shadow gate**：即使 Regime 推荐收紧或放宽，实际阈值仍为 Neutral，直到当前 feature generation 至少获得 120 个独立 sample cluster、至少 40 个动作会改变选择的 cluster，并且 chronological 70/30 development/certification 的 +3/-1 excess utility 满足 development>0、certification 95% LCB>0、三个模型各自 certification 均不为负。在线探索另有第二道 `adaptive_exploration_ready` 门，且最大 5%；未通过证据门时 `.env` 单独设置探索率也不能启用探索。
 
 Provider fallback 采用“主源优先、缺失不伪造为 0”：GMGN Key Pool 是 Token/Trending/Hot Search/Smart Money/KOL/DexScreener 集成字段主源；GMGN 整体不可用，或其 Signal 中 Dex promotion 子族单独缺失时，才以 DEX Screener Public API 的最新 Solana Ads/Boosts 做低频、家族级 attention fallback。Solana Network 状态按 `4×Alchemy 独立 Free account → Solana Public RPC emergency` 降级；Public RPC 只允许应急且降低 Regime confidence。Alchemy Free 当前为每账号 30M CU，`getRecentPerformanceSamples=20 CU`、`getRecentPrioritizationFees=10 CU`，因此一分钟一次网络状态远低于免费预算。DEX Screener 官方 Public API 仍为无鉴权免费接口，Ads/Boost 类 60 RPM、Pair/Token 类 300 RPM；官方 API Terms 同时确认存在付费 API，但公开网页未给出可验证的个人免费 Key/付费价目表，因此当前不把它设为关键生产依赖。
 
@@ -396,7 +402,11 @@ Provider fallback 采用“主源优先、缺失不伪造为 0”：GMGN Key Poo
 
 同时修复两项执行/审计缺陷：第一，旧 `trades.slippage_*` 把 GMGN current price 到 Jupiter fill 的跨源/跨时点差异当成滑点；170 笔 route-validated 历史 SELL 的该字段由 `$393.28` 按 Jupiter 自带 `priceImpact` 重分类为 `$96.72`，约 `$296.56` 被纠正为非 slippage execution deviation。该历史修复不改变任何 fill、现金或 PnL，旧 deviation 保留在 trade `response_json`。第二，旧 PositionMonitor 会等待整批 GMGN 持仓行情全部返回后才处理 paper SELL，最慢 Token 会阻塞其它 Token；现在每个 market response 一到即按实际响应时刻判断，并立刻启动受 Jupiter-key semaphore 限制的退出任务。默认轮询目标同时从 3s 收紧到 **2s**，生产已观测 `target_poll_seconds=2.0 / last_start_interval_seconds=2.0`。
 
-模型经济目标同步从 `+5/-1` 收紧为 **`+4/-1`**：`U=4TP-FP`，固定 $50 代理为赢 +$20 / 输 -$5，盈亏平衡 Precision=20%；H1 `1.6x/0.9x` 标签与实际交易规则不变。新模型写入 `economic_objective_version=fixed_4_to_1_v2`；旧 +5/-1 active Top 3 即使未来 v3 mature 达到 1000，也不会恢复模型评分，必须等新目标模型训练并原子切换。
+2026-08-18 当时模型经济目标从 `+5/-1` 收紧为 **`+4/-1`**：`U=4TP-FP`，固定 $50 代理为赢 +$20 / 输 -$5，盈亏平衡 Precision=20%；H1 `1.6x/0.9x` 标签与实际交易规则不变。该阶段新模型写入 `economic_objective_version=fixed_4_to_1_v2`。
+
+**2026-08-24 当前口径**进一步收紧为 **`+3/-1`**：`U=3TP-FP=N+×recall×(4-1/precision)`，固定 $50 代理为赢 +$15 / 输 -$5，盈亏平衡 Precision=25%，经济得分归一化为 `E=mean(clip((3TP-FP)/(3N+),-1,1))`。新模型写入 `economic_objective_version=fixed_3_to_1_v3`；Prediction 对旧 objective 模型继续 fail-closed，必须使用本口径重新训练的模型工件。
+
+本次热更新后正式手动重训 run `b040425e-3043-4dd5-9752-f6685d83f4b9` 使用 **1080 条 current-generation mature 样本 + 当前持久化 44 特征候选池**，`retry_count=0`、无训练错误。开发期选出的新 Top 3 为：Rank 1 **Extra Trees**（35 features，threshold `0.2454529`，E `0.139676`，G `0.459697`，S `0.267685`）；Rank 2 **Decision Tree**（4 features，threshold `0.42`，E `0.124905`，G `0.437260`，S `0.249847`）；Rank 3 **Random Forest**（20 features，threshold `0.2763549`，E `0.118388`，G `0.447422`，S `0.250002`）。三者工件均写入 `fixed_3_to_1_v3`。final holdout 继续只做 certification：Extra Trees / Decision Tree / Random Forest 的 Precision 分别约 `28.57% / 20.00% / 19.51%`；该结果不反向改变开发期 Top 3。训练完成后候选按既有 staged rollover 进入 `waiting_for_flat`，并冻结四策略新开仓；已有 `rules_only` 仓位继续按原 TP/SL/1h 路径自然退出，禁止为换模强平。
 
 ### 9.4 实盘接口刻意停放
 

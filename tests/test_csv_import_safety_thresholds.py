@@ -36,8 +36,10 @@ def test_csv_import_applies_current_top10_and_volume_per_swap_thresholds(tmp_pat
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        writer.writerow({**base, "address": "accepted", "top_10_holder_rate": "0.28", "volume_1h/swaps_1h": str(math.log(31.01))})
-        writer.writerow({**base, "address": "top-too-high", "top_10_holder_rate": "0.280001", "volume_1h/swaps_1h": str(math.log(100.0))})
+        writer.writerow({**base, "address": "accepted", "top_10_holder_rate": "0.2", "volume_1h/swaps_1h": str(math.log(31.01))})
+        writer.writerow({**base, "address": "top-low-boundary", "top_10_holder_rate": "0.14", "volume_1h/swaps_1h": str(math.log(100.0))})
+        writer.writerow({**base, "address": "top-high-boundary", "top_10_holder_rate": "0.25", "volume_1h/swaps_1h": str(math.log(100.0))})
+        writer.writerow({**base, "address": "top-too-high", "top_10_holder_rate": "0.250001", "volume_1h/swaps_1h": str(math.log(100.0))})
         writer.writerow({**base, "address": "vps-boundary", "top_10_holder_rate": "0.2", "volume_1h/swaps_1h": str(math.log(31.0))})
 
     summary = CsvImporter(database).import_file(path)

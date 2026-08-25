@@ -133,10 +133,10 @@ class CsvImporter:
                 volume_per_swap_feature = _float(row.get("volume_1h/swaps_1h"))
                 min_log_volume_per_swap = math.log(FILTER_THRESHOLDS.min_volume_per_swap_1h)
                 if (
-                    top_10_holder_rate is not None
-                    and not FILTER_THRESHOLDS.min_top_10_holder_rate
-                    <= top_10_holder_rate
-                    <= FILTER_THRESHOLDS.max_top_10_holder_rate
+                    top_10_holder_rate is None
+                    or not FILTER_THRESHOLDS.min_top_10_holder_rate
+                    < top_10_holder_rate
+                    < FILTER_THRESHOLDS.max_top_10_holder_rate
                 ) or (
                     volume_per_swap_feature is not None
                     and volume_per_swap_feature <= min_log_volume_per_swap

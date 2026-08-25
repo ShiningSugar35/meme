@@ -14,7 +14,7 @@ from backend.app.database import Database
 from backend.app.services.paper_position_monitor import PaperPositionMonitor
 from backend.app.services.paper_trading import PaperTradingService
 from backend.app.services.platform_configuration import PlatformConfigurationService
-from backend.app.services.position_monitor import PositionMonitorService
+from backend.app.services.position_monitor import PositionMonitorService, PositionMonitorWorker
 from backend.app.trading.live.models import ExecutionResult, OrderStatus
 from backend.app.trading.simulator.jupiter_probe import RouteProbeResult
 
@@ -103,6 +103,22 @@ class FixedSolPrice:
             observed_at=int(occurred_at.timestamp()),
             source="test",
         )
+
+
+class RefreshingSolPrice:
+    def __init__(self) -> None:
+        self.fresh = False
+        self.refresh_calls = 0
+
+    def price_at(self, occurred_at, *, max_age_seconds=None):
+        if not self.fresh:
+            return None
+        return SimpleNamespace(price_usd=180.0, observed_at=int(occurred_at), source="test-refresh")
+
+    async def refresh(self, provider, *, now_ts=None):
+        self.refresh_calls += 1
+        self.fresh = True
+        return SimpleNamespace(price_usd=180.0, observed_at=int(now_ts or time.time()), source="test-refresh")
 
 
 class FakeLiveService:
@@ -368,3 +384,22 @@ async def test_fast_market_response_exits_before_slow_asset_returns(tmp_path: Pa
     report = await task
     assert report.paper_closed == 2
     assert database.fetch_one("SELECT status FROM positions WHERE id='paper-slow'")["status"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_worker_refreshes_sol_fee_fact_independently_of_collector(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_paper(database, position_id="paper-sol-refresh", address="sol-refresh-token", opened=opened)
+    worker = PositionMonitorWorker(database, settings)
+    fake = RefreshingSolPrice()
+    worker._sol_price = fake
+    worker._sol_provider = object()
+
+    first = await worker._refresh_sol_usd_for_open_simulation_positions()
+    second = await worker._refresh_sol_usd_for_open_simulation_positions()
+
+    assert first is None
+    assert second is None
+    assert fake.refresh_calls == 1

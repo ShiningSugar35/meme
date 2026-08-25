@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from dotenv import dotenv_values
 
 from ..collector.client import CollectorEndpoints, GMGNDataClient, HttpxTransport
-from ..collector.enrichment import merge_sources
+from ..collector.enrichment import GMGNEnrichmentProvider, merge_sources
 from ..collector.errors import CollectorAPIError, CollectorNetworkError
 from ..collector.filters import first, normalize_token, to_float
 from ..collector.models import ApiKeyRoles
@@ -23,6 +23,7 @@ from .live_trading import LiveTradingService
 from .paper_position_monitor import PaperPositionMonitor
 from .paper_trading import PaperTradingService
 from .platform_configuration import ENV_PATH, PlatformConfigurationService
+from .sol_price import SolUsdPriceService
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,15 +312,15 @@ class PositionMonitorService:
         stop_price = float(row.get("stop_loss_price") or 0.0)
         take_price = float(row.get("take_profit_price") or 0.0)
         if stop_price > 0 and price <= stop_price:
-            reason = "stop_loss_0_9x"
+            reason = self.paper._exit_reason_for_policy(row, "stop")
         elif take_price > 0 and price >= take_price:
-            reason = "take_profit_1_6x"
+            reason = self.paper._exit_reason_for_policy(row, "take")
         else:
             expires_at = datetime.fromisoformat(str(row["expires_at"]))
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
             if now_ts >= int(expires_at.timestamp()):
-                reason = "timeout_1h"
+                reason = self.paper._exit_reason_for_policy(row, "timeout")
         if reason is None:
             return "open"
 
@@ -546,6 +547,9 @@ class PositionMonitorWorker:
         self._stop = asyncio.Event()
         self._transport: HttpxTransport | None = None
         self._provider: GMGNPositionMarketProvider | None = None
+        self._sol_provider: GMGNEnrichmentProvider | None = None
+        self._sol_price = SolUsdPriceService(database)
+        self._last_sol_refresh_attempt_monotonic = 0.0
         self._gmgn_limiter = gmgn_limiter
         self._env_mtime_ns: int | None = None
         self._provider_rebuilds = 0
@@ -553,6 +557,7 @@ class PositionMonitorWorker:
     async def _rebuild_provider(self) -> None:
         old_transport = self._transport
         self._provider = None
+        self._sol_provider = None
         self._transport = None
         if old_transport is not None:
             await old_transport.close()
@@ -588,7 +593,46 @@ class PositionMonitorWorker:
             limiter=limiter,
             endpoints=endpoints,
         )
+        self._sol_provider = GMGNEnrichmentProvider(client, roles)
         return GMGNPositionMarketProvider(client, roles)
+
+    async def _refresh_sol_usd_for_open_simulation_positions(self) -> str | None:
+        """Keep fee-time SOL/USD facts available independently of Collector."""
+        if self._sol_provider is None:
+            return "sol_kline_provider_unavailable"
+        open_row = self.database.fetch_one(
+            """
+            SELECT 1 AS present
+            FROM positions
+            WHERE account_kind='simulation'
+              AND strategy_key IN ('model_1','model_2','model_3','rules_only')
+              AND status IN ('open','closing')
+            LIMIT 1
+            """
+        )
+        if not open_row:
+            return None
+        now_ts = int(time.time())
+        if self._sol_price.price_at(now_ts, max_age_seconds=60) is not None:
+            return None
+        now_monotonic = time.monotonic()
+        if now_monotonic - self._last_sol_refresh_attempt_monotonic < 30.0:
+            return None
+        self._last_sol_refresh_attempt_monotonic = now_monotonic
+        try:
+            price = await self._sol_price.refresh(self._sol_provider, now_ts=now_ts)
+            if price is None:
+                return "sol_usd_price_stale_after_refresh"
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"[:300]
+            self.database.audit(
+                category="trading",
+                action="position_monitor_sol_usd_refresh_failed",
+                severity="warning",
+                details={"error": message},
+            )
+            return message
+        return None
 
     async def run_forever(self) -> None:
         if not self.settings.position_monitor_enabled:
@@ -654,9 +698,10 @@ class PositionMonitorWorker:
                 cycle_started_at = utc_now_iso()
                 self._provider.reset_cycle_cache()
                 try:
+                    sol_usd_refresh_error = await self._refresh_sol_usd_for_open_simulation_positions()
                     report = await self.service.run_cycle(self._provider)
                     elapsed = time.monotonic() - started
-                    state = "degraded" if report.market_data_failures else "running"
+                    state = "degraded" if (report.market_data_failures or sol_usd_refresh_error) else "running"
                     self.database.set_runtime_state(
                         "position_monitor_status",
                         {
@@ -666,6 +711,7 @@ class PositionMonitorWorker:
                             "last_cycle_started_at": cycle_started_at,
                             "last_start_interval_seconds": start_interval,
                             "provider_rebuilds": self._provider_rebuilds,
+                            "sol_usd_refresh_error": sol_usd_refresh_error,
                             **asdict(report),
                         },
                     )

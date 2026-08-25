@@ -28,7 +28,7 @@ def test_csv_import_is_idempotent_and_migrates_legacy_terminal(tmp_path: Path) -
     path = tmp_path / "legacy.csv"
     fields = [
         "address", "name", "symbol", "type", "time", "age", "launchpad", "price",
-        "price_2h_max/price", "price_2h_min/price", "fresh_wallet_rate", "tag",
+        "price_2h_max/price", "price_2h_min/price", "top_10_holder_rate", "fresh_wallet_rate", "tag",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -37,7 +37,7 @@ def test_csv_import_is_idempotent_and_migrates_legacy_terminal(tmp_path: Path) -
             "address": "token-a", "name": "A", "symbol": "A", "type": "new_creation",
             "time": "1700000000", "age": "1.2", "launchpad": "Pump.fun", "price": "0.1",
             "price_2h_max/price": "1.30", "price_2h_min/price": "0.91",
-            "fresh_wallet_rate": "0.1", "tag": "1",
+            "top_10_holder_rate": "0.20", "fresh_wallet_rate": "0.1", "tag": "1",
         })
     importer = CsvImporter(database)
     first = importer.import_file(path)
@@ -60,7 +60,7 @@ def test_csv_import_skips_age_at_or_above_300_minutes(tmp_path: Path) -> None:
     path = tmp_path / "legacy-age.csv"
     fields = [
         "address", "name", "symbol", "type", "time", "age", "launchpad", "price",
-        "price_2h_max/price", "price_2h_min/price", "fresh_wallet_rate", "tag",
+        "price_2h_max/price", "price_2h_min/price", "top_10_holder_rate", "fresh_wallet_rate", "tag",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -69,13 +69,13 @@ def test_csv_import_skips_age_at_or_above_300_minutes(tmp_path: Path) -> None:
             "address": "token-young", "name": "Y", "symbol": "Y", "type": "new_creation",
             "time": "1700000000", "age": str(math.log(299.0)), "launchpad": "Pump.fun", "price": "0.1",
             "price_2h_max/price": "1.30", "price_2h_min/price": "0.91",
-            "fresh_wallet_rate": "0.1", "tag": "0",
+            "top_10_holder_rate": "0.20", "fresh_wallet_rate": "0.1", "tag": "0",
         })
         writer.writerow({
             "address": "token-old", "name": "O", "symbol": "O", "type": "new_creation",
             "time": "1700000001", "age": str(math.log(300.0)), "launchpad": "Pump.fun", "price": "0.1",
             "price_2h_max/price": "1.30", "price_2h_min/price": "0.91",
-            "fresh_wallet_rate": "0.1", "tag": "0",
+            "top_10_holder_rate": "0.20", "fresh_wallet_rate": "0.1", "tag": "0",
         })
 
     summary = CsvImporter(database).import_file(path)
@@ -120,13 +120,17 @@ def test_label_finalization_preserves_legacy_utility_ineligibility(tmp_path: Pat
     asyncio.run(SqliteCollectorSink(database).save_label(result))
 
     row = database.fetch_one(
-        "SELECT label_status,utility_eligible,terminal_return_estimated,final_1h_close_ratio FROM samples WHERE address=?",
+        """SELECT label_status,utility_eligible,terminal_return_estimated,
+                  final_1h_close_ratio,label_final_close_ratio,label_window_seconds
+           FROM samples WHERE address=?""",
         ("fixture-mint-legacy-pending",),
     )
     assert row["label_status"] == "mature"
     assert row["utility_eligible"] == 0
     assert row["terminal_return_estimated"] == 0
-    assert row["final_1h_close_ratio"] == 1.25
+    assert row["final_1h_close_ratio"] is None
+    assert row["label_final_close_ratio"] == pytest.approx(1.25)
+    assert row["label_window_seconds"] == 5400
 
 
 def test_same_token_is_independent_at_different_entry_times(tmp_path: Path) -> None:
@@ -191,4 +195,50 @@ def test_risk_limits_and_duplicate_live_position(tmp_path: Path) -> None:
     )
     assert allowed.allowed
     assert allowed.investment_usd == 49
+
+def test_v13_backfills_legacy_position_policy_snapshot(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    database.execute(
+        """
+        INSERT INTO positions(
+            id,token_address,account_kind,strategy_key,status,entry_time,expires_at,
+            invested_usd,entry_price,stop_loss_price,take_profit_price
+        ) VALUES('legacy-v13','legacy-token','simulation','rules_only','open',
+                 '2026-08-24T00:00:00+00:00','2026-08-24T01:00:00+00:00',
+                 50,1.0,0.9,1.6)
+        """
+    )
+    # Re-running initialize is the supported idempotent migration path.
+    database.initialize()
+    row = database.fetch_one(
+        """SELECT exit_policy_version,stop_loss_ratio,take_profit_ratio,max_holding_seconds
+           FROM positions WHERE id='legacy-v13'"""
+    )
+    assert row == {
+        "exit_policy_version": "h1_tp160_sl090_v1",
+        "stop_loss_ratio": pytest.approx(0.9),
+        "take_profit_ratio": pytest.approx(1.6),
+        "max_holding_seconds": 3600,
+    }
+
+
+def test_v5_pending_is_not_due_at_60m_but_is_due_at_90m(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    repository = SampleRepository(database)
+    now_ts = 1_900_000_000
+    repository.insert(
+        SampleRecord(
+            address="pending-v5",
+            token_type="new_creation",
+            entry_time=now_ts - 3600,
+            entry_price=1.0,
+            features={"x": 1.0},
+            label_status="pending",
+        )
+    )
+    cutoff = now_ts - 5400
+    assert repository.list_pending_due(before_epoch=cutoff) == []
+    database.execute("UPDATE samples SET entry_time=? WHERE address='pending-v5'", (cutoff,))
+    due = repository.list_pending_due(before_epoch=cutoff)
+    assert [row["address"] for row in due] == ["pending-v5"]
 

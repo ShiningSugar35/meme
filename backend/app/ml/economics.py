@@ -5,8 +5,8 @@ import numpy as np
 from .types import EconomicSlice, EvaluationMetrics
 
 FIXED_TRADE_USD = 50.0
-ECONOMIC_OBJECTIVE_VERSION = "fixed_4_to_1_v2"
-WIN_UNITS = 4.0
+ECONOMIC_OBJECTIVE_VERSION = "fixed_3_to_1_v3"
+WIN_UNITS = 3.0
 LOSS_UNITS = 1.0
 UNIT_USD = 5.0
 
@@ -28,10 +28,10 @@ def economic_sample_weights(economics: EconomicSlice) -> np.ndarray:
 
 
 def theoretical_profit_units(true_positives: int, false_positives: int) -> float:
-    """Friction-adjusted ranking proxy under +4 / -1 payoff units.
+    """Friction-adjusted ranking proxy under +3 / -1 payoff units.
 
     One loss is one unit (-$5). A labelled winner is deliberately haircut from
-    its gross +60% path to 4 units (+$20 on a fixed $50 entry) so threshold
+    its gross +60% path to 3 units (+$15 on a fixed $50 entry) so threshold
     search and model ranking reserve room for slippage and trading friction.
     """
     return WIN_UNITS * int(true_positives) - LOSS_UNITS * int(false_positives)
@@ -45,7 +45,7 @@ def theoretical_profit_from_precision_recall(
     """Return normalized fixed-payoff profit units from p/r.
 
     TP = recall * N+, FP = TP/precision - TP, therefore
-    U = N+ * recall * (5 - 1/precision) for the current +4/-1 proxy.
+    U = N+ * recall * (4 - 1/precision) for the current +3/-1 proxy.
     This is an evaluation identity, not a differentiable training objective.
     """
     if precision <= 0 or recall <= 0 or positive_count <= 0:

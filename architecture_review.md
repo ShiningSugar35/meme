@@ -112,6 +112,8 @@ SQLite 单机第一版启用 WAL、外键、busy timeout 和短事务。当前 s
 
 自 2026-08-13 起，Trenches 前置筛选与 local safety filter 对 `top_10_holder_rate` 使用同一闭区间：`0.125 <= top_10_holder_rate <= 0.28`；local safety filter 同时要求 `volume_1h / swaps_1h > 31`。旧版采集脚本同步采用相同阈值，legacy CsvImporter 对已 log 化的成交均额特征执行等价的 `feature > ln(31)`。该口径已追溯清理真实样本集：删除 182 条不合格样本和 36 条关联 predictions；4 个已关闭模拟持仓只解除 sample/prediction 引用，8 条历史成交及账户流水保留。迁移后剩余 1676 条样本且新口径违规数为 0。
 
+**2026-08-22 当前决议**：Top10 业务边界进一步改为严格开区间 `0.14 < top_10_holder_rate < 0.25`。同一个 canonical `normalize_token()` 值同时驱动准入与模型特征，禁止再由 `bundle.stat` 覆盖训练特征；discovery prefilter、SafetyFilter、CsvImporter 和 legacy 采集脚本必须保持严格同构。现库已在物理备份后追溯删除 210 条不合规样本；相关 simulation position 仅解除 sample 外键以保留真实账本和退出状态，迁移后样本侧/特征侧违规数及 SQLite foreign-key violation 均为 0。
+
 ### 5.2 限流与故障隔离
 
 全局共享 2 RPS 安全门限；429 按 reset/retry-after 全局冷却。Cloudflare HTML block 不能当普通业务 429 无限探测。
@@ -137,7 +139,7 @@ Discovery 失败不能阻断已有模拟仓位退出或标签成熟。关闭 dis
 
 候选池覆盖 LogisticRegression、DecisionTree、HistGradientBoosting、GradientBoosting、AdaBoost、ExtraTrees、RandomForest、RBF-SVM、XGBoost，并登记 LightGBM/CatBoost/FLAML optional candidates。缺依赖必须显式 `skipped`；AutoML 只能嵌套在 outer train 内部时间切分。
 
-模型拟合与交易评价分离：训练仍做二分类；开发期经济单位自 2026-08-14 起为 `U=4TP-FP`，Precision/Recall 恒等式为 `U=N+×r×(5-1/p)`。经济得分 E 为各 chronological OOS fold 的归一化 capture，泛化得分 G 综合 AP Skill、稳定性、衰减，综合 `S=0.60E+0.40G`。当前 E/G/S 排名公式保持冻结不变。特征数默认从 4 到可用全量逐维搜索；每个 chronological fold 的特征排序只读取本 fold train slice，最终再用 final-train 确定生产特征名，one-standard-error 内优先更小维度。
+模型拟合与交易评价分离：训练仍做二分类；自 2026-08-24 起当前开发期经济单位为 `U=3TP-FP`，Precision/Recall 恒等式为 `U=N+×r×(4-1/p)`。经济得分 E 为各 chronological OOS fold 的归一化 capture，泛化得分 G 综合 AP Skill、稳定性、衰减，综合 `S=0.60E+0.40G`。当前 E/G/S 排名公式保持冻结不变。特征数默认从 4 到可用全量逐维搜索；每个 chronological fold 的特征排序只读取本 fold train slice，最终再用 final-train 确定生产特征名，one-standard-error 内优先更小维度。
 
 ### 6.3 Top 3 单一决策线
 
@@ -266,7 +268,7 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - legacy CSV/schema migration；
 - 标签边界/first-touch；
 - entry-time 特征与未来泄漏；
-- 时序 split/扩展候选池/单一决策线/`4TP-FP`/E-G-S/one-standard-error Occam/final 隔离；
+- 时序 split/扩展候选池/单一决策线/`3TP-FP`/E-G-S/one-standard-error Occam/final 隔离；
 - Top 3 原子发布/三 active model degraded/Rank 1 rollback；
 - durable training queue/restart/scheduler retry；
 - 四策略 simulation session、rules-only 无预测开仓、同 Token current-market 请求合并、2s（可配置）current-price trigger、Jupiter executable quote、ledger/closing recovery；
@@ -370,7 +372,8 @@ Portfolio 使用 `mode × strategy` 两层视图：simulation 下四张策略卡
 - Simulation PnL 会计逐笔复核无双扣：实际 fill 已反映执行价，`slippage_cost_usd` 仅为审计统计，不再次从 `net_pnl` 扣减。
 - Jupiter route SELL 的 slippage 定义改为 Jupiter `priceImpact`；GMGN current-price→Jupiter fill 差异保留为独立 `exit_execution_deviation_bps`。历史 170 笔 route SELL 的错误 slippage 统计由 `$393.28` 重分类为 `$96.72`，PnL 不变。
 - PositionMonitor 从 batch `gather` 改为 per-token `as_completed` + immediate paper exit task，消除慢行情请求对其它 Token 的 head-of-line blocking；poll 目标同步为 2s。
-- 模型经济目标为 `fixed_4_to_1_v2` / `U=4TP-FP`，break-even Precision=20%；旧 objective active model fail-closed，直到新目标重新训练并切换。
+- 2026-08-18 当时模型经济目标为 `fixed_4_to_1_v2` / `U=4TP-FP`，break-even Precision=20%。
+- **2026-08-24 当前模型经济目标为 `fixed_3_to_1_v3` / `U=3TP-FP`，break-even Precision=25%**；Prediction 对旧 objective active model fail-closed，直到按当前目标重新训练并切换。
 
 ### 2026-08-19 Modern Standby runtime correction
 

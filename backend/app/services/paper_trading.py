@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
-from ..collector.constants import LabelPolicy
+from ..collector.constants import EXIT_POLICY_VERSION, LabelPolicy
 from ..collector.models import Kline
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
@@ -254,6 +254,7 @@ class PaperTradingService:
                 FROM positions
                 WHERE simulation_session_id=? AND strategy_key=? AND model_id=?
                   AND status='closed' AND entry_time>=?
+                  AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0
                 """,
                 (session_id, strategy, model_id, started_at),
             ) or {}
@@ -284,6 +285,7 @@ class PaperTradingService:
                 FROM positions
                 WHERE simulation_session_id=? AND strategy_key=? AND status='closed'
                   AND entry_time>=?
+                  AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0
                 """,
                 (session_id, strategy, started_at),
             ) or {}
@@ -389,7 +391,12 @@ class PaperTradingService:
             },
         )
 
-    def reset_simulation(self, *, created_reason: str = "manual_reset") -> dict[str, Any]:
+    def reset_simulation(
+        self,
+        *,
+        created_reason: str = "manual_reset",
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
         open_count = int((self.database.fetch_one(
             """
             SELECT COUNT(*) AS count FROM positions
@@ -400,8 +407,23 @@ class PaperTradingService:
         ) or {"count": 0})["count"])
         if open_count:
             raise ValueError("simulation cannot reset while strategy positions are open")
+        if session_id is not None:
+            existing = self.database.fetch_one(
+                "SELECT * FROM simulation_sessions WHERE id=?", (session_id,)
+            )
+            if existing is not None:
+                if str(existing.get("status") or "") != "active":
+                    raise ValueError("requested idempotent simulation session is no longer active")
+                session = {
+                    "id": str(existing["id"]),
+                    "started_at": str(existing["started_at"]),
+                    "initial_cash_usd": float(existing["initial_cash_usd"]),
+                    "initial_sol_fee_reserve": float(existing.get("initial_sol_fee_reserve") or 0.0),
+                }
+                self.database.set_runtime_state("simulation_session", session)
+                return self.simulation_status()
         session = {
-            "id": f"sim_{uuid.uuid4().hex}",
+            "id": session_id or f"sim_{uuid.uuid4().hex}",
             "started_at": utc_now_iso(),
             "initial_cash_usd": 1_000.0,
             "initial_sol_fee_reserve": 0.0,
@@ -460,11 +482,11 @@ class PaperTradingService:
                     """
                     SELECT COUNT(*) AS positions,
                            COALESCE(SUM(CASE WHEN p.status IN ('opening','open','closing') THEN 1 ELSE 0 END),0) AS open_positions,
-                           COALESCE(SUM(CASE WHEN p.status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
-                           COALESCE(SUM(CASE WHEN p.status='closed' AND p.net_pnl_usd >= 0.20 * p.invested_usd THEN 1 ELSE 0 END),0) AS profit_count,
-                           COALESCE(SUM(CASE WHEN p.status='closed' AND p.net_pnl_usd < 0.05 * p.invested_usd THEN 1 ELSE 0 END),0) AS loss_count,
+                           COALESCE(SUM(CASE WHEN p.status='closed' AND COALESCE(json_extract(p.metadata_json,'$.performance_excluded'),0)=0 THEN 1 ELSE 0 END),0) AS closed_positions,
+                           COALESCE(SUM(CASE WHEN p.status='closed' AND COALESCE(json_extract(p.metadata_json,'$.performance_excluded'),0)=0 AND p.net_pnl_usd >= 0.20 * p.invested_usd THEN 1 ELSE 0 END),0) AS profit_count,
+                           COALESCE(SUM(CASE WHEN p.status='closed' AND COALESCE(json_extract(p.metadata_json,'$.performance_excluded'),0)=0 AND p.net_pnl_usd < 0.05 * p.invested_usd THEN 1 ELSE 0 END),0) AS loss_count,
                            COALESCE(SUM(CASE WHEN p.status IN ('opening','open','closing') THEN p.invested_usd ELSE 0 END),0) AS invested_usd,
-                           COALESCE(SUM(CASE WHEN p.status='closed' THEN p.net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+                           COALESCE(SUM(CASE WHEN p.status='closed' AND COALESCE(json_extract(p.metadata_json,'$.performance_excluded'),0)=0 THEN p.net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                     FROM positions p
                     WHERE p.strategy_key=? AND p.simulation_session_id=?
                       AND p.model_id=? AND p.entry_time>=?
@@ -479,7 +501,15 @@ class PaperTradingService:
                            COALESCE(SUM(COALESCE(slippage_cost_usd,0)),0) AS slippage_cost_usd
                     FROM trades
                     WHERE account_kind='simulation' AND strategy_key=? AND simulation_session_id=?
+                      AND (position_id IS NULL OR NOT EXISTS(
+                          SELECT 1 FROM positions px WHERE px.id=trades.position_id
+                            AND COALESCE(json_extract(px.metadata_json,'$.performance_excluded'),0)=1
+                      ))
                       AND created_at>=?
+                      AND (position_id IS NULL OR NOT EXISTS(
+                          SELECT 1 FROM positions px WHERE px.id=trades.position_id
+                            AND COALESCE(json_extract(px.metadata_json,'$.performance_excluded'),0)=1
+                      ))
                     """,
                     (strategy, session_id, scope["selected_at"]),
                 ) or {}
@@ -514,11 +544,11 @@ class PaperTradingService:
                     """
                     SELECT COUNT(*) AS positions,
                            COALESCE(SUM(CASE WHEN status IN ('opening','open','closing') THEN 1 ELSE 0 END),0) AS open_positions,
-                           COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
-                           COALESCE(SUM(CASE WHEN status='closed' AND net_pnl_usd >= 0.20 * invested_usd THEN 1 ELSE 0 END),0) AS profit_count,
-                           COALESCE(SUM(CASE WHEN status='closed' AND net_pnl_usd < 0.05 * invested_usd THEN 1 ELSE 0 END),0) AS loss_count,
+                           COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN 1 ELSE 0 END),0) AS closed_positions,
+                           COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 AND net_pnl_usd >= 0.20 * invested_usd THEN 1 ELSE 0 END),0) AS profit_count,
+                           COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 AND net_pnl_usd < 0.05 * invested_usd THEN 1 ELSE 0 END),0) AS loss_count,
                            COALESCE(SUM(CASE WHEN status IN ('opening','open','closing') THEN invested_usd ELSE 0 END),0) AS invested_usd,
-                           COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+                           COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                     FROM positions
                     WHERE strategy_key=? AND simulation_session_id=?
                     """,
@@ -592,10 +622,10 @@ class PaperTradingService:
             summaries = self.database.fetch_all(
                 """
                 SELECT strategy_key,
-                       COUNT(*) AS positions,
-                       COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+                       COALESCE(SUM(CASE WHEN status!='closed' OR COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN 1 ELSE 0 END),0) AS positions,
+                       COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN 1 ELSE 0 END),0) AS closed_positions,
                        COALESCE(SUM(CASE WHEN status IN ('opening','open','closing') THEN 1 ELSE 0 END),0) AS open_positions,
-                       COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+                       COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                 FROM positions
                 WHERE simulation_session_id=?
                   AND strategy_key IN ('model_1','model_2','model_3','rules_only')
@@ -650,10 +680,10 @@ class PaperTradingService:
                     summary = self.database.fetch_one(
                         f"""
                         SELECT strategy_key,
-                               COUNT(*) AS positions,
-                               COALESCE(SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),0) AS closed_positions,
+                               COALESCE(SUM(CASE WHEN status!='closed' OR COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN 1 ELSE 0 END),0) AS positions,
+                               COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN 1 ELSE 0 END),0) AS closed_positions,
                                COALESCE(SUM(CASE WHEN status IN ('opening','open','closing') THEN 1 ELSE 0 END),0) AS open_positions,
-                               COALESCE(SUM(CASE WHEN status='closed' THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
+                               COALESCE(SUM(CASE WHEN status='closed' AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0 THEN net_pnl_usd ELSE 0 END),0) AS realized_pnl_usd
                         FROM positions WHERE {scope_where}
                         """,
                         tuple(scope_params),
@@ -772,6 +802,8 @@ class PaperTradingService:
         liquidation = self.database.get_runtime_state("liquidation_job") or {}
         if isinstance(liquidation, dict) and liquidation.get("status") in {"queued", "running"}:
             return PaperOpenResult(False, "liquidation_in_progress")
+        if bool(self.database.get_runtime_state("simulation_entries_paused", False)):
+            return PaperOpenResult(False, "simulation_entries_paused")
         session = self.ensure_simulation_session()
         if prediction_id is not None:
             existing = self.database.fetch_one(
@@ -838,12 +870,17 @@ class PaperTradingService:
         if float(state["cash_usd"]) < capital + quote.fee_usd + network_fee_usd:
             return PaperOpenResult(False, "insufficient_paper_cash")
 
-        expires_at = observed_at + timedelta(hours=1)
+        exit_policy = LabelPolicy()
+        expires_at = observed_at + timedelta(seconds=exit_policy.window_seconds)
         quantity = capital / quote.fill_price
         metadata = {
             "sample_id": sample_id,
             "strategy_key": strategy,
             "execution_policy_version": "h1_route_aware_v1",
+            "exit_policy_version": EXIT_POLICY_VERSION,
+            "stop_loss_ratio": exit_policy.stop_loss_ratio,
+            "take_profit_ratio": exit_policy.take_profit_ratio,
+            "max_holding_seconds": exit_policy.window_seconds,
             "simulation_session_id": state["session_id"],
             "entry_fee_usd": quote.fee_usd,
             "entry_network_fee_sol": quote.network_fee_sol,
@@ -863,8 +900,9 @@ class PaperTradingService:
                 INSERT INTO positions(
                     id,token_address,account_kind,strategy_key,status,simulation_session_id,
                     sample_id,prediction_id,model_id,entry_time,expires_at,invested_usd,token_amount,
-                    entry_price,stop_loss_price,take_profit_price,metadata_json
-                ) VALUES(?,?,'simulation',?,'open',?,?,?,?,?,?,?,?,?,?,?,?)
+                    entry_price,stop_loss_price,take_profit_price,
+                    exit_policy_version,stop_loss_ratio,take_profit_ratio,max_holding_seconds,metadata_json
+                ) VALUES(?,?,'simulation',?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     position_id,
@@ -879,8 +917,12 @@ class PaperTradingService:
                     capital,
                     quantity,
                     quote.fill_price,
-                    quote.fill_price * 0.9,
-                    quote.fill_price * 1.6,
+                    quote.fill_price * exit_policy.stop_loss_ratio,
+                    quote.fill_price * exit_policy.take_profit_ratio,
+                    EXIT_POLICY_VERSION,
+                    exit_policy.stop_loss_ratio,
+                    exit_policy.take_profit_ratio,
+                    exit_policy.window_seconds,
                     json.dumps(metadata, separators=(",", ":")),
                 ),
             )
@@ -902,7 +944,7 @@ class PaperTradingService:
         rows = self.database.fetch_all(
             """
             SELECT p.*,s.tag,s.entry_price AS reference_entry_price,s.liquidity,
-                   s.final_1h_close_ratio,s.price_1h_min_ratio
+                   s.label_final_close_ratio,s.label_min_price_ratio
             FROM positions p
             JOIN samples s ON s.id=p.sample_id
             WHERE p.strategy_key IN ('model_1','model_2','model_3','rules_only')
@@ -918,6 +960,23 @@ class PaperTradingService:
             if self._settle(row):
                 settled += 1
         return settled
+
+    @staticmethod
+    def _exit_reason_for_policy(row: dict[str, Any], kind: str) -> str:
+        stop_ratio = float(row.get("stop_loss_ratio") or 0.9)
+        take_ratio = float(row.get("take_profit_ratio") or 1.6)
+        holding_seconds = int(row.get("max_holding_seconds") or 3600)
+        if kind == "stop":
+            return f"stop_loss_{str(round(stop_ratio, 4)).replace('.', '_')}x"
+        if kind == "take":
+            return f"take_profit_{str(round(take_ratio, 4)).replace('.', '_')}x"
+        if kind == "timeout":
+            if holding_seconds % 3600 == 0:
+                return f"timeout_{holding_seconds // 3600}h"
+            if holding_seconds % 60 == 0:
+                return f"timeout_{holding_seconds // 60}m"
+            return f"timeout_{holding_seconds}s"
+        raise ValueError(f"unsupported exit kind: {kind}")
 
     def monitor_position_realtime(
         self,
@@ -979,11 +1038,11 @@ class PaperTradingService:
         take_price = float(row.get("take_profit_price") or 0.0)
         reason: str | None = None
         if stop_price > 0 and price <= stop_price:
-            reason = "stop_loss_0_9x"
+            reason = self._exit_reason_for_policy(row, "stop")
         elif take_price > 0 and price >= take_price:
-            reason = "take_profit_1_6x"
+            reason = self._exit_reason_for_policy(row, "take")
         elif current_ts >= int(expires_at.timestamp()):
-            reason = "timeout_1h"
+            reason = self._exit_reason_for_policy(row, "timeout")
         if reason is None:
             metadata["last_market_check_at"] = utc_now_iso()
             metadata["last_market_price"] = price
@@ -1088,17 +1147,17 @@ class PaperTradingService:
             low = line.low if line.low is not None else line.close
             high = line.high if line.high is not None else line.close
             if low is not None and stop_price > 0 and low <= stop_price:
-                decision = ("stop_loss_0_9x", stop_price, int(line.timestamp))
+                decision = (self._exit_reason_for_policy(row, "stop"), stop_price, int(line.timestamp))
                 break
             if high is not None and take_price > 0 and high >= take_price:
-                decision = ("take_profit_1_6x", take_price, int(line.timestamp))
+                decision = (self._exit_reason_for_policy(row, "take"), take_price, int(line.timestamp))
                 break
 
         if decision is None and current_ts >= expires_ts:
             close_lines = [line for line in ordered if line.close not in (None, 0)]
             if close_lines:
                 final_line = close_lines[-1]
-                decision = ("timeout_1h", float(final_line.close), expires_ts)
+                decision = (self._exit_reason_for_policy(row, "timeout"), float(final_line.close), expires_ts)
             else:
                 return PaperMonitorResult(position_id, "pending", "timeout_candle_unavailable")
 
@@ -1248,6 +1307,7 @@ class PaperTradingService:
             "execution_policy_version": "h1_route_aware_v1",
             "exit_route_probe": route_probe,
             "exit_trigger_at": trigger_at,
+            "exit_trigger_reference_price": reference_price,
             "exit_quote_source": "jupiter_read_only_quote" if execution_quote is not None and route_probe.get("state") == "quoted" else "seeded_local_execution_model",
             "exit_fee_usd": quote.fee_usd,
             "exit_network_fee_sol": quote.network_fee_sol,
@@ -1495,13 +1555,18 @@ class PaperTradingService:
     def _settle(self, row: dict[str, Any]) -> bool:
         tag = int(row["tag"])
         reference_entry = float(row["reference_entry_price"])
+        stop_ratio = float(row.get("stop_loss_ratio") or 0.9)
+        take_ratio = float(row.get("take_profit_ratio") or 1.6)
         if tag == 1:
-            exit_reason, reference_price = "take_profit_1_6x", reference_entry * 1.6
-        elif float(row.get("price_1h_min_ratio") or 1.0) <= 0.9:
-            exit_reason, reference_price = "stop_loss_0_9x", reference_entry * 0.9
+            exit_reason = self._exit_reason_for_policy(row, "take")
+            reference_price = reference_entry * take_ratio
+        elif float(row.get("label_min_price_ratio") or 1.0) <= stop_ratio:
+            exit_reason = self._exit_reason_for_policy(row, "stop")
+            reference_price = reference_entry * stop_ratio
         else:
-            ratio = float(row.get("final_1h_close_ratio") or 1.0)
-            exit_reason, reference_price = "timeout_1h", reference_entry * ratio
+            ratio = float(row.get("label_final_close_ratio") or 1.0)
+            exit_reason = self._exit_reason_for_policy(row, "timeout")
+            reference_price = reference_entry * ratio
         quantity = float(row["token_amount"] or 0)
         gross_reference = quantity * reference_price
         observed_at = datetime.fromisoformat(row["expires_at"])

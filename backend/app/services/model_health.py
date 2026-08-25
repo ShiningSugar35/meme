@@ -8,7 +8,8 @@ from typing import Any
 from ..collector.constants import LabelPolicy
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
-from ..ml.economics import UNIT_USD, WIN_UNITS, theoretical_profit_units
+from ..ml.decision_policy import DECISION_POLICY_VERSION
+from ..ml.economics import ECONOMIC_OBJECTIVE_VERSION, UNIT_USD, WIN_UNITS, theoretical_profit_units
 from ..repositories.models import ModelRepository
 from .training import TrainingService
 
@@ -51,6 +52,24 @@ class ModelHealthService:
     ) -> ModelHealthReport:
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         active = self.models.active_models()
+        contract_current = len(active) == 3 and all(
+            str((item.get("parameters") or {}).get("label_version") or "") == LabelPolicy().label_version
+            and str((item.get("parameters") or {}).get("economic_objective_version") or "") == ECONOMIC_OBJECTIVE_VERSION
+            and str((item.get("parameters") or {}).get("decision_policy_version") or "") == DECISION_POLICY_VERSION
+            for item in active
+        )
+        if len(active) == 3 and not contract_current:
+            return self._store(ModelHealthReport(
+                state="active_top3_phase16_contract_stale",
+                model_id=active[0]["id"],
+                window_days=self.settings.model_monitor_window_days,
+                mature_predictions=0, selected_trades=0, precision=None,
+                utility_eligible=False, recent_pnl_usd=None,
+                recent_selected_capital_usd=None, recent_roi=None, baseline_roi=None,
+                degraded_ratio=self.settings.model_degraded_ratio, degraded=False,
+                reason="active Top-3 label/economic/decision-policy provenance is stale",
+                evaluated_at=moment.isoformat(),
+            ))
         if len(active) != 3:
             return self._store(ModelHealthReport(
                 state="active_top3_not_ready",
@@ -126,13 +145,14 @@ class ModelHealthService:
             SELECT p.selected,s.tag,s.entry_time
             FROM predictions p JOIN samples s ON s.id=p.sample_id
             WHERE p.model_id=? AND p.strategy_key=?
+              AND p.decision_policy_version=?
               AND s.label_status='mature' AND s.tag IN (0,1)
               AND s.token_type IN ('new_creation','near_completion')
               AND s.label_version=?
               AND s.entry_time>=? AND s.entry_time<=?
             ORDER BY s.entry_time,p.id
             """,
-            (model["id"], strategy_key, LabelPolicy().label_version, scope_start, end),
+            (model["id"], strategy_key, DECISION_POLICY_VERSION, LabelPolicy().label_version, scope_start, end),
         )
         selected = [row for row in rows if int(row.get("selected") or 0) == 1]
         tp = sum(int(int(row.get("tag") or 0) == 1) for row in selected)

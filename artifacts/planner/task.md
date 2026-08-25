@@ -30,11 +30,11 @@
 
 ### 评价公式
 
-- [x] 固定离线经济单位：`U = 6×TP - FP`
-- [x] p/r 恒等式测试：`U = N_positive × recall × (7 - 1/precision)`
+- [x] 当前固定离线经济单位：`U = 3×TP - FP`
+- [x] 当前 p/r 恒等式测试：`U = N_positive × recall × (4 - 1/precision)`
 - [x] 固定 $50 仅用于模型公平离线排名：`fixed_profit_usd = 5 × U`
 - [x] 实际模拟/实盘 sizing 不变：`min(1% × entry liquidity, $50)`，并继续计滑点/平台费/网络费
-- [x] 经济得分 `E = mean(clip((4TP-FP)/(4N+), -1, 1))`
+- [x] 当前经济得分 `E = mean(clip((3TP-FP)/(3N+), -1, 1))`
 - [x] 泛化得分 `G = 0.60×AP Skill + 0.20×Stability + 0.20×Decay`
 - [x] 综合分 `S = 0.60×E + 0.40×G`
 - [x] 最终 holdout certification-only，不参与模型、feature、threshold 或 Top 3 排名
@@ -178,6 +178,48 @@
 - [x] 默认/运行态 poll 由 3s 收紧为 2s；生产已观察 `target_poll_seconds=2.0`、`last_start_interval_seconds=2.0`。
 - [x] 新增 `scripts/audit_rules_only_execution.py` 与 `scripts/reclassify_route_slippage.py`，前者持续核验会计恒等式并拆分 stop market gap / route price impact，后者默认 dry-run、仅显式 `--apply` 才修历史审计字段。
 - [x] 最终验收：后端 pytest **168/168**，frontend production build 通过；运行态 PositionMonitor `target_poll_seconds=2.0 / last_start_interval_seconds=2.0`，当前 modeling gate 为 `193/1000`、模型评分继续关闭，live trading 保持未武装。
+
+## Phase 12：Top10 严格区间热迁移 — COMPLETE
+
+- [x] 当前生产 `top_10_holder_rate` 准入收紧为严格开区间 `0.14 < rate < 0.25`；`0.14` / `0.25` 边界均拒绝。
+- [x] discovery prefilter、authoritative `SafetyFilter`、CsvImporter 与 legacy `量化训练采集.py` 已统一为相同严格边界；缺失 Top10 的 CSV 导入也 fail-closed。
+- [x] 准入与模型特征统一使用 `normalize_token()` canonical Top10 值，禁止 `bundle.stat` 覆盖；对应冲突回归已加入。
+- [x] 迁移前 SQLite backup：`data/backups/meme_quant_pre_top10_014_025_20260822T145311Z.db`。迁移快照 1009 → 799，删除 210 条不合规样本（200 mature：28 正 / 172 负；10 pending）；158 个 rules-only positions 仅解除 sample 引用保留真实账本，其中 2 个当时 open 的仓继续自然退出；0 predictions。
+- [x] 迁移后 raw/features 新规则违规数=0、Top10 authority mismatch=0、`PRAGMA foreign_key_check`=0。热更新后 Collector 已继续采入新样本；2026-08-22 23:02 BJT 复核为 800 条（791 mature + 9 pending），新增样本仍满足新规；迁移时 2 个 open 解绑仓位中已有 1 个自然结算，剩余 1 个继续原退出链。
+- [x] 相关定向测试通过，Python compile 通过，全量 `pytest -q` 通过；运行态 `/health=ok`，modeling=`data_collection_rules_only`、scheduler=`data_collection_only`、当前 mature=791/1000，PositionMonitor 已恢复 `state=running`、start-to-start=2.0s、market/network failure=0、blocked=0。
+
+## Phase 13：+3/-1 economics / 1:3 重训热更新 — COMPLETE / ACTIVATED
+
+- [x] 当前模型经济代理收紧为 `+3/-1`：`U=3TP-FP`，固定 $50 为 +$15/-$5，盈亏平衡 Precision=25%；E 归一化为 `clip((3TP-FP)/(3N+),-1,1)`，p/r 恒等式为 `N+×recall×(4-1/precision)`。
+- [x] `ECONOMIC_OBJECTIVE_VERSION=fixed_3_to_1_v3`、`WIN_UNITS=3`；Trainer / ModelHealth / Adaptive Policy 共用同一经济常量，Prediction 对旧 `fixed_4_to_1_v2` active model fail-closed。H1 `1.6x/0.9x` 标签与 simulation/live 真实退出规则不变。
+- [x] 定向经济学/训练/Prediction/Adaptive 回归 37/37 通过；全量 `pytest -q` 通过；frontend `npm run build` 通过。
+- [x] durable manual run `b040425e-3043-4dd5-9752-f6685d83f4b9` 使用 1080 mature + 持久化 44 特征池完成，retry=0。新 Top 3：Extra Trees（35 features，threshold `0.2454529`，E/G/S=`0.139676/0.459697/0.267685`）/ Decision Tree（4 features，threshold `0.42`，E/G/S=`0.124905/0.437260/0.249847`）/ Random Forest（20 features，threshold `0.2763549`，E/G/S=`0.118388/0.447422/0.250002`）。三者 objective 均为 `fixed_3_to_1_v3`。
+- [x] run 完成后先进入 staged `waiting_for_flat`；旧仓自然结算后 TrainingWorker 已于 2026-08-24 前完成原子激活，新 active Top 3 为 Extra Trees / Decision Tree / Random Forest，objective 均为 `fixed_3_to_1_v3`，并创建新的 `model_generation_upgrade` simulation session。
+
+## Phase 14：标签策略只读网格 / Collector 事故修复 — COMPLETE
+
+- [x] 固定 1177 条 `event1m_regime_v3` mature 样本重新拉取 2h/1m Kline，1177/1177 成功、0 错误；缓存 `artifacts/research/kline_cache_v3_2h.json.gz`。
+- [x] 360 套 policy grid 完成：TP 1.6/1.8/2.0 × SL 0.9/0.8/0.75/0.7 × 60/90/120min × trailing off/20/25/30% × 5/10/15min。生产 1.6/0.9/60 基线精确复现 217/1177=18.44%。
+- [x] 结论：不支持放宽 hard SL；20% trailing 仍高 false-kill；首选 challenger 为 1.8x/0.9x/90min/no-trailing，次选 2.0x/0.9x/90min。生产标签未修改。
+- [x] 真实 rules-only clean ledger：stop 平均 -23.30% / trimmed -21.93%，TP1.6 平均 +68.93% / trimmed +65.39%，真实 payoff≈2.98:1、break-even Precision≈25.11%，支持现行 `fixed_3_to_1_v3`。
+- [x] recent 25% 存在显著 drift：当前标签正类率 Q1→Q4 为 22.45%→13.90%，p≈0.007；`ln(liquidity_usd)` / `price_change_1h` / `entrapment_ratio` 发生显著 KS 漂移。60–120m age 分层持续最差。
+- [x] read-only separability：recent holdout Logistic top10 Precision 当前/1.8x90/2.0x90 分别 30.0%/26.7%/23.3%；压力测试显示正期望主要集中在 top5–10% 信号，支持后续研究更稀疏交易而非放宽 SL。
+- [x] 事故根因确认：Kline 研究隔离残留 `COLLECTOR_ENABLED=false` 与 `simulation_entries_paused=true`；09:36 后 Collector 未重启且 stale runtime 误报 running，SOL/USD fee fact 同步中断导致 2 个 paper 仓位延迟退出。已恢复配置并审计。
+- [x] 防复发：Collector disabled 启动时显式写 `collector_status=disabled`；PositionMonitor 独立刷新 SOL/USD fee fact，不再依赖 Collector discovery。恢复后连续 Collector cycles 正常，首轮 accepted=3；PositionMonitor 2s cadence、`sol_usd_refresh_error=null`；全量 pytest 172/172 通过。
+- [x] 结果：`artifacts/research/label_policy_grid.json`、`label_policy_grid.csv`、`label_policy_grid_report.md`、`collector_incident_20260824.md`。
+
+## Phase 15：Shadow Challenger / Age / Execution Risk 只读赛马 — COMPLETE
+
+- [x] 将 Kline 冻结快照从 1177 补齐到 **1183 mature / 1183 Kline**，本轮所有 challenger 使用同一固定快照，生产后续新增样本不污染评测。
+- [x] 用户新增专项完成：`1.8/0.9/60m` 全体 176/1183=14.88%，`age<60m` 后 **143/802=17.83%**；`1.8/0.9/90m` 全体 182/1183=15.38%，`age<60m` 后 **146/802=18.20%**。age<60 对应 age>=60 的正类率分别 17.83% vs 8.66%、18.20% vs 9.45%，差异显著（p<1e-4）。
+- [x] 完整生产训练栈 shadow race（当前 44 feature pool、chronological folds、13-model candidate pool、`fixed_3_to_1_v3`，不注册模型/不写 training_runs/不激活）完成：p18/90 Top3=LightGBM/CatBoost/ExtraTrees；p20/90 Top3=CatBoost/RBF-SVM/Logistic。recent final holdout 显示开发最强模型仍会失效，确认标签切换不能单独解决 regime drift。
+- [x] 稀疏交易预算完成：p18/90 full 仅 ExtraTrees Top5%（12/4，P=33.3%）有明显正 stress；p20/90 full 仅 Logistic 极稀疏头部有信号（Top5% 12/4，P=33.3%），扩大预算后优势迅速衰减。禁止将“一套统一 Top3 阈值”视为可行方案。
+- [x] `p18/90 + age<60` 正式 ablation：802 rows / 146 positives，final holdout 161 / 23；Top3=ExtraTrees/Logistic/CatBoost。age<60 clean stop 5% trimmed mean=-23.53%；按该专属 stop stress，Logistic Top5% 8/4 约 +25.7%/trade、Top7.5% 12/4 约 +9.3%，但样本仍过小，只作为 shadow 信号。
+- [x] age 60–120m 对照完成：排除该段后 1023 rows / 171 positives，ExtraTrees recent Top5% 10/4=P40%；仅训练该段仅 160 rows / 11 positives，development economic score 全负，判定不适合作为独立 model regime，优先研究降权/排除。
+- [x] stop execution gap 分解：首次 below-stop reference 对 0.9x 线中位已额外穿透约 -4.54%，25% 分位约 -11.86%，最差10%约 -25.3%；fill 相对 trigger 再损失中位约 -2.77%；execution delay 与净损失几乎无相关，trigger overshoot 为主要损失源。
+- [x] execution-risk head 可学性验证：722 clean linked stops，severe-gap base≈29.8%；ExtraTrees chronological holdout AUC≈0.677、AP≈0.466，风险 Top20% severe≈47.2%、Bottom20%≈8.3%，支持未来增加 entry-time execution-risk penalty/head，而不是单纯提高 entry liquidity 门槛。
+- [x] drift-aware 诊断：simple prior odds correction 与简单缩短训练窗口均不能稳定修复 recent collapse；后续方向应为 recent calibration gate + model-specific trade budget + covariate/prior drift alarm + shadow retrain trigger。
+- [x] 本轮未修改生产标签、active models、TP/SL/timeout 或生产准入；结果落盘：`artifacts/research/age_lt60_p18_stats_1183.json`、`shadow_challenger_training_1183.json`、`shadow_p18_90_only_60_120.json`、`shadow_challenger_report_1183.md`。
 
 ## 环境事实
 

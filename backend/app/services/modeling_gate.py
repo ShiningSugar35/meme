@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from ..collector.constants import FEATURE_SCHEMA_VERSION
+from ..collector.constants import FEATURE_SCHEMA_VERSION, LabelPolicy
 from ..config import Settings, get_settings
 from ..database import Database, utc_now_iso
 
@@ -30,10 +30,12 @@ def modeling_readiness(
         SELECT COUNT(*) AS n
         FROM samples
         WHERE feature_schema_version=?
+          AND label_version=?
           AND label_status='mature'
           AND tag IN (0,1)
+          AND token_type IN ('new_creation','near_completion')
         """,
-        (FEATURE_SCHEMA_VERSION,),
+        (FEATURE_SCHEMA_VERSION, LabelPolicy().label_version),
     ) or {"n": 0}
     mature = int(row.get("n") or 0)
     minimum = int(settings.modeling_min_mature_samples)

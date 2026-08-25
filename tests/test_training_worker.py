@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.collector.constants import LabelPolicy
 from backend.app.config import Settings
 from backend.app.database import Database, utc_now_iso
+from backend.app.ml.decision_policy import DECISION_POLICY_VERSION
+from backend.app.ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from backend.app.repositories.models import ModelRepository
 from backend.app.services.paper_trading import PaperTradingService
 from backend.app.services.training import TrainingService
@@ -139,9 +142,16 @@ def _register_generation(database: Database, prefix: str, *, activate: bool) -> 
                 "early_stage": True,
                 "trained_at": utc_now_iso(),
                 "feature_names": ["price"],
-                "parameters": {},
+                "parameters": {
+                    "label_version": LabelPolicy().label_version,
+                    "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
+                    "decision_policy_version": DECISION_POLICY_VERSION,
+                },
                 "thresholds": {"decision": 0.2 + slot * 0.01},
-                "metrics": {"composite_score": 0.8 - slot * 0.1},
+                "metrics": {
+                    "composite_score": 0.8 - slot * 0.1,
+                    "execution_risk": {"certified": True},
+                },
                 "artifact_path": f"ml_models/{model_id}.joblib",
             }
         )
@@ -213,6 +223,7 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
             utc_now_iso(),
             json.dumps({
                 "top_models": candidate,
+                "deployment_certification": {"eligible": True, "blockers": []},
                 "activation": {"status": "waiting_for_flat"},
             }),
         ),
@@ -266,3 +277,86 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
         assert account["precision"] is None
         assert account["recall"] is None
         assert account["model_id"] == candidate[slot - 1]["id"]
+
+def test_rollover_recovers_after_models_switch_before_run_commit(monkeypatch, tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    _register_generation(database, "current-crash", activate=True)
+    candidate = _register_generation(database, "candidate-crash", activate=False)
+    run_id = "pending-crash-recovery"
+    database.execute(
+        """
+        INSERT INTO training_runs(
+            id,trigger,status,requested_at,completed_at,request_json,promoted,summary_json
+        ) VALUES(?, 'manual', 'completed', ?, ?, '{}', 0, ?)
+        """,
+        (
+            run_id,
+            utc_now_iso(),
+            utc_now_iso(),
+            json.dumps({
+                "top_models": candidate,
+                "deployment_certification": {"eligible": True, "blockers": []},
+                "activation": {"status": "waiting_for_flat"},
+            }),
+        ),
+    )
+    service = TrainingService(database, settings)
+    original_reset = PaperTradingService.reset_simulation
+
+    def crash_before_session_reset(self, **kwargs):
+        raise RuntimeError("simulated crash after active model swap")
+
+    monkeypatch.setattr(PaperTradingService, "reset_simulation", crash_before_session_reset)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.promote_pending_if_flat(run_id=run_id)
+
+    assert [row["id"] for row in ModelRepository(database).active_models()] == [row["id"] for row in candidate]
+    assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 0
+    assert database.get_runtime_state("model_entries_paused_for_rollover") is True
+    assert database.get_runtime_state("model_rollover_status")["state"] == "activating"
+
+    # Simulate the second crash point: the deterministic session was created,
+    # but the training-run commit marker was never persisted.
+    monkeypatch.setattr(PaperTradingService, "reset_simulation", original_reset)
+    deterministic_session_id = f"sim_upgrade_{run_id}"
+    PaperTradingService(database, settings).reset_simulation(
+        created_reason="model_generation_upgrade", session_id=deterministic_session_id
+    )
+    recovered = TrainingService(database, settings).promote_pending_if_flat(run_id=run_id)
+    assert recovered == run_id
+    assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 1
+    assert database.get_runtime_state("model_entries_paused_for_rollover") is False
+    status = PaperTradingService(database, settings).simulation_status()
+    assert status["session"]["id"] == deterministic_session_id
+    count = database.fetch_one(
+        "SELECT COUNT(*) AS n FROM simulation_sessions WHERE id=? AND created_reason='model_generation_upgrade'",
+        (deterministic_session_id,),
+    )["n"]
+    assert count == 1
+    assert TrainingService(database, settings).promote_pending_if_flat(run_id=run_id) is None
+
+def test_rollover_refuses_candidate_without_deployment_certification(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    _register_generation(database, "current-uncert", activate=True)
+    candidate = _register_generation(database, "candidate-uncert", activate=False)
+    run_id = "uncertified-candidate"
+    database.execute(
+        """
+        INSERT INTO training_runs(
+            id,trigger,status,requested_at,completed_at,request_json,promoted,summary_json
+        ) VALUES(?, 'manual', 'completed', ?, ?, '{}', 0, ?)
+        """,
+        (
+            run_id, utc_now_iso(), utc_now_iso(),
+            json.dumps({
+                "top_models": candidate,
+                "deployment_certification": {"eligible": False, "blockers": ["final_drift_severe"]},
+                "activation": {"status": "blocked_certification"},
+            }),
+        ),
+    )
+    assert TrainingService(database, settings).promote_pending_if_flat(run_id=run_id) is None
+    assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 0
+    assert [row["id"] for row in ModelRepository(database).active_models()] != [row["id"] for row in candidate]

@@ -38,8 +38,8 @@ class FilterThresholds:
     max_insider_ratio: float = 0.2
     max_bundler_rate: float = 0.2
     min_liquidity: float = 4_800.0
-    min_top_10_holder_rate: float = 0.125
-    max_top_10_holder_rate: float = 0.28
+    min_top_10_holder_rate: float = 0.14
+    max_top_10_holder_rate: float = 0.25
     max_fresh_wallet_rate: float = 0.2
     max_rat_trader_amount_rate: float = 0.2
     min_holder_count_exclusive: int = 29
@@ -60,13 +60,17 @@ class FilterThresholds:
 
 @dataclass(frozen=True, slots=True)
 class LabelPolicy:
-    """One-hour binary first-touch label: SL 0.9, TP 1.6, timeout is negative."""
+    """90-minute binary first-touch label: SL 0.9, TP 1.8, timeout is negative."""
 
     stop_loss_ratio: float = 0.9
-    take_profit_ratio: float = 1.6
-    window_seconds: int = 60 * 60
+    take_profit_ratio: float = 1.8
+    window_seconds: int = 90 * 60
     history_seconds: int = 60 * 60
-    label_version: str = "sl090_tp160_h1_binary_v4"
+    label_version: str = "sl090_tp180_m90_binary_v5"
+
+
+EXIT_POLICY_VERSION = "m90_tp180_sl090_v2"
+LEGACY_EXIT_POLICY_VERSION = "h1_tp160_sl090_v1"
 
 
 ALLOWED_QUOTE_SYMBOLS = frozenset({"SOL", "USDC", "USDT"})

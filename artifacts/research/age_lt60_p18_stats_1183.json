@@ -1,0 +1,51 @@
+{
+  "snapshot": {
+    "mature_samples": 1183,
+    "production_label_positive": 219,
+    "kline_coverage": 1183
+  },
+  "p18_sl09_60m": {
+    "all_mature": {
+      "n": 1183,
+      "positive": 176,
+      "positive_rate": 0.14877430262045648
+    },
+    "age_lt_60m": {
+      "n": 802,
+      "positive": 143,
+      "positive_rate": 0.17830423940149626,
+      "hard_sl": 644,
+      "timeout": 15
+    },
+    "age_ge_60m": {
+      "n": 381,
+      "positive": 33,
+      "positive_rate": 0.08661417322834646
+    },
+    "age_lt60_minus_ge60_pp": 9.16900661731498,
+    "age_lt60_relative_lift": 2.058988764044944,
+    "two_proportion_p": 0.0000346
+  },
+  "p18_sl09_90m": {
+    "all_mature": {
+      "n": 1183,
+      "positive": 182,
+      "positive_rate": 0.15384615384615385
+    },
+    "age_lt_60m": {
+      "n": 802,
+      "positive": 146,
+      "positive_rate": 0.18204488778054864,
+      "hard_sl": 646,
+      "timeout": 10
+    },
+    "age_ge_60m": {
+      "n": 381,
+      "positive": 36,
+      "positive_rate": 0.09448818897637795
+    },
+    "age_lt60_minus_ge60_pp": 8.755669880417068,
+    "age_lt60_relative_lift": 1.9266409266409265,
+    "two_proportion_p": 0.0000961
+  }
+}

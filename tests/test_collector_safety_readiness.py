@@ -80,6 +80,29 @@ async def test_transient_missing_security_fact_is_retried_then_can_pass() -> Non
 
 
 @pytest.mark.asyncio
+async def test_top10_feature_uses_same_normalized_value_as_safety_filter() -> None:
+    address = "TokenTop10Authority11111111111111111111111111111"
+
+    class ConflictingStatProvider(ReadinessProvider):
+        async def token_bundle(self, address: str):
+            self.bundle_calls += 1
+            index = min(self.bundle_calls - 1, len(self.bundles) - 1)
+            return {
+                "token_info": {"data": deepcopy(self.bundles[index])},
+                "stat": {"top_10_holder_rate": 0.06},
+            }
+
+    provider = ConflictingStatProvider([complete_facts(address)])
+    service = EnrichmentService(provider, readiness_attempts=1, readiness_retry_seconds=0)
+    candidate = TokenCandidate(address, "new_creation", {"top_10_holder_rate": 0.24})
+
+    result = await service.enrich(candidate, now_ts=1_800_000_000)
+
+    assert result.sample is not None
+    assert result.sample.features["top_10_holder_rate"] == pytest.approx(0.24)
+
+
+@pytest.mark.asyncio
 async def test_persistently_missing_security_fact_is_rejected_after_retry_budget() -> None:
     address = "TokenMissing111111111111111111111111111111111"
     incomplete = complete_facts(address)

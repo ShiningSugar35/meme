@@ -10,7 +10,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .config import get_settings
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 def utc_now_iso() -> str:
@@ -326,6 +326,62 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_samples_feature_generation_time "
             "ON samples(feature_schema_version,entry_time)"
         )
+
+        # v13: generic barrier audit facts + immutable per-position exit-policy
+        # snapshots. This lets a hot rollout change the global policy without
+        # reinterpreting positions that were opened under an older contract.
+        for column, definition in (
+            ("label_max_price_ratio", "REAL"),
+            ("label_min_price_ratio", "REAL"),
+            ("label_final_close_ratio", "REAL"),
+            ("label_window_seconds", "INTEGER"),
+        ):
+            cls._ensure_column(connection, "samples", column, definition)
+        for column, definition in (
+            ("exit_policy_version", "TEXT"),
+            ("stop_loss_ratio", "REAL"),
+            ("take_profit_ratio", "REAL"),
+            ("max_holding_seconds", "INTEGER"),
+        ):
+            cls._ensure_column(connection, "positions", column, definition)
+        connection.execute(
+            """
+            UPDATE positions
+            SET exit_policy_version=COALESCE(exit_policy_version,'h1_tp160_sl090_v1'),
+                stop_loss_ratio=COALESCE(
+                    stop_loss_ratio,
+                    CASE WHEN entry_price>0 AND stop_loss_price>0
+                         THEN stop_loss_price/entry_price ELSE 0.9 END
+                ),
+                take_profit_ratio=COALESCE(
+                    take_profit_ratio,
+                    CASE WHEN entry_price>0 AND take_profit_price>0
+                         THEN take_profit_price/entry_price ELSE 1.6 END
+                ),
+                max_holding_seconds=COALESCE(
+                    max_holding_seconds,
+                    CASE
+                        WHEN julianday(expires_at) IS NOT NULL AND julianday(entry_time) IS NOT NULL
+                        THEN MAX(1, CAST(ROUND((julianday(expires_at)-julianday(entry_time))*86400.0) AS INTEGER))
+                        ELSE 3600
+                    END
+                )
+            WHERE exit_policy_version IS NULL
+               OR stop_loss_ratio IS NULL
+               OR take_profit_ratio IS NULL
+               OR max_holding_seconds IS NULL
+            """
+        )
+        for column, definition in (
+            ("raw_probability", "REAL"),
+            ("decision_policy_version", "TEXT"),
+            ("decision_reason", "TEXT"),
+            ("execution_risk_probability", "REAL"),
+            ("drift_state", "TEXT"),
+            ("policy_base_threshold", "REAL"),
+            ("age_probability_floor", "REAL"),
+        ):
+            cls._ensure_column(connection, "predictions", column, definition)
 
     @classmethod
     def _migrate_training_runs_v10(cls, connection: sqlite3.Connection) -> None:
@@ -662,6 +718,10 @@ CREATE TABLE IF NOT EXISTS samples (
     price_1h_max_ratio REAL,
     price_1h_min_ratio REAL,
     final_1h_close_ratio REAL,
+    label_max_price_ratio REAL,
+    label_min_price_ratio REAL,
+    label_final_close_ratio REAL,
+    label_window_seconds INTEGER,
     final_close_ratio REAL,
     first_take_profit_at INTEGER,
     first_stop_loss_at INTEGER,
@@ -671,7 +731,7 @@ CREATE TABLE IF NOT EXISTS samples (
     return_source TEXT,
     tag INTEGER CHECK(tag IN (0,1) OR tag IS NULL),
     label_status TEXT NOT NULL DEFAULT 'pending' CHECK(label_status IN ('pending','mature','failed')),
-    label_version TEXT NOT NULL DEFAULT 'sl090_tp160_h2_binary_v3',
+    label_version TEXT NOT NULL DEFAULT 'sl090_tp180_m90_binary_v5',
     label_source TEXT NOT NULL DEFAULT 'collector',
     terminal_return_estimated INTEGER NOT NULL DEFAULT 0 CHECK(terminal_return_estimated IN (0,1)),
     raw_json TEXT,
@@ -730,6 +790,13 @@ CREATE TABLE IF NOT EXISTS predictions (
     regime_snapshot_id INTEGER,
     action_propensity REAL,
     policy_version TEXT,
+    raw_probability REAL,
+    decision_policy_version TEXT,
+    decision_reason TEXT,
+    execution_risk_probability REAL,
+    drift_state TEXT,
+    policy_base_threshold REAL,
+    age_probability_floor REAL,
     predicted_at TEXT NOT NULL,
     UNIQUE(sample_id,model_id,strategy_key)
 );
@@ -777,6 +844,10 @@ CREATE TABLE IF NOT EXISTS positions (
     entry_price REAL,
     stop_loss_price REAL,
     take_profit_price REAL,
+    exit_policy_version TEXT,
+    stop_loss_ratio REAL,
+    take_profit_ratio REAL,
+    max_holding_seconds INTEGER,
     exit_time TEXT,
     exit_price REAL,
     exit_reason TEXT,

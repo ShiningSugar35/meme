@@ -45,7 +45,7 @@ class PreparedDataset:
         liquidity = self.liquidity_usd.iloc[positions].to_numpy(dtype=float)
 
         realized = np.full(len(positions), -0.10, dtype=float)
-        realized[tags == 1] = 0.60
+        realized[tags == 1] = 0.80
 
         blockers: list[str] = []
         real_liquidity = np.isfinite(liquidity) & (liquidity > 0)
@@ -179,6 +179,8 @@ class CandidateEvaluation:
     execution_net_pnl_usd: float | None = None
     execution_weight: float = 0.0
     ranking_economic_score: float | None = None
+    calibrator: Any | None = None
+    sparse_budget: Any | None = None
 
 
 @dataclass
@@ -193,21 +195,58 @@ class ModelBundle:
     training_start: datetime
     training_end: datetime
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    calibrator: Any | None = None
+    sparse_budget: Any | None = None
+    decision_policy_version: str | None = None
+    label_version: str | None = None
+    economic_objective_version: str | None = None
+    execution_risk_model: Any | None = None
+    drift_reference: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def threshold(self) -> float:
         return float(self.thresholds.decision)
 
-    def predict_probabilities(self, frame: pd.DataFrame) -> np.ndarray:
-        missing = [name for name in self.feature_names if name not in frame.columns]
-        if missing:
-            raise ValueError(f"missing model features: {missing}")
-        probabilities = self.estimator.predict_proba(frame.loc[:, self.feature_names])
+    def _positive_probabilities(self, frame: pd.DataFrame) -> np.ndarray:
+        probabilities = np.asarray(self.estimator.predict_proba(frame.loc[:, self.feature_names]), dtype=float)
         classes = np.asarray(getattr(self.estimator, "classes_", [0, 1]))
         positive_columns = np.flatnonzero(classes == 1)
         if probabilities.ndim != 2 or len(positive_columns) != 1:
             raise ValueError("estimator did not return binary class probabilities")
         return np.asarray(probabilities[:, int(positive_columns[0])], dtype=float)
+
+    def predict_raw_scores(self, frame: pd.DataFrame) -> np.ndarray:
+        missing = [name for name in self.feature_names if name not in frame.columns]
+        if missing:
+            raise ValueError(f"missing model features: {missing}")
+        view = frame.loc[:, self.feature_names]
+        if hasattr(self.estimator, "decision_function"):
+            scores = np.asarray(self.estimator.decision_function(view), dtype=float)
+            if scores.ndim == 2:
+                classes = np.asarray(getattr(self.estimator, "classes_", [0, 1]))
+                positive_columns = np.flatnonzero(classes == 1)
+                if len(positive_columns) != 1:
+                    raise ValueError("estimator decision_function has no unique positive class")
+                scores = scores[:, int(positive_columns[0])]
+            return np.asarray(scores, dtype=float).reshape(-1)
+        probabilities = np.clip(self._positive_probabilities(frame), 1e-8, 1.0 - 1e-8)
+        return np.log(probabilities / (1.0 - probabilities))
+
+    def predict_raw_probabilities(self, frame: pd.DataFrame) -> np.ndarray:
+        if hasattr(self.estimator, "predict_proba"):
+            return np.clip(self._positive_probabilities(frame), 0.0, 1.0)
+        scores = np.clip(self.predict_raw_scores(frame), -50.0, 50.0)
+        return 1.0 / (1.0 + np.exp(-scores))
+
+    def predict_probabilities(self, frame: pd.DataFrame) -> np.ndarray:
+        scores = self.predict_raw_scores(frame)
+        if self.calibrator is None:
+            return self.predict_raw_probabilities(frame)
+        probabilities = np.asarray(self.calibrator.transform(scores), dtype=float)
+        if len(probabilities) != len(frame) or not np.isfinite(probabilities).all():
+            raise ValueError("calibrator returned invalid probabilities")
+        return np.clip(probabilities, 0.0, 1.0)
+
 
 
 @dataclass(frozen=True)

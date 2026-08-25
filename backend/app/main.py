@@ -136,6 +136,21 @@ async def lifespan(_: FastAPI):
                     name="gmgn-collector",
                 )
             )
+        else:
+            # Never leave a stale "running" snapshot from a previous process when
+            # Collector is disabled at startup. This is especially important after
+            # hot reloads or temporary maintenance toggles because runtime_state is
+            # durable across process restarts.
+            database.set_runtime_state(
+                "collector_status",
+                {
+                    "state": "disabled",
+                    "mode": "collector",
+                    "cycle_state": "idle",
+                    "reason": "collector_disabled_by_configuration",
+                    "updated_at": utc_now_iso(),
+                },
+            )
 
     try:
         yield

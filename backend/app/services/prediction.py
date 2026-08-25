@@ -10,15 +10,23 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..collector.constants import FEATURE_SCHEMA_VERSION
+from ..collector.constants import FEATURE_SCHEMA_VERSION, LabelPolicy
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
+from ..ml.decision_policy import (
+    DECISION_POLICY_VERSION,
+    RISK_CEILING_CAUTION,
+    RISK_CEILING_NORMAL,
+    age_gate,
+    clamp_adaptive_threshold,
+)
 from ..ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from ..ml.features import materialize_entry_feature
 from ..ml.registry import ModelRegistry
 from ..repositories.models import ModelRepository
 from ..strategy import MODEL_STRATEGIES, RULES_ONLY, model_strategy
 from .adaptive_policy import AdaptivePolicyService
+from .drift import DriftGateService
 from .modeling_gate import persist_modeling_readiness
 from .paper_trading import PaperTradingService
 
@@ -46,6 +54,7 @@ class PredictionService:
         self.models = ModelRepository(database)
         self.paper = PaperTradingService(database, self.settings)
         self.adaptive = AdaptivePolicyService(database, self.settings)
+        self.drift = DriftGateService(database)
 
     def run_cycle(
         self,
@@ -56,12 +65,13 @@ class PredictionService:
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         readiness = persist_modeling_readiness(self.database, self.settings)
         active = self.models.active_models()
-        active_objective_current = len(active) == 3 and all(
-            str((item.get("parameters") or {}).get("economic_objective_version") or "")
-            == ECONOMIC_OBJECTIVE_VERSION
+        active_contract_current = len(active) == 3 and all(
+            str((item.get("parameters") or {}).get("label_version") or "") == LabelPolicy().label_version
+            and str((item.get("parameters") or {}).get("economic_objective_version") or "") == ECONOMIC_OBJECTIVE_VERSION
+            and str((item.get("parameters") or {}).get("decision_policy_version") or "") == DECISION_POLICY_VERSION
             for item in active
         )
-        if not readiness.ready or not active_objective_current:
+        if not readiness.ready or not active_contract_current:
             rule_opened, rule_stale, rule_blocked = self._reconcile_rule_only(
                 moment=moment,
                 limit=limit,
@@ -73,9 +83,9 @@ class PredictionService:
             elif len(active) != 3:
                 blocked_reason = "active_top3_not_ready"
             else:
-                blocked_reason = "active_top3_economic_objective_stale"
+                blocked_reason = "active_top3_phase16_contract_stale"
             result = PredictionCycleResult(
-                model_ids=tuple(item.get("id") for item in active) if active_objective_current else (),
+                model_ids=tuple(item.get("id") for item in active) if active_contract_current else (),
                 rule_positions_opened=rule_opened,
                 paper_positions_settled=settled,
                 stale_signals=rule_stale,
@@ -122,36 +132,96 @@ class PredictionService:
                 [self._prediction_frame(row, bundle.feature_names) for row in rows],
                 ignore_index=True,
             )
+            if (
+                bundle.calibrator is None
+                or bundle.sparse_budget is None
+                or bundle.decision_policy_version != DECISION_POLICY_VERSION
+                or bundle.label_version != LabelPolicy().label_version
+                or bundle.economic_objective_version != ECONOMIC_OBJECTIVE_VERSION
+            ):
+                raise RuntimeError("active model artifact does not satisfy the Phase16 decision contract")
+            raw_probabilities = np.clip(bundle.predict_raw_probabilities(frame), 0.0, 1.0)
             probabilities = np.clip(bundle.predict_probabilities(frame), 0.0, 1.0)
-            if len(probabilities) != len(rows):
+            if len(probabilities) != len(rows) or len(raw_probabilities) != len(rows):
                 raise RuntimeError("model returned a prediction count that does not match the batch")
-            for row, raw_probability in zip(rows, probabilities, strict=True):
-                probability = float(raw_probability)
-                base_threshold = float(bundle.threshold)
-                threshold = self.adaptive.effective_threshold(base_threshold, adaptive_decision)
-                neutral_chosen = probability >= base_threshold
-                chosen = probability >= threshold
+            drift = self.drift.evaluate(model_id=str(model["id"]), reference=bundle.drift_reference)
+            risk_model = bundle.execution_risk_model
+            for row, raw_probability, calibrated_probability in zip(
+                rows, raw_probabilities, probabilities, strict=True
+            ):
+                probability = float(calibrated_probability)
+                policy_base_threshold = max(float(bundle.threshold), 0.25)
+                age = age_gate(row.get("age_minutes"))
+                hard_threshold = max(policy_base_threshold, float(age.probability_floor))
+                adaptive_threshold = self.adaptive.effective_threshold(
+                    policy_base_threshold, adaptive_decision
+                )
+                # Adaptive EXPANSIVE may never undercut the sparse-budget/global/
+                # age hard floor. DEFENSIVE may raise it further.
+                threshold = clamp_adaptive_threshold(
+                    policy_base_threshold, float(age.probability_floor), adaptive_threshold
+                )
+
+                risk_probability: float | None = None
+                if risk_model is not None:
+                    try:
+                        risk_probability = float(risk_model.predict_probability(row))
+                    except Exception:
+                        risk_probability = None
+                risk_ceiling = (
+                    RISK_CEILING_CAUTION if drift.state == "caution" else RISK_CEILING_NORMAL
+                )
+                hard_gate_ok = True
+                if not age.allowed:
+                    hard_gate_ok = False
+                    decision_reason = age.reason
+                elif risk_probability is None:
+                    hard_gate_ok = False
+                    decision_reason = "execution_risk_unavailable"
+                elif risk_probability > risk_ceiling:
+                    hard_gate_ok = False
+                    decision_reason = "execution_risk_above_ceiling"
+                elif drift.state == "severe":
+                    hard_gate_ok = False
+                    decision_reason = "drift_severe_model_freeze"
+                elif probability < threshold:
+                    decision_reason = "calibrated_probability_below_threshold"
+                else:
+                    decision_reason = "selected"
+                neutral_chosen = bool(hard_gate_ok and probability >= hard_threshold)
+                chosen = bool(hard_gate_ok and probability >= threshold)
+                if chosen:
+                    decision_reason = "selected"
                 with self.database.transaction(immediate=True) as connection:
                     cursor = connection.execute(
                         """
                         INSERT INTO predictions(
                             sample_id,model_id,probability,strategy_key,threshold,selected,
                             base_threshold,neutral_selected,adaptive_action,adaptive_delta_logit,
-                            regime_snapshot_id,action_propensity,policy_version,predicted_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            regime_snapshot_id,action_propensity,policy_version,
+                            raw_probability,decision_policy_version,decision_reason,
+                            execution_risk_probability,drift_state,policy_base_threshold,
+                            age_probability_floor,predicted_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(sample_id,model_id,strategy_key) DO NOTHING
                         """,
                         (
                             row["id"], model["id"], probability, strategy, threshold,
-                            int(chosen), base_threshold, int(neutral_chosen), adaptive_decision.action,
+                            int(chosen), hard_threshold, int(neutral_chosen), adaptive_decision.action,
                             adaptive_decision.delta_logit, adaptive_decision.regime_snapshot_id,
-                            adaptive_decision.propensity, adaptive_decision.policy_version, moment.isoformat(),
+                            adaptive_decision.propensity, adaptive_decision.policy_version,
+                            float(raw_probability), DECISION_POLICY_VERSION, decision_reason,
+                            risk_probability, drift.state, policy_base_threshold,
+                            float(age.probability_floor), moment.isoformat(),
                         ),
                     )
                     if cursor.rowcount == 1:
                         predictions_written += 1
                         selected += int(chosen)
                         scored += 1
+            self.database.set_runtime_state(
+                f"model_drift:{model['id']}", drift.as_dict()
+            )
 
         opened, stale, blocked = self._reconcile_model_signals(moment=moment)
         rule_opened, rule_stale, rule_blocked = self._reconcile_rule_only(moment=moment, limit=limit)
@@ -209,6 +279,8 @@ class PredictionService:
             JOIN samples s ON s.id=p.sample_id
             JOIN active_model_slots a ON a.model_id=p.model_id
             WHERE p.selected=1
+              AND p.decision_policy_version=?
+              AND p.decision_reason='selected'
               AND p.strategy_key IN ('model_1','model_2','model_3')
               AND s.feature_schema_version=?
               AND s.token_type IN ('new_creation','near_completion')
@@ -218,7 +290,7 @@ class PredictionService:
               )
             ORDER BY s.entry_time,p.id
             """,
-            (FEATURE_SCHEMA_VERSION,),
+            (DECISION_POLICY_VERSION, FEATURE_SCHEMA_VERSION),
         )
         opened = stale = blocked = 0
         now_epoch = int(moment.timestamp())
