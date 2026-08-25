@@ -316,10 +316,10 @@ Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，
 
 - [x] `python -m py_compile` 覆盖所有新增/修改后端模块。
 - [x] targeted ML/collector/prediction/paper/monitor/database/scheduler tests 全过。
-- [x] full `pytest -q` 191/191 pass。
+- [x] full `pytest -q` 204/204 pass。
 - [x] frontend `npm run build` pass。
 - [x] DB migration 在临时 DB/生产备份上通过；`PRAGMA foreign_key_check`=0。
-- [x] runtime `/health=ok`；最后一次源码热重载后 Collector 连续完成 4053/4054/4055 三个周期且 `errors=[]`；PositionMonitor 恢复 2.0s cadence、market/network failures=0；SOL/USD ready。
+- [x] runtime `/health=ok`；最终 GMGN 角色隔离 + worker circuit 后 Collector 连续完成 **4062/4063/4064** 三个周期且 `discovered=120 / errors=[]`；4062/4064 各真实入样 1 条。PositionMonitor 保持约 2.0s cadence、market/network failures=0；SOL/USD primary/fallback 均 ready。
 - [x] 重训完成且 retry=0；新 Top3 candidate objective/label/policy version 全部一致。
 - [x] staged activation gate 已执行且 fail-closed：本轮 generation 因 final drift / selected-evidence certification 不达标而**不得激活**；Prediction `model_ids=[]`、reason=`active_top3_phase16_contract_stale`，旧 generation 不再产生 model entry。后续仅当新 generation 通过 certification 才允许激活。
 - [x] 样本数在整个 rollout 期间持续增长，证明 Collector 未停。
@@ -366,9 +366,29 @@ Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，
 - **deployment certification 正确拒绝本代，不强行激活**：final recent window 244 条、27 正类；三候选完整 model-policy selected 均为 0。development reference 的正类率约 16.34%，final 约 11.07%；`ln(liquidity_usd)` PSI≈0.4617 达 severe，且后续新样本的流动性分布继续上移，判定为真实近期分布漂移而非 PSI 实现错误。因此 `activation.status=blocked_certification`，旧 Top3 保持 active slot 但在 Prediction 中因 Phase16 provenance stale 而 fail-closed，绝不产生 model entry。
 - fallback：`TrainingScheduler.schedule_mode()` 对 `insufficient_data / active_top3_not_ready / active_top3_phase16_contract_stale / deployment_certification_blocked` 进入 **daily 17:00 BJT** recovery cadence；合规 Phase16 generation 激活、health 恢复后自动回归 weekly。该设计让真实 drift 下系统继续积累新分布数据，而不是降低 0.25 global floor、绕过 risk/drift gate 或重复利用 final holdout 调参。
 - paper trading 恢复：发现 `.env` 遗留 `SIMULATION_ENABLED=false` 导致 `rules_only` 入口直接短路；已恢复 `SIMULATION_ENABLED=true`，并再次确认 `DRY_RUN=true`。重启后 `rules_only` 已实际开出 `m90_tp180_sl090_v2` 新仓，TP=1.8、SL=0.9、max holding=5400s；旧仓仍按自身 `h1_tp160_sl090_v1` 快照退出。
-- 运行验收：后端 `/health=ok`；Collector 持续增长至 1273+ current-generation 样本；最后一次源码热重载后连续完成 4053/4054/4055 三轮且 `errors=[]`；PositionMonitor target/start interval≈2s；SOL/USD=`ready`；`system_awake_request=held_on_ac`；模型 worker 明确返回 `active_top3_phase16_contract_stale`，同时 rules-only 可继续。
-- 测试：Phase16 审查后的全量后端 `pytest -q` **191/191 通过**；scheduler recovery targeted 12/12；前端 `tsc -b && vite build` 通过；`git diff --check` 在 Phase16 主提交前通过。
+- 运行验收：后端 `/health=ok`；current-generation 样本已增长至 **1279（1275 mature / 4 pending，200 positive）**。最终连续成功周期为 **4062 → 4063 → 4064**：三轮均 `discovered=120 / errors=[]`，其中 4062/4064 各新增 1 条真实样本；rate-limit circuit 保持 `closed`。PositionMonitor target/start interval≈2s、0 blocked/0 market/network failure；GMGN 不可用时 DexScreener position fallback 与 Coinbase SOL/USD fee fallback 已真实运行，GMGN 恢复时自动回主源。`system_awake_request=held_on_ac`；模型 worker 仍以 `active_top3_phase16_contract_stale` fail-closed，不产生 model entry；rules-only 继续按 v5 开仓/退出。
+- 测试：Phase16 审查后的全量后端 `pytest -q` **204/204 通过**；scheduler recovery targeted 12/12；前端 `tsc -b && vite build` 通过；`git diff --check` 在 Phase16 主提交前通过。
 
 ### 11.1 当前上线结论
 
 Phase16 的**数据、标签、仓位策略快照、概率校准、稀疏预算、age/risk/drift gate、故障自愈和 rules-only 生产链均已上线**。模型代本身当前处于“候选已训练、认证未通过、禁止激活”的安全生产状态；这是验收门正常工作，不是未处理故障。后续由 daily recovery cadence 使用持续新增的真实 v5 样本重新训练，只有新一代独立通过 certification 后才允许 staged activation。
+
+
+### 2026-08-25 GMGN 429 circuit-breaker / position fallback
+
+- 现场进一步复现了 GMGN 多 Key 429：即使独立探针降到 1 RPS，多把 Key 仍返回带约 100–155 秒 reset 窗口的 429；旧逻辑把单 Key `reset_at` 写进共享 limiter，导致一把 Key 限流会把 Collector + PositionMonitor 的其它 Key 一并暂停，PositionMonitor 曾出现约 47–49 秒 start interval。
+- `GMGNDataClient` 现在把 429 cooldown 绑定到 **slot 本身**，共享 limiter 只负责总 RPS，不再承载单 Key reset。PositionMonitor 遇单 Key 429 立即换下一 Key；若整池均 429，则打开 full-pool circuit breaker，在 reset window 内不再触碰 GMGN，直接进入只读 fallback。
+- PositionMonitor 新增 **DexScreener Public `/token-pairs/v1/solana/{mint}`** 兜底，仅用于已经打开的持仓 current-price 监控：只接受目标 Mint 作为 `baseToken` 的 Solana pair，并选流动性最高的 pair；fallback source 持久化为 `dexscreener_public_token_pairs`。该路径不参与 Collector admission、标签、模型训练或新仓选股。fallback 自身限速 4 RPS，低于其 Public pairs 类接口公开 300 RPM 上限。
+- Collector 仍 fail-closed：GMGN 缺关键准入/Kline 事实时不使用 DexScreener 补造样本。Discovery 对 429 不再重复打同一 primary；已冷却的 primary/fallback 直接跳过；Realtime/Kline enrichment 跳过 cooldown slot，连续 429 之间不再人为 sleep。目标是让 server reset window 真正到期，而不是每几十秒探测一次把滚动限流续上。
+- 生产 `GMGN_GLOBAL_RPS` 从 10 保守降为 **2 RPS**；不改变任何业务筛选阈值、LabelPolicy 或 DRY_RUN 边界。后续只有在持续运行证据证明无 429 且采样吞吐不足时，才允许逐级上调。
+
+- **Coinbase Exchange Public SOL/USD fee fallback**：PositionMonitor 的手续费会计仍以 GMGN SOL 1m 为主；若 GMGN Kline 因 429/网络不可用，则读取 Coinbase Exchange 无鉴权 `SOL-USD` 1m candles，只接受已经闭合的 minute bucket，并以 candle close 时刻写入 `asset_usd_prices`，source=`coinbase_exchange_public_sol_usd_1m`。该 fallback 已真实解除一笔长期 `closing` rules-only 仓位；退出价、PnL、Jupiter quote 均保持真实执行事实。
+- 最终自动化门：后端 `pytest -q` **204/204**、`py_compile`、`git diff --check` 与前端 `tsc -b && vite build` 均通过。
+
+- **Collector worker 级长熔断**：仅 per-slot cooldown 仍不足以处理 GMGN 的滚动 reset。Collector 现将 rate-limit circuit 持久化到 SQLite；首次确认 discovery 429 后静默至少 300s，再次 half-open 失败按 600/1200/2400/3600s 指数退避。backend 重启不会清除 `next_probe_at`。backoff 内不请求 GMGN；half-open 只优先执行真实 `collect_once`，成功并持久化 cycle snapshot 后才关闭 circuit，下一正常周期再恢复 SOL/Kline/Regime/label 辅助负载。
+- 生产现场曾在故障恢复中出现一次 partial cycle：New Creation 与 Near Completion discovery 已返回，Near Completion 新样本 `4104/4105` 于 13:38–13:39 BJT 成功入库，但后续阶段失败导致该轮没有 cycle snapshot。样本事实保留有效；最终验收只认 circuit 关闭后的完整成功周期。
+
+- **GMGN Key 角色隔离**：当配置 Key>=6 时，slot 0/1 专供 New Creation/Near Completion discovery，slot 2 只作 discovery fallback；slot 3+ 承担 realtime enrichment、Kline 与 PositionMonitor。`kline_fallback` 不再借用 discovery fallback。少 Key 环境保持旧共享布局。生产当前 12 Key，因此实际为 3 把 Discovery 保留容量 + 9 把 auxiliary。
+- **恢复 probation**：half-open collection 成功后保留前一 streak 15 分钟；probation 内若正常全链周期再次 429，则从上一 streak 继续加倍，而不是错误地重置回 5 分钟。现场 13:49 恢复后约 2 分钟复发已按新语义升级为 streak=2 / 600s，下一半开点 14:01:38 BJT。
+
+- **GMGN 429 最终生产验收**：streak=2 的 half-open 于 `2026-08-25T06:02:34Z` 完整成功并关闭 circuit；4062=`120/1/118`。随后重新加入 SOL/Kline/Regime/label 辅助负载的正常周期 4063=`120/0/118`、4064=`120/1/117` 均完整结束、`errors=[]`，未再次拖死 Discovery。最终结构为 0/1/2 Discovery 专用、3–11 auxiliary；全局运行预算 2 RPS，短期 429 per-slot cooldown，整 worker 300→600→1200→2400→3600s 持久化退避，恢复后 15 分钟 probation。

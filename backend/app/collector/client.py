@@ -179,6 +179,22 @@ class GMGNDataClient:
         self.endpoints = endpoints or CollectorEndpoints()
         self.timeout_seconds = timeout_seconds
         self._slot_locks: dict[int, asyncio.Lock] = {}
+        self._slot_rate_limit_until: dict[int, float] = {}
+        self._slot_rate_limit_reset_at: dict[int, int | None] = {}
+
+    def _note_slot_rate_limit(self, slot: ApiSlot, reset_at: int | None) -> None:
+        now = time.time()
+        buffer_seconds = float(getattr(self.limiter, "cooldown_buffer_seconds", 15.0))
+        reset_epoch = float(reset_at) if reset_at else now + 300.0
+        cooldown_until = max(now, reset_epoch) + max(0.0, buffer_seconds)
+        self._slot_rate_limit_until[slot.index] = max(
+            self._slot_rate_limit_until.get(slot.index, 0.0),
+            cooldown_until,
+        )
+        self._slot_rate_limit_reset_at[slot.index] = reset_at
+
+    def slot_rate_limit_remaining(self, slot: ApiSlot) -> float:
+        return max(0.0, self._slot_rate_limit_until.get(slot.index, 0.0) - time.time())
 
     def _url(self, path: str) -> str:
         if path.startswith(("http://", "https://")):
@@ -209,6 +225,11 @@ class GMGNDataClient:
     ) -> Mapping[str, Any]:
         lock = self._slot_locks.setdefault(slot.index, asyncio.Lock())
         async with lock:
+            if self.slot_rate_limit_remaining(slot) > 0:
+                raise CollectorRateLimitError(
+                    f"GMGN API slot cooling down after rate limit (slot={slot.index}, path={path})",
+                    reset_at=self._slot_rate_limit_reset_at.get(slot.index),
+                )
             await self.limiter.acquire(self.route_weight(path))
             request_params = {
                 key: value
@@ -248,7 +269,12 @@ class GMGNDataClient:
             )
             if rate_limited:
                 reset_at = _extract_reset_at(response.data, response.headers)
-                self.limiter.note_rate_limit(reset_at)
+                # GMGN credentials are rotated independently. A 429 on one API
+                # slot must cool only that slot; poisoning the shared aggregate
+                # limiter stalls every other key and can delay position exits by
+                # the server reset window. The shared limiter still enforces the
+                # configured total request rate across all slots.
+                self._note_slot_rate_limit(slot, reset_at)
                 raise CollectorRateLimitError(
                     f"GMGN rate limited (slot={slot.index}, path={path})",
                     reset_at=reset_at,

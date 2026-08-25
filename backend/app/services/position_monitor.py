@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -9,9 +10,11 @@ from typing import Any, Mapping
 
 from dotenv import dotenv_values
 
+import httpx
+
 from ..collector.client import CollectorEndpoints, GMGNDataClient, HttpxTransport
 from ..collector.enrichment import GMGNEnrichmentProvider, merge_sources
-from ..collector.errors import CollectorAPIError, CollectorNetworkError
+from ..collector.errors import CollectorAPIError, CollectorNetworkError, CollectorRateLimitError
 from ..collector.filters import first, normalize_token, to_float
 from ..collector.models import ApiKeyRoles
 from ..collector.rate_limit import AsyncRateLimiter
@@ -23,7 +26,7 @@ from .live_trading import LiveTradingService
 from .paper_position_monitor import PaperPositionMonitor
 from .paper_trading import PaperTradingService
 from .platform_configuration import ENV_PATH, PlatformConfigurationService
-from .sol_price import SolUsdPriceService
+from .sol_price import CoinbaseSolKlineProvider, SolUsdPriceService
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +34,7 @@ class PositionMonitorCycle:
     checked_positions: int = 0
     market_requests: int = 0
     market_data_failures: int = 0
+    market_fallbacks: int = 0
     network_failures: int = 0
     paper_closed: int = 0
     paper_pending: int = 0
@@ -53,6 +57,8 @@ class GMGNPositionMarketProvider:
         self.roles = roles
         self._cache: dict[str, Mapping[str, Any]] = {}
         self._position_index = 0
+        self._pool_rate_limit_until = 0.0
+        self._pool_rate_limit_reset_at: int | None = None
 
     def reset_cycle_cache(self) -> None:
         self._cache.clear()
@@ -61,8 +67,14 @@ class GMGNPositionMarketProvider:
         cached = self._cache.get(address)
         if cached is not None:
             return cached
+        if time.time() < self._pool_rate_limit_until:
+            raise CollectorRateLimitError(
+                "GMGN position-monitor pool is cooling down after full-pool rate limit",
+                reset_at=self._pool_rate_limit_reset_at,
+            )
         pool = self.roles.position_monitor
         last_error: Exception | None = None
+        rate_limit_errors: list[CollectorRateLimitError] = []
         start = self._position_index % len(pool)
         self._position_index = (start + 1) % len(pool)
         for offset in range(len(pool)):
@@ -78,11 +90,108 @@ class GMGNPositionMarketProvider:
                 return bundle
             except CollectorNetworkError:
                 raise
+            except CollectorRateLimitError as exc:
+                # A rate-limited key is a slot-local capacity event, not a
+                # transport failure. Rotate immediately instead of stalling the
+                # whole position-monitor cycle until that key's reset time.
+                last_error = exc
+                rate_limit_errors.append(exc)
+                continue
             except CollectorAPIError as exc:
                 last_error = exc
+        if len(rate_limit_errors) == len(pool):
+            now = int(time.time())
+            reset_candidates = [int(exc.reset_at) for exc in rate_limit_errors if exc.reset_at]
+            reset_at = max(reset_candidates) if reset_candidates else now + 300
+            self._pool_rate_limit_reset_at = reset_at
+            self._pool_rate_limit_until = max(float(reset_at), time.time()) + 15.0
+            raise CollectorRateLimitError(
+                "GMGN position-monitor key pool rate limited", reset_at=reset_at
+            )
         if last_error is not None:
             raise last_error
         raise RuntimeError("GMGN position-monitor key pool is empty")
+
+
+class DexScreenerPositionMarketProvider:
+    """Read-only emergency price source for already-open positions only.
+
+    It is intentionally isolated from Collector admission, labeling and model
+    features. The public DEX pairs endpoint is used only when GMGN cannot
+    provide a current token price.
+    """
+
+    BASE_URL = "https://api.dexscreener.com"
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        *,
+        timeout_seconds: float = 3.0,
+        requests_per_second: float = 4.0,
+    ) -> None:
+        self._client = client or httpx.AsyncClient(
+            base_url=self.BASE_URL,
+            timeout=timeout_seconds,
+            headers={"Accept": "application/json", "User-Agent": "meme-quant-position-monitor/1"},
+        )
+        self._owns_client = client is None
+        self._limiter = AsyncRateLimiter(requests_per_second, cooldown_buffer_seconds=0.0)
+        self._cache: dict[str, Mapping[str, Any]] = {}
+
+    def reset_cycle_cache(self) -> None:
+        self._cache.clear()
+
+    @staticmethod
+    def _number(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    async def token_bundle(self, address: str) -> Mapping[str, Any]:
+        cached = self._cache.get(address)
+        if cached is not None:
+            return cached
+        await self._limiter.acquire()
+        response = await self._client.get(f"/token-pairs/v1/solana/{address}")
+        response.raise_for_status()
+        payload = response.json()
+        items = payload if isinstance(payload, list) else (payload.get("pairs") if isinstance(payload, Mapping) else None)
+        pairs = [item for item in (items or []) if isinstance(item, Mapping)]
+        candidates: list[tuple[float, Mapping[str, Any]]] = []
+        for pair in pairs:
+            base = pair.get("baseToken") if isinstance(pair.get("baseToken"), Mapping) else {}
+            if str(pair.get("chainId") or "").lower() != "solana" or str(base.get("address") or "") != address:
+                continue
+            price = self._number(pair.get("priceUsd"))
+            if price is None or price <= 0:
+                continue
+            liquidity_raw = pair.get("liquidity") if isinstance(pair.get("liquidity"), Mapping) else {}
+            liquidity = self._number(liquidity_raw.get("usd")) or 0.0
+            candidates.append((max(0.0, liquidity), pair))
+        if not candidates:
+            raise CollectorAPIError("DexScreener returned no usable Solana base-token pair")
+        liquidity, pair = max(candidates, key=lambda item: item[0])
+        price = self._number(pair.get("priceUsd"))
+        market_cap = self._number(pair.get("marketCap"))
+        data = {
+            "address": address,
+            "price_usd": price,
+            "liquidity_usd": liquidity,
+            "market_cap": market_cap,
+        }
+        bundle: Mapping[str, Any] = {
+            "token_info": {"data": data},
+            "_market_source": "dexscreener_public_token_pairs",
+        }
+        self._cache[address] = bundle
+        return bundle
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
 
 
 class PositionMonitorService:
@@ -113,6 +222,7 @@ class PositionMonitorService:
         self,
         provider: GMGNPositionMarketProvider,
         *,
+        fallback_provider: DexScreenerPositionMarketProvider | None = None,
         now_ts: int | None = None,
     ) -> PositionMonitorCycle:
         # Observation timestamps are captured when each market response arrives.
@@ -157,7 +267,7 @@ class PositionMonitorService:
                     continue
             grouped.setdefault(str(row["token_address"]), []).append(row)
 
-        checked = market_requests = market_data_failures = network_failures = 0
+        checked = market_requests = market_data_failures = market_fallbacks = network_failures = 0
         paper_closed = paper_pending = 0
         live_triggered = live_pending = blocked = 0
         jupiter_key_count = len(
@@ -200,10 +310,25 @@ class PositionMonitorService:
         async def fetch_current_market(
             address: str, positions: list[dict[str, Any]]
         ) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None, Exception | None]:
+            primary_error: Exception | None = None
             try:
-                return address, positions, self._snapshot(await provider.token_bundle(address)), None
+                primary_snapshot = self._snapshot(await provider.token_bundle(address))
+                if float(primary_snapshot.get("price") or 0.0) > 0:
+                    return address, positions, primary_snapshot, None
+                primary_error = CollectorAPIError("GMGN current price is missing or non-positive")
             except Exception as exc:
-                return address, positions, None, exc
+                primary_error = exc
+            if fallback_provider is not None:
+                try:
+                    fallback_snapshot = self._snapshot(await fallback_provider.token_bundle(address))
+                    if float(fallback_snapshot.get("price") or 0.0) > 0:
+                        return address, positions, fallback_snapshot, None
+                    raise CollectorAPIError("DexScreener fallback price is missing or non-positive")
+                except Exception as fallback_exc:
+                    return address, positions, None, RuntimeError(
+                        f"primary={type(primary_error).__name__}; fallback={type(fallback_exc).__name__}"
+                    )
+            return address, positions, None, primary_error
 
         market_tasks = [
             asyncio.create_task(fetch_current_market(address, positions))
@@ -231,6 +356,8 @@ class PositionMonitorService:
                     details={"positions": len(positions), "error": message},
                 )
                 continue
+            if str(snapshot.get("market_data_source") or "") == "dexscreener_public_token_pairs":
+                market_fallbacks += 1
             price = float(snapshot.get("price") or 0.0)
             if price <= 0:
                 checked += len(positions)
@@ -263,6 +390,7 @@ class PositionMonitorService:
             checked_positions=checked,
             market_requests=market_requests,
             market_data_failures=market_data_failures,
+            market_fallbacks=market_fallbacks,
             network_failures=network_failures,
             paper_closed=paper_closed,
             paper_pending=paper_pending,
@@ -491,12 +619,15 @@ class PositionMonitorService:
             "as_of": utc_now_iso(),
             "price": price,
             "liquidity_usd": liquidity,
+            "market_data_source": str(bundle.get("_market_source") or "gmgn_api"),
         }
         decimals = to_float(first(merged, ("decimals", "decimal")))
         if decimals is not None and 0 <= decimals <= 18:
             snapshot["token_decimals"] = int(decimals)
         market_cap = to_float(normalized.get("marketcap"))
-        source = "gmgn_direct" if market_cap is not None else None
+        market_data_source = str(snapshot.get("market_data_source") or "gmgn_api")
+        market_cap_prefix = "gmgn" if market_data_source == "gmgn_api" else market_data_source
+        source = f"{market_cap_prefix}_direct" if market_cap is not None else None
         if market_cap is None and price is not None:
             circulating = to_float(first(merged, ("circulating_supply",)))
             total = to_float(first(merged, ("total_supply",)))
@@ -504,9 +635,9 @@ class PositionMonitorService:
             if supply is not None and supply > 0:
                 market_cap = price * supply
                 source = (
-                    "gmgn_price_x_circulating_supply"
+                    f"{market_cap_prefix}_price_x_circulating_supply"
                     if circulating is not None
-                    else "gmgn_price_x_total_supply"
+                    else f"{market_cap_prefix}_price_x_total_supply"
                 )
         snapshot["market_cap_usd"] = market_cap
         snapshot["market_cap_source"] = source
@@ -547,7 +678,9 @@ class PositionMonitorWorker:
         self._stop = asyncio.Event()
         self._transport: HttpxTransport | None = None
         self._provider: GMGNPositionMarketProvider | None = None
+        self._fallback_provider: DexScreenerPositionMarketProvider | None = None
         self._sol_provider: GMGNEnrichmentProvider | None = None
+        self._sol_fallback_provider: CoinbaseSolKlineProvider | None = None
         self._sol_price = SolUsdPriceService(database)
         self._last_sol_refresh_attempt_monotonic = 0.0
         self._gmgn_limiter = gmgn_limiter
@@ -597,9 +730,11 @@ class PositionMonitorWorker:
         return GMGNPositionMarketProvider(client, roles)
 
     async def _refresh_sol_usd_for_open_simulation_positions(self) -> str | None:
-        """Keep fee-time SOL/USD facts available independently of Collector."""
-        if self._sol_provider is None:
-            return "sol_kline_provider_unavailable"
+        """Keep fee-time SOL/USD facts available independently of Collector.
+
+        GMGN remains primary. Coinbase Exchange public SOL-USD candles are a
+        read-only fallback used only for fee conversion when GMGN is unavailable.
+        """
         open_row = self.database.fetch_one(
             """
             SELECT 1 AS present
@@ -619,20 +754,47 @@ class PositionMonitorWorker:
         if now_monotonic - self._last_sol_refresh_attempt_monotonic < 30.0:
             return None
         self._last_sol_refresh_attempt_monotonic = now_monotonic
-        try:
-            price = await self._sol_price.refresh(self._sol_provider, now_ts=now_ts)
-            if price is None:
-                return "sol_usd_price_stale_after_refresh"
-        except Exception as exc:
-            message = f"{type(exc).__name__}: {exc}"[:300]
-            self.database.audit(
-                category="trading",
-                action="position_monitor_sol_usd_refresh_failed",
-                severity="warning",
-                details={"error": message},
-            )
-            return message
-        return None
+        errors: list[str] = []
+        if self._sol_provider is not None:
+            try:
+                price = await self._sol_price.refresh(self._sol_provider, now_ts=now_ts)
+                if price is not None:
+                    return None
+                errors.append("gmgn:stale_after_refresh")
+            except Exception as exc:
+                errors.append(f"gmgn:{type(exc).__name__}")
+        else:
+            errors.append("gmgn:provider_unavailable")
+
+        if self._sol_fallback_provider is not None:
+            try:
+                price = await self._sol_price.refresh(
+                    self._sol_fallback_provider,
+                    now_ts=now_ts,
+                    source="coinbase_exchange_public_sol_usd_1m",
+                )
+                if price is not None:
+                    self.database.audit(
+                        category="trading",
+                        action="position_monitor_sol_usd_fallback_used",
+                        severity="warning",
+                        details={"source": price.source, "observed_at": price.observed_at},
+                    )
+                    return None
+                errors.append("coinbase:stale_after_refresh")
+            except Exception as exc:
+                errors.append(f"coinbase:{type(exc).__name__}")
+        else:
+            errors.append("coinbase:provider_unavailable")
+
+        message = ";".join(errors)[:300]
+        self.database.audit(
+            category="trading",
+            action="position_monitor_sol_usd_refresh_failed",
+            severity="warning",
+            details={"error": message},
+        )
+        return message or "sol_usd_price_unavailable"
 
     async def run_forever(self) -> None:
         if not self.settings.position_monitor_enabled:
@@ -647,6 +809,24 @@ class PositionMonitorWorker:
             self.database.set_runtime_state(
                 "position_monitor_status",
                 {"state": "blocked", "error": f"{type(exc).__name__}: {exc}"[:500]},
+            )
+        try:
+            self._fallback_provider = DexScreenerPositionMarketProvider()
+        except Exception as exc:
+            self._fallback_provider = None
+            self.database.audit(
+                category="trading", action="position_monitor_fallback_init_failed",
+                severity="warning", details={"error": f"{type(exc).__name__}: {exc}"[:300]},
+            )
+        try:
+            self._sol_fallback_provider = CoinbaseSolKlineProvider()
+        except Exception as exc:
+            self._sol_fallback_provider = None
+            self.database.audit(
+                category="trading",
+                action="position_monitor_sol_usd_fallback_init_failed",
+                severity="warning",
+                details={"error": f"{type(exc).__name__}: {exc}"[:300]},
             )
         initial_runtime = self.configuration.runtime_values()
         initial_status = self.database.get_runtime_state("position_monitor_status", {})
@@ -697,9 +877,13 @@ class PositionMonitorWorker:
                 previous_started = started
                 cycle_started_at = utc_now_iso()
                 self._provider.reset_cycle_cache()
+                if self._fallback_provider is not None:
+                    self._fallback_provider.reset_cycle_cache()
                 try:
                     sol_usd_refresh_error = await self._refresh_sol_usd_for_open_simulation_positions()
-                    report = await self.service.run_cycle(self._provider)
+                    report = await self.service.run_cycle(
+                        self._provider, fallback_provider=self._fallback_provider
+                    )
                     elapsed = time.monotonic() - started
                     state = "degraded" if (report.market_data_failures or sol_usd_refresh_error) else "running"
                     self.database.set_runtime_state(
@@ -782,6 +966,10 @@ class PositionMonitorWorker:
             await self.service.shutdown()
             if self._transport is not None:
                 await self._transport.close()
+            if self._fallback_provider is not None:
+                await self._fallback_provider.close()
+            if self._sol_fallback_provider is not None:
+                await self._sol_fallback_provider.close()
             self.database.set_runtime_state(
                 "position_monitor_status", {"state": "stopped", "stopped_at": utc_now_iso()}
             )

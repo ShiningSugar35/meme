@@ -9,12 +9,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.app.collector.constants import SOL_WRAPPED_MINT
+from backend.app.collector.errors import CollectorRateLimitError
+from backend.app.collector.models import Kline
 from backend.app.config import Settings
 from backend.app.database import Database
 from backend.app.services.paper_position_monitor import PaperPositionMonitor
 from backend.app.services.paper_trading import PaperTradingService
 from backend.app.services.platform_configuration import PlatformConfigurationService
-from backend.app.services.position_monitor import PositionMonitorService, PositionMonitorWorker
+from backend.app.services.position_monitor import (
+    DexScreenerPositionMarketProvider, PositionMonitorService, PositionMonitorWorker,
+)
+from backend.app.services.sol_price import CoinbaseSolKlineProvider
 from backend.app.trading.live.models import ExecutionResult, OrderStatus
 from backend.app.trading.simulator.jupiter_probe import RouteProbeResult
 
@@ -211,6 +217,113 @@ def seed_live(database: Database, *, position_id: str, address: str, opened: dat
     )
 
 
+
+
+class FailingRateLimitedMarketProvider:
+    async def token_bundle(self, address: str):
+        raise CollectorRateLimitError("all GMGN slots cooling", reset_at=1_800_000_000)
+
+
+class PositionFallbackProvider(CurrentMarketProvider):
+    async def token_bundle(self, address: str):
+        self.calls.append(address)
+        return {
+            "token_info": {
+                "data": {
+                    "address": address,
+                    "price_usd": self.price,
+                    "liquidity_usd": self.liquidity,
+                    "market_cap": 123_456.0,
+                }
+            },
+            "_market_source": "dexscreener_public_token_pairs",
+        }
+
+
+class _DexResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _DexClient:
+    def __init__(self, payload) -> None:
+        self.payload = payload
+        self.paths: list[str] = []
+
+    async def get(self, path: str):
+        self.paths.append(path)
+        return _DexResponse(self.payload)
+
+
+@pytest.mark.asyncio
+async def test_dexscreener_position_fallback_selects_highest_liquidity_base_pair() -> None:
+    address = "fallback-mint"
+    client = _DexClient([
+        {
+            "chainId": "solana",
+            "baseToken": {"address": address},
+            "quoteToken": {"address": "quote-a"},
+            "priceUsd": "0.50",
+            "liquidity": {"usd": 5000},
+            "marketCap": 100000,
+        },
+        {
+            "chainId": "solana",
+            "baseToken": {"address": address},
+            "quoteToken": {"address": "quote-b"},
+            "priceUsd": "0.55",
+            "liquidity": {"usd": 9000},
+            "marketCap": 110000,
+        },
+        {
+            "chainId": "solana",
+            "baseToken": {"address": "other"},
+            "quoteToken": {"address": address},
+            "priceUsd": "999",
+            "liquidity": {"usd": 999999},
+        },
+    ])
+    provider = DexScreenerPositionMarketProvider(client=client, requests_per_second=100.0)
+
+    bundle = await provider.token_bundle(address)
+
+    data = bundle["token_info"]["data"]
+    assert data["price_usd"] == pytest.approx(0.55)
+    assert data["liquidity_usd"] == pytest.approx(9000.0)
+    assert bundle["_market_source"] == "dexscreener_public_token_pairs"
+    assert client.paths == [f"/token-pairs/v1/solana/{address}"]
+
+
+@pytest.mark.asyncio
+async def test_position_monitor_uses_dexscreener_only_when_gmgn_market_is_unavailable(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_paper(database, position_id="paper-fallback", address="fallback-token", opened=opened)
+    fallback = PositionFallbackProvider(0.95, liquidity=12_000.0)
+    service = PositionMonitorService(database, settings)
+
+    report = await service.run_cycle(
+        FailingRateLimitedMarketProvider(), fallback_provider=fallback
+    )
+
+    assert report.market_requests == 1
+    assert report.market_data_failures == 0
+    assert report.market_fallbacks == 1
+    assert report.blocked_positions == 0
+    row = database.fetch_one("SELECT status,metadata_json FROM positions WHERE id='paper-fallback'")
+    assert row["status"] == "open"
+    snapshot = json.loads(row["metadata_json"])["market_snapshot"]
+    assert snapshot["price"] == pytest.approx(0.95)
+    assert snapshot["market_data_source"] == "dexscreener_public_token_pairs"
+    assert snapshot["market_cap_source"] == "dexscreener_public_token_pairs_direct"
+
 @pytest.mark.asyncio
 async def test_current_price_above_stop_stays_open_without_kline_lookup(tmp_path: Path) -> None:
     database = make_database(tmp_path)
@@ -403,3 +516,76 @@ async def test_worker_refreshes_sol_fee_fact_independently_of_collector(tmp_path
     assert first is None
     assert second is None
     assert fake.refresh_calls == 1
+
+
+class _CoinbaseResponse:
+    def __init__(self, payload) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return self.payload
+
+
+class _CoinbaseClient:
+    def __init__(self, payload) -> None:
+        self.payload = payload
+        self.calls: list[tuple[str, dict]] = []
+
+    async def get(self, path: str, *, params=None):
+        self.calls.append((path, dict(params or {})))
+        return _CoinbaseResponse(self.payload)
+
+
+@pytest.mark.asyncio
+async def test_coinbase_sol_fee_provider_uses_only_closed_one_minute_candles() -> None:
+    target = 1_800_000_180
+    payload = [
+        [target - 180, 99.0, 102.0, 100.0, 101.0, 123.0],
+        [target - 60, 100.0, 103.0, 101.0, 102.0, 456.0],
+        [target, 101.0, 104.0, 102.0, 103.0, 789.0],
+    ]
+    client = _CoinbaseClient(payload)
+    provider = CoinbaseSolKlineProvider(client=client)
+
+    rows = await provider.klines(SOL_WRAPPED_MINT, target - 300, target)
+
+    assert [row.timestamp for row in rows] == [target - 120, target]
+    assert [row.close for row in rows] == [101.0, 102.0]
+    assert client.calls[0][0] == "/products/SOL-USD/candles"
+
+
+class _FailingSolKlineProvider:
+    async def klines(self, address: str, from_ts: int, to_ts: int):
+        raise RuntimeError("gmgn unavailable")
+
+
+class _HealthySolKlineProvider:
+    async def klines(self, address: str, from_ts: int, to_ts: int):
+        assert address == SOL_WRAPPED_MINT
+        return [Kline(timestamp=to_ts - 10, high=102.0, low=100.0, close=101.25, open=100.5)]
+
+
+@pytest.mark.asyncio
+async def test_worker_falls_back_to_coinbase_for_fee_time_sol_usd(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_paper(database, position_id="paper-sol-coinbase", address="sol-fallback-token", opened=opened)
+    worker = PositionMonitorWorker(database, settings)
+    worker._sol_provider = _FailingSolKlineProvider()
+    worker._sol_fallback_provider = _HealthySolKlineProvider()
+
+    error = await worker._refresh_sol_usd_for_open_simulation_positions()
+
+    assert error is None
+    row = database.fetch_one(
+        "SELECT price_usd,source FROM asset_usd_prices WHERE asset='SOL' ORDER BY observed_at DESC LIMIT 1"
+    )
+    assert row["price_usd"] == pytest.approx(101.25)
+    assert row["source"] == "coinbase_exchange_public_sol_usd_1m"
+    status = database.get_runtime_state("sol_usd_price_status")
+    assert status["state"] == "ready"
+    assert status["source"] == "coinbase_exchange_public_sol_usd_1m"

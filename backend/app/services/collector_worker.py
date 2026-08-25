@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -16,6 +17,7 @@ from ..collector import (
     CollectedSample,
     CollectorEndpoints,
     CollectorNetworkError,
+    CollectorRateLimitError,
     CollectorService,
     DiscoveryService,
     EnrichmentService,
@@ -198,10 +200,91 @@ class CollectorWorker:
         self._env_mtime_ns: int | None = None
         self._transport_rebuilds = 0
         self._sol_price = SolUsdPriceService(database)
+        existing_circuit = database.get_runtime_state("collector_rate_limit_circuit", {})
+        existing_circuit = existing_circuit if isinstance(existing_circuit, dict) else {}
+        self._rate_limit_streak = int(existing_circuit.get("streak") or 0)
+        self._rate_limit_until_epoch = float(existing_circuit.get("next_probe_epoch") or 0.0)
+        self._rate_limit_previous_streak = int(existing_circuit.get("previous_streak") or 0)
+        self._rate_limit_last_recovered_epoch = float(existing_circuit.get("recovered_epoch") or 0.0)
         existing_events = database.get_runtime_state("collector_events", [])
         seed = existing_events[-250:] if isinstance(existing_events, list) else []
         self._events: deque[dict[str, Any]] = deque(seed, maxlen=250)
         self._active_cycle_id: str | None = None
+
+    @staticmethod
+    def _rate_limit_error(exc: BaseException | None) -> CollectorRateLimitError | None:
+        seen: set[int] = set()
+        current = exc
+        while isinstance(current, BaseException) and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, CollectorRateLimitError):
+                return current
+            current = current.__cause__ or current.__context__
+        return None
+
+    def _rate_limit_remaining(self) -> float:
+        return max(0.0, self._rate_limit_until_epoch - time.time())
+
+    def _open_rate_limit_circuit(self, exc: BaseException, *, stage: str) -> dict[str, Any]:
+        rate_error = self._rate_limit_error(exc)
+        now = time.time()
+        recent_recovery = (
+            self._rate_limit_last_recovered_epoch > 0
+            and now - self._rate_limit_last_recovered_epoch <= 900.0
+        )
+        base_streak = self._rate_limit_streak
+        if base_streak <= 0 and recent_recovery:
+            base_streak = self._rate_limit_previous_streak
+        self._rate_limit_streak = max(1, base_streak + 1)
+        # Five minutes is deliberately longer than the ~100-155s rolling reset
+        # observed in production. Repeated half-open failures double the quiet
+        # period up to one hour so the worker cannot perpetually renew a ban.
+        backoff_seconds = min(3600.0, 300.0 * (2 ** min(4, self._rate_limit_streak - 1)))
+        server_reset = float(rate_error.reset_at) if rate_error and rate_error.reset_at else 0.0
+        self._rate_limit_until_epoch = max(now + backoff_seconds, server_reset + 15.0)
+        payload = {
+            "state": "open",
+            "streak": self._rate_limit_streak,
+            "stage": stage,
+            "backoff_seconds": backoff_seconds,
+            "server_reset_at": int(server_reset) if server_reset else None,
+            "next_probe_epoch": self._rate_limit_until_epoch,
+            "next_probe_at": datetime.fromtimestamp(self._rate_limit_until_epoch, timezone.utc).isoformat(),
+            "opened_at": utc_now_iso(),
+        }
+        self.database.set_runtime_state("collector_rate_limit_circuit", payload)
+        self.database.audit(
+            category="collector",
+            action="gmgn_rate_limit_circuit_opened",
+            severity="warning",
+            details=payload,
+        )
+        return payload
+
+    def _close_rate_limit_circuit(self) -> None:
+        if self._rate_limit_streak <= 0 and self._rate_limit_until_epoch <= 0:
+            return
+        previous_streak = self._rate_limit_streak
+        recovered_epoch = time.time()
+        self._rate_limit_previous_streak = previous_streak
+        self._rate_limit_last_recovered_epoch = recovered_epoch
+        self._rate_limit_streak = 0
+        self._rate_limit_until_epoch = 0.0
+        payload = {
+            "state": "closed",
+            "streak": 0,
+            "previous_streak": previous_streak,
+            "recovered_epoch": recovered_epoch,
+            "recovered_at": datetime.fromtimestamp(recovered_epoch, timezone.utc).isoformat(),
+            "probation_until": datetime.fromtimestamp(recovered_epoch + 900.0, timezone.utc).isoformat(),
+        }
+        self.database.set_runtime_state("collector_rate_limit_circuit", payload)
+        self.database.audit(
+            category="collector",
+            action="gmgn_rate_limit_circuit_closed",
+            severity="info",
+            details=payload,
+        )
 
     @staticmethod
     def _type_label(token_type: object) -> str:
@@ -372,9 +455,151 @@ class CollectorWorker:
                     )
                     await asyncio.sleep(3.0)
                     continue
+
+            requested_limit = min(self.settings.gmgn_trenches_limit, 80)
+            rate_limit_remaining = self._rate_limit_remaining()
+            if rate_limit_remaining > 0:
+                circuit = self.database.get_runtime_state("collector_rate_limit_circuit", {})
+                circuit = circuit if isinstance(circuit, dict) else {}
+                self.database.set_runtime_state(
+                    "collector_status",
+                    {
+                        "state": "rate_limited",
+                        "mode": "monitor_only" if self.monitor_only else "collector",
+                        "cycle_state": "backoff",
+                        "requested_limit_per_type": requested_limit,
+                        "rate_limit_streak": self._rate_limit_streak,
+                        "rate_limit_backoff_remaining_seconds": rate_limit_remaining,
+                        "next_probe_at": circuit.get("next_probe_at"),
+                        "errors": [],
+                        "transport_rebuilds": self._transport_rebuilds,
+                        "updated_at": utc_now_iso(),
+                    },
+                )
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=rate_limit_remaining)
+                except TimeoutError:
+                    pass
+                continue
+
+            # A persisted/open rate-limit circuit is half-opened with the
+            # production-critical collection path *before* Kline/Regime work.
+            # This prevents quota-heavy ancillary calls from consuming the first
+            # recovered requests and immediately re-banning discovery.
+            if self._rate_limit_streak > 0 and not self.monitor_only:
+                probe_started = time.time()
+                self._active_cycle_id = uuid.uuid4().hex[:10]
+                self.database.set_runtime_state(
+                    "collector_status",
+                    {
+                        "state": "recovering",
+                        "mode": "collector",
+                        "cycle_state": "half_open_probe",
+                        "cycle_id": self._active_cycle_id,
+                        "cycle_started_at": utc_now_iso(),
+                        "requested_limit_per_type": requested_limit,
+                        "rate_limit_streak": self._rate_limit_streak,
+                    },
+                )
+                try:
+                    collection = await self._service.collect_once(
+                        limit=requested_limit,
+                        event_sink=self._record_event,
+                    )
+                    probe_stats = {
+                        "discovered": collection.discovered,
+                        "accepted": collection.accepted,
+                        "rejected": collection.rejected,
+                        "prefilter_rejected": collection.prefilter_rejected,
+                        "enrichment_rejected": collection.enrichment_rejected,
+                        "duplicates": collection.unfinished_duplicates,
+                        "rejection_reasons": dict(collection.rejection_reasons),
+                        "type_stats": {key: dict(value) for key, value in collection.type_stats.items()},
+                    }
+                    self._persist_cycle_snapshot(probe_stats)
+                    previous_streak = self._rate_limit_streak
+                    self._close_rate_limit_circuit()
+                    self.database.set_runtime_state(
+                        "collector_status",
+                        {
+                            "state": "running",
+                            "mode": "collector",
+                            "cycle_state": "idle",
+                            "cycle_id": self._active_cycle_id,
+                            "last_cycle_at": utc_now_iso(),
+                            "last_cycle_duration_seconds": time.time() - probe_started,
+                            "requested_limit_per_type": requested_limit,
+                            **probe_stats,
+                            "finalized": 0,
+                            "errors": [],
+                            "transport_rebuilds": self._transport_rebuilds,
+                            "rate_limit_recovered": True,
+                            "recovered_from_streak": previous_streak,
+                        },
+                    )
+                except Exception as exc:
+                    if self._rate_limit_error(exc) is not None:
+                        circuit = self._open_rate_limit_circuit(
+                            exc, stage="half_open_collection_probe"
+                        )
+                        self.database.set_runtime_state(
+                            "collector_status",
+                            {
+                                "state": "rate_limited",
+                                "mode": "collector",
+                                "cycle_state": "backoff",
+                                "cycle_id": self._active_cycle_id,
+                                "last_cycle_at": utc_now_iso(),
+                                "last_cycle_duration_seconds": time.time() - probe_started,
+                                "requested_limit_per_type": requested_limit,
+                                "rate_limit_streak": self._rate_limit_streak,
+                                "next_probe_at": circuit["next_probe_at"],
+                                "errors": [{
+                                    "stage": "half_open_collection_probe",
+                                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                                }],
+                                "transport_rebuilds": self._transport_rebuilds,
+                            },
+                        )
+                    else:
+                        self.database.set_runtime_state(
+                            "collector_status",
+                            {
+                                "state": "degraded",
+                                "mode": "collector",
+                                "cycle_state": "idle",
+                                "cycle_id": self._active_cycle_id,
+                                "last_cycle_at": utc_now_iso(),
+                                "last_cycle_duration_seconds": time.time() - probe_started,
+                                "requested_limit_per_type": requested_limit,
+                                "errors": [{
+                                    "stage": "half_open_collection_probe",
+                                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                                }],
+                                "transport_rebuilds": self._transport_rebuilds,
+                            },
+                        )
+                    try:
+                        await asyncio.wait_for(
+                            self._stop.wait(),
+                            timeout=max(1.0, min(self.settings.collector_poll_seconds, self._rate_limit_remaining() or self.settings.collector_poll_seconds)),
+                        )
+                    except TimeoutError:
+                        pass
+                    continue
+
+                # Recovery succeeded. Give the normal cadence one full interval
+                # before reintroducing label/Regime/SOL requests.
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=max(1.0, self.settings.collector_poll_seconds)
+                    )
+                except TimeoutError:
+                    pass
+                continue
+
             started = time.time()
             self._active_cycle_id = uuid.uuid4().hex[:10]
-            requested_limit = min(self.settings.gmgn_trenches_limit, 80)
             previous_status = self.database.get_runtime_state("collector_status", {})
             previous_status = previous_status if isinstance(previous_status, dict) else {}
             self.database.set_runtime_state(
@@ -404,6 +629,7 @@ class CollectorWorker:
             }
             finalized = 0
             network_failure = False
+            rate_limit_circuit: dict[str, Any] | None = None
 
             # Freeze a recent SOL/USD observation before any simulated execution.
             # Paper accounting consumes this cache at the actual fee timestamp;
@@ -480,6 +706,10 @@ class CollectorWorker:
                         severity="error",
                         details={"error": message},
                     )
+                    if self._rate_limit_error(exc) is not None:
+                        rate_limit_circuit = self._open_rate_limit_circuit(
+                            exc, stage="discovery"
+                        )
 
             elapsed = time.time() - started
             if not self.monitor_only:
@@ -494,7 +724,11 @@ class CollectorWorker:
             self.database.set_runtime_state(
                 "collector_status",
                 {
-                    "state": "degraded" if cycle_errors else ("monitor_only" if self.monitor_only else "running"),
+                    "state": (
+                        "rate_limited"
+                        if rate_limit_circuit is not None
+                        else ("degraded" if cycle_errors else ("monitor_only" if self.monitor_only else "running"))
+                    ),
                     "mode": "monitor_only" if self.monitor_only else "collector",
                     "cycle_state": "idle",
                     "cycle_id": self._active_cycle_id,
@@ -505,6 +739,8 @@ class CollectorWorker:
                     "finalized": finalized,
                     "errors": cycle_errors,
                     "transport_rebuilds": self._transport_rebuilds,
+                    "rate_limit_streak": self._rate_limit_streak if rate_limit_circuit is not None else 0,
+                    "next_probe_at": rate_limit_circuit.get("next_probe_at") if rate_limit_circuit else None,
                 },
             )
             if network_failure:

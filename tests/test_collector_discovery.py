@@ -21,15 +21,19 @@ async def no_sleep(_: float) -> None:
     return None
 
 
-def test_dynamic_key_role_layout_uses_all_configured_keys_and_redacts() -> None:
+def test_dynamic_key_role_layout_reserves_discovery_capacity_and_redacts() -> None:
     roles = ApiKeyRoles.from_secrets([f"secret-{i}" for i in range(12)])
     assert [slot.index for slot in roles.discovery] == [0, 1]
-    assert [slot.index for slot in roles.position_monitor] == list(range(12))
+    assert [slot.index for slot in roles.position_monitor] == list(range(3, 12))
     assert roles.discovery_fallback.index == 2
-    assert [slot.index for slot in roles.realtime] == list(range(12))
-    assert [slot.index for slot in roles.realtime_fallback] == list(range(12))
-    assert [slot.index for slot in roles.kline] == list(range(12))
-    assert [slot.index for slot in roles.all_slots] == list(range(12))
+    assert [slot.index for slot in roles.realtime] == list(range(3, 12))
+    assert [slot.index for slot in roles.realtime_fallback] == list(range(3, 12))
+    assert [slot.index for slot in roles.kline] == list(range(3, 12))
+    assert [slot.index for slot in roles.kline_fallback] == list(range(3, 12))
+    assert {slot.index for slot in (*roles.discovery, roles.discovery_fallback)}.isdisjoint(
+        {slot.index for slot in roles.kline}
+    )
+    assert {slot.index for slot in roles.all_slots} == set(range(12))
     assert "secret-0" not in repr(roles.discovery[0])
 
     single = ApiKeyRoles.from_secrets(["one-key"])

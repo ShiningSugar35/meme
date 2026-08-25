@@ -142,7 +142,8 @@ async def test_collector_fixture_429_5xx_and_validation_contract() -> None:
     with pytest.raises(CollectorRateLimitError) as rate_exc:
         await rate_client.request(ApiSlot(0, placeholder), "/v1/test")
     assert rate_exc.value.reset_at == 1_800_000_000
-    assert limiter.reset_at == 1_800_000_000
+    assert limiter.reset_at is None
+    assert rate_client.slot_rate_limit_remaining(ApiSlot(0, placeholder)) > 0
     assert placeholder not in str(rate_exc.value)
 
     server_client = GMGNDataClient(

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from .client import GMGNDataClient
 from .constants import DISCOVERY_TYPES, LAUNCHPADS, SOL_TRENCH_QUOTE_ADDRESS_TYPES
-from .errors import CollectorError, CollectorNetworkError, CollectorValidationError
+from .errors import CollectorError, CollectorNetworkError, CollectorRateLimitError, CollectorValidationError
 from .models import ApiKeyRoles, TokenCandidate
 
 
@@ -93,10 +94,48 @@ class DiscoveryService:
         body = self.request_body(token_type, limit)
         primary = self.roles.discovery[DISCOVERY_TYPES.index(token_type)]
         last_error: BaseException | None = None
-        for attempt in range(3):
+        cooldown = getattr(self.client, "slot_rate_limit_remaining", None)
+        def cooling(slot) -> float:
+            return float(cooldown(slot)) if callable(cooldown) else 0.0
+
+        fallback = self.roles.discovery_fallback
+        primary_remaining = cooling(primary)
+        fallback_remaining = cooling(fallback)
+        if primary_remaining > 0 and fallback_remaining > 0:
+            raise CollectorRateLimitError(
+                f"GMGN discovery keys cooling down for {token_type}",
+                reset_at=int(time.time() + max(primary_remaining, fallback_remaining)),
+            )
+        if primary_remaining <= 0:
+            for attempt in range(3):
+                try:
+                    data = await self.client.request(
+                        primary,
+                        self.client.endpoints.trenches,
+                        method="POST",
+                        params={"chain": "sol"},
+                        json_body=body,
+                    )
+                    return extract_trench_candidates(data, token_type)[:limit]
+                except CollectorNetworkError:
+                    # Network failures are transport/IP-level, not key-specific.
+                    # The transport already retried once with a fresh connection pool.
+                    raise
+                except CollectorRateLimitError as exc:
+                    # Do not retry the same key inside its server reset window.
+                    # Re-probing a 429 can extend rolling cooldowns and starve the
+                    # entire collector indefinitely.
+                    last_error = exc
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < 2 and self.retry_delay_seconds:
+                        await self._sleep(self.retry_delay_seconds)
+        fallback_remaining = cooling(fallback)
+        if fallback_remaining <= 0:
             try:
                 data = await self.client.request(
-                    primary,
+                    fallback,
                     self.client.endpoints.trenches,
                     method="POST",
                     params={"chain": "sol"},
@@ -104,26 +143,9 @@ class DiscoveryService:
                 )
                 return extract_trench_candidates(data, token_type)[:limit]
             except CollectorNetworkError:
-                # Network failures are transport/IP-level, not key-specific.
-                # The transport already retried once with a fresh connection pool.
                 raise
             except Exception as exc:
                 last_error = exc
-                if attempt < 2 and self.retry_delay_seconds:
-                    await self._sleep(self.retry_delay_seconds)
-        try:
-            data = await self.client.request(
-                self.roles.discovery_fallback,
-                self.client.endpoints.trenches,
-                method="POST",
-                params={"chain": "sol"},
-                json_body=body,
-            )
-            return extract_trench_candidates(data, token_type)[:limit]
-        except CollectorNetworkError:
-            raise
-        except Exception as exc:
-            last_error = exc
         raise CollectorError(
             f"Discovery failed for {token_type} after primary retries and fallback"
         ) from last_error

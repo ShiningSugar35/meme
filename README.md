@@ -418,7 +418,7 @@ fallback 已固定：active Top3 not-ready/stale 或 certification blocked 时�
 
 Windows 侧对 2026-08-24/25 停采事故的根因定位为 Modern Standby；防休眠从线程级 `SetThreadExecutionState` 升级为持久 Power Request (`SystemRequired + ExecutionRequired`)。异常 `+1716 USD` 延迟退出仓保留原始成交事实，但通过 `performance_excluded=true` 从收益、现金重算、胜负与训练执行证据中隔离。
 
-本轮最终后端 `pytest -q` **191/191**，scheduler recovery targeted 12/12，前端 `tsc -b && vite build` 通过。
+本轮最终后端 `pytest -q` **204/204**，scheduler recovery targeted 12/12，前端 `tsc -b && vite build` 通过。
 
 ### 9.5 实盘接口刻意停放
 
@@ -444,3 +444,23 @@ Windows 侧对 2026-08-24/25 停采事故的根因定位为 Modern Standby；防
 
 截至 2026-08-14，仓库里的非实盘主链已经完成 schema v11 H1/no-completed、扩展候选池、自适应且 fold-train-only 的特征选择、Top 3 + `rules_only`、四策略 USD-only 模拟账本、手续费发生时 SOL/USD 冻结折算、默认 3s（可配置）current-price PositionMonitor、Jupiter Token→USDC executable quote-only 卖出验证、重大模型换代新 simulation session、H1-only simulation 历史与重启可恢复的 workers，以及 143/143 后端测试与前端 production build。现役 Top 3 已在真实样本上完成训练与激活，最终 holdout 被严格保留为 certification；`E_exec` 仅作为权重为 0 的执行影子指标。写在这里的致谢不是客套，而是一份公开的记念——没有这些前后端支撑，没有那些在策略分叉口给出的清醒建议，本项目很难同时站在“可演示”与“可负责”之间。
 
+
+
+### 2026-08-25 GMGN 429 circuit-breaker / position fallback
+
+- 现场进一步复现了 GMGN 多 Key 429：即使独立探针降到 1 RPS，多把 Key 仍返回带约 100–155 秒 reset 窗口的 429；旧逻辑把单 Key `reset_at` 写进共享 limiter，导致一把 Key 限流会把 Collector + PositionMonitor 的其它 Key 一并暂停，PositionMonitor 曾出现约 47–49 秒 start interval。
+- `GMGNDataClient` 现在把 429 cooldown 绑定到 **slot 本身**，共享 limiter 只负责总 RPS，不再承载单 Key reset。PositionMonitor 遇单 Key 429 立即换下一 Key；若整池均 429，则打开 full-pool circuit breaker，在 reset window 内不再触碰 GMGN，直接进入只读 fallback。
+- PositionMonitor 新增 **DexScreener Public `/token-pairs/v1/solana/{mint}`** 兜底，仅用于已经打开的持仓 current-price 监控：只接受目标 Mint 作为 `baseToken` 的 Solana pair，并选流动性最高的 pair；fallback source 持久化为 `dexscreener_public_token_pairs`。该路径不参与 Collector admission、标签、模型训练或新仓选股。fallback 自身限速 4 RPS，低于其 Public pairs 类接口公开 300 RPM 上限。
+- Collector 仍 fail-closed：GMGN 缺关键准入/Kline 事实时不使用 DexScreener 补造样本。Discovery 对 429 不再重复打同一 primary；已冷却的 primary/fallback 直接跳过；Realtime/Kline enrichment 跳过 cooldown slot，连续 429 之间不再人为 sleep。目标是让 server reset window 真正到期，而不是每几十秒探测一次把滚动限流续上。
+- 生产 `GMGN_GLOBAL_RPS` 从 10 保守降为 **2 RPS**；不改变任何业务筛选阈值、LabelPolicy 或 DRY_RUN 边界。后续只有在持续运行证据证明无 429 且采样吞吐不足时，才允许逐级上调。
+
+- **Coinbase Exchange Public SOL/USD fee fallback**：PositionMonitor 的手续费会计仍以 GMGN SOL 1m 为主；若 GMGN Kline 因 429/网络不可用，则读取 Coinbase Exchange 无鉴权 `SOL-USD` 1m candles，只接受已经闭合的 minute bucket，并以 candle close 时刻写入 `asset_usd_prices`，source=`coinbase_exchange_public_sol_usd_1m`。该 fallback 已真实解除一笔长期 `closing` rules-only 仓位；退出价、PnL、Jupiter quote 均保持真实执行事实。
+- 最终自动化门：后端 `pytest -q` **204/204**、`py_compile`、`git diff --check` 与前端 `tsc -b && vite build` 均通过。
+
+- **Collector worker 级长熔断**：仅 per-slot cooldown 仍不足以处理 GMGN 的滚动 reset。Collector 现将 rate-limit circuit 持久化到 SQLite；首次确认 discovery 429 后静默至少 300s，再次 half-open 失败按 600/1200/2400/3600s 指数退避。backend 重启不会清除 `next_probe_at`。backoff 内不请求 GMGN；half-open 只优先执行真实 `collect_once`，成功并持久化 cycle snapshot 后才关闭 circuit，下一正常周期再恢复 SOL/Kline/Regime/label 辅助负载。
+- 生产现场曾在故障恢复中出现一次 partial cycle：New Creation 与 Near Completion discovery 已返回，Near Completion 新样本 `4104/4105` 于 13:38–13:39 BJT 成功入库，但后续阶段失败导致该轮没有 cycle snapshot。样本事实保留有效；最终验收只认 circuit 关闭后的完整成功周期。
+
+- **GMGN Key 角色隔离**：当配置 Key>=6 时，slot 0/1 专供 New Creation/Near Completion discovery，slot 2 只作 discovery fallback；slot 3+ 承担 realtime enrichment、Kline 与 PositionMonitor。`kline_fallback` 不再借用 discovery fallback。少 Key 环境保持旧共享布局。生产当前 12 Key，因此实际为 3 把 Discovery 保留容量 + 9 把 auxiliary。
+- **恢复 probation**：half-open collection 成功后保留前一 streak 15 分钟；probation 内若正常全链周期再次 429，则从上一 streak 继续加倍，而不是错误地重置回 5 分钟。现场 13:49 恢复后约 2 分钟复发已按新语义升级为 streak=2 / 600s，下一半开点 14:01:38 BJT。
+
+- **GMGN 429 最终生产验收**：在 12-Key 角色隔离（0/1/2 Discovery；3–11 auxiliary）、`GMGN_GLOBAL_RPS=2`、per-slot cooldown、worker 持久化 circuit 与 15 分钟 probation 同时生效后，生产连续完成 **4062 / 4063 / 4064** 三个 Collector cycle，均 `discovered=120 / errors=[]`；4062 与 4064 各新增 1 条样本。最终样本数 **1279（1275 mature / 4 pending，200 positive）**。PositionMonitor 保持约 2s、0 blocked/0 market/network failure；持仓 current-price DexScreener fallback、fee-time SOL/USD Coinbase fallback 均已真实验证并可在 GMGN 恢复后自动回主源。

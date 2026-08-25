@@ -11,7 +11,7 @@ from typing import Any, Protocol
 
 from .client import GMGNDataClient
 from .constants import FEATURE_SCHEMA_VERSION
-from .errors import CollectorError, CollectorNetworkError
+from .errors import CollectorError, CollectorNetworkError, CollectorRateLimitError
 from .event_features import build_gmgn_event_features
 from .filters import FilterDecision, SafetyFilter, canonical_launchpad, first, normalize_token, to_float
 from .models import ApiKeyRoles, CollectedSample, Kline, TokenCandidate
@@ -121,25 +121,40 @@ class GMGNEnrichmentProvider:
         primary = self.roles.realtime[self._realtime_index % len(self.roles.realtime)]
         self._realtime_index += 1
         last_error: BaseException | None = None
-        for attempt in range(self.primary_attempts):
-            try:
-                return await self.client.request(primary, path, params=params)
-            except CollectorNetworkError:
-                raise
-            except Exception as exc:
-                last_error = exc
-                if attempt < self.primary_attempts - 1 and self.primary_retry_seconds:
-                    await self._sleep(self.primary_retry_seconds)
+        if self.client.slot_rate_limit_remaining(primary) <= 0:
+            for attempt in range(self.primary_attempts):
+                try:
+                    return await self.client.request(primary, path, params=params)
+                except CollectorNetworkError:
+                    raise
+                except CollectorRateLimitError as exc:
+                    last_error = exc
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < self.primary_attempts - 1 and self.primary_retry_seconds:
+                        await self._sleep(self.primary_retry_seconds)
         fallbacks = [slot for slot in self.roles.realtime_fallback if slot.index != primary.index]
-        for position, fallback in enumerate(fallbacks):
-            if position and self.fallback_delay_seconds:
+        delay_before_next = False
+        for fallback in fallbacks:
+            if self.client.slot_rate_limit_remaining(fallback) > 0:
+                continue
+            if delay_before_next and self.fallback_delay_seconds:
                 await self._sleep(self.fallback_delay_seconds)
             try:
                 return await self.client.request(fallback, path, params=params)
             except CollectorNetworkError:
                 raise
+            except CollectorRateLimitError as exc:
+                # A rate-limited key is immediately skipped. Sleeping between
+                # known 429 slots only stretches a failed cycle and does not
+                # improve the server-side reset condition.
+                last_error = exc
+                delay_before_next = False
+                continue
             except Exception as exc:
                 last_error = exc
+                delay_before_next = True
         raise CollectorError(f"Realtime enrichment failed for path={path}") from last_error
 
     async def token_bundle(self, address: str) -> Mapping[str, Any]:
@@ -195,23 +210,27 @@ class GMGNEnrichmentProvider:
             "limit": 500,
         }
         last_error: BaseException | None = None
-        for attempt in range(3):
-            try:
-                data = await self.client.request(
-                    primary,
-                    self.client.endpoints.kline,
-                    params=params,
-                    timeout_seconds=max(self.client.timeout_seconds, 30.0),
-                )
-                return [Kline.from_mapping(item) for item in extract_items(data, ("klines", "list", "items", "rows", "data"))]
-            except CollectorNetworkError:
-                raise
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2 and self.fallback_delay_seconds:
-                    await self._sleep(self.fallback_delay_seconds)
+        if self.client.slot_rate_limit_remaining(primary) <= 0:
+            for attempt in range(3):
+                try:
+                    data = await self.client.request(
+                        primary,
+                        self.client.endpoints.kline,
+                        params=params,
+                        timeout_seconds=max(self.client.timeout_seconds, 30.0),
+                    )
+                    return [Kline.from_mapping(item) for item in extract_items(data, ("klines", "list", "items", "rows", "data"))]
+                except CollectorNetworkError:
+                    raise
+                except CollectorRateLimitError as exc:
+                    last_error = exc
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < 2 and self.fallback_delay_seconds:
+                        await self._sleep(self.fallback_delay_seconds)
         for fallback in self.roles.kline_fallback:
-            if fallback.index == primary.index:
+            if fallback.index == primary.index or self.client.slot_rate_limit_remaining(fallback) > 0:
                 continue
             try:
                 data = await self.client.request(
@@ -223,6 +242,9 @@ class GMGNEnrichmentProvider:
                 return [Kline.from_mapping(item) for item in extract_items(data, ("klines", "list", "items", "rows", "data"))]
             except CollectorNetworkError:
                 raise
+            except CollectorRateLimitError as exc:
+                last_error = exc
+                continue
             except Exception as exc:
                 last_error = exc
         raise CollectorError("Kline request failed after primary and idle fallback roles") from last_error

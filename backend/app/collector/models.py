@@ -43,21 +43,26 @@ class ApiKeyRoles:
         def pick(index: int) -> ApiSlot:
             return slots[index % len(slots)]
 
-        # All pools may reuse the same underlying keys when only a few are
-        # configured. A shared per-IP limiter still caps aggregate throughput;
-        # the larger pool merely spreads auth/key-specific failures and hotspots.
+        # With a sufficiently large pool, reserve three credentials for the
+        # production-critical discovery path. Realtime/Kline/PositionMonitor
+        # traffic must not cool those keys before the next Trenches request.
+        # Small deployments retain the historical shared-pool behavior.
+        auxiliary = slots[3:] if len(slots) >= 6 else slots
         return cls(
             discovery=(pick(0), pick(1)),
-            position_monitor=slots,
+            position_monitor=auxiliary,
             discovery_fallback=pick(2),
-            realtime=slots,
-            realtime_fallback=slots,
-            kline=slots,
+            realtime=auxiliary,
+            realtime_fallback=auxiliary,
+            kline=auxiliary,
         )
 
     @property
     def kline_fallback(self) -> tuple[ApiSlot, ...]:
-        ordered = (self.discovery_fallback, *self.realtime_fallback)
+        # Never borrow the reserved discovery fallback into the Kline pool when
+        # role isolation is active. For small shared pools realtime_fallback
+        # already contains the same credentials.
+        ordered = (*self.kline, *self.realtime_fallback)
         unique: dict[int, ApiSlot] = {}
         for slot in ordered:
             unique.setdefault(slot.index, slot)
