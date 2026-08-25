@@ -220,7 +220,11 @@ def seed_live(database: Database, *, position_id: str, address: str, opened: dat
 
 
 class FailingRateLimitedMarketProvider:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
     async def token_bundle(self, address: str):
+        self.calls.append(address)
         raise CollectorRateLimitError("all GMGN slots cooling", reset_at=1_800_000_000)
 
 
@@ -301,28 +305,47 @@ async def test_dexscreener_position_fallback_selects_highest_liquidity_base_pair
 
 
 @pytest.mark.asyncio
-async def test_position_monitor_uses_dexscreener_only_when_gmgn_market_is_unavailable(tmp_path: Path) -> None:
+async def test_simulation_position_prefers_dexscreener_without_spending_gmgn_quota(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime.now(timezone.utc) - timedelta(minutes=5)
     seed_paper(database, position_id="paper-fallback", address="fallback-token", opened=opened)
+    gmgn = FailingRateLimitedMarketProvider()
     fallback = PositionFallbackProvider(0.95, liquidity=12_000.0)
     service = PositionMonitorService(database, settings)
 
-    report = await service.run_cycle(
-        FailingRateLimitedMarketProvider(), fallback_provider=fallback
-    )
+    report = await service.run_cycle(gmgn, fallback_provider=fallback)
 
     assert report.market_requests == 1
     assert report.market_data_failures == 0
     assert report.market_fallbacks == 1
     assert report.blocked_positions == 0
+    assert gmgn.calls == []
+    assert fallback.calls == ["fallback-token"]
     row = database.fetch_one("SELECT status,metadata_json FROM positions WHERE id='paper-fallback'")
     assert row["status"] == "open"
     snapshot = json.loads(row["metadata_json"])["market_snapshot"]
     assert snapshot["price"] == pytest.approx(0.95)
     assert snapshot["market_data_source"] == "dexscreener_public_token_pairs"
     assert snapshot["market_cap_source"] == "dexscreener_public_token_pairs_direct"
+
+
+@pytest.mark.asyncio
+async def test_live_position_never_uses_public_dexscreener_fallback(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_live(database, position_id="live-no-public-fallback", address="live-token", opened=opened)
+    gmgn = FailingRateLimitedMarketProvider()
+    fallback = PositionFallbackProvider(0.89, liquidity=12_000.0)
+    service = PositionMonitorService(database, settings)
+
+    report = await service.run_cycle(gmgn, fallback_provider=fallback)
+
+    assert gmgn.calls == ["live-token"]
+    assert fallback.calls == []
+    assert report.market_data_failures == 1
+    assert report.blocked_positions == 1
 
 @pytest.mark.asyncio
 async def test_current_price_above_stop_stays_open_without_kline_lookup(tmp_path: Path) -> None:
@@ -558,29 +581,41 @@ async def test_coinbase_sol_fee_provider_uses_only_closed_one_minute_candles() -
 
 
 class _FailingSolKlineProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def klines(self, address: str, from_ts: int, to_ts: int):
-        raise RuntimeError("gmgn unavailable")
+        self.calls += 1
+        raise RuntimeError("provider unavailable")
 
 
 class _HealthySolKlineProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def klines(self, address: str, from_ts: int, to_ts: int):
+        self.calls += 1
         assert address == SOL_WRAPPED_MINT
         return [Kline(timestamp=to_ts - 10, high=102.0, low=100.0, close=101.25, open=100.5)]
 
 
 @pytest.mark.asyncio
-async def test_worker_falls_back_to_coinbase_for_fee_time_sol_usd(tmp_path: Path) -> None:
+async def test_worker_prefers_coinbase_for_fee_time_sol_usd_without_gmgn_call(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     opened = datetime.now(timezone.utc) - timedelta(minutes=5)
     seed_paper(database, position_id="paper-sol-coinbase", address="sol-fallback-token", opened=opened)
     worker = PositionMonitorWorker(database, settings)
-    worker._sol_provider = _FailingSolKlineProvider()
-    worker._sol_fallback_provider = _HealthySolKlineProvider()
+    gmgn = _FailingSolKlineProvider()
+    coinbase = _HealthySolKlineProvider()
+    worker._sol_provider = gmgn
+    worker._sol_fallback_provider = coinbase
 
     error = await worker._refresh_sol_usd_for_open_simulation_positions()
 
     assert error is None
+    assert coinbase.calls == 1
+    assert gmgn.calls == 0
     row = database.fetch_one(
         "SELECT price_usd,source FROM asset_usd_prices WHERE asset='SOL' ORDER BY observed_at DESC LIMIT 1"
     )
@@ -589,3 +624,26 @@ async def test_worker_falls_back_to_coinbase_for_fee_time_sol_usd(tmp_path: Path
     status = database.get_runtime_state("sol_usd_price_status")
     assert status["state"] == "ready"
     assert status["source"] == "coinbase_exchange_public_sol_usd_1m"
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_gmgn_only_if_coinbase_sol_fee_source_fails(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seed_paper(database, position_id="paper-sol-gmgn-fallback", address="sol-gmgn-token", opened=opened)
+    worker = PositionMonitorWorker(database, settings)
+    gmgn = _HealthySolKlineProvider()
+    coinbase = _FailingSolKlineProvider()
+    worker._sol_provider = gmgn
+    worker._sol_fallback_provider = coinbase
+
+    error = await worker._refresh_sol_usd_for_open_simulation_positions()
+
+    assert error is None
+    assert coinbase.calls == 1
+    assert gmgn.calls == 1
+    row = database.fetch_one(
+        "SELECT source FROM asset_usd_prices WHERE asset='SOL' ORDER BY observed_at DESC LIMIT 1"
+    )
+    assert row["source"] == "gmgn_1m_kline"

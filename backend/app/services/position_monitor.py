@@ -310,24 +310,43 @@ class PositionMonitorService:
         async def fetch_current_market(
             address: str, positions: list[dict[str, Any]]
         ) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None, Exception | None]:
-            primary_error: Exception | None = None
-            try:
-                primary_snapshot = self._snapshot(await provider.token_bundle(address))
-                if float(primary_snapshot.get("price") or 0.0) > 0:
-                    return address, positions, primary_snapshot, None
-                primary_error = CollectorAPIError("GMGN current price is missing or non-positive")
-            except Exception as exc:
-                primary_error = exc
-            if fallback_provider is not None:
+            simulation_only = all(
+                str(position.get("account_kind") or "") == "simulation"
+                for position in positions
+            )
+
+            # Paper positions do not need to consume the scarce authenticated
+            # GMGN account budget every two seconds. Prefer the public read-only
+            # DexScreener token-pairs feed for simulation, then fall back to GMGN
+            # only if the public source is unavailable. Live positions keep GMGN
+            # as the sole current-price source; a public fallback must never
+            # silently weaken a real-money execution gate.
+            fallback_error: Exception | None = None
+            if simulation_only and fallback_provider is not None:
                 try:
                     fallback_snapshot = self._snapshot(await fallback_provider.token_bundle(address))
                     if float(fallback_snapshot.get("price") or 0.0) > 0:
                         return address, positions, fallback_snapshot, None
-                    raise CollectorAPIError("DexScreener fallback price is missing or non-positive")
-                except Exception as fallback_exc:
-                    return address, positions, None, RuntimeError(
-                        f"primary={type(primary_error).__name__}; fallback={type(fallback_exc).__name__}"
+                    fallback_error = CollectorAPIError(
+                        "DexScreener simulation price is missing or non-positive"
                     )
+                except Exception as exc:
+                    fallback_error = exc
+
+            try:
+                primary_snapshot = self._snapshot(await provider.token_bundle(address))
+                if float(primary_snapshot.get("price") or 0.0) > 0:
+                    return address, positions, primary_snapshot, None
+                primary_error: Exception = CollectorAPIError(
+                    "GMGN current price is missing or non-positive"
+                )
+            except Exception as exc:
+                primary_error = exc
+
+            if fallback_error is not None:
+                return address, positions, None, RuntimeError(
+                    f"simulation_public={type(fallback_error).__name__}; gmgn={type(primary_error).__name__}"
+                )
             return address, positions, None, primary_error
 
         market_tasks = [
@@ -755,17 +774,9 @@ class PositionMonitorWorker:
             return None
         self._last_sol_refresh_attempt_monotonic = now_monotonic
         errors: list[str] = []
-        if self._sol_provider is not None:
-            try:
-                price = await self._sol_price.refresh(self._sol_provider, now_ts=now_ts)
-                if price is not None:
-                    return None
-                errors.append("gmgn:stale_after_refresh")
-            except Exception as exc:
-                errors.append(f"gmgn:{type(exc).__name__}")
-        else:
-            errors.append("gmgn:provider_unavailable")
-
+        # Simulation fee accounting is provider-neutral. Prefer Coinbase's
+        # unauthenticated SOL-USD one-minute candles so the high-frequency paper
+        # monitor does not spend GMGN quota merely to convert network fees.
         if self._sol_fallback_provider is not None:
             try:
                 price = await self._sol_price.refresh(
@@ -774,18 +785,29 @@ class PositionMonitorWorker:
                     source="coinbase_exchange_public_sol_usd_1m",
                 )
                 if price is not None:
-                    self.database.audit(
-                        category="trading",
-                        action="position_monitor_sol_usd_fallback_used",
-                        severity="warning",
-                        details={"source": price.source, "observed_at": price.observed_at},
-                    )
                     return None
                 errors.append("coinbase:stale_after_refresh")
             except Exception as exc:
                 errors.append(f"coinbase:{type(exc).__name__}")
         else:
             errors.append("coinbase:provider_unavailable")
+
+        if self._sol_provider is not None:
+            try:
+                price = await self._sol_price.refresh(self._sol_provider, now_ts=now_ts)
+                if price is not None:
+                    self.database.audit(
+                        category="trading",
+                        action="position_monitor_sol_usd_gmgn_fallback_used",
+                        severity="warning",
+                        details={"source": price.source, "observed_at": price.observed_at},
+                    )
+                    return None
+                errors.append("gmgn:stale_after_refresh")
+            except Exception as exc:
+                errors.append(f"gmgn:{type(exc).__name__}")
+        else:
+            errors.append("gmgn:provider_unavailable")
 
         message = ";".join(errors)[:300]
         self.database.audit(
