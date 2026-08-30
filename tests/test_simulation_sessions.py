@@ -95,7 +95,9 @@ def test_simulation_session_initializes_four_equal_accounts_and_reset_changes_id
     assert reset["session"]["id"] != first["session"]["id"]
     assert set(reset["accounts"]) == {"model_1", "model_2", "model_3", "rules_only"}
     for account in reset["accounts"].values():
-        assert account["cash_usd"] == pytest.approx(1000.0)
+        assert account["capital_mode"] == "unlimited_notional"
+        assert "cash_usd" not in account
+        assert "initial_cash_usd" not in account
         assert "sol_fee_reserve" not in account
         assert account["accounting_currency"] == "USD"
         assert account["open_positions"] == 0
@@ -160,7 +162,9 @@ def test_successful_open_persists_position_trade_and_strategy_account(tmp_path: 
     )
     assert position == {"simulation_session_id": session["id"], "strategy_key": "model_1", "status": "open"}
     assert account["session_id"] == session["id"]
-    assert account["cash_usd"] == pytest.approx(949.32)
+    assert account["capital_mode"] == "unlimited_notional"
+    assert "cash_usd" not in account
+    assert "initial_cash_usd" not in account
     assert "sol_fee_reserve" not in account
     assert trade == {
         "status": "confirmed",
@@ -194,7 +198,9 @@ def test_failed_chain_execution_charges_network_fee_without_creating_position(tm
     assert not result.opened
     assert database.fetch_one("SELECT COUNT(*) AS n FROM positions")["n"] == 0
     account = database.get_runtime_state("portfolio_strategy:model_1")
-    assert account["cash_usd"] == pytest.approx(999.82)
+    assert account["capital_mode"] == "unlimited_notional"
+    assert "cash_usd" not in account
+    assert "initial_cash_usd" not in account
     assert "sol_fee_reserve" not in account
     trade = database.fetch_one("SELECT status,network_fee_sol,sol_usd_price,network_fee_usd FROM trades")
     assert trade == {

@@ -80,7 +80,6 @@ def main() -> int:
             "history_count": len(sessions),
             "accounts": {
                 key: {
-                    "cash_usd": value.get("cash_usd"),
                     "invested_usd": value.get("invested_usd"),
                     "open_positions": value.get("open_positions"),
                     "closed_positions": value.get("closed_positions"),
@@ -102,7 +101,7 @@ def main() -> int:
             "model_health": database.get_runtime_state("model_health_status", {"state": "not_evaluated"}),
             "model_health_worker": database.get_runtime_state("model_health_worker_status", {"state": "stopped"}),
             "collector": database.get_runtime_state("collector_status", {"state": "stopped"}),
-            "paper_monitor": database.get_runtime_state("paper_monitor_status", {"state": "stopped"}),
+            "position_monitor": database.get_runtime_state("position_monitor_status", {"state": "stopped"}),
             "live_trading_enabled": bool(database.get_runtime_state("live_trading_enabled", False)),
         },
     }

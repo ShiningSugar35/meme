@@ -87,7 +87,7 @@ class PaperTradingService:
                     (
                         existing["id"],
                         existing.get("started_at") or utc_now_iso(),
-                        float(existing.get("initial_cash_usd") or 1_000.0),
+                        0.0,
                         0.0,
                         "runtime_recovery",
                     ),
@@ -100,7 +100,7 @@ class PaperTradingService:
             session = {
                 "id": active["id"],
                 "started_at": active["started_at"],
-                "initial_cash_usd": float(active["initial_cash_usd"]),
+                "initial_cash_usd": 0.0,
                 "initial_sol_fee_reserve": 0.0,
             }
             self.database.set_runtime_state("simulation_session", session)
@@ -108,7 +108,7 @@ class PaperTradingService:
         session = {
             "id": f"sim_{uuid.uuid4().hex}",
             "started_at": utc_now_iso(),
-            "initial_cash_usd": 1_000.0,
+            "initial_cash_usd": 0.0,
             "initial_sol_fee_reserve": 0.0,
         }
         with self.database.transaction(immediate=True) as connection:
@@ -145,7 +145,6 @@ class PaperTradingService:
         account: PaperAccount,
         session_id: str,
         *,
-        cash_usd: float = 1_000.0,
         source: str = "simulation_fixed",
         model_id: str | None = None,
         statistics_started_at: str | None = None,
@@ -153,8 +152,7 @@ class PaperTradingService:
         state = {
             "session_id": session_id,
             "strategy_key": account,
-            "cash_usd": float(cash_usd),
-            "initial_cash_usd": float(cash_usd),
+            "capital_mode": "unlimited_notional",
             "accounting_currency": "USD",
             "network_fee_accounting": "fee_time_sol_usd",
             "source": source,
@@ -186,7 +184,6 @@ class PaperTradingService:
         self,
         account: PaperAccount,
         *,
-        cash_usd: float = 1_000.0,
         source: str = "simulation_fixed",
     ) -> dict[str, Any]:
         strategy = validate_strategy(account)
@@ -197,9 +194,13 @@ class PaperTradingService:
             normalized = dict(existing)
             normalized.pop("sol_fee_reserve", None)
             normalized.pop("initial_sol_fee_reserve", None)
+            normalized.pop("cash_usd", None)
+            normalized.pop("initial_cash_usd", None)
+            normalized.pop("ledger_reconciled_at", None)
+            normalized.pop("ledger_reconciliation_delta_usd", None)
+            normalized["capital_mode"] = "unlimited_notional"
             normalized["accounting_currency"] = "USD"
             normalized["network_fee_accounting"] = "fee_time_sol_usd"
-            normalized = self._reconcile_account_cash(strategy, session, normalized)
             if normalized != existing:
                 normalized["updated_at"] = utc_now_iso()
                 self.database.set_runtime_state(key, normalized)
@@ -207,146 +208,10 @@ class PaperTradingService:
         state = self._new_account_state(
             strategy,
             str(session["id"]),
-            cash_usd=cash_usd,
             source=source,
         )
-        state = self._reconcile_account_cash(strategy, session, state)
         self.database.set_runtime_state(key, state)
         return state
-
-    def _account_generation_scope(
-        self,
-        strategy: str,
-        session: dict[str, Any],
-    ) -> tuple[str | None, str]:
-        if strategy != RULES_ONLY:
-            slot = int(strategy.rsplit("_", 1)[1])
-            row = self.database.fetch_one(
-                "SELECT model_id,selected_at FROM active_model_slots WHERE slot=?",
-                (slot,),
-            )
-            if row:
-                return str(row["model_id"]), str(row["selected_at"])
-        return None, str(session.get("started_at") or "")
-
-    def _reconcile_account_cash(
-        self,
-        strategy: str,
-        session: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Rebuild available cash from durable accounting facts.
-
-        This is intentionally deterministic so an older runtime_state value cannot
-        drift away from positions/trades after accounting migrations or a process
-        restart. Closed position net PnL is the complete cash delta for a round
-        trip; current open principal and already-paid execution fees remain cash
-        outflows; failed BUY fees without a position are also real outflows.
-        """
-        session_id = str(session["id"])
-        model_id, started_at = self._account_generation_scope(strategy, session)
-        if not started_at:
-            return state
-        if model_id is not None:
-            closed = self.database.fetch_one(
-                """
-                SELECT COALESCE(SUM(net_pnl_usd),0) AS pnl
-                FROM positions
-                WHERE simulation_session_id=? AND strategy_key=? AND model_id=?
-                  AND status='closed' AND entry_time>=?
-                  AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0
-                """,
-                (session_id, strategy, model_id, started_at),
-            ) or {}
-            open_row = self.database.fetch_one(
-                """
-                SELECT COALESCE(SUM(invested_usd),0) AS invested
-                FROM positions
-                WHERE simulation_session_id=? AND strategy_key=? AND model_id=?
-                  AND status IN ('opening','open','closing','manual_intervention')
-                  AND entry_time>=?
-                """,
-                (session_id, strategy, model_id, started_at),
-            ) or {}
-            open_costs = self.database.fetch_one(
-                """
-                SELECT COALESCE(SUM(COALESCE(t.platform_fee_usd,0)+COALESCE(t.network_fee_usd,0)),0) AS costs
-                FROM trades t JOIN positions p ON p.id=t.position_id
-                WHERE p.simulation_session_id=? AND p.strategy_key=? AND p.model_id=?
-                  AND p.status IN ('opening','open','closing','manual_intervention')
-                  AND p.entry_time>=?
-                """,
-                (session_id, strategy, model_id, started_at),
-            ) or {}
-        else:
-            closed = self.database.fetch_one(
-                """
-                SELECT COALESCE(SUM(net_pnl_usd),0) AS pnl
-                FROM positions
-                WHERE simulation_session_id=? AND strategy_key=? AND status='closed'
-                  AND entry_time>=?
-                  AND COALESCE(json_extract(metadata_json,'$.performance_excluded'),0)=0
-                """,
-                (session_id, strategy, started_at),
-            ) or {}
-            open_row = self.database.fetch_one(
-                """
-                SELECT COALESCE(SUM(invested_usd),0) AS invested
-                FROM positions
-                WHERE simulation_session_id=? AND strategy_key=?
-                  AND status IN ('opening','open','closing','manual_intervention')
-                  AND entry_time>=?
-                """,
-                (session_id, strategy, started_at),
-            ) or {}
-            open_costs = self.database.fetch_one(
-                """
-                SELECT COALESCE(SUM(COALESCE(t.platform_fee_usd,0)+COALESCE(t.network_fee_usd,0)),0) AS costs
-                FROM trades t JOIN positions p ON p.id=t.position_id
-                WHERE p.simulation_session_id=? AND p.strategy_key=?
-                  AND p.status IN ('opening','open','closing','manual_intervention')
-                  AND p.entry_time>=?
-                """,
-                (session_id, strategy, started_at),
-            ) or {}
-        failed_entry = self.database.fetch_one(
-            """
-            SELECT COALESCE(SUM(COALESCE(network_fee_usd,0)),0) AS costs
-            FROM trades
-            WHERE account_kind='simulation' AND strategy_key=? AND simulation_session_id=?
-              AND position_id IS NULL AND side='buy' AND status='failed' AND created_at>=?
-            """,
-            (strategy, session_id, started_at),
-        ) or {}
-        initial_cash = float(state.get("initial_cash_usd") or session.get("initial_cash_usd") or 1_000.0)
-        expected = (
-            initial_cash
-            + float(closed.get("pnl") or 0.0)
-            - float(open_row.get("invested") or 0.0)
-            - float(open_costs.get("costs") or 0.0)
-            - float(failed_entry.get("costs") or 0.0)
-        )
-        current = float(state.get("cash_usd") or 0.0)
-        if abs(expected - current) <= 1e-9:
-            return state
-        result = dict(state)
-        result["cash_usd"] = expected
-        result["ledger_reconciled_at"] = utc_now_iso()
-        result["ledger_reconciliation_delta_usd"] = expected - current
-        self.database.audit(
-            category="simulation",
-            action="account_cash_reconciled",
-            entity_type="simulation_strategy",
-            entity_id=strategy,
-            details={
-                "model_id": model_id,
-                "statistics_started_at": started_at,
-                "before_cash_usd": current,
-                "after_cash_usd": expected,
-                "delta_usd": expected - current,
-            },
-        )
-        return result
 
     def reset_model_accounts_for_activation(
         self,
@@ -354,7 +219,7 @@ class PaperTradingService:
         *,
         activated_at: str,
     ) -> None:
-        """Start a fresh $1000 ledger for each newly activated model generation.
+        """Start fresh statistics for each newly activated model generation.
 
         Promotion is allowed only after model_1/2/3 are flat, so resetting these
         three strategy ledgers cannot strand capital in an older position. The
@@ -373,7 +238,6 @@ class PaperTradingService:
                     self._new_account_state(
                         strategy,
                         str(session["id"]),
-                        cash_usd=1_000.0,
                         source="model_activation",
                         model_id=str(model["id"]),
                         statistics_started_at=activated_at,
@@ -387,7 +251,6 @@ class PaperTradingService:
             details={
                 "activated_at": activated_at,
                 "model_ids": [str(model["id"]) for model in active_models],
-                "cash_usd_each": 1_000.0,
             },
         )
 
@@ -425,7 +288,7 @@ class PaperTradingService:
         session = {
             "id": session_id or f"sim_{uuid.uuid4().hex}",
             "started_at": utc_now_iso(),
-            "initial_cash_usd": 1_000.0,
+            "initial_cash_usd": 0.0,
             "initial_sol_fee_reserve": 0.0,
         }
         with self.database.transaction(immediate=True) as connection:
@@ -610,6 +473,7 @@ class PaperTradingService:
         ) or {}
         public_session = {**session, **registry}
         public_session.pop("initial_sol_fee_reserve", None)
+        public_session.pop("initial_cash_usd", None)
         return {"session": public_session, "accounts": accounts}
 
     def simulation_history(self, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -814,10 +678,10 @@ class PaperTradingService:
             existing = self.database.fetch_one(
                 """
                 SELECT id FROM positions
-                WHERE sample_id=? AND simulation_session_id=? AND strategy_key='rules_only'
+                WHERE sample_id=? AND account_kind='simulation' AND strategy_key='rules_only'
                 LIMIT 1
                 """,
-                (sample_id, session["id"]),
+                (sample_id,),
             )
         if existing:
             return PaperOpenResult(False, "already_opened", existing["id"])
@@ -840,9 +704,6 @@ class PaperTradingService:
 
         state = self.ensure_account(strategy)
         capital = min(0.01 * liquidity, 50.0)
-        if float(state["cash_usd"]) < capital:
-            return PaperOpenResult(False, "insufficient_paper_cash")
-
         position_id = f"{strategy}-{uuid.uuid4().hex[:16]}"
         observed_at = datetime.fromtimestamp(int(sample["entry_time"]), timezone.utc)
         quote = self.quote_provider.quote(
@@ -867,9 +728,6 @@ class PaperTradingService:
             self._record_failed_trade(position_id, sample, strategy, "buy", capital, quote, fee_fact)
             return PaperOpenResult(False, quote.failure_category.value if quote.failure_category else "quote_failed")
         network_fee_usd = float(fee_fact["network_fee_usd"])
-        if float(state["cash_usd"]) < capital + quote.fee_usd + network_fee_usd:
-            return PaperOpenResult(False, "insufficient_paper_cash")
-
         exit_policy = LabelPolicy()
         expires_at = observed_at + timedelta(seconds=exit_policy.window_seconds)
         quantity = capital / quote.fill_price
@@ -892,7 +750,6 @@ class PaperTradingService:
             "quote_source": "seeded_local_execution_model",
         }
         next_state = dict(state)
-        next_state["cash_usd"] = float(state["cash_usd"]) - capital - quote.fee_usd - network_fee_usd
         next_state["updated_at"] = utc_now_iso()
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
@@ -1320,7 +1177,6 @@ class PaperTradingService:
             "exit_execution_deviation_bps": execution_deviation_bps,
         })
         next_state = dict(state)
-        next_state["cash_usd"] = float(state["cash_usd"]) + proceeds
         next_state["updated_at"] = utc_now_iso()
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
@@ -1526,7 +1382,6 @@ class PaperTradingService:
         gross_pnl = gross_sale - float(row["invested_usd"])
         pnl = proceeds - float(row["invested_usd"]) - self._position_paid_costs(position_id)
         next_state = dict(state)
-        next_state["cash_usd"] = float(state["cash_usd"]) + proceeds
         next_state["updated_at"] = utc_now_iso()
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
@@ -1605,7 +1460,6 @@ class PaperTradingService:
         gross_pnl = gross_sale - float(row["invested_usd"])
         pnl = proceeds - float(row["invested_usd"]) - self._position_paid_costs(str(row["id"]))
         next_state = dict(state)
-        next_state["cash_usd"] = float(state["cash_usd"]) + proceeds
         next_state["updated_at"] = utc_now_iso()
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
@@ -1651,7 +1505,6 @@ class PaperTradingService:
         network_fee_usd = float(fee_fact["network_fee_usd"])
         next_state = dict(state)
         if network_fee_usd > 0:
-            next_state["cash_usd"] = float(state["cash_usd"]) - network_fee_usd
             next_state["updated_at"] = now
         with self.database.transaction(immediate=True) as connection:
             connection.execute(

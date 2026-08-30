@@ -31,12 +31,16 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
     assert models.status_code == 200
     catalog = models.json()["feature_catalog"]
     assert "ln(age+1)" in catalog["default_features"]
-    assert "ln(price+1)" in catalog["default_features"]
+    assert "ln(price+1)" not in catalog["default_features"]
+    assert "ln(marketcap+1)" in catalog["available_features"]
+    assert "momentum_accel_1m_vs_5m" in catalog["default_features"]
     assert catalog["selected_features"] == catalog["default_features"]
     assert "price" not in catalog["available_features"]
+    assert "price_change_1h" not in catalog["available_features"]
+    assert "top_bot_degen_percentage" not in catalog["available_features"]
     assert "ln(liquidity_usd)" not in catalog["default_features"]
-    assert len(catalog["available_features"]) == 44
-    assert len(catalog["default_features"]) == 31
+    assert len(catalog["available_features"]) == 39
+    assert len(catalog["default_features"]) == 29
     assert "price_change_1m" in catalog["available_features"]
     assert "price_change_1m" not in catalog["default_features"]
     assert "price_change_2m" not in catalog["available_features"]
@@ -44,17 +48,20 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
     assert "ln(volume_2m+1)" not in catalog["available_features"]
     assert "creator_token_status" not in catalog["available_features"]
     assert "volume_acceleration_2m" not in catalog["available_features"]
-    assert "ln(liquidity_usd)" in catalog["available_features"]
+    assert "ln(liquidity_usd)" not in catalog["available_features"]
 
     saved = client.put(
         "/api/models/feature-selection",
         json={"features": ["ln(price+1)", "price_change_1h"]},
     )
     assert saved.status_code == 200
-    assert saved.json()["selected_features"] == ["ln(price+1)", "price_change_1h"]
+    assert saved.json()["selected_features"] == [
+        "momentum_accel_1m_vs_5m",
+        "ln(marketcap+1)",
+    ]
     assert client.get("/api/models").json()["feature_catalog"]["selected_features"] == [
-        "ln(price+1)",
-        "price_change_1h",
+        "momentum_accel_1m_vs_5m",
+        "ln(marketcap+1)",
     ]
 
     response = client.post(
@@ -68,8 +75,10 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
         (run_id,),
     )
     assert row is not None and row["status"] == "queued"
-    assert '"ln(price+1)"' in row["request_json"]
-    assert '"price_change_1h"' in row["request_json"]
+    assert '"ln(marketcap+1)"' in row["request_json"]
+    assert '"momentum_accel_1m_vs_5m"' in row["request_json"]
+    assert '"ln(price+1)"' not in row["request_json"]
+    assert '"price_change_1h"' not in row["request_json"]
 
 
 def test_simulation_api_keeps_current_and_historical_sessions_separate(monkeypatch, tmp_path: Path) -> None:

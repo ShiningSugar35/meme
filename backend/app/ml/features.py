@@ -70,7 +70,9 @@ _RETURN_ESTIMATE_COLUMNS = (
 )
 
 AGE_LOG1P_FEATURE = "ln(age+1)"
-PRICE_LOG1P_FEATURE = "ln(price+1)"
+PRICE_LOG1P_FEATURE = "ln(price+1)"  # legacy model compatibility only
+MARKETCAP_LOG1P_FEATURE = "ln(marketcap+1)"
+MOMENTUM_ACCEL_1M_VS_5M_FEATURE = "momentum_accel_1m_vs_5m"
 LEGACY_AGE_FEATURE = "age"
 LEGACY_PRICE_FEATURE = "price"
 
@@ -128,19 +130,35 @@ def materialize_entry_feature(
             return None
         return math.log(age_minutes) if age_minutes > 0 else None
 
+    if name == MOMENTUM_ACCEL_1M_VS_5M_FEATURE:
+        one_minute = _finite_float(source.get("price_change_1m"))
+        five_minute = _finite_float(source.get("price_change_5m"))
+        if one_minute is None or five_minute is None or one_minute <= -1.0 or five_minute <= -1.0:
+            return None
+        return math.log1p(one_minute) - math.log1p(five_minute) / 5.0
+
     return source.get(name)
 
 
 # Frozen model-input schema from README.md §2.2. `tag` is deliberately absent:
-# it is the target, never an input feature. Price and age are admission-time
-# facts whose model-facing representations use log1p transforms.
+# it is the target, never an input feature. Age remains an admission-time fact
+# and optional log1p model feature; absolute entry price is compatibility-only.
 # Launchpad remains sample metadata and is deliberately excluded from model
-# inputs. Raw liquidity remains economic sizing/evaluation data; only its
-# optional log transform may be selected as a model input.
+# inputs. Raw liquidity remains economic sizing/evaluation data, but absolute
+# log-liquidity is retired from predictive/risk inputs: it was highly redundant
+# with market-cap scale while being the dominant unstable PSI feature. Relative
+# liquidity features remain available.
+DEPRECATED_MODEL_FEATURES: frozenset[str] = frozenset({
+    "ln(liquidity_usd)",
+    "ln(price+1)",
+    "price_change_1h",
+    "top_bot_degen_percentage",
+    "dexscr_ad",
+    "dexscr_trending_bar",
+})
+
 AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     AGE_LOG1P_FEATURE,
-    PRICE_LOG1P_FEATURE,
-    "ln(liquidity_usd)",
     "liquidity/holder_count",
     "volume_1h/swaps_1h",
     "has_twitter",
@@ -152,7 +170,6 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "ln(twitter_del_post_token_count+1)",
     "ln(twitter_create_token_count+1)",
     "top_10_holder_rate",
-    "top_bot_degen_percentage",
     "fresh_wallet_rate",
     "bot_degen_rate",
     "price/ath_price",
@@ -165,8 +182,8 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "ln(twitter_dup+1)",
     "ln(website_dup+1)",
     "ln(visiting_count+1)",
-    "price_change_1h",
     "price_change_5m",
+    MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
     "price_change_1m",
     "ln(volume_1m+1)",
     "buy_count_imbalance_1m",
@@ -174,9 +191,7 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "ln(volume_1m/swaps_1m+1)",
     "holder_count/age",
     "ln(marketcap+1)",
-    "dexscr_ad",
     "ln(dexscr_boost_fee+1)",
-    "dexscr_trending_bar",
     "ln(x_user_follower+1)",
     "ln(tg_call_count+1)",
     "ln(creator_open_count+1)",
@@ -189,7 +204,6 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
 # The trainer's feature-state key is also namespaced by feature generation.
 DEFAULT_MODEL_TRAINING_FEATURES: tuple[str, ...] = (
     AGE_LOG1P_FEATURE,
-    PRICE_LOG1P_FEATURE,
     "liquidity/holder_count",
     "volume_1h/swaps_1h",
     "has_twitter",
@@ -201,7 +215,6 @@ DEFAULT_MODEL_TRAINING_FEATURES: tuple[str, ...] = (
     "ln(twitter_del_post_token_count+1)",
     "ln(twitter_create_token_count+1)",
     "top_10_holder_rate",
-    "top_bot_degen_percentage",
     "fresh_wallet_rate",
     "bot_degen_rate",
     "price/ath_price",
@@ -214,8 +227,8 @@ DEFAULT_MODEL_TRAINING_FEATURES: tuple[str, ...] = (
     "ln(twitter_dup+1)",
     "ln(website_dup+1)",
     "ln(visiting_count+1)",
-    "price_change_1h",
     "price_change_5m",
+    MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
     "ln(creator_open_count+1)",
     "creator_open_ratio",
     "ln(top_wallets+1)",
@@ -307,6 +320,10 @@ class FeatureBuilder:
         work = work.iloc[order].reset_index(drop=False).rename(columns={"index": "_source_row"})
         target = target.iloc[order].reset_index(drop=True)
         timestamps = timestamps.iloc[order].reset_index(drop=True)
+        age_minutes = pd.to_numeric(
+            work.get("age_minutes", pd.Series(np.nan, index=work.index)),
+            errors="coerce",
+        ).astype(float)
 
         liquidity_column = _first_existing(work.columns, _LIQUIDITY_COLUMNS)
         if liquidity_column is None:
@@ -369,6 +386,7 @@ class FeatureBuilder:
             y=y,
             tags=target,
             timestamps=timestamps,
+            age_minutes=age_minutes.reset_index(drop=True),
             liquidity_usd=liquidity.reset_index(drop=True),
             final_close_ratio=close_ratio.reset_index(drop=True),
             return_is_estimated=return_is_estimated.reset_index(drop=True),

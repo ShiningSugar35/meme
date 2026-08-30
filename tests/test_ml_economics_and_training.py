@@ -17,6 +17,7 @@ from backend.app.ml import (
     ThresholdSet,
     TrainerConfig,
 )
+from backend.app.ml.decision_policy import DEFAULT_AGE_POLICY_VERSION
 from backend.app.ml.economics import (
     evaluate_probabilities,
     theoretical_profit_from_precision_recall,
@@ -354,7 +355,8 @@ def test_trainer_returns_top3_one_threshold_each_and_keeps_final_holdout_separat
         assert pd.Timestamp(bundle.calibrator.source_end) < test_start
         assert bundle.sparse_budget is not None
         assert bundle.sparse_budget.budget_fraction in {0.05, 0.075, 0.10, 0.15}
-        assert bundle.sparse_budget.policy_base_threshold >= 0.25
+        assert 0.0 <= bundle.sparse_budget.policy_base_threshold <= 1.0
+        assert bundle.sparse_budget.precision >= 0.25
         assert bundle.sparse_budget.sample_count == bundle.calibrator.source_rows
         reference = build_drift_reference(
             dataset, result.plan.final_split.train_indices, bundle.feature_names
@@ -367,6 +369,56 @@ def test_trainer_returns_top3_one_threshold_each_and_keeps_final_holdout_separat
         assert certification_drift["state"] in {"normal", "caution", "severe"}
         assert "max_feature_psi" in certification_drift
         assert "label_prior_relative_decline" in certification_drift
+
+    final_rows = result.plan.final_split.test_indices
+    for production, evaluation in zip(result.bundles, result.evaluation_bundles, strict=True):
+        assert production.training_end == evaluation.training_end
+        assert pd.Timestamp(production.training_end) < test_start
+        assert production.metrics["deployment_fit_scope"] == "final_train_only_certified_instance"
+        assert evaluation.metrics["deployment_fit_scope"] == "final_train_only_certified_instance"
+        assert production.age_policy_version == evaluation.age_policy_version
+        production_probabilities = production.predict_probabilities(
+            dataset.X.loc[final_rows, production.feature_names]
+        )
+        evaluation_probabilities = evaluation.predict_probabilities(
+            dataset.X.loc[final_rows, evaluation.feature_names]
+        )
+        assert np.allclose(production_probabilities, evaluation_probabilities, atol=1e-12, rtol=0.0)
+
+
+def test_age_policy_is_fixed_admission_only_and_ignores_outcome_selection() -> None:
+    frame = pd.DataFrame(
+        {
+            "time": 1_800_000_000 + np.arange(10) * 60,
+            "age_minutes": [90.0] * 5 + [30.0] * 5,
+            "score": np.linspace(0.0, 1.0, 10),
+            "liquidity": 10_000.0,
+            "tag": [1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+        }
+    )
+    dataset = FeatureBuilder(FeaturePolicy(feature_allowlist=("score",))).prepare(frame)
+    trainer = ModelTrainer(TrainerConfig(min_trades=5))
+    positions = np.arange(10, dtype=int)
+    probabilities = np.asarray([0.8] * 5 + [0.1] * 5, dtype=float)
+
+    selected, evidence = trainer._select_development_age_policy(
+        dataset, positions, probabilities, 0.5
+    )
+
+    assert selected == DEFAULT_AGE_POLICY_VERSION
+    assert evidence["selection_source"] == "fixed_admission_contract"
+    candidate = evidence["candidates"][DEFAULT_AGE_POLICY_VERSION]
+    assert candidate["selected_count"] == 5
+    assert candidate["profit_units"] == 7.0
+
+    losing = frame.copy()
+    losing["tag"] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    losing_dataset = FeatureBuilder(FeaturePolicy(feature_allowlist=("score",))).prepare(losing)
+    selected_losing, losing_evidence = trainer._select_development_age_policy(
+        losing_dataset, positions, probabilities, 0.5
+    )
+    assert selected_losing == DEFAULT_AGE_POLICY_VERSION
+    assert losing_evidence["candidates"][DEFAULT_AGE_POLICY_VERSION]["profit_units"] < 0
 
 
 class _ScoreEstimator:

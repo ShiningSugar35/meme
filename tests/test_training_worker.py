@@ -9,7 +9,11 @@ import pytest
 from backend.app.collector.constants import LabelPolicy
 from backend.app.config import Settings
 from backend.app.database import Database, utc_now_iso
-from backend.app.ml.decision_policy import DECISION_POLICY_VERSION
+from backend.app.ml.decision_policy import (
+    DECISION_POLICY_VERSION,
+    DEFAULT_AGE_POLICY_VERSION,
+    DEPLOYMENT_CERTIFICATION_VERSION,
+)
 from backend.app.ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from backend.app.repositories.models import ModelRepository
 from backend.app.services.paper_trading import PaperTradingService
@@ -128,11 +132,20 @@ def test_training_service_does_not_discard_queued_run_when_another_is_running(tm
     assert waiting == {"status": "queued", "completed_at": None, "error_message": None}
 
 
+def _deployment_certificate() -> dict:
+    return {
+        "version": DEPLOYMENT_CERTIFICATION_VERSION,
+        "deployment_fit_scope": "final_train_only_certified_instance",
+        "qualified_deployment_evidence": True,
+    }
+
+
 def _register_generation(database: Database, prefix: str, *, activate: bool) -> list[dict]:
     repo = ModelRepository(database)
     generation: list[dict] = []
     for slot, algorithm in enumerate(("decision_tree", "random_forest", "xgboost"), start=1):
         model_id = f"{prefix}-{slot}"
+        certificate = _deployment_certificate()
         repo.register(
             {
                 "id": model_id,
@@ -146,11 +159,15 @@ def _register_generation(database: Database, prefix: str, *, activate: bool) -> 
                     "label_version": LabelPolicy().label_version,
                     "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
                     "decision_policy_version": DECISION_POLICY_VERSION,
+                    "age_policy_version": DEFAULT_AGE_POLICY_VERSION,
+                    "deployment_fit_scope": "final_train_only_certified_instance",
+                    "deployment_certification": certificate,
                 },
                 "thresholds": {"decision": 0.2 + slot * 0.01},
                 "metrics": {
                     "composite_score": 0.8 - slot * 0.1,
                     "execution_risk": {"certified": True},
+                    "deployment_certification": certificate,
                 },
                 "artifact_path": f"ml_models/{model_id}.joblib",
             }
@@ -161,7 +178,7 @@ def _register_generation(database: Database, prefix: str, *, activate: bool) -> 
                 "algorithm": algorithm,
                 "composite_score": 0.8 - slot * 0.1,
                 "threshold": 0.2 + slot * 0.01,
-                "metrics": {},
+                "metrics": {"deployment_certification": certificate},
             }
         )
     if activate:
@@ -170,16 +187,12 @@ def _register_generation(database: Database, prefix: str, *, activate: bool) -> 
 
 
 @pytest.mark.asyncio
-async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_resets_generation(tmp_path: Path) -> None:
+async def test_completed_candidate_waits_for_model_flat_but_rules_only_remains_continuous(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     current = _register_generation(database, "current", activate=True)
     paper = PaperTradingService(database, settings)
     session_id = paper.ensure_simulation_session()["id"]
-    for strategy in ("model_1", "model_2", "model_3"):
-        state = paper.ensure_account(strategy)
-        state["cash_usd"] = 777.0
-        database.set_runtime_state(f"portfolio_strategy:{strategy}", state)
 
     now = datetime.now(timezone.utc)
     database.execute(
@@ -223,7 +236,12 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
             utc_now_iso(),
             json.dumps({
                 "top_models": candidate,
-                "deployment_certification": {"eligible": True, "blockers": []},
+                "deployment_certification": {
+                    "version": DEPLOYMENT_CERTIFICATION_VERSION,
+                    "deployment_fit_scope": "final_train_only_certified_instance",
+                    "eligible": True,
+                    "blockers": [],
+                },
                 "activation": {"status": "waiting_for_flat"},
             }),
         ),
@@ -234,23 +252,12 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
     assert [model["id"] for model in ModelRepository(database).active_models()] == [item["id"] for item in current]
     assert database.get_runtime_state("model_entries_paused_for_rollover") is True
     assert database.get_runtime_state("model_rollover_status")["state"] == "waiting_for_flat"
-    assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 0
 
-    # A model generation rollover now owns the whole four-strategy experiment.
-    # Closing only the model position is insufficient while rules_only is open.
     database.execute(
         "UPDATE positions SET status='closed',exit_time=?,net_pnl_usd=-50 WHERE id='old-open'",
         (utc_now_iso(),),
     )
     restarted_worker = TrainingWorker(database, settings)
-    assert await restarted_worker.run_once() is None
-    assert [model["id"] for model in ModelRepository(database).active_models()] == [item["id"] for item in current]
-    assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 0
-
-    database.execute(
-        "UPDATE positions SET status='closed',exit_time=?,net_pnl_usd=-50 WHERE id='rules-open'",
-        (utc_now_iso(),),
-    )
     assert await restarted_worker.run_once() is None
 
     active = ModelRepository(database).active_models()
@@ -258,17 +265,14 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
     assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 1
     assert database.get_runtime_state("model_entries_paused_for_rollover") is False
     status = PaperTradingService(database, settings).simulation_status()
-    assert status["session"]["id"] != session_id
-    session_row = database.fetch_one(
-        "SELECT created_reason FROM simulation_sessions WHERE id=?",
-        (status["session"]["id"],),
-    )
-    assert session_row["created_reason"] == "model_generation_upgrade"
-    assert status["accounts"]["rules_only"]["cash_usd"] == pytest.approx(1000.0)
-    assert status["accounts"]["rules_only"]["trade_count"] == 0
+    assert status["session"]["id"] == session_id
+    assert status["accounts"]["rules_only"]["open_positions"] == 1
+    assert status["accounts"]["rules_only"]["capital_mode"] == "unlimited_notional"
+    assert "cash_usd" not in status["accounts"]["rules_only"]
     for slot in (1, 2, 3):
         account = status["accounts"][f"model_{slot}"]
-        assert account["cash_usd"] == pytest.approx(1000.0)
+        assert account["capital_mode"] == "unlimited_notional"
+        assert "cash_usd" not in account
         assert account["invested_usd"] == pytest.approx(0.0)
         assert account["realized_pnl_usd"] == pytest.approx(0.0)
         assert account["total_fees_usd"] == pytest.approx(0.0)
@@ -278,10 +282,62 @@ async def test_completed_candidate_waits_for_flat_survives_worker_restart_and_re
         assert account["recall"] is None
         assert account["model_id"] == candidate[slot - 1]["id"]
 
+def test_contract_upgrade_invalidates_waiting_generation_and_releases_stale_pause(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    current = _register_generation(database, "current-version", activate=True)
+    candidate = _register_generation(database, "obsolete-pending", activate=False)
+    run_id = "obsolete-v6-generation"
+    database.execute(
+        """
+        INSERT INTO training_runs(
+            id,trigger,status,requested_at,completed_at,request_json,promoted,summary_json
+        ) VALUES(?, 'manual', 'completed', ?, ?, '{}', 0, ?)
+        """,
+        (
+            run_id,
+            utc_now_iso(),
+            utc_now_iso(),
+            json.dumps({
+                "top_models": candidate,
+                "deployment_certification": {
+                    "version": "phase16_final_recent_certification_v6",
+                    "deployment_fit_scope": "final_train_only_certified_instance",
+                    "eligible": True,
+                    "blockers": [],
+                },
+                "activation": {"status": "waiting_for_flat"},
+            }),
+        ),
+    )
+    database.set_runtime_state("model_entries_paused_for_rollover", True)
+    database.set_runtime_state(
+        "model_entry_rollover_gate",
+        {"paused": True, "reason": "candidate_models_waiting_for_all_simulation_positions_to_close"},
+    )
+    database.set_runtime_state(
+        "model_rollover_status",
+        {"state": "waiting_for_flat", "run_id": run_id},
+    )
+
+    assert TrainingService(database, settings).promote_pending_if_flat(run_id=run_id) is None
+
+    assert [model["id"] for model in ModelRepository(database).active_models()] == [item["id"] for item in current]
+    assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 0
+    assert database.get_runtime_state("model_entries_paused_for_rollover") is False
+    gate = database.get_runtime_state("model_entry_rollover_gate")
+    assert gate["paused"] is False
+    assert gate["reason"] == "pending_generation_no_longer_matches_current_contract"
+    rollover = database.get_runtime_state("model_rollover_status")
+    assert rollover["state"] == "invalidated_pending"
+    assert rollover["run_id"] == run_id
+
+
 def test_rollover_recovers_after_models_switch_before_run_commit(monkeypatch, tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
     _register_generation(database, "current-crash", activate=True)
+    session_id = PaperTradingService(database, settings).ensure_simulation_session()["id"]
     candidate = _register_generation(database, "candidate-crash", activate=False)
     run_id = "pending-crash-recovery"
     database.execute(
@@ -296,18 +352,23 @@ def test_rollover_recovers_after_models_switch_before_run_commit(monkeypatch, tm
             utc_now_iso(),
             json.dumps({
                 "top_models": candidate,
-                "deployment_certification": {"eligible": True, "blockers": []},
+                "deployment_certification": {
+                    "version": DEPLOYMENT_CERTIFICATION_VERSION,
+                    "deployment_fit_scope": "final_train_only_certified_instance",
+                    "eligible": True,
+                    "blockers": [],
+                },
                 "activation": {"status": "waiting_for_flat"},
             }),
         ),
     )
     service = TrainingService(database, settings)
-    original_reset = PaperTradingService.reset_simulation
+    original_reset = PaperTradingService.reset_model_accounts_for_activation
 
-    def crash_before_session_reset(self, **kwargs):
+    def crash_before_account_reset(self, *args, **kwargs):
         raise RuntimeError("simulated crash after active model swap")
 
-    monkeypatch.setattr(PaperTradingService, "reset_simulation", crash_before_session_reset)
+    monkeypatch.setattr(PaperTradingService, "reset_model_accounts_for_activation", crash_before_account_reset)
     with pytest.raises(RuntimeError, match="simulated crash"):
         service.promote_pending_if_flat(run_id=run_id)
 
@@ -316,24 +377,14 @@ def test_rollover_recovers_after_models_switch_before_run_commit(monkeypatch, tm
     assert database.get_runtime_state("model_entries_paused_for_rollover") is True
     assert database.get_runtime_state("model_rollover_status")["state"] == "activating"
 
-    # Simulate the second crash point: the deterministic session was created,
-    # but the training-run commit marker was never persisted.
-    monkeypatch.setattr(PaperTradingService, "reset_simulation", original_reset)
-    deterministic_session_id = f"sim_upgrade_{run_id}"
-    PaperTradingService(database, settings).reset_simulation(
-        created_reason="model_generation_upgrade", session_id=deterministic_session_id
-    )
+    monkeypatch.setattr(PaperTradingService, "reset_model_accounts_for_activation", original_reset)
     recovered = TrainingService(database, settings).promote_pending_if_flat(run_id=run_id)
     assert recovered == run_id
     assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 1
     assert database.get_runtime_state("model_entries_paused_for_rollover") is False
     status = PaperTradingService(database, settings).simulation_status()
-    assert status["session"]["id"] == deterministic_session_id
-    count = database.fetch_one(
-        "SELECT COUNT(*) AS n FROM simulation_sessions WHERE id=? AND created_reason='model_generation_upgrade'",
-        (deterministic_session_id,),
-    )["n"]
-    assert count == 1
+    assert status["session"]["id"] == session_id
+    assert status["accounts"]["rules_only"]["capital_mode"] == "unlimited_notional"
     assert TrainingService(database, settings).promote_pending_if_flat(run_id=run_id) is None
 
 def test_rollover_refuses_candidate_without_deployment_certification(tmp_path: Path) -> None:

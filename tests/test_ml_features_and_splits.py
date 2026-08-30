@@ -8,6 +8,7 @@ from backend.app.ml import FeatureBuilder, TemporalSplitConfig, TemporalSplitter
 from backend.app.ml.features import (
     AGE_LOG1P_FEATURE,
     PRICE_LOG1P_FEATURE,
+    MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
     FeaturePolicy,
     MODEL_TRAINING_FEATURES,
     materialize_entry_feature,
@@ -93,16 +94,16 @@ def test_production_feature_allowlist_includes_entry_price_and_excludes_launchpa
     assert len(prepared.feature_names) == len(MODEL_TRAINING_FEATURES)
     assert "price_change_1m" not in prepared.feature_names
     assert "volume_acceleration_2m" not in prepared.feature_names
-    assert len(prepared.feature_names) == 31
+    assert len(prepared.feature_names) == 29
     assert AGE_LOG1P_FEATURE in prepared.feature_names
-    assert PRICE_LOG1P_FEATURE in prepared.feature_names
+    assert PRICE_LOG1P_FEATURE not in prepared.feature_names
+    assert MOMENTUM_ACCEL_1M_VS_5M_FEATURE in prepared.feature_names
     assert "price" not in prepared.feature_names
     assert "launchpad" not in prepared.feature_names
     assert not any(name.startswith("launchpad::") for name in prepared.feature_names)
     assert "liquidity" not in prepared.feature_names
     assert "liquidity_usd" not in prepared.feature_names
     assert "tag" not in prepared.feature_names
-    assert prepared.X[PRICE_LOG1P_FEATURE].eq(np.log1p(1.0)).all()
 
 
 def test_log1p_entry_feature_materialization_keeps_legacy_models_compatible() -> None:
@@ -122,6 +123,11 @@ def test_log1p_entry_feature_materialization_keeps_legacy_models_compatible() ->
     assert materialize_entry_feature(
         "price", {AGE_LOG1P_FEATURE: current_age}, entry_price=entry_price
     ) == pytest.approx(entry_price)
+    source = {"price_change_1m": 0.10, "price_change_5m": 0.25}
+    expected_acceleration = np.log1p(0.10) - np.log1p(0.25) / 5.0
+    assert materialize_entry_feature(
+        MOMENTUM_ACCEL_1M_VS_5M_FEATURE, source, entry_price=entry_price
+    ) == pytest.approx(expected_acceleration)
 
 
 def test_legacy_missing_liquidity_is_proxy_not_dollar_pnl() -> None:
@@ -134,7 +140,7 @@ def test_legacy_missing_liquidity_is_proxy_not_dollar_pnl() -> None:
     assert any("liquidity" in blocker for blocker in economics.blockers)
 
 
-def test_early_stage_split_is_expanding_and_has_one_hour_gap() -> None:
+def test_early_stage_split_is_expanding_and_has_full_label_gap() -> None:
     prepared = FeatureBuilder().prepare(_frame(days=60))
     plan = TemporalSplitter(
         TemporalSplitConfig(
@@ -152,7 +158,7 @@ def test_early_stage_split_is_expanding_and_has_one_hour_gap() -> None:
     for fold in (*plan.development_folds, plan.final_split):
         train_end = prepared.timestamps.iloc[fold.train_indices].max()
         test_start = prepared.timestamps.iloc[fold.test_indices].min()
-        assert train_end + pd.Timedelta(hours=1) <= test_start
+        assert train_end + pd.Timedelta(minutes=90) <= test_start
         assert fold.train_indices.max() < fold.test_indices.min()
 
 
@@ -169,4 +175,4 @@ def test_120_day_plan_uses_only_last_120_days_and_recent_30_day_holdout() -> Non
     holdout_start = prepared.timestamps.iloc[plan.final_split.test_indices[0]]
     assert holdout_start >= end - pd.Timedelta(days=30)
     train_end = prepared.timestamps.iloc[plan.final_split.train_indices].max()
-    assert train_end + pd.Timedelta(hours=1) <= holdout_start
+    assert train_end + pd.Timedelta(minutes=90) <= holdout_start

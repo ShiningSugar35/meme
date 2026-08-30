@@ -10,7 +10,11 @@ from backend.app.collector.models import Kline
 from backend.app.config import Settings
 from backend.app.database import Database, utc_now_iso
 from backend.app.ml.calibration import SigmoidCalibrator
-from backend.app.ml.decision_policy import DECISION_POLICY_VERSION
+from backend.app.ml.decision_policy import (
+    DECISION_POLICY_VERSION,
+    DEFAULT_AGE_POLICY_VERSION,
+    DEPLOYMENT_CERTIFICATION_VERSION,
+)
 from backend.app.ml.economics import ECONOMIC_OBJECTIVE_VERSION
 from backend.app.ml.sparse_budget import SparseBudgetSelection
 from backend.app.ml.registry import ModelRegistry
@@ -19,6 +23,7 @@ from backend.app.repositories.models import ModelRepository
 from backend.app.repositories.samples import SampleRecord, SampleRepository
 from backend.app.services.drift import DriftDecision
 from backend.app.services.paper_position_monitor import PaperPositionMonitor
+from backend.app.services.paper_trading import PaperTradingService
 from backend.app.services.prediction import PredictionService
 
 
@@ -59,6 +64,7 @@ def current_bundle_kwargs(*, risk_probability: float = 0.10) -> dict:
             profit_units=2.0, sample_count=100,
         ),
         "decision_policy_version": DECISION_POLICY_VERSION,
+        "age_policy_version": DEFAULT_AGE_POLICY_VERSION,
         "label_version": LabelPolicy().label_version,
         "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
         "execution_risk_model": ConstantRiskModel(risk_probability),
@@ -69,21 +75,37 @@ def current_bundle_kwargs(*, risk_probability: float = 0.10) -> dict:
     }
 
 
-def current_model_parameters() -> dict:
+def current_deployment_certification(*, qualified: bool = True) -> dict:
+    return {
+        "version": DEPLOYMENT_CERTIFICATION_VERSION,
+        "deployment_fit_scope": "final_train_only_certified_instance",
+        "qualified_deployment_evidence": qualified,
+    }
+
+
+def current_model_parameters(*, qualified: bool = True) -> dict:
     return {
         "label_version": LabelPolicy().label_version,
         "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
         "decision_policy_version": DECISION_POLICY_VERSION,
+        "age_policy_version": DEFAULT_AGE_POLICY_VERSION,
+        "deployment_fit_scope": "final_train_only_certified_instance",
+        "deployment_certification": current_deployment_certification(
+            qualified=qualified
+        ),
     }
 
 
-def seed_top3(database: Database, model_dir, now: datetime, *, probability: float = 0.60, risk_probability: float = 0.10, training_end: datetime | None = None, activation_at: datetime | None = None, feature_names=("feature_a",)) -> None:
+def seed_top3(database: Database, model_dir, now: datetime, *, probability: float = 0.60, risk_probability: float = 0.10, training_end: datetime | None = None, activation_at: datetime | None = None, feature_names=("feature_a",), qualified_slots=(1, 2, 3)) -> None:
     registry = ModelRegistry(model_dir)
     models = ModelRepository(database)
     thresholds = (0.20, 0.50, 0.80)
     active = []
+    qualified_slot_set = {int(slot) for slot in qualified_slots}
     for slot in (1, 2, 3):
         model_id = f"model-{slot}"
+        qualified = slot in qualified_slot_set
+        certificate = current_deployment_certification(qualified=qualified)
         bundle = ModelBundle(
             model_id=model_id,
             algorithm="constant",
@@ -110,13 +132,16 @@ def seed_top3(database: Database, model_dir, now: datetime, *, probability: floa
                 "validation_window_start": None,
                 "validation_window_end": None,
                 "feature_names": list(feature_names),
-                "parameters": current_model_parameters(),
+                "parameters": current_model_parameters(qualified=qualified),
                 "thresholds": bundle.thresholds.as_dict(),
-                "metrics": {"composite_score": 0.8 - slot * 0.1},
+                "metrics": {
+                    "composite_score": 0.8 - slot * 0.1,
+                    "deployment_certification": certificate,
+                },
                 "artifact_path": str(artifact),
             }
         )
-        active.append({"id": model_id, "composite_score": 0.8 - slot * 0.1, "threshold": thresholds[slot - 1], "metrics": {}})
+        active.append({"id": model_id, "composite_score": 0.8 - slot * 0.1, "threshold": thresholds[slot - 1], "metrics": {"deployment_certification": certificate}})
     models.set_active_models(active)
     selected_at = (activation_at or (now - timedelta(seconds=30))).isoformat()
     database.execute("UPDATE active_model_slots SET selected_at=?", (selected_at,))
@@ -152,7 +177,7 @@ def test_stale_economic_objective_keeps_models_off_and_rules_only_running(tmp_pa
 
     result = PredictionService(database, settings).run_cycle(now=now)
 
-    assert result.reason == "active_top3_phase16_contract_stale"
+    assert result.reason == "active_top3_contract_stale"
     assert result.predictions_written == 0
     assert result.model_positions_opened == 0
     assert result.rule_positions_opened == 1
@@ -243,7 +268,7 @@ def test_stale_oos_signals_and_rule_baseline_are_not_retroactively_filled(tmp_pa
     assert database.fetch_one("SELECT COUNT(*) AS n FROM positions")["n"] == 0
 
 
-def test_rollover_gate_blocks_all_four_simulation_strategies(tmp_path):
+def test_rollover_gate_blocks_models_but_rules_only_continues(tmp_path):
     database = Database(tmp_path / "rollover.db")
     database.initialize()
     settings = Settings(
@@ -274,9 +299,9 @@ def test_rollover_gate_blocks_all_four_simulation_strategies(tmp_path):
 
     assert result.predictions_written == 3
     assert result.model_positions_opened == 0
-    assert result.blocked_signals == 4
-    assert result.rule_positions_opened == 0
-    assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key='rules_only'")["n"] == 0
+    assert result.rule_positions_opened == 1
+    assert result.blocked_signals == 3
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key='rules_only'")["n"] == 1
     assert database.fetch_one("SELECT COUNT(*) AS n FROM positions WHERE strategy_key LIKE 'model_%'")["n"] == 0
 
 
@@ -394,6 +419,7 @@ def test_execution_risk_above_ceiling_blocks_models_but_rules_only_continues(tmp
         )
     )
     result = PredictionService(database, settings).run_cycle(now=now)
+
     assert result.predictions_written == 3
     assert result.model_positions_opened == 0
     assert result.rule_positions_opened == 1
@@ -401,7 +427,7 @@ def test_execution_risk_above_ceiling_blocks_models_but_rules_only_continues(tmp
     assert reasons == {"execution_risk_above_ceiling"}
 
 
-def test_severe_drift_freezes_models_but_rules_only_continues(monkeypatch, tmp_path):
+def test_severe_drift_is_monitoring_only_for_paper(monkeypatch, tmp_path):
     database = Database(tmp_path / "severe-drift.db")
     database.initialize()
     settings = Settings(
@@ -439,13 +465,18 @@ def test_severe_drift_freezes_models_but_rules_only_continues(monkeypatch, tmp_p
     )
     monkeypatch.setattr(service.drift, "evaluate", lambda **kwargs: severe)
     result = service.run_cycle(now=now)
-    assert result.predictions_written == 3
-    assert result.model_positions_opened == 0
-    assert result.rule_positions_opened == 1
-    reasons = {row["decision_reason"] for row in database.fetch_all("SELECT decision_reason FROM predictions")}
-    assert reasons == {"drift_severe_model_freeze"}
 
-def test_age_60_to_120_abstains_models_while_rules_only_continues(tmp_path):
+    assert result.predictions_written == 3
+    assert result.model_positions_opened == 3
+    assert result.rule_positions_opened == 1
+    rows = database.fetch_all("SELECT selected,decision_reason,drift_state FROM predictions ORDER BY id")
+    assert len(rows) == 3
+    assert all(int(row["selected"]) == 1 for row in rows)
+    assert all(row["decision_reason"] == "selected" for row in rows)
+    assert all(row["drift_state"] == "severe" for row in rows)
+
+
+def test_age_60_to_120_uses_model_threshold_without_abstain(tmp_path):
     database = Database(tmp_path / "age-abstain.db")
     database.initialize()
     settings = Settings(
@@ -471,8 +502,205 @@ def test_age_60_to_120_abstains_models_while_rules_only_continues(tmp_path):
         )
     )
     result = PredictionService(database, settings).run_cycle(now=now)
+
     assert result.predictions_written == 3
-    assert result.model_positions_opened == 0
+    assert result.model_positions_opened == 3
     assert result.rule_positions_opened == 1
-    reasons = {row["decision_reason"] for row in database.fetch_all("SELECT decision_reason FROM predictions")}
-    assert reasons == {"age_60_120_abstain"}
+    rows = database.fetch_all("SELECT threshold,policy_base_threshold,age_probability_floor,selected,decision_reason FROM predictions ORDER BY id")
+    assert len(rows) == 3
+    assert all(float(row["threshold"]) == pytest.approx(float(row["policy_base_threshold"])) for row in rows)
+    assert all(float(row["age_probability_floor"]) == pytest.approx(float(row["policy_base_threshold"])) for row in rows)
+    assert all(int(row["selected"]) == 1 and row["decision_reason"] == "selected" for row in rows)
+
+
+def test_only_individually_qualified_models_can_open_entries(tmp_path):
+    database = Database(tmp_path / "qualified-only.db")
+    database.initialize()
+    settings = Settings(
+        _env_file=None,
+        sqlite_path=str(tmp_path / "qualified-only.db"),
+        background_workers_enabled=False,
+        modeling_min_mature_samples=0,
+        signal_max_age_seconds=300,
+        paper_market_monitor_enabled=False,
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    seed_sol_price(database, now - timedelta(seconds=10))
+    seed_top3(
+        database,
+        tmp_path / "qualified-models",
+        now,
+        probability=0.99,
+        qualified_slots=(1,),
+    )
+    sample = SampleRecord(
+        address="qualified-only",
+        entry_time=int((now - timedelta(seconds=10)).timestamp()),
+        entry_price=1.0,
+        features={"feature_a": 1.0},
+        age_minutes=30.0,
+        liquidity=10_000.0,
+    )
+    setattr(sample, "token_" + "type", "new_" + "creation")
+    SampleRepository(database).insert(sample)
+
+    result = PredictionService(database, settings).run_cycle(now=now)
+
+    assert result.model_ids == ("model-1", "model-2", "model-3")
+    assert result.tradable_model_ids == ("model-1",)
+    assert result.shadow_model_ids == ("model-2", "model-3")
+    assert result.predictions_written == 1
+    assert result.shadow_predictions_written == 2
+    assert result.shadow_signals_selected == 2
+    assert result.signals_selected == 1
+    assert result.model_positions_opened == 1
+    assert result.rule_positions_opened == 1
+    strategies = {row["strategy_key"] for row in database.fetch_all("SELECT strategy_key FROM positions")}
+    assert strategies == {"model_1", "rules_only"}
+    reasons = {
+        row["strategy_key"]: row["decision_reason"]
+        for row in database.fetch_all("SELECT strategy_key,decision_reason FROM predictions")
+    }
+    assert reasons["model_1"] == "selected"
+    assert reasons["shadow_model_2"] == "shadow_selected"
+    assert reasons["shadow_model_3"] == "shadow_selected"
+
+
+
+
+def test_blocked_generation_shadow_is_non_trading_idempotent_and_adaptive_isolated(tmp_path):
+    database = Database(tmp_path / "blocked-shadow.db")
+    database.initialize()
+    settings = Settings(
+        _env_file=None,
+        sqlite_path=str(tmp_path / "blocked-shadow.db"),
+        background_workers_enabled=False,
+        modeling_min_mature_samples=0,
+        signal_max_age_seconds=300,
+        paper_market_monitor_enabled=False,
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    completed_at = now - timedelta(seconds=30)
+    seed_sol_price(database, now - timedelta(seconds=10))
+    seed_top3(
+        database,
+        tmp_path / "blocked-shadow-models",
+        now,
+        probability=0.99,
+        qualified_slots=(),
+    )
+    database.execute("DELETE FROM active_model_slots")
+    top_models = [
+        {"id": f"model-{slot}", "algorithm": "constant"}
+        for slot in (1, 2, 3)
+    ]
+    database.execute(
+        """
+        INSERT INTO training_runs(
+            id,trigger,status,requested_at,completed_at,request_json,promoted,summary_json
+        ) VALUES('blocked-shadow-run','manual','completed',?,?, '{}',0,?)
+        """,
+        (
+            completed_at.isoformat(),
+            completed_at.isoformat(),
+            __import__('json').dumps({
+                "decision_policy_version": DECISION_POLICY_VERSION,
+                "top_models": top_models,
+                "deployment_certification": {
+                    "version": DEPLOYMENT_CERTIFICATION_VERSION,
+                    "deployment_fit_scope": "final_train_only_certified_instance",
+                    "eligible": False,
+                    "blockers": ["no_positive_end_to_end_evidence"],
+                },
+                "activation": {"status": "blocked_certification"},
+            }),
+        ),
+    )
+    sample = SampleRecord(
+        address="blocked-shadow-sample",
+        entry_time=int((now - timedelta(seconds=10)).timestamp()),
+        entry_price=1.0,
+        features={"feature_a": 1.0},
+        age_minutes=30.0,
+        liquidity=10_000.0,
+    )
+    setattr(sample, "token_" + "type", "new_" + "creation")
+    sample_id = SampleRepository(database).insert(sample)
+
+    service = PredictionService(database, settings)
+    first = service.run_cycle(now=now)
+    assert first.shadow_model_ids == ("model-1", "model-2", "model-3")
+    assert first.shadow_predictions_written == 3
+    assert first.shadow_signals_selected == 3
+    assert first.model_positions_opened == 0
+    assert first.rule_positions_opened == 1
+    assert {row["strategy_key"] for row in database.fetch_all("SELECT strategy_key FROM predictions")} == {
+        "shadow_model_1", "shadow_model_2", "shadow_model_3"
+    }
+    assert {row["strategy_key"] for row in database.fetch_all("SELECT strategy_key FROM positions")} == {"rules_only"}
+
+    second = service.run_cycle(now=now + timedelta(seconds=1))
+    assert second.shadow_predictions_written == 0
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM predictions")["n"] == 3
+
+    database.execute(
+        "UPDATE samples SET label_status='mature',tag=1,label_version=? WHERE id=?",
+        (LabelPolicy().label_version, sample_id),
+    )
+    service.run_cycle(now=now + timedelta(hours=2))
+    assert service.adaptive.settle_feedback() == 0
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM adaptive_policy_feedback")["n"] == 0
+    shadow_health = database.get_runtime_state("shadow_model_health")
+    assert shadow_health["state"] == "observing"
+    assert all(item["mature_predictions"] == 1 for item in shadow_health["models"])
+
+
+def test_simulation_ignores_legacy_cash_balance_and_keeps_notional_trading(tmp_path):
+    database = Database(tmp_path / "unlimited-notional.db")
+    database.initialize()
+    settings = Settings(
+        _env_file=None,
+        sqlite_path=str(tmp_path / "unlimited-notional.db"),
+        background_workers_enabled=False,
+        modeling_min_mature_samples=0,
+        signal_max_age_seconds=300,
+        paper_market_monitor_enabled=False,
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    entry = now - timedelta(seconds=10)
+    seed_sol_price(database, entry)
+    seed_top3(database, tmp_path / "unlimited-notional-models", now, probability=0.99)
+    paper = PaperTradingService(database, settings)
+    session = paper.ensure_simulation_session()
+    for strategy in ("model_1", "model_2", "model_3", "rules_only"):
+        database.set_runtime_state(
+            f"portfolio_strategy:{strategy}",
+            {
+                "session_id": session["id"],
+                "strategy_key": strategy,
+                "cash_usd": -999.0,
+                "initial_cash_usd": 1000.0,
+                "source": "legacy_finite_cash",
+            },
+        )
+    SampleRepository(database).insert(
+        SampleRecord(
+            address="UnlimitedNotional111111111111111111111111111111",
+            token_type="new_creation",
+            age_minutes=30.0,
+            entry_time=int(entry.timestamp()),
+            entry_price=1.0,
+            liquidity=10_000.0,
+            features={"feature_a": 1.0},
+        )
+    )
+
+    result = PredictionService(database, settings).run_cycle(now=now)
+
+    assert result.model_positions_opened == 3
+    assert result.rule_positions_opened == 1
+    status = paper.simulation_status()
+    for account in status["accounts"].values():
+        assert account["capital_mode"] == "unlimited_notional"
+        assert "cash_usd" not in account
+        assert "initial_cash_usd" not in account

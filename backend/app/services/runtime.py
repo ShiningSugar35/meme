@@ -187,6 +187,8 @@ class RuntimeService:
                 "system_awake_request", {"state": "not_requested"}
             ),
             "prediction_worker": self.database.get_runtime_state("prediction_worker_status", {"state": "stopped"}),
+            "prediction_shadow": self.database.get_runtime_state("prediction_shadow_last_cycle", {"state": "inactive"}),
+            "shadow_model_health": self.database.get_runtime_state("shadow_model_health", {"state": "not_evaluated"}),
             "scheduler": self.database.get_runtime_state("scheduler_status", {"state": "stopped"}),
             "paper_monitor": self.database.get_runtime_state("position_monitor_status", {"state": "stopped"}),
             "position_monitor": self.database.get_runtime_state("position_monitor_status", {"state": "stopped"}),

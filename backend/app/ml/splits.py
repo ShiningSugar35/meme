@@ -14,7 +14,10 @@ class TemporalSplitConfig:
     full_window_days: int = 120
     final_holdout_days: int = 30
     early_holdout_fraction: float = 0.20
-    gap_hours: float = 1.0
+    # Current entry labels mature over a 90-minute first-touch window. The
+    # default split gap therefore must be at least 1.5 hours so a training row
+    # cannot have an unresolved outcome overlapping the next OOS window.
+    gap_hours: float = 1.5
     development_folds: int = 3
     initial_train_fraction: float = 0.40
     min_train_rows: int = 40
@@ -22,7 +25,7 @@ class TemporalSplitConfig:
 
 
 class TemporalSplitter:
-    """Deterministic expanding-window splits with a one-hour label gap."""
+    """Deterministic expanding-window splits with a full label-maturity gap."""
 
     def __init__(self, config: TemporalSplitConfig | None = None) -> None:
         self.config = config or TemporalSplitConfig()
@@ -66,7 +69,7 @@ class TemporalSplitter:
             final_train = active[(timestamps.iloc[active] <= holdout_start - gap).to_numpy()]
 
         if len(final_train) < self.config.min_train_rows:
-            raise ValueError("one-hour gap leaves too few final training rows")
+            raise ValueError("label-maturity gap leaves too few final training rows")
         if len(final_test) < self.config.min_test_rows:
             raise ValueError("final chronological holdout is too small")
 

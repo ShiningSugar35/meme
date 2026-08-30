@@ -60,7 +60,7 @@ class ModelHealthService:
         )
         if len(active) == 3 and not contract_current:
             return self._store(ModelHealthReport(
-                state="active_top3_phase16_contract_stale",
+                state="active_top3_contract_stale",
                 model_id=active[0]["id"],
                 window_days=self.settings.model_monitor_window_days,
                 mature_predictions=0, selected_trades=0, precision=None,
@@ -91,22 +91,42 @@ class ModelHealthService:
 
         cutoff = int((moment - timedelta(days=self.settings.model_monitor_window_days)).timestamp())
         reports = [self._evaluate_model(model, cutoff, int(moment.timestamp())) for model in active]
+        drift_reports = [
+            self.database.get_runtime_state(f"model_drift:{model['id']}", {})
+            for model in active
+        ]
+        drifted = [
+            item
+            for item in drift_reports
+            if isinstance(item, dict)
+            and str(item.get("state") or "") in {"caution", "severe"}
+        ]
         rank1 = reports[0]
         enough = [item for item in reports if item["mature_predictions"] >= self.settings.model_monitor_min_predictions]
         degraded_models = [item for item in enough if item["degraded"]]
-        state = "healthy" if enough and not degraded_models else "insufficient_data" if not enough else "degraded"
+        state = (
+            "drift_detected"
+            if drifted
+            else "healthy"
+            if enough and not degraded_models
+            else "insufficient_data"
+            if not enough
+            else "degraded"
+        )
         reason = (
-            "all evaluated active models remain within fixed-payoff decay tolerance"
+            "active model drift detected; accelerate scheduled model update"
+            if state == "drift_detected"
+            else "all evaluated active models remain within fixed-payoff decay tolerance"
             if state == "healthy"
             else "not enough mature OOS predictions for active models"
             if state == "insufficient_data"
             else "degraded active models: " + ", ".join(item["strategy_key"] for item in degraded_models)
         )
-        # Health classification no longer starts an out-of-band retrain. The
-        # scheduler owns all automatic cadence: insufficient_data -> daily 17:00,
-        # every other state (including degraded) -> weekly 17:00. This keeps the
-        # 16:00 entry freeze / 17:00 training / flat-then-activate lifecycle
-        # deterministic for every automatic update.
+        # Health classification does not start an out-of-band retrain. The
+        # scheduler owns automatic cadence: insufficient data, stale contracts,
+        # or observed drift -> daily 17:00; otherwise the normal weekly cadence.
+        # This keeps the 16:00 entry freeze / 17:00 training / flat-then-activate
+        # lifecycle deterministic for every automatic update.
         run_id = None
         report = ModelHealthReport(
             state=state,

@@ -24,7 +24,11 @@ from .models import (
     positive_raw_scores,
 )
 from .calibration import fit_sigmoid_calibrator
-from .decision_policy import DECISION_POLICY_VERSION
+from .decision_policy import (
+    AGE_POLICY_CANDIDATES,
+    DEFAULT_AGE_POLICY_VERSION,
+    DECISION_POLICY_VERSION,
+)
 from .sparse_budget import select_sparse_budget
 from .splits import TemporalSplitConfig, TemporalSplitter
 from .types import (
@@ -191,17 +195,14 @@ class ModelTrainer:
         evaluation_bundles: list[ModelBundle] = []
 
         for rank, selected in enumerate(top, start=1):
-            spec = successful_specs[selected.algorithm]
             features = selected.feature_names
-            refit = build_pipeline(spec, dataset.X.loc[plan.refit_indices, features])
-            refit_economics = dataset.economic_slice(plan.refit_indices)
-            fit_pipeline(
-                refit,
-                dataset.X.loc[plan.refit_indices, features],
-                dataset.y.iloc[plan.refit_indices],
-                economic_sample_weights(refit_economics),
-            )
-            model_step = refit.named_steps.get("model")
+            # The exact fitted instance evaluated on the frozen final holdout is
+            # the only instance eligible for deployment. Never refit with final
+            # labels after certification; doing so would invalidate the certificate.
+            production_estimator = final_estimators[selected.algorithm]
+            certified_fit_indices = plan.final_split.train_indices
+            production_economics = dataset.economic_slice(certified_fit_indices)
+            model_step = production_estimator.named_steps.get("model")
             runtime_metadata: dict[str, object] = {}
             if model_step is not None and hasattr(model_step, "actual_model_version_"):
                 runtime_metadata = {
@@ -237,14 +238,15 @@ class ModelTrainer:
                 created_at=now,
                 early_stage=plan.early_stage,
                 training_start=dataset.timestamps.iloc[plan.active_indices[0]].to_pydatetime(),
-                training_end=dataset.timestamps.iloc[plan.active_indices[-1]].to_pydatetime(),
+                training_end=dataset.timestamps.iloc[certified_fit_indices[-1]].to_pydatetime(),
                 calibrator=selected.calibrator,
                 sparse_budget=selected.sparse_budget,
                 decision_policy_version=DECISION_POLICY_VERSION,
+                age_policy_version=selected.age_policy_version,
             )
             bundles.append(
                 ModelBundle(
-                    estimator=refit,
+                    estimator=production_estimator,
                     metrics={
                         "rank": rank,
                         "stage": plan.stage_label,
@@ -254,11 +256,14 @@ class ModelTrainer:
                         "economic_score": selected.economic_score,
                         "composite_score": selected.composite_score,
                         "score_standard_error": selected.score_standard_error,
-                        "utility_eligible": refit_economics.utility_eligible,
-                        "utility_blockers": refit_economics.blockers,
+                        "utility_eligible": production_economics.utility_eligible,
+                        "utility_blockers": production_economics.blockers,
                         "model_runtime": runtime_metadata,
                         "calibration": selected.calibrator.provenance() if selected.calibrator else None,
                         "sparse_budget": selected.sparse_budget.provenance() if selected.sparse_budget else None,
+                        "age_policy_version": selected.age_policy_version,
+                        "age_policy_selection": dict(selected.age_policy_metrics),
+                        "deployment_fit_scope": "final_train_only_certified_instance",
                         "decision_policy_version": DECISION_POLICY_VERSION,
                         "evaluation_only": False,
                     },
@@ -268,7 +273,7 @@ class ModelTrainer:
             evaluation_bundles.append(
                 ModelBundle(
                     model_id=f"{model_id}-evaluation",
-                    estimator=final_estimators[selected.algorithm],
+                    estimator=production_estimator,
                     metrics={
                         "rank": rank,
                         "stage": plan.stage_label,
@@ -278,6 +283,9 @@ class ModelTrainer:
                         "model_runtime": runtime_metadata,
                         "calibration": selected.calibrator.provenance() if selected.calibrator else None,
                         "sparse_budget": selected.sparse_budget.provenance() if selected.sparse_budget else None,
+                        "age_policy_version": selected.age_policy_version,
+                        "age_policy_selection": dict(selected.age_policy_metrics),
+                        "deployment_fit_scope": "final_train_only_certified_instance",
                         "decision_policy_version": DECISION_POLICY_VERSION,
                         "evaluation_only": True,
                         "trained_through": dataset.timestamps.iloc[
@@ -343,9 +351,12 @@ class ModelTrainer:
             raise ValueError(f"unknown model candidate: {algorithm}")
         if not spec.available:
             raise RuntimeError(spec.skip_reason or f"candidate {algorithm} is unavailable")
-        features = tuple(dataset.feature_names)
-        evaluation = self._evaluate_development_candidate(dataset, plan, spec, features)
+        requested_features = tuple(dataset.feature_names)
+        evaluation = self._evaluate_development_candidate(
+            dataset, plan, spec, len(requested_features)
+        )
         evaluation, estimator = self._attach_final_holdout(dataset, plan, spec, evaluation)
+        features = evaluation.feature_names
         now = datetime.now(timezone.utc)
         bundle = ModelBundle(
             model_id=f"rebuild-{algorithm}-{uuid.uuid4().hex[:8]}",
@@ -360,8 +371,15 @@ class ModelTrainer:
             metrics={
                 "stage": plan.stage_label,
                 "final_recent_window": asdict(evaluation.final_metrics) if evaluation.final_metrics else {},
+                "age_policy_version": evaluation.age_policy_version,
+                "age_policy_selection": dict(evaluation.age_policy_metrics),
+                "deployment_fit_scope": "final_train_only_certified_instance",
                 "evaluation_only": True,
             },
+            calibrator=evaluation.calibrator,
+            sparse_budget=evaluation.sparse_budget,
+            decision_policy_version=DECISION_POLICY_VERSION,
+            age_policy_version=evaluation.age_policy_version,
         )
         return bundle, plan, evaluation
 
@@ -635,6 +653,12 @@ class ModelTrainer:
             min_trades=self.config.min_trades,
         )
         threshold = float(sparse_budget.policy_base_threshold)
+        age_policy_version, age_policy_metrics = self._select_development_age_policy(
+            dataset,
+            positions,
+            probabilities,
+            threshold,
+        )
 
         # Transform each chronological OOS fold with the calibrator learned only
         # from development OOS predictions. The final holdout is never an input
@@ -724,7 +748,46 @@ class ModelTrainer:
             ranking_economic_score=ranking_economic_score,
             calibrator=calibrator,
             sparse_budget=sparse_budget,
+            age_policy_version=age_policy_version,
+            age_policy_metrics=age_policy_metrics,
         )
+
+    def _select_development_age_policy(
+        self,
+        dataset: PreparedDataset,
+        positions: np.ndarray,
+        probabilities: np.ndarray,
+        base_threshold: float,
+    ) -> tuple[str, dict[str, object]]:
+        """Record the admission-only contract against development OOS predictions.
+
+        Phase17 has no model-output age adjustment and no age-band abstain. All
+        rows in the modeling dataset have already passed the Collector admission
+        contract, so this audit reports the model's own frozen threshold rather
+        than re-reading an optional age column and producing a false zero signal.
+        """
+        labels = dataset.y.iloc[positions].to_numpy(dtype=int)
+        mask = np.asarray(probabilities, dtype=float) >= float(base_threshold)
+        selected_count = int(mask.sum())
+        true_positives = int(labels[mask].sum()) if selected_count else 0
+        false_positives = selected_count - true_positives
+        precision = true_positives / selected_count if selected_count else None
+        evidence = {
+            "selected_count": selected_count,
+            "true_positives": true_positives,
+            "false_positives": false_positives,
+            "precision": precision,
+            "profit_units": float(3 * true_positives - false_positives),
+        }
+        candidates: dict[str, dict[str, object]] = {
+            policy_version: dict(evidence) for policy_version in AGE_POLICY_CANDIDATES
+        }
+
+        return DEFAULT_AGE_POLICY_VERSION, {
+            "selection_source": "fixed_admission_contract",
+            "selected": DEFAULT_AGE_POLICY_VERSION,
+            "candidates": candidates,
+        }
 
     def _execution_score(
         self,

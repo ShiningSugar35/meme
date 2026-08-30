@@ -298,7 +298,9 @@ async def test_failed_exit_persists_trigger_and_retries_without_new_market_decis
     assert pending["network_fee_sol_charged"] == pytest.approx(0.001)
     assert pending["network_fee_usd_charged"] == pytest.approx(0.18)
     account = database.get_runtime_state("portfolio_strategy:model_1")
-    assert account["cash_usd"] == pytest.approx(949.82)
+    assert account["capital_mode"] == "unlimited_notional"
+    assert "cash_usd" not in account
+    assert "initial_cash_usd" not in account
     assert "sol_fee_reserve" not in account
 
     restarted_monitor = PaperPositionMonitor(database, settings, paper_service=paper)

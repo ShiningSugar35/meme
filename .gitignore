@@ -4,6 +4,7 @@
 !.env.example
 __pycache__/
 *.py[cod]
+.ai-bridge/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -18,6 +19,7 @@ data/*.db
 data/*.db-*
 data/*.sqlite*
 data/backups/
+data/experimental_*
 logs/*
 !logs/.gitkeep
 ml_models/*

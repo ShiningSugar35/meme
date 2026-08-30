@@ -26,6 +26,7 @@ class PreparedDataset:
     y: pd.Series
     tags: pd.Series
     timestamps: pd.Series
+    age_minutes: pd.Series
     liquidity_usd: pd.Series
     final_close_ratio: pd.Series
     return_is_estimated: pd.Series
@@ -181,6 +182,8 @@ class CandidateEvaluation:
     ranking_economic_score: float | None = None
     calibrator: Any | None = None
     sparse_budget: Any | None = None
+    age_policy_version: str | None = None
+    age_policy_metrics: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -202,6 +205,7 @@ class ModelBundle:
     economic_objective_version: str | None = None
     execution_risk_model: Any | None = None
     drift_reference: Mapping[str, Any] = field(default_factory=dict)
+    age_policy_version: str | None = None
 
     @property
     def threshold(self) -> float:

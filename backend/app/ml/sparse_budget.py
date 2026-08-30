@@ -10,7 +10,11 @@ from .types import EconomicSlice, EvaluationMetrics
 
 
 SPARSE_BUDGET_FRACTIONS = (0.05, 0.075, 0.10, 0.15)
-GLOBAL_PROBABILITY_FLOOR = 0.25
+# Absolute calibrated-probability values are not an economic break-even proxy.
+# Profitability is certified from chronological OOS precision / +3:-1 utility;
+# the sparse-budget threshold therefore carries the model's calibrated score
+# scale instead of being clipped to a hard-coded 0.25.
+GLOBAL_PROBABILITY_FLOOR = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +84,7 @@ def select_sparse_budget(
         candidates.append((selection, metrics))
     eligible = [item for item in candidates if item[1].precision >= 0.25 and item[1].profit_units > 0]
     if not eligible:
-        raise ValueError("no development-only sparse budget clears the 25% economic floor")
+        raise ValueError("no development-only sparse budget clears the +3/-1 economic gate")
     return max(
         eligible,
         key=lambda item: (

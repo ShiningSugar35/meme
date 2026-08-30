@@ -99,13 +99,14 @@ def test_new_feature_generation_keeps_event_candidates_shadow_only() -> None:
     assert "creator_token_status" not in AVAILABLE_MODEL_FEATURES
     assert "ln(swaps_1m+1)" not in AVAILABLE_MODEL_FEATURES
     assert "ln(volume_2m+1)" not in AVAILABLE_MODEL_FEATURES
-    assert len(AVAILABLE_MODEL_FEATURES) == 44
+    assert "ln(liquidity_usd)" not in AVAILABLE_MODEL_FEATURES
+    assert len(AVAILABLE_MODEL_FEATURES) == 39
     assert "price_change_1m" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "volume_acceleration_2m" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "holder_count/age" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "creator_token_status" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "ln(liquidity_usd)" not in DEFAULT_MODEL_TRAINING_FEATURES
-    assert len(DEFAULT_MODEL_TRAINING_FEATURES) == 31
+    assert len(DEFAULT_MODEL_TRAINING_FEATURES) == 29
     assert FEATURE_SCHEMA_VERSION in TrainingService.FEATURE_SELECTION_STATE_KEY
 
 
@@ -318,7 +319,7 @@ def test_feature_family_audit_reports_insufficient_data_without_backfill(tmp_pat
     assert report["families"]["local_event"]["status"] == "INSUFFICIENT_DATA"
     assert report["families"]["attention_entry"]["status"] == "INSUFFICIENT_DATA"
     assert report["families"]["attention"]["status"] == "INSUFFICIENT_DATA"
-    assert len(LEGACY_BASELINE_FEATURES) == 31
+    assert len(LEGACY_BASELINE_FEATURES) == 28
     assert "price_change_1m" not in LEGACY_BASELINE_FEATURES
     assert "baseline" not in report
 

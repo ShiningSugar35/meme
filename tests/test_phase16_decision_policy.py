@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from backend.app.ml.calibration import fit_sigmoid_calibrator
-from backend.app.ml.decision_policy import age_gate, clamp_adaptive_threshold
+from backend.app.ml.decision_policy import (
+    age_adjusted_threshold,
+    age_gate,
+    clamp_adaptive_threshold,
+)
 from backend.app.ml.models import candidate_catalog
 from backend.app.ml.sparse_budget import select_sparse_budget, wilson_lower_bound
 from backend.app.ml.types import EconomicSlice
@@ -37,7 +41,7 @@ def test_sigmoid_calibration_fails_closed_for_degenerate_labels() -> None:
         )
 
 
-def test_sparse_budget_is_development_only_and_respects_global_economic_floor() -> None:
+def test_sparse_budget_is_development_only_and_respects_empirical_economic_gate() -> None:
     y = np.asarray([1, 1, 1, 0, 1, 0, 0, 0, 0, 0] * 20, dtype=int)
     probabilities = np.linspace(0.95, 0.05, len(y))
     economics = EconomicSlice(
@@ -48,7 +52,7 @@ def test_sparse_budget_is_development_only_and_respects_global_economic_floor() 
     )
     selection, metrics = select_sparse_budget(y, probabilities, economics, min_trades=5)
     assert selection.budget_fraction in {0.05, 0.075, 0.10, 0.15}
-    assert selection.policy_base_threshold >= 0.25
+    assert selection.policy_base_threshold == pytest.approx(selection.budget_threshold)
     assert selection.sample_count == len(y)
     assert selection.oos_selected_count == metrics.trade_count
     assert selection.precision >= 0.25
@@ -58,20 +62,44 @@ def test_sparse_budget_is_development_only_and_respects_global_economic_floor() 
     )
 
 
-def test_age_gate_freezes_60_to_120_only_for_model_policy() -> None:
-    assert age_gate(5).allowed and age_gate(5).probability_floor == pytest.approx(0.29)
-    assert age_gate(20).allowed and age_gate(20).probability_floor == pytest.approx(0.29)
-    assert age_gate(45).allowed and age_gate(45).probability_floor == pytest.approx(0.22)
-    assert not age_gate(60).allowed
-    assert not age_gate(119.9).allowed
-    assert age_gate(120).allowed and age_gate(120).probability_floor >= 0.25
+def test_sparse_budget_does_not_confuse_break_even_precision_with_probability_scale() -> None:
+    probabilities = np.linspace(0.22, 0.05, 100)
+    y = np.zeros(100, dtype=int)
+    y[:5] = np.asarray([1, 1, 0, 0, 0], dtype=int)
+    economics = EconomicSlice(
+        realized_return=np.where(y == 1, 0.80, -0.10).astype(float),
+        capital=np.full(len(y), 50.0),
+        utility_eligible=True,
+        unit="usd",
+    )
+    selection, metrics = select_sparse_budget(
+        y,
+        probabilities,
+        economics,
+        min_trades=5,
+        fractions=(0.05,),
+    )
+    assert probabilities.max() < 0.25
+    assert selection.policy_base_threshold < 0.25
+    assert metrics.trade_count == 5
+    assert metrics.precision == pytest.approx(0.40)
+    assert metrics.profit_units > 0
 
 
-def test_adaptive_expansive_cannot_undercut_hard_floor() -> None:
-    assert clamp_adaptive_threshold(0.34, 0.29, 0.20) == pytest.approx(0.34)
-    assert clamp_adaptive_threshold(0.22, 0.29, 0.20) == pytest.approx(0.29)
-    assert clamp_adaptive_threshold(0.22, 0.22, 0.10) == pytest.approx(0.25)
-    assert clamp_adaptive_threshold(0.34, 0.29, 0.50) == pytest.approx(0.50)
+def test_age_gate_is_admission_only_and_never_reweights_model_threshold() -> None:
+    for age in (5, 20, 45, 60, 90, 119.9, 120, 299.9):
+        decision = age_gate(age)
+        assert decision.allowed
+        assert decision.threshold_delta == pytest.approx(0.0)
+        assert age_adjusted_threshold(0.18, decision) == pytest.approx(0.18)
+    assert not age_gate(2).allowed
+    assert not age_gate(300).allowed
+
+
+def test_adaptive_expansive_cannot_undercut_relative_age_threshold() -> None:
+    assert clamp_adaptive_threshold(0.18, 0.22, 0.20) == pytest.approx(0.22)
+    assert clamp_adaptive_threshold(0.18, 0.18, 0.10) == pytest.approx(0.18)
+    assert clamp_adaptive_threshold(0.18, 0.22, 0.50) == pytest.approx(0.50)
 
 
 def test_rbf_svm_has_no_internal_probability_calibration() -> None:

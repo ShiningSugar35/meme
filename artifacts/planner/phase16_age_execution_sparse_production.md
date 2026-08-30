@@ -1,9 +1,11 @@
 # Phase 16：1.8/0.9/90m + Age-aware + Execution-risk-aware + Sparse Budget 生产化方案
 
-状态：**DESIGN FROZEN / IMPLEMENTATION IN PROGRESS**  
-日期：2026-08-24  
-适用分支：`main`  
+状态：**HISTORICAL / SUPERSEDED BY PHASE17**
+日期：2026-08-24
+适用分支：`main`
 适用环境：Windows 本地单机、SQLite、CPU-first、`event1m_regime_v3`
+
+> 本文保留 Phase16 的历史研究与设计依据，不再定义现行 paper 决策。当前合同以 `开发文档.md` 为准：不再有年龄固定加分、60–120 分钟 ABSTAIN 或 drift paper veto；simulation 使用无本金限制的名义交易。
 
 ## 1. 目标与不可违反边界
 
@@ -130,7 +132,7 @@ Collector / immutable PIT features
         └── Decision Policy
                 ├── model-specific sparse budget threshold (5/7.5/10/15%)
                 ├── age-aware probability floor
-                ├── 60–120m hard abstain
+                ├── development-selected 60–120m age policy (strict/reopen challenger)
                 ├── execution-risk max gate
                 ├── drift state adjustment
                 └── AdaptivePolicy only after the above base safety floor
@@ -173,7 +175,7 @@ PositionMonitor 只读取仓位自己的 stop/take/expires 快照，禁止用当
 1. 仅用 development OOS `(p_raw, y)` 拟合 `LogisticRegression(C=1e6)` 的单变量 sigmoid；输入使用 clipped logit(p)。
 2. OOS threshold/budget/economics 全部在 calibrated p 上评价。
 3. final holdout estimator 仍只用 pre-holdout train 拟合，预测后应用同一个 development calibrator；holdout 不拟合 calibrator。
-4. refit production estimator 用 refit data 拟合，继续携带 development calibrator。
+4. final pre-holdout estimator 预测 final 后若取得证书，该 fitted instance 即 production estimator；禁止再用 final 标签 refit，继续携带 development calibrator。
 5. 若 OOS 两类不足或 calibrator 失败，fail-closed：该 candidate 不可晋级。
 
 ### 5.4 Model-specific sparse budget
@@ -182,10 +184,10 @@ PositionMonitor 只读取仓位自己的 stop/take/expires 快照，禁止用当
 
 每个模型只在 development OOS 上：
 
-- 对 calibrated probability 按分位数形成固定在线 threshold；
+- 对 calibrated probability 按分位数形成固定在线 threshold；绝对 probability 数值不再硬裁到 0.25，避免把“25% Precision 盈亏平衡”误当作所有校准器共用的分数刻度；
 - 至少 `max(5, ceil(2% × OOS rows))` 个 selected；
 - `profit_units > 0`；
-- Precision 必须高于 global 25% break-even；
+- OOS Precision 必须高于 25% break-even；
 - 优先最大 `profit_units`，同等时优先更高 precision、更小预算；
 - 保存 `budget_fraction / budget_threshold / OOS trade count / precision / Wilson LCB / profit_units`。
 
@@ -195,32 +197,33 @@ PositionMonitor 只读取仓位自己的 stop/take/expires 快照，禁止用当
 
 基于真实 route-aware stop break-even：
 
-| entry age | production action | calibrated P(winner) floor |
+| entry age | production action | 相对 model budget threshold |
 |---|---|---:|
-| 2–10m | allow with stronger floor | 0.29 |
-| 10–30m | allow with stronger floor | 0.29 |
-| 30–60m | allow | 0.22，但最终仍受全局 0.25 与 budget threshold 约束 |
-| 60–120m | **ABSTAIN** | — |
-| 120–300m | allow conservatively | 0.25 |
+| 2–10m | allow with stronger threshold | `+0.04` |
+| 10–30m | allow with stronger threshold | `+0.04` |
+| 30–60m | allow | `+0.00` |
+| 60–120m | strict 默认 ABSTAIN；development OOS 可预选 reopen challenger | `+0.00`（仅 reopen） |
+| 120–300m | allow | `+0.00` |
 
-实际 base threshold = `max(model_budget_threshold, 0.25, age_floor)`。
+实际 age threshold = `model_budget_threshold + age_delta`。年龄门只表达“年轻币相对更谨慎”，不再假设所有模型共享 0.29/0.22 的绝对校准分数刻度；25% 仍是 OOS Precision / `+3/-1` 经济门。60–120m 只允许 `age_strict_v1` 与 `age_reopen_60_120_v1` 两个预注册策略，且只能由 chronological development OOS 选择；平局、样本不足或无正效用时保持 strict，final 只 veto。
 
 Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，以便持续收集全准入池执行事实。
 
 ### 5.6 Execution-risk head
 
-目标仅在 clean linked stop 样本中构造：
+目标在全部 clean、已平仓、linked rules-only entry 上构造：
 
-`severe_gap = trigger_reference_price <= stop_loss_price * 0.90`
+`severe_gap = (exit is stop_loss) AND (trigger_reference_price <= stop_loss_price * 0.90)`
 
-即第一次 stop trigger 时，已比 0.9x 止损线再穿透至少 10%。
+非止损退出显式为负类；这样估计的是新 entry 的无条件 `P(severe_gap)`，而不是旧版错误的 `P(severe_gap | 已止损)`。
 
-- 特征：只允许 current approved entry-time catalog。
-- 训练：chronological 80/20，ExtraTrees + Logistic 两个小候选，按 AP skill/AUC 选一个。
-- 最低数据门：observations>=300、positive>=40、negative>=80；不满足则 head=`unavailable`，模型开仓使用更保守阈值但不得凭空填风险。
-- certification：holdout AUC>=0.60 且 AP >= base prevalence + 0.05；否则 head 不激活。
+- 特征：只允许 current approved entry-time catalog；自 2026-08-26 起 `ln(liquidity_usd)` 退役，不进入主模型或 execution-risk head，raw liquidity 继续用于资金/执行约束。
+- 训练：先截断为 final recent 开始前、再减去完整 90 分钟标签隔离带的 clean rules-only 仓位；截断后的风险样本 chronological 70/15/15，前 70% 拟合 ExtraTrees / Logistic，中间 15% 对风险分数做 Platt 校准并按 AP/AUC 选模型，末 15% 只做独立 certification。
+- ExtraTrees / Logistic 不再使用 `class_weight=balanced`；最终 `predict_probability` 必须经过独立 calibration slice 的 sigmoid calibrator，固定 0.35/0.40 因而重新具有概率语义。
+- 最低数据门：observations>=300、positive>=40、negative>=80；不满足则 head=`unavailable`，模型开仓 fail-closed。
+- certification：末段 AUC>=0.60 且 AP >= base prevalence + 0.05；同时记录 calibrated Brier / raw Brier 供审计。
 - active risk threshold：默认 `P(severe_gap) <= 0.40`；若 drift=caution 收紧到 0.35；severe 时冻结 model entries。
-- risk head 版本、训练窗口、AUC/AP/base prevalence、特征列表、artifact hash 全部写入模型/运行审计。
+- risk head 版本、训练/校准/认证窗口、AUC/AP/Brier/base prevalence、特征列表、artifact hash 全部写入模型/运行审计。
 
 ### 5.7 Drift / recent certification gate
 
@@ -228,10 +231,11 @@ Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，
 
 模型 generation 只有在以下条件满足才可激活：
 
-1. 至少一个 Top3 在 final recent window 有 >=5 个 model-policy selected observations；
-2. 对已有 >=8 个 selected observations 的模型，其 final `profit_units >= 0`；
-3. 若 final selected <8，标 `limited_evidence`，允许 simulation，但 threshold 增加安全 margin +0.03；
-4. recent label prevalence 相对 development reference 下降 >35% 或关键 feature drift 达 severe，则 model entries freeze，Collector/rules_only/退出不停。
+1. final recent window 必须至少 100 条、10 个正类、30 个负类，确保部署证书不是在极小或单一类别窗口上得出；
+2. 至少一个同一 Top3 模型必须同时满足：final AP 严格高于 final prevalence、ROC-AUC>=0.50、完整 age+risk+drift+threshold 后 selected>=1、`3TP-FP>0`；
+3. 对任一已有 >=8 个完整策略 selected observations 的模型，若 final `profit_units < 0`，整代阻断；selected<8 只标 `limited_evidence`，但仍必须由第 2 条的正向联合证据模型为整代取得资格；
+4. recent label prevalence 相对 development reference 下降 >35%、关键 feature drift 达 severe，或 execution-risk head 未认证，则整代阻断；final 只作 deployment veto，禁止借其换候选、重排、调阈值、调特征、调 age policy 或调 risk ceiling；承担 final 认证的 fitted estimator 就是唯一可部署实例，禁止 final 后 refit。Collector/rules_only/退出不停。
+5. generation 至少一个模型取得联合正向证据即可 staged activation，但激活后只有自身 `qualified_deployment_evidence=true` 的 slot 可开仓；其他 slot 使用 `shadow_model_*` 只记录 post-training outcome。
 
 ### 5.8 AdaptivePolicy 的位置
 
@@ -239,7 +243,7 @@ Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，
 
 `calibrated probability → sparse budget/age/execution/drift hard gate → adaptive threshold only upward/downward inside hard safety floor`
 
-任何 EXPANSIVE action 都不得把 threshold 降到 base safety floor 以下，也不得绕过 age 60–120 abstain / execution-risk / severe-drift gate。
+任何 EXPANSIVE action 都不得把 threshold 降到 base safety floor 以下，也不得绕过模型已冻结的 age policy / execution-risk / severe-drift gate。
 
 ## 6. 数据迁移与热更新
 
@@ -289,8 +293,8 @@ Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，
 ### C. Sparse budget / age / execution risk
 
 - [x] 每个候选/未来 active model 持久化独立 `budget_fraction` 与 `budget_threshold`；本轮候选未通过 deployment certification，未冒充 active。
-- [x] 在线 threshold 不低于 0.25 global floor 与对应 age floor。
-- [x] age 60–120 对 model strategy 必须 abstain；rules_only 不受影响。
+- [x] 在线 threshold 使用各模型 development OOS 稀疏预算刻度；25% 只作为 Precision 经济门，年轻币在模型阈值上相对 +0.04，不设统一概率 0.25 硬底线。
+- [x] age 60–120 默认 `age_strict_v1` abstain；只有 development OOS challenger 满足最小交易数、Precision>=25%、正效用且严格优于 strict 时才可选择 `age_reopen_60_120_v1`；final 不得反选，rules_only 不受影响。
 - [x] execution-risk head 低于数据/指标门时 fail-closed 为 unavailable，不伪造风险值。
 - [x] risk head artifact 可加载、hash 可审计；本轮 risk head 已 certified。
 - [x] P(severe)>risk ceiling 时 model position 不得打开。
@@ -308,7 +312,7 @@ Age gate 只影响 model_1/2/3；rules_only 继续作为无模型执行基线，
 
 - [x] 旧 label/decision-policy generation 在新代码下 fail-closed，不产生 model entry。
 - [x] 新训练 summary 写明 label version、decision policy version、calibration、budget、risk head、drift certification。
-- [x] final holdout 只做 certification，任何阈值/预算选择不得读取 final label 做反向优化。
+- [x] final holdout 只做 certification，任何特征/阈值/预算/age policy/risk ceiling 选择不得读取 final label 做反向优化；承担 final 认证的 fitted estimator 即部署 estimator，final 后不再 refit。
 - [x] Top3 candidate artifact 全部可加载；Prediction policy-gate 回归可产生可审计 decision reason。
 - [x] staged rollover 与 rollback 保留，并新增中途崩溃幂等恢复。
 

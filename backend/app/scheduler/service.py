@@ -64,8 +64,9 @@ class TrainingScheduler:
         recovery_states = {
             "insufficient_data",
             "active_top3_not_ready",
-            "active_top3_phase16_contract_stale",
+            "active_top3_contract_stale",
             "deployment_certification_blocked",
+            "drift_detected",
         }
         return "daily" if state in recovery_states else "weekly"
 

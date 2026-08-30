@@ -221,8 +221,7 @@ export interface SampleLedgerItem {
 export interface SimulationAccount {
   session_id: string;
   strategy_key: StrategyKey;
-  cash_usd: number;
-  initial_cash_usd: number;
+  capital_mode: "unlimited_notional";
   accounting_currency: "USD";
   network_fee_accounting: "fee_time_sol_usd";
   source: string;
@@ -254,7 +253,6 @@ export interface SimulationStatus {
     ended_at?: string | null;
     status?: "active" | "closed";
     created_reason?: string;
-    initial_cash_usd: number;
   };
   accounts: Record<StrategyKey, SimulationAccount>;
 }

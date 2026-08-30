@@ -8,30 +8,38 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 from ..collector.constants import FEATURE_SCHEMA_VERSION, LabelPolicy
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..ml.decision_policy import (
+    AGE_POLICY_CANDIDATES,
     DECISION_POLICY_VERSION,
-    RISK_CEILING_CAUTION,
+    DEPLOYMENT_CERTIFICATION_VERSION,
     RISK_CEILING_NORMAL,
+    age_adjusted_threshold,
     age_gate,
+    deployment_certification_is_current,
 )
-from ..ml.economics import ECONOMIC_OBJECTIVE_VERSION
+from ..ml.economics import ECONOMIC_OBJECTIVE_VERSION, theoretical_profit_units
 from ..ml.features import (
     AGE_LOG1P_FEATURE,
     AVAILABLE_MODEL_FEATURES,
+    DEPRECATED_MODEL_FEATURES,
     DEFAULT_MODEL_TRAINING_FEATURES,
+    MARKETCAP_LOG1P_FEATURE,
+    MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
     PRICE_LOG1P_FEATURE,
     FeatureBuilder,
     FeaturePolicy,
     materialize_entry_feature,
 )
 from ..ml.registry import ModelRegistry
+from ..ml.splits import TemporalSplitConfig
 from ..ml.trainer import ModelTrainer, TrainerConfig
-from ..ml.types import ThresholdSet
 from ..repositories.models import ModelRepository
 from ..repositories.samples import SampleRepository
 from .drift import build_drift_reference, evaluate_final_certification_drift
@@ -40,6 +48,108 @@ from .modeling_gate import ModelingReadiness, persist_modeling_readiness
 
 
 TrainingTrigger = Literal["manual", "weekly", "daily", "startup_catchup", "degraded"]
+
+FINAL_CERTIFICATION_MIN_ROWS = 100
+FINAL_CERTIFICATION_MIN_POSITIVES = 10
+FINAL_CERTIFICATION_MIN_NEGATIVES = 30
+FINAL_CERTIFICATION_MIN_END_TO_END_SELECTED = 1
+FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED = 8
+FINAL_CERTIFICATION_MIN_ROC_AUC = 0.50
+
+
+def evaluate_final_deployment_evidence(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    selected_mask: np.ndarray | list[bool],
+) -> dict[str, Any]:
+    """Evaluate one frozen Top-3 model on the untouched final window.
+
+    This is a deployment veto, not another model-selection stage. It never
+    changes the estimator, feature set, calibrated threshold or Top-3 order.
+    Positive deployment evidence requires the same model to retain both
+    non-random ranking skill and positive end-to-end policy utility.
+    """
+    y = np.asarray(labels, dtype=int)
+    probs = np.asarray(probabilities, dtype=float)
+    selected = np.asarray(selected_mask, dtype=bool)
+    if len(y) == 0:
+        raise ValueError("final certification cannot evaluate an empty window")
+    if len(y) != len(probs) or len(y) != len(selected):
+        raise ValueError("final labels, probabilities, and policy mask must align")
+    if not np.isin(y, (0, 1)).all():
+        raise ValueError("final certification labels must be binary")
+    if not np.isfinite(probs).all():
+        raise ValueError("final certification probabilities must be finite")
+
+    rows = int(len(y))
+    positives = int(np.sum(y == 1))
+    negatives = rows - positives
+    prevalence = float(positives / rows)
+    support_ok = bool(
+        rows >= FINAL_CERTIFICATION_MIN_ROWS
+        and positives >= FINAL_CERTIFICATION_MIN_POSITIVES
+        and negatives >= FINAL_CERTIFICATION_MIN_NEGATIVES
+    )
+
+    average_precision: float | None = None
+    roc_auc: float | None = None
+    if positives > 0 and negatives > 0:
+        average_precision = float(average_precision_score(y, probs))
+        roc_auc = float(roc_auc_score(y, probs))
+    average_precision_lift = (
+        None if average_precision is None else float(average_precision - prevalence)
+    )
+    ranking_evidence = bool(
+        support_ok
+        and average_precision is not None
+        and average_precision > prevalence
+        and roc_auc is not None
+        and roc_auc >= FINAL_CERTIFICATION_MIN_ROC_AUC
+    )
+
+    selected_count = int(np.sum(selected))
+    true_positives = int(np.sum(selected & (y == 1)))
+    false_positives = selected_count - true_positives
+    profit_units = float(theoretical_profit_units(true_positives, false_positives))
+    positive_end_to_end_evidence = bool(
+        selected_count >= FINAL_CERTIFICATION_MIN_END_TO_END_SELECTED
+        and profit_units > 0.0
+    )
+
+    blockers: list[str] = []
+    if rows < FINAL_CERTIFICATION_MIN_ROWS:
+        blockers.append("final_rows_below_minimum")
+    if positives < FINAL_CERTIFICATION_MIN_POSITIVES:
+        blockers.append("final_positives_below_minimum")
+    if negatives < FINAL_CERTIFICATION_MIN_NEGATIVES:
+        blockers.append("final_negatives_below_minimum")
+    if average_precision is None or average_precision <= prevalence:
+        blockers.append("final_average_precision_not_above_prevalence")
+    if roc_auc is None or roc_auc < FINAL_CERTIFICATION_MIN_ROC_AUC:
+        blockers.append("final_roc_auc_below_random")
+    if selected_count < FINAL_CERTIFICATION_MIN_END_TO_END_SELECTED:
+        blockers.append("final_no_end_to_end_selected")
+    if profit_units <= 0.0:
+        blockers.append("final_end_to_end_profit_not_positive")
+
+    return {
+        "rows": rows,
+        "positives": positives,
+        "negatives": negatives,
+        "prevalence": prevalence,
+        "average_precision": average_precision,
+        "average_precision_lift": average_precision_lift,
+        "roc_auc": roc_auc,
+        "support_ok": support_ok,
+        "ranking_evidence": ranking_evidence,
+        "selected_count": selected_count,
+        "true_positives": true_positives,
+        "false_positives": false_positives,
+        "profit_units": profit_units,
+        "positive_end_to_end_evidence": positive_end_to_end_evidence,
+        "qualified": bool(ranking_evidence and positive_end_to_end_evidence),
+        "blockers": blockers,
+    }
 
 
 class TrainingService:
@@ -109,12 +219,21 @@ class TrainingService:
     ) -> tuple[str, ...]:
         if feature_names is None:
             return DEFAULT_MODEL_TRAINING_FEATURES
-        aliases = {"age": AGE_LOG1P_FEATURE, "price": PRICE_LOG1P_FEATURE}
+        aliases = {"age": AGE_LOG1P_FEATURE, "price": MARKETCAP_LOG1P_FEATURE}
+        replacements = {
+            PRICE_LOG1P_FEATURE: MARKETCAP_LOG1P_FEATURE,
+            "price_change_1h": MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
+            "top_bot_degen_percentage": "bot_degen_rate",
+        }
         requested = {
-            aliases.get(str(name).strip(), str(name).strip())
+            replacements.get(
+                aliases.get(str(name).strip(), str(name).strip()),
+                aliases.get(str(name).strip(), str(name).strip()),
+            )
             for name in feature_names
             if str(name).strip()
         }
+        requested.difference_update(DEPRECATED_MODEL_FEATURES)
         if not requested:
             raise ValueError("at least one model feature must be selected")
         unknown = sorted(requested.difference(AVAILABLE_MODEL_FEATURES))
@@ -201,13 +320,33 @@ class TrainingService:
                 and row.get("token_type") in {"new_creation", "near_completion"}
             ]
             if not rows:
-                raise ValueError("no current Phase16 v5 mature samples are available")
+                raise ValueError("no current mature samples are available")
             frame, data_hash = self._training_frame(rows)
             dataset = FeatureBuilder(
                 FeaturePolicy(feature_allowlist=selected_features)
             ).prepare(frame)
-            result = ModelTrainer(TrainerConfig()).train(dataset)
-            execution_risk = ExecutionRiskTrainer(self.database).train()
+            # Derive the embargo from the active label window so a future
+            # label-policy change cannot silently leave a shorter production
+            # split gap behind.
+            result = ModelTrainer(
+                TrainerConfig(),
+                TemporalSplitConfig(
+                    gap_hours=LabelPolicy().window_seconds / 3600.0,
+                ),
+            ).train(dataset)
+            candidate_map = result.candidates_by_algorithm
+            final_train = result.plan.final_split.train_indices
+            final_test = result.plan.final_split.test_indices
+            final_window_start = dataset.timestamps.iloc[final_test[0]]
+            final_window_start_epoch = int(final_window_start.timestamp())
+            final_window_start_iso = final_window_start.isoformat()
+            risk_training_cutoff = (
+                final_window_start_epoch - LabelPolicy().window_seconds
+            )
+            execution_risk = ExecutionRiskTrainer(self.database).train(
+                max_entry_time_exclusive=risk_training_cutoff,
+                max_exit_time_exclusive=final_window_start_iso,
+            )
             self.database.set_runtime_state("execution_risk_training", execution_risk.as_dict())
             if not execution_risk.certified or execution_risk.model is None:
                 self.database.audit(
@@ -218,13 +357,10 @@ class TrainingService:
                     entity_id=run_id,
                     details=execution_risk.as_dict(),
                 )
-            candidate_map = result.candidates_by_algorithm
-            final_train = result.plan.final_split.train_indices
-            final_test = result.plan.final_split.test_indices
             references: dict[str, dict[str, Any]] = {}
             final_drift: dict[str, dict[str, Any]] = {}
             certification_models: list[dict[str, Any]] = []
-            has_minimum_final_evidence = False
+            qualified_model_ids: list[str] = []
             certification_blockers: list[str] = []
 
             evaluation_by_algorithm = {
@@ -245,18 +381,15 @@ class TrainingService:
                 )
                 selected_mask: list[bool] = []
                 risk_probabilities: list[float | None] = []
-                risk_ceiling = (
-                    RISK_CEILING_CAUTION
-                    if drift_cert.get("state") == "caution"
-                    else RISK_CEILING_NORMAL
-                )
+                risk_ceiling = RISK_CEILING_NORMAL
                 for row_source, probability in zip(
                     final_source_rows, probabilities, strict=True
                 ):
-                    age = age_gate(row_source.get("age_minutes"))
-                    hard_threshold = max(
-                        0.25, original_threshold, float(age.probability_floor)
+                    age = age_gate(
+                        row_source.get("age_minutes"),
+                        evaluation_bundle.age_policy_version,
                     )
+                    hard_threshold = age_adjusted_threshold(original_threshold, age)
                     risk_probability: float | None = None
                     if execution_risk.model is not None:
                         try:
@@ -274,40 +407,54 @@ class TrainingService:
                             and float(probability) >= hard_threshold
                         )
                     )
-                selected_count = int(sum(selected_mask))
-                true_positives = int(
-                    sum(
-                        1
-                        for selected, label in zip(selected_mask, final_labels, strict=True)
-                        if selected and int(label) == 1
-                    )
+
+                evidence = evaluate_final_deployment_evidence(
+                    final_labels,
+                    probabilities,
+                    selected_mask,
                 )
-                false_positives = selected_count - true_positives
-                profit_units = float(3 * true_positives - false_positives)
-                limited_evidence = selected_count < 8
-                certification_margin = 0.03 if limited_evidence else 0.0
-                if certification_margin:
-                    bundle.thresholds = ThresholdSet(
-                        decision=min(0.999999, original_threshold + certification_margin)
-                    )
-                has_minimum_final_evidence = has_minimum_final_evidence or selected_count >= 5
-                model_blockers: list[str] = []
-                if selected_count >= 8 and profit_units < 0:
-                    model_blockers.append("final_profit_units_negative_with_8plus_selected")
-                    certification_blockers.append(
-                        f"{bundle.algorithm}:final_profit_units_negative_with_8plus_selected"
-                    )
-                if drift_cert.get("state") == "severe":
-                    model_blockers.append("final_recent_drift_severe")
-                    certification_blockers.append(f"{bundle.algorithm}:final_recent_drift_severe")
+                selected_count = int(evidence["selected_count"])
+                true_positives = int(evidence["true_positives"])
+                false_positives = int(evidence["false_positives"])
+                profit_units = float(evidence["profit_units"])
+                limited_evidence = (
+                    selected_count < FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED
+                )
+                certification_margin = 0.0
+                model_blockers = list(evidence["blockers"])
+                if evidence["qualified"]:
+                    qualified_model_ids.append(str(bundle.model_id))
+                if (
+                    selected_count >= FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED
+                    and profit_units < 0
+                ):
+                    blocker = "final_profit_units_negative_with_8plus_selected"
+                    model_blockers.append(blocker)
+                    certification_blockers.append(f"{bundle.algorithm}:{blocker}")
                 certification_models.append(
                     {
+                        "version": DEPLOYMENT_CERTIFICATION_VERSION,
                         "model_id": bundle.model_id,
                         "algorithm": bundle.algorithm,
+                        "age_policy_version": evaluation_bundle.age_policy_version,
+                        "deployment_fit_scope": "final_train_only_certified_instance",
                         "final_model_policy_selected": selected_count,
                         "final_model_policy_true_positives": true_positives,
                         "final_model_policy_false_positives": false_positives,
                         "final_model_policy_profit_units": profit_units,
+                        "final_rows": int(evidence["rows"]),
+                        "final_positives": int(evidence["positives"]),
+                        "final_negatives": int(evidence["negatives"]),
+                        "final_prevalence": float(evidence["prevalence"]),
+                        "final_average_precision": evidence["average_precision"],
+                        "final_average_precision_lift": evidence["average_precision_lift"],
+                        "final_roc_auc": evidence["roc_auc"],
+                        "final_support_ok": bool(evidence["support_ok"]),
+                        "final_ranking_evidence": bool(evidence["ranking_evidence"]),
+                        "positive_end_to_end_evidence": bool(
+                            evidence["positive_end_to_end_evidence"]
+                        ),
+                        "qualified_deployment_evidence": bool(evidence["qualified"]),
                         "probability_only_selected": int(
                             candidate.final_metrics.trade_count if candidate.final_metrics else 0
                         ),
@@ -324,19 +471,32 @@ class TrainingService:
                     }
                 )
 
-            if not has_minimum_final_evidence:
-                certification_blockers.append("no_top3_model_has_5_final_selected")
+            if not qualified_model_ids:
+                certification_blockers.append(
+                    "no_top3_model_has_positive_ranked_end_to_end_final_evidence"
+                )
             if not execution_risk.certified or execution_risk.model is None:
                 certification_blockers.append("execution_risk_head_uncertified")
             deployment_certification = {
-                "version": "phase16_final_recent_certification_v1",
+                "version": DEPLOYMENT_CERTIFICATION_VERSION,
+                "deployment_fit_scope": "final_train_only_certified_instance",
                 "eligible": not certification_blockers,
-                "has_top3_model_with_5plus_model_policy_selected": has_minimum_final_evidence,
+                "qualified_model_ids": qualified_model_ids,
+                "has_top3_model_with_positive_ranked_end_to_end_final_evidence": bool(
+                    qualified_model_ids
+                ),
+                "minimum_final_rows": FINAL_CERTIFICATION_MIN_ROWS,
+                "minimum_final_positives": FINAL_CERTIFICATION_MIN_POSITIVES,
+                "minimum_final_negatives": FINAL_CERTIFICATION_MIN_NEGATIVES,
+                "minimum_final_roc_auc": FINAL_CERTIFICATION_MIN_ROC_AUC,
+                "minimum_end_to_end_selected": FINAL_CERTIFICATION_MIN_END_TO_END_SELECTED,
+                "economic_loss_guard_min_selected": FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED,
+                "evidence_policy": "same_model_ranking_plus_positive_end_to_end_v1",
                 "blockers": certification_blockers,
                 "models": certification_models,
-                "final_window_start": dataset.timestamps.iloc[final_test[0]].isoformat(),
+                "final_window_start": final_window_start_iso,
                 "final_window_end": dataset.timestamps.iloc[final_test[-1]].isoformat(),
-                "final_holdout_usage": "certification_only",
+                "final_holdout_usage": "deployment_veto_only_not_selection",
             }
 
             for bundle in (*result.bundles, *result.evaluation_bundles):
@@ -431,6 +591,8 @@ class TrainingService:
                             "label_version": LabelPolicy().label_version,
                             "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
                             "decision_policy_version": DECISION_POLICY_VERSION,
+                            "age_policy_version": bundle.age_policy_version,
+                            "deployment_fit_scope": "final_train_only_certified_instance",
                             "calibration": bundle.calibrator.provenance() if bundle.calibrator else None,
                             "sparse_budget": bundle.sparse_budget.provenance() if bundle.sparse_budget else None,
                             "execution_risk_model": (
@@ -495,7 +657,7 @@ class TrainingService:
                 "deployment_certification": deployment_certification,
                 "activation": {
                     "status": "waiting_for_flat" if deployment_certification["eligible"] else "blocked_certification",
-                    "required_flat_strategies": ["model_1", "model_2", "model_3", "rules_only"],
+                    "required_flat_strategies": ["model_1", "model_2", "model_3"],
                     "certification_blockers": list(deployment_certification["blockers"]),
                 },
                 "selection_formula": {
@@ -583,7 +745,11 @@ class TrainingService:
                 continue
             proposed = summary.get("top_models") if isinstance(summary, dict) else None
             certification = summary.get("deployment_certification") if isinstance(summary, dict) else None
-            if not isinstance(certification, dict) or not bool(certification.get("eligible")):
+            if (
+                not isinstance(certification, dict)
+                or not bool(certification.get("eligible"))
+                or not deployment_certification_is_current(certification)
+            ):
                 continue
             if not isinstance(proposed, list) or len(proposed) != 3:
                 continue
@@ -612,11 +778,18 @@ class TrainingService:
                     contract_current = False
                     break
                 risk = metrics.get("execution_risk") or {}
+                model_certification = (
+                    metrics.get("deployment_certification")
+                    or parameters.get("deployment_certification")
+                )
                 if (
                     parameters.get("label_version") != LabelPolicy().label_version
                     or parameters.get("economic_objective_version") != ECONOMIC_OBJECTIVE_VERSION
                     or parameters.get("decision_policy_version") != DECISION_POLICY_VERSION
+                    or parameters.get("age_policy_version") not in AGE_POLICY_CANDIDATES
+                    or parameters.get("deployment_fit_scope") != "final_train_only_certified_instance"
                     or not bool(risk.get("certified"))
+                    or not deployment_certification_is_current(model_certification)
                 ):
                     contract_current = False
                     break
@@ -627,6 +800,36 @@ class TrainingService:
             pending_already_active = already_active
             break
         if pending is None:
+            # A previously valid pending generation can become stale after a
+            # decision/certification contract upgrade. If it was only waiting
+            # for flat positions, release that obsolete rollover pause; the
+            # scheduler may immediately re-apply its own time-based freeze if
+            # the next scheduled training window requires it. Never auto-clear
+            # an ``activating`` state because that may represent a crash after
+            # the active-slot swap and needs the dedicated recovery path.
+            rollover = self.database.get_runtime_state("model_rollover_status", {})
+            if isinstance(rollover, dict) and rollover.get("state") == "waiting_for_flat":
+                now = utc_now_iso()
+                invalidated_run_id = rollover.get("run_id")
+                self.database.set_runtime_state("model_entries_paused_for_rollover", False)
+                self.database.set_runtime_state(
+                    "model_entry_rollover_gate",
+                    {
+                        "paused": False,
+                        "scheduled_for": None,
+                        "schedule_mode": "contract_invalidation",
+                        "reason": "pending_generation_no_longer_matches_current_contract",
+                        "updated_at": now,
+                    },
+                )
+                self.database.set_runtime_state(
+                    "model_rollover_status",
+                    {
+                        "state": "invalidated_pending",
+                        "run_id": invalidated_run_id,
+                        "updated_at": now,
+                    },
+                )
             return None
 
         # Close the race between the flat check and session rollover: no
@@ -638,7 +841,7 @@ class TrainingService:
             SELECT COUNT(*) AS count
             FROM positions
             WHERE account_kind='simulation'
-              AND strategy_key IN ('model_1','model_2','model_3','rules_only')
+              AND strategy_key IN ('model_1','model_2','model_3')
               AND status IN ('opening','open','closing','manual_intervention')
             """
         ) or {"count": 0})["count"])
@@ -669,14 +872,12 @@ class TrainingService:
             return None
 
         activated_at = utc_now_iso()
-        deterministic_session_id = f"sim_upgrade_{pending['id']}"
         self.database.set_runtime_state(
             "model_rollover_status",
             {
                 "state": "activating",
                 "run_id": str(pending["id"]),
                 "model_ids": [str(item["id"]) for item in top_models],
-                "simulation_session_id": deterministic_session_id,
                 "models_already_active": bool(pending_already_active),
                 "updated_at": activated_at,
             },
@@ -687,10 +888,12 @@ class TrainingService:
         # implementation details during module import.
         from .paper_trading import PaperTradingService
 
-        simulation = PaperTradingService(self.database, self.settings).reset_simulation(
-            created_reason="model_generation_upgrade",
-            session_id=deterministic_session_id,
+        simulation_service = PaperTradingService(self.database, self.settings)
+        simulation_service.reset_model_accounts_for_activation(
+            top_models,
+            activated_at=activated_at,
         )
+        simulation = simulation_service.simulation_status()
         try:
             summary = json.loads(pending.get("summary_json") or "{}")
         except (TypeError, json.JSONDecodeError):
@@ -698,7 +901,7 @@ class TrainingService:
         summary["activation"] = {
             "status": "activated",
             "activated_at": activated_at,
-            "required_flat_strategies": ["model_1", "model_2", "model_3", "rules_only"],
+            "required_flat_strategies": ["model_1", "model_2", "model_3"],
             "simulation_session_id": simulation["session"]["id"],
         }
         self.database.set_runtime_state("last_model_activation_at", activated_at)
@@ -755,12 +958,12 @@ class TrainingService:
             """
             SELECT COUNT(*) AS count FROM positions
             WHERE account_kind='simulation'
-              AND strategy_key IN ('model_1','model_2','model_3','rules_only')
+              AND strategy_key IN ('model_1','model_2','model_3')
               AND status IN ('opening','open','closing','manual_intervention')
             """
         ) or {"count": 0})["count"])
         if open_count:
-            raise ValueError("model rollback requires all four simulation strategies to be fully flat")
+            raise ValueError("model rollback requires all three model strategies to be fully flat")
         artifact = Path(str(target["artifact_path"]))
         artifact = artifact if artifact.is_absolute() else PROJECT_ROOT / artifact
         if not artifact.exists():
@@ -771,9 +974,14 @@ class TrainingService:
         activated_at = utc_now_iso()
         from .paper_trading import PaperTradingService
 
-        simulation = PaperTradingService(self.database, self.settings).reset_simulation(
-            created_reason="model_generation_rollback"
-        )
+        simulation_service = PaperTradingService(self.database, self.settings)
+        active_models = self.models.active_models()
+        if len(active_models) == 3:
+            simulation_service.reset_model_accounts_for_activation(
+                active_models,
+                activated_at=activated_at,
+            )
+        simulation = simulation_service.simulation_status()
         self.database.set_runtime_state("last_model_activation_at", activated_at)
         self.database.audit(
             category="model",

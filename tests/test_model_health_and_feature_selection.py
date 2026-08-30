@@ -107,13 +107,23 @@ def seed_recent_predictions(database: Database, model_ids: list[str], now: datet
             )
 
 
-def test_feature_selection_defaults_exclude_optional_liquidity_feature(tmp_path: Path) -> None:
+def test_deprecated_absolute_liquidity_feature_is_filtered(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     service = TrainingService(database, make_settings(tmp_path))
-    assert "ln(price+1)" in service.normalize_feature_selection(None)
-    assert "ln(liquidity_usd)" not in service.normalize_feature_selection(None)
+    defaults = service.normalize_feature_selection(None)
+    assert "ln(price+1)" not in defaults
+    assert "price_change_1h" not in defaults
+    assert "top_bot_degen_percentage" not in defaults
+    assert "dexscr_ad" not in defaults
+    assert "dexscr_trending_bar" not in defaults
+    assert "momentum_accel_1m_vs_5m" in defaults
+    assert "ln(liquidity_usd)" not in defaults
     selected = service.normalize_feature_selection(["price", "ln(liquidity_usd)"])
-    assert selected == ("ln(price+1)", "ln(liquidity_usd)")
+    assert selected == ("ln(marketcap+1)",)
+    migrated = service.normalize_feature_selection(["price_change_1h", "top_bot_degen_percentage"])
+    assert migrated == ("bot_degen_rate", "momentum_accel_1m_vs_5m")
+    with pytest.raises(ValueError):
+        service.normalize_feature_selection(["ln(liquidity_usd)"])
     with pytest.raises(ValueError):
         service.normalize_feature_selection(["launchpad"])
     run_id = service.create_run("manual", feature_names=list(selected))
@@ -132,6 +142,25 @@ def test_insufficient_recent_predictions_do_not_queue_retraining(tmp_path: Path)
     assert not report.degraded
     assert report.training_run_id is None
     assert database.fetch_one("SELECT COUNT(*) AS n FROM training_runs")["n"] == 0
+
+
+def test_active_model_drift_marks_health_for_scheduled_update(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    now = datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc)
+    model_ids = seed_top3(database, now)
+    seed_recent_predictions(database, model_ids, now, [1, 0, 1, 0, 1])
+    database.set_runtime_state(
+        f"model_drift:{model_ids[1]}",
+        {"state": "caution", "reasons": ["feature_psi_caution"]},
+    )
+
+    report = ModelHealthService(database, settings).evaluate(now=now)
+
+    assert report.state == "drift_detected"
+    assert not report.degraded
+    assert report.training_run_id is None
+    assert "accelerate scheduled model update" in report.reason
 
 
 def test_fixed_payoff_degradation_is_reported_without_out_of_band_retraining(tmp_path: Path) -> None:
@@ -217,6 +246,6 @@ def test_stale_phase16_contract_fails_model_health_closed(tmp_path: Path) -> Non
         "UPDATE models SET parameters_json='{}' WHERE id IN ('health-model-1','health-model-2','health-model-3')"
     )
     report = ModelHealthService(database, settings).evaluate(now=now)
-    assert report.state == "active_top3_phase16_contract_stale"
+    assert report.state == "active_top3_contract_stale"
     assert not report.degraded
     assert report.training_run_id is None

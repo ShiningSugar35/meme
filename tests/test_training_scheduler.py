@@ -69,9 +69,9 @@ def test_insufficient_data_accelerates_schedule_to_daily_1700_bjt(tmp_path: Path
 
 @pytest.mark.parametrize(
     "state",
-    ("active_top3_not_ready", "active_top3_phase16_contract_stale", "deployment_certification_blocked"),
+    ("active_top3_not_ready", "active_top3_contract_stale", "deployment_certification_blocked", "drift_detected"),
 )
-def test_phase16_recovery_states_accelerate_schedule_to_daily(tmp_path: Path, state: str) -> None:
+def test_recovery_states_accelerate_schedule_to_daily(tmp_path: Path, state: str) -> None:
     database = make_database(tmp_path)
     set_health(database, state)
     scheduler = TrainingScheduler(database, make_settings(tmp_path))
@@ -124,7 +124,7 @@ def test_due_day_entry_gate_freezes_at_1600_until_new_generation_activates(tmp_p
 
 def test_daily_recovery_completed_attempt_releases_old_due_until_next_freeze(tmp_path: Path) -> None:
     database = make_database(tmp_path)
-    set_health(database, "active_top3_phase16_contract_stale")
+    set_health(database, "active_top3_contract_stale")
     scheduler = TrainingScheduler(database, make_settings(tmp_path))
     tz = ZoneInfo("Asia/Shanghai")
     database.set_runtime_state(
@@ -214,9 +214,8 @@ async def test_scheduled_training_uses_persisted_feature_pool_not_champion_subse
     row = database.fetch_one("SELECT request_json FROM training_runs WHERE id=?", (run_id,))
     assert json.loads(row["request_json"])["feature_names"] == [
         "ln(age+1)",
-        "ln(price+1)",
-        "ln(liquidity_usd)",
-        "price_change_1h",
+        "momentum_accel_1m_vs_5m",
+        "ln(marketcap+1)",
     ]
 
 

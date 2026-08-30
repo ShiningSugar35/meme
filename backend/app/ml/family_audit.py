@@ -15,6 +15,7 @@ from .trainer import ModelTrainer, TrainerConfig
 
 TOKEN_LOCAL_FAMILY: tuple[str, ...] = (
     "price_change_1m",
+    "momentum_accel_1m_vs_5m",
     "ln(volume_1m+1)",
     "buy_count_imbalance_1m",
     "buy_volume_imbalance_1m",
@@ -24,9 +25,7 @@ TOKEN_LOCAL_FAMILY: tuple[str, ...] = (
 )
 
 TOKEN_ATTENTION_FAMILY: tuple[str, ...] = (
-    "dexscr_ad",
     "ln(dexscr_boost_fee+1)",
-    "dexscr_trending_bar",
     "ln(x_user_follower+1)",
     "ln(tg_call_count+1)",
 )
