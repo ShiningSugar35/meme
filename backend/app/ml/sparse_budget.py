@@ -5,20 +5,20 @@ import math
 
 import numpy as np
 
-from .economics import evaluate_probabilities
+from .economics import expected_return_score_from_counts, evaluate_probabilities
 from .types import EconomicSlice, EvaluationMetrics
 
 
+# Historical Phase16/17 replay constants only. Phase19 production threshold
+# selection searches the complete development-OOS operating-point set.
 SPARSE_BUDGET_FRACTIONS = (0.05, 0.075, 0.10, 0.15)
-# Absolute calibrated-probability values are not an economic break-even proxy.
-# Profitability is certified from chronological OOS precision / +3:-1 utility;
-# the sparse-budget threshold therefore carries the model's calibrated score
-# scale instead of being clipped to a hard-coded 0.25.
 GLOBAL_PROBABILITY_FLOOR = 0.0
 
 
 @dataclass(frozen=True, slots=True)
 class SparseBudgetSelection:
+    # Field names are retained for artifact/API compatibility. budget_fraction is
+    # now the selected share of development OOS rows, not a preset budget.
     budget_fraction: float
     budget_threshold: float
     policy_base_threshold: float
@@ -29,7 +29,9 @@ class SparseBudgetSelection:
     sample_count: int
 
     def provenance(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["selection_policy"] = "full_pr_expected_return_v1"
+        return payload
 
 
 def wilson_lower_bound(successes: int, total: int, *, z: float = 1.96) -> float:
@@ -43,6 +45,7 @@ def wilson_lower_bound(successes: int, total: int, *, z: float = 1.96) -> float:
 
 
 def _budget_threshold(probabilities: np.ndarray, fraction: float, min_trades: int) -> float:
+    """Historical/operator override for explicit fraction replay only."""
     n = len(probabilities)
     if n == 0:
         raise ValueError("cannot choose a budget on an empty slice")
@@ -57,40 +60,91 @@ def select_sparse_budget(
     economics: EconomicSlice,
     *,
     min_trades: int = 5,
-    fractions: tuple[float, ...] = SPARSE_BUDGET_FRACTIONS,
+    fractions: tuple[float, ...] | None = None,
     global_probability_floor: float = GLOBAL_PROBABILITY_FLOOR,
 ) -> tuple[SparseBudgetSelection, EvaluationMetrics]:
+    """Select the development-OOS operating point with maximum expected return.
+
+    Production (`fractions=None`) evaluates every distinct calibrated probability
+    operating point in O(N log N) using one descending sort and cumulative TP/FP
+    counts. Explicit fractions remain available only for historical replay/tests.
+    """
     y = np.asarray(y_true, dtype=int)
     probabilities = np.asarray(calibrated_probabilities, dtype=float)
     if len(y) != len(probabilities):
         raise ValueError("labels and probabilities must align")
-    candidates: list[tuple[SparseBudgetSelection, EvaluationMetrics]] = []
-    for fraction in fractions:
-        budget_threshold = _budget_threshold(probabilities, fraction, min_trades)
-        policy_threshold = max(float(global_probability_floor), budget_threshold)
-        metrics = evaluate_probabilities(y, probabilities, policy_threshold, economics)
-        if metrics.trade_count < min_trades:
-            continue
-        selection = SparseBudgetSelection(
-            budget_fraction=float(fraction),
-            budget_threshold=float(budget_threshold),
-            policy_base_threshold=float(policy_threshold),
-            oos_selected_count=int(metrics.trade_count),
-            precision=float(metrics.precision),
-            wilson_lower_bound=wilson_lower_bound(metrics.true_positives, metrics.trade_count),
-            profit_units=float(metrics.profit_units),
-            sample_count=len(y),
-        )
-        candidates.append((selection, metrics))
-    eligible = [item for item in candidates if item[1].precision >= 0.25 and item[1].profit_units > 0]
+    if len(y) == 0 or not np.isfinite(probabilities).all():
+        raise ValueError("development probabilities must be non-empty and finite")
+    if not np.isin(y, (0, 1)).all():
+        raise ValueError("development labels must be binary")
+
+    positive_count = int(np.sum(y == 1))
+    if positive_count <= 0:
+        raise ValueError("development threshold search requires positive labels")
+
+    candidates: list[tuple[float, int, int, int, float, float, float]] = []
+    # tuple: threshold, selected, TP, FP, J, recall, precision
+    if fractions is not None:
+        for fraction in fractions:
+            threshold = max(
+                float(global_probability_floor),
+                _budget_threshold(probabilities, fraction, min_trades),
+            )
+            selected = probabilities >= threshold
+            count = int(selected.sum())
+            if count < min_trades:
+                continue
+            tp = int(np.sum(selected & (y == 1)))
+            fp = count - tp
+            recall = tp / positive_count
+            precision = tp / count
+            score = expected_return_score_from_counts(tp, fp, positive_count)
+            candidates.append((threshold, count, tp, fp, score, recall, precision))
+    else:
+        order = np.argsort(-probabilities, kind="stable")
+        sorted_probs = probabilities[order]
+        sorted_y = y[order]
+        cumulative_tp = np.cumsum(sorted_y == 1)
+        cumulative_fp = np.cumsum(sorted_y == 0)
+        for index, threshold in enumerate(sorted_probs):
+            # threshold >= value selects the entire tied group, so only evaluate
+            # the last row of each group.
+            if index + 1 < len(sorted_probs) and sorted_probs[index + 1] == threshold:
+                continue
+            if float(threshold) < float(global_probability_floor):
+                break
+            count = index + 1
+            if count < min_trades:
+                continue
+            tp = int(cumulative_tp[index])
+            fp = int(cumulative_fp[index])
+            recall = tp / positive_count
+            precision = tp / count
+            score = expected_return_score_from_counts(tp, fp, positive_count)
+            candidates.append((float(threshold), count, tp, fp, score, recall, precision))
+
+    eligible = [item for item in candidates if item[4] > 0.0]
     if not eligible:
-        raise ValueError("no development-only sparse budget clears the +3/-1 economic gate")
-    return max(
+        raise ValueError("no development-only operating point has positive expected return")
+
+    threshold, count, tp, fp, _, _, _ = max(
         eligible,
         key=lambda item: (
-            item[1].profit_units,
-            item[0].wilson_lower_bound,
-            item[1].precision,
-            -item[0].budget_fraction,
+            item[4],  # J first
+            item[5],  # then Recall
+            item[6],  # then Precision
+            wilson_lower_bound(item[2], item[1]),
         ),
     )
+    metrics = evaluate_probabilities(y, probabilities, threshold, economics)
+    selection = SparseBudgetSelection(
+        budget_fraction=float(count / len(y)),
+        budget_threshold=float(threshold),
+        policy_base_threshold=float(threshold),
+        oos_selected_count=int(count),
+        precision=float(metrics.precision),
+        wilson_lower_bound=wilson_lower_bound(tp, count),
+        profit_units=float(metrics.profit_units),
+        sample_count=len(y),
+    )
+    return selection, metrics

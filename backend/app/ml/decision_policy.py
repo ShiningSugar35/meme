@@ -6,8 +6,8 @@ from typing import Any, Mapping
 from .sparse_budget import GLOBAL_PROBABILITY_FLOOR
 
 
-DECISION_POLICY_VERSION = "phase18_model_filter_paper_v1"
-DEPLOYMENT_CERTIFICATION_VERSION = "phase18_model_filter_certification_v1"
+DECISION_POLICY_VERSION = "phase19_expected_return_paper_v1"
+DEPLOYMENT_CERTIFICATION_VERSION = "phase19_expected_return_certification_v1"
 
 AGE_POLICY_ADMISSION_ONLY = "age_admission_only_v1"
 AGE_POLICY_CANDIDATES = (AGE_POLICY_ADMISSION_ONLY,)

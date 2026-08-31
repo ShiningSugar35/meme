@@ -10,8 +10,9 @@
 - 研究对象：允许清单内的 Solana Launchpad 新创建及接近完成阶段 Token。
 - 当前特征代：`event1m_regime_v3`。
 - 当前标签：`sl090_tp180_m90_binary_v5`，90 分钟窗口，0.9x 止损、1.8x 止盈，同一分钟同时触发时止损优先，超时未触及止盈记负类。
-- 当前模型决策合同：`phase18_model_filter_paper_v1`。
-- 当前上线认证合同：`phase18_model_filter_certification_v1`。
+- 当前模型决策合同：`phase19_expected_return_paper_v1`。
+- 当前上线认证合同：`phase19_expected_return_certification_v1`。
+- 当前经济目标：`precision_recall_payoff_v4`，+3/-1 收益比，`J=(3TP-FP)/N_positive`。
 - 模拟交易和理论标签收益、可执行报价收益、真实链上收益分别核算，不混为同一 PnL。
 
 系统不是高频撮合器，不承诺覆盖所有 Meme Token，也不以“每天必须交易”为目标。没有满足质量与风控条件的机会时，模型保持不交易是合法状态。
@@ -56,11 +57,11 @@ GMGN Trenches 候选发现
 
 - 入场时特征子集；
 - chronological development OOS 概率校准器；
-- 模型专属稀疏预算与固定在线阈值；
+- 模型专属 development OOS 期望收益最优 operating point 与固定在线阈值；
 - 经济评价、泛化评价和训练 provenance；
 - execution-risk 模型及 drift reference。
 
-Paper 模型复筛主链为：规则安全准入 → 模型校准概率达到 development OOS 冻结阈值 → 模拟交易。年龄只保留 Collector 的 `2 < age_minutes < 300` 原始准入事实；`ln(age+1)` 可以作为普通特征交给模型学习，但模型输出后不再追加年龄阈值，也不再对 60–120 分钟单独 abstain。execution-risk 继续计算和保存概率，仅用于 shadow outcome、监控与研究，不拥有 paper 一票否决权。
+Paper 模型复筛主链为：规则安全准入 → 模型校准概率达到 development OOS 冻结阈值 → 模拟交易。阈值在 development OOS 的全部 distinct calibrated-probability operating points 中搜索，唯一主目标为 `J = Recall × (4 - 1/Precision) = (3TP-FP)/N_positive`；当前 +3/-1 盈亏比对应 25% 盈亏平衡 Precision。年龄只保留 Collector 的 `2 < age_minutes < 300` 原始准入事实；execution-risk 与 drift 继续记录/监控但不投票。
 
 Drift 的 normal/caution/severe 只用于模型健康监控、提前重训和特征治理，不直接改变 paper selected。AdaptivePolicy 可以在模型基础阈值之上收紧，但不能把 development OOS 冻结阈值向下放宽；execution-risk 与 drift 都不再是额外 paper 硬门。
 
@@ -70,14 +71,14 @@ Drift 的 normal/caution/severe 只用于模型健康监控、提前重训和特
 
 ## 5. 上线认证
 
-Top 3、特征、概率校准和稀疏预算均先由 development OOS 冻结；最终时间留出只执行部署否决，不参与任何重选或调参。承担 final 认证的 fitted instance 就是唯一可部署实例，final 标签不得再用于部署前 refit。
+Top 3、特征、概率校准和 J 最优 operating point 均先由 development OOS 冻结；最终时间留出只执行部署否决，不参与任何重选或调参。承担 final 认证的 fitted instance 就是唯一可部署实例，final 标签不得再用于部署前 refit。
 
-1. development 稀疏预算必须满足 `Precision >= 25%` 且 `3×TP-FP > 0`；
-2. final 窗口样本与正负类数量达到最低证据门；
-3. 同一模型在 final 上 `ROC-AUC >= 0.50`，且 Average Precision 严格高于该窗口正类率；
-4. 同一模型按冻结的模型阈值至少选中 1 条且 `3×TP-FP > 0`；
-5. 任一模型在 final 已有不少于 8 条模型阈值命中且经济单位为负，会阻断 generation；execution-risk 与 drift 只记录监控/研究状态，不作为 paper certification blocker；
-6. generation 至少存在 1 个具备上述基础模型正向证据的模型才可 staged activation；激活后仍只有自身 `qualified_deployment_evidence=true` 的 slot 可以开仓，其他 slot 只做 shadow。
+1. development 必须存在满足最小交易样本数且 `J>0` 的 operating point；完整阈值空间中选择 J 最大者，J 并列时优先更高 Recall，再看 Precision/Wilson 下界；
+2. Top 3 只按 development OOS J 排名，AP/AUC、稳定性、衰减、execution-score 与模型家族多样性仅作审计；
+3. final 窗口样本与正负类数量达到最低证据门；
+4. 同一模型按冻结阈值至少选中 1 条且 final `J>0`，才取得逐模型 paper 交易资格；
+5. final AP/AP lift/ROC-AUC 继续记录为诊断，不参与重排、调阈值或部署硬门；execution-risk 与 drift 同样只作监控/研究；
+6. generation 至少存在 1 个具备上述正向 J 证据的模型才可 staged activation；激活后仍只有自身 `qualified_deployment_evidence=true` 的 slot 可以开仓，其他 slot 只做 shadow。
 
 旧标签、旧决策合同或旧认证合同的 Active 模型在新代码下 fail-closed；Collector、rules_only 与已有持仓退出继续运行。
 

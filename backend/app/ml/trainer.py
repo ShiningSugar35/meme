@@ -66,26 +66,24 @@ class TrainerConfig:
     feature_subset_sizes: tuple[int, ...] | None = None
     min_features_to_select: int = 4
     max_relative_occam_score_drop: float = 0.08
-    max_diversity_score_drop: float = 0.08
     interaction_rank_estimators: int = 160
     interaction_rank_max_depth: int = 3
-    economic_weight: float = 0.60
-    generalization_weight: float = 0.40
-    # E remains the current fixed-payoff proxy. E_exec is collected and reported
-    # as a shadow metric only; it never changes the established E/G/S ranking.
+    # Route-validated execution PnL remains shadow-only and never changes the
+    # precision/recall/payoff expected-return objective J.
     execution_min_observations: int = 100
     execution_full_observations: int = 500
-    execution_max_weight: float = 0.0  # shadow-only; E_exec never changes current E/G/S ranking
+    execution_max_weight: float = 0.0  # shadow-only; never changes J ranking
     top_k: int = 3
 
 
 class ModelTrainer:
-    """Chronological Top-K model selection with economic and decay-aware scoring.
+    """Chronological Top-K selection on one expected-return objective.
 
-    Model fitting is ordinary equal-weight binary classification. Trading payoff
-    is applied only to out-of-sample predictions. Feature count is chosen inside
-    the development folds by a one-standard-error Occam rule. The final recent
-    holdout is certification only and never participates in ranking or tuning.
+    Model fitting is ordinary equal-weight binary classification. Development OOS
+    probabilities choose an operating point that maximizes J=(3TP-FP)/N+, which
+    is exactly Recall*(4-1/Precision) under the current +3/-1 payoff. AP, temporal
+    stability, decay, execution quality and family diversity are audit-only. The
+    final recent holdout is certification only and never ranks or tunes models.
     """
 
     def __init__(
@@ -184,12 +182,14 @@ class ModelTrainer:
             eligible,
             key=lambda item: (
                 -float(item.composite_score),
+                -float(item.development_metrics.recall if item.development_metrics else 0.0),
+                -float(item.development_metrics.precision if item.development_metrics else 0.0),
                 len(item.feature_names),
                 item.complexity_rank,
                 item.algorithm,
             ),
         )
-        top = self._select_diverse_top_k(ranked, successful_specs)
+        top = ranked[: self.config.top_k]
         now = datetime.now(timezone.utc)
         bundles: list[ModelBundle] = []
         evaluation_bundles: list[ModelBundle] = []
@@ -322,9 +322,7 @@ class ModelTrainer:
             warnings.append(f"optional candidates skipped: {', '.join(skipped)}")
         if plan.early_stage:
             warnings.append("models are marked EARLY_STAGE_MODEL because history is under 120 days")
-        warnings.append(
-            "Top-3 selection prefers distinct model families inside the configured relative score budget"
-        )
+        warnings.append("Top-3 selection ranks only development-OOS expected-return score J")
         warnings.append("final recent holdout is certification-only and is not used for Top-3 ranking")
 
         return TrainingResult(
@@ -388,42 +386,8 @@ class ModelTrainer:
         ranked: list[CandidateEvaluation],
         specs: dict[str, CandidateSpec],
     ) -> list[CandidateEvaluation]:
-        """Prefer distinct model families without sacrificing more than the score budget.
-
-        The three deployed slots are independent strategies, not one averaged
-        ensemble. Keeping three near-identical tree ensembles adds little model
-        risk diversification, so within the configured near-best score band we
-        prefer the strongest candidate from a family not yet represented. If the
-        band cannot supply enough families, selection falls back to pure score.
-        """
-
-        if not ranked:
-            return []
-        best_score = float(ranked[0].composite_score or 0.0)
-        relative_drop = float(np.clip(self.config.max_diversity_score_drop, 0.0, 1.0))
-        score_floor = best_score - abs(best_score) * relative_drop
-        remaining = list(ranked)
-        selected: list[CandidateEvaluation] = []
-        families: set[str] = set()
-
-        while remaining and len(selected) < self.config.top_k:
-            within_budget = [
-                item
-                for item in remaining
-                if float(item.composite_score or -math.inf) >= score_floor
-            ]
-            candidate_pool = within_budget or remaining
-            unseen_family = [
-                item
-                for item in candidate_pool
-                if specs[item.algorithm].family not in families
-            ]
-            choice = (unseen_family or candidate_pool)[0]
-            selected.append(choice)
-            families.add(specs[choice.algorithm].family)
-            remaining.remove(choice)
-
-        return selected
+        """Compatibility helper: Phase19 never sacrifices J for family diversity."""
+        return list(ranked[: self.config.top_k])
 
     def _audit_top_diversity(
         self,
@@ -481,8 +445,7 @@ class ModelTrainer:
                 )
 
         return {
-            "selection_policy": "distinct_model_family_within_relative_score_budget",
-            "max_relative_score_drop": float(self.config.max_diversity_score_drop),
+            "selection_policy": "pure_expected_return_top_k",
             "holdout_role": "certification_only_not_used_for_selection",
             "families": families,
             "pairs": pairs,
@@ -662,7 +625,7 @@ class ModelTrainer:
 
         # Transform each chronological OOS fold with the calibrator learned only
         # from development OOS predictions. The final holdout is never an input
-        # to either sigmoid fitting or sparse-budget tuning.
+        # to either sigmoid fitting or operating-point tuning.
         fold_probabilities = [calibrator.transform(values) for values in oos_scores]
         fold_metrics: list[EvaluationMetrics] = []
         average_precisions: list[float] = []
@@ -683,10 +646,7 @@ class ModelTrainer:
             skill = float(np.clip((ap - prevalence) / denominator, 0.0, 1.0))
             average_precisions.append(ap)
             ap_skills.append(skill)
-            fold_composites.append(
-                self.config.economic_weight * fold_economic_score(metric)
-                + self.config.generalization_weight * skill
-            )
+            fold_composites.append(fold_economic_score(metric))
 
         skill_array = np.asarray(ap_skills, dtype=float)
         mean_skill = float(np.mean(skill_array))
@@ -701,16 +661,13 @@ class ModelTrainer:
         generalization_score = float(
             0.60 * mean_skill + 0.20 * stability + 0.20 * decay_score
         )
-        economic_score = float(np.mean([fold_economic_score(metric) for metric in fold_metrics]))
+        economic_score = float(fold_economic_score(development_metrics))
         execution_score, execution_observations, execution_selected, execution_net_pnl = (
             self._execution_score(dataset, positions, probabilities, threshold)
         )
         execution_weight = 0.0
         ranking_economic_score = float(economic_score)
-        composite = float(
-            self.config.economic_weight * ranking_economic_score
-            + self.config.generalization_weight * generalization_score
-        )
+        composite = float(ranking_economic_score)
         composites = np.asarray(fold_composites, dtype=float)
         standard_error = (
             float(np.std(composites, ddof=1) / math.sqrt(len(composites)))
@@ -761,7 +718,7 @@ class ModelTrainer:
     ) -> tuple[str, dict[str, object]]:
         """Record the admission-only contract against development OOS predictions.
 
-        Phase17 has no model-output age adjustment and no age-band abstain. All
+        Phase19 has no model-output age adjustment and no age-band abstain. All
         rows in the modeling dataset have already passed the Collector admission
         contract, so this audit reports the model's own frozen threshold rather
         than re-reading an optional age column and producing a false zero signal.

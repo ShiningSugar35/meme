@@ -41,7 +41,7 @@ def test_sigmoid_calibration_fails_closed_for_degenerate_labels() -> None:
         )
 
 
-def test_sparse_budget_is_development_only_and_respects_empirical_economic_gate() -> None:
+def test_full_operating_point_search_is_development_only_and_maximizes_expected_return() -> None:
     y = np.asarray([1, 1, 1, 0, 1, 0, 0, 0, 0, 0] * 20, dtype=int)
     probabilities = np.linspace(0.95, 0.05, len(y))
     economics = EconomicSlice(
@@ -51,7 +51,8 @@ def test_sparse_budget_is_development_only_and_respects_empirical_economic_gate(
         unit="usd",
     )
     selection, metrics = select_sparse_budget(y, probabilities, economics, min_trades=5)
-    assert selection.budget_fraction in {0.05, 0.075, 0.10, 0.15}
+    assert 0.0 < selection.budget_fraction <= 1.0
+    assert selection.provenance()["selection_policy"] == "full_pr_expected_return_v1"
     assert selection.policy_base_threshold == pytest.approx(selection.budget_threshold)
     assert selection.sample_count == len(y)
     assert selection.oos_selected_count == metrics.trade_count
@@ -60,6 +61,28 @@ def test_sparse_budget_is_development_only_and_respects_empirical_economic_gate(
     assert selection.wilson_lower_bound == pytest.approx(
         wilson_lower_bound(metrics.true_positives, metrics.trade_count)
     )
+
+
+def test_full_operating_point_search_can_choose_more_than_old_fifteen_percent_budget() -> None:
+    probabilities = np.linspace(1.0, 0.01, 100)
+    y = np.zeros(100, dtype=int)
+    # Ten early winners support a profitable operating point around the first
+    # third; the remaining winners are deliberately late so trading everything
+    # is negative. The old 15% cap could never reach this Recall.
+    y[[0, 3, 6, 9, 12, 15, 18, 21, 24, 27]] = 1
+    y[90:100] = 1
+    economics = EconomicSlice(
+        realized_return=np.where(y == 1, 0.80, -0.10).astype(float),
+        capital=np.full(len(y), 50.0),
+        utility_eligible=True,
+        unit="usd",
+    )
+
+    selection, metrics = select_sparse_budget(y, probabilities, economics, min_trades=5)
+
+    assert selection.budget_fraction > 0.15
+    assert metrics.recall >= 0.50
+    assert metrics.profit_units > 0
 
 
 def test_sparse_budget_does_not_confuse_break_even_precision_with_probability_scale() -> None:

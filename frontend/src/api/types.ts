@@ -108,6 +108,7 @@ export interface ModelMetrics {
   trade_count?: number;
   fixed_profit_usd?: number | null;
   profit_units?: number | null;
+  economic_objective_version?: string | null;
   economic_score?: number | null;
   generalization_score?: number | null;
   composite_score?: number | null;

@@ -74,10 +74,10 @@ def test_a_single_losing_model_threshold_observation_never_qualifies() -> None:
     assert result["ranking_evidence"]
     assert not result["positive_model_threshold_evidence"]
     assert not result["qualified"]
-    assert "final_model_threshold_profit_not_positive" in result["blockers"]
+    assert "final_expected_return_not_positive" in result["blockers"]
 
 
-def test_reversed_ranking_is_blocked_even_when_manual_policy_mask_wins() -> None:
+def test_ap_auc_are_diagnostics_only_when_frozen_threshold_expected_return_is_positive() -> None:
     labels, good_probabilities = _good_ranked_slice()
     selected = np.zeros_like(labels, dtype=bool)
     selected[:4] = True
@@ -90,8 +90,8 @@ def test_reversed_ranking_is_blocked_even_when_manual_policy_mask_wins() -> None
 
     assert result["positive_model_threshold_evidence"]
     assert not result["ranking_evidence"]
-    assert not result["qualified"]
-    assert "final_roc_auc_below_random" in result["blockers"]
+    assert result["qualified"]
+    assert "final_roc_auc_below_random" not in result["blockers"]
 
 
 def test_small_or_class_sparse_final_window_fails_closed() -> None:

@@ -19,7 +19,10 @@ from backend.app.ml import (
 )
 from backend.app.ml.decision_policy import DEFAULT_AGE_POLICY_VERSION
 from backend.app.ml.economics import (
+    BREAK_EVEN_PRECISION,
     evaluate_probabilities,
+    expected_return_score_from_counts,
+    expected_return_score_from_precision_recall,
     theoretical_profit_from_precision_recall,
     theoretical_profit_units,
 )
@@ -86,6 +89,19 @@ def test_precision_recall_identity_matches_tp_fp_payoff() -> None:
     from_pr = theoretical_profit_from_precision_recall(precision, recall, positives)
     assert from_counts == pytest.approx(from_pr)
     assert from_pr == pytest.approx(positives * recall * (4 - 1 / precision))
+
+
+def test_expected_return_score_is_same_math_in_counts_and_precision_recall() -> None:
+    tp, fp, positives = 18, 12, 60
+    precision = tp / (tp + fp)
+    recall = tp / positives
+    assert BREAK_EVEN_PRECISION == pytest.approx(0.25)
+    assert expected_return_score_from_counts(tp, fp, positives) == pytest.approx(
+        expected_return_score_from_precision_recall(precision, recall)
+    )
+    assert expected_return_score_from_counts(tp, fp, positives) == pytest.approx(
+        (3 * tp - fp) / positives
+    )
 
 
 def test_three_to_one_proxy_break_even_precision_is_twenty_five_percent() -> None:
@@ -204,8 +220,8 @@ def test_occam_rule_never_accepts_more_than_eight_percent_score_drop() -> None:
     assert len(chosen.feature_names) == 6
 
 
-def test_top3_prefers_distinct_model_families_inside_eight_percent_budget() -> None:
-    trainer = ModelTrainer(TrainerConfig(top_k=3, max_diversity_score_drop=0.08))
+def test_top3_never_sacrifices_expected_return_for_model_family_diversity() -> None:
+    trainer = ModelTrainer(TrainerConfig(top_k=3))
     specs = {spec.name: spec for spec in candidate_catalog(42)}
     ranked = [
         CandidateEvaluation(
@@ -242,8 +258,8 @@ def test_top3_prefers_distinct_model_families_inside_eight_percent_budget() -> N
 
     assert [item.algorithm for item in selected] == [
         "ada_boost",
+        "hist_gradient_boosting",
         "random_forest",
-        "logistic_regression",
     ]
 
 
@@ -310,7 +326,7 @@ def test_execution_score_uses_route_validated_net_pnl_but_remains_shadow_metric(
     )
 
     # Selected actual PnL is +10-5=+5; the observed profitable-opportunity pool
-    # is +10+20=+30. E_exec is 1/6 but has zero influence on E/G/S ranking.
+    # is +10+20=+30. Execution score remains shadow-only and has zero J weight.
     assert score == pytest.approx(1 / 6)
     assert observations == 3
     assert selected == 2
@@ -354,7 +370,8 @@ def test_trainer_returns_top3_one_threshold_each_and_keeps_final_holdout_separat
         # holdout; the final holdout can never be an input to Platt fitting.
         assert pd.Timestamp(bundle.calibrator.source_end) < test_start
         assert bundle.sparse_budget is not None
-        assert bundle.sparse_budget.budget_fraction in {0.05, 0.075, 0.10, 0.15}
+        assert 0.0 < bundle.sparse_budget.budget_fraction <= 1.0
+        assert bundle.sparse_budget.provenance()["selection_policy"] == "full_pr_expected_return_v1"
         assert 0.0 <= bundle.sparse_budget.policy_base_threshold <= 1.0
         assert bundle.sparse_budget.precision >= 0.25
         assert bundle.sparse_budget.sample_count == bundle.calibrator.source_rows

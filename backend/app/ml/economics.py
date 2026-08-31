@@ -5,10 +5,11 @@ import numpy as np
 from .types import EconomicSlice, EvaluationMetrics
 
 FIXED_TRADE_USD = 50.0
-ECONOMIC_OBJECTIVE_VERSION = "fixed_3_to_1_v3"
+ECONOMIC_OBJECTIVE_VERSION = "precision_recall_payoff_v4"
 WIN_UNITS = 3.0
 LOSS_UNITS = 1.0
 UNIT_USD = 5.0
+BREAK_EVEN_PRECISION = LOSS_UNITS / (WIN_UNITS + LOSS_UNITS)
 
 
 def capital_from_liquidity(liquidity_usd: np.ndarray) -> np.ndarray:
@@ -53,6 +54,29 @@ def theoretical_profit_from_precision_recall(
     payoff_multiple = WIN_UNITS + LOSS_UNITS
     return float(positive_count) * float(recall) * (
         payoff_multiple - LOSS_UNITS / float(precision)
+    )
+
+
+def expected_return_score_from_counts(
+    true_positives: int,
+    false_positives: int,
+    positive_count: int,
+) -> float:
+    """Return J=(3*TP-FP)/N+, the canonical normalized expected-return score."""
+    if int(positive_count) <= 0:
+        return 0.0
+    return float(theoretical_profit_units(true_positives, false_positives)) / float(positive_count)
+
+
+def expected_return_score_from_precision_recall(
+    precision: float,
+    recall: float,
+) -> float:
+    """Return J(P,R,b)=R*((b+1)-1/P) for the current fixed payoff ratio."""
+    if precision <= 0.0 or recall <= 0.0:
+        return 0.0
+    return float(recall) * (
+        (WIN_UNITS + LOSS_UNITS) - LOSS_UNITS / float(precision)
     )
 
 
@@ -150,7 +174,9 @@ def evaluate_rule_baseline(y_true: np.ndarray, economics: EconomicSlice) -> Eval
 
 
 def fold_economic_score(metrics: EvaluationMetrics) -> float:
-    return float(np.clip(metrics.economic_capture, -1.0, 1.0))
+    return expected_return_score_from_counts(
+        metrics.true_positives, metrics.false_positives, metrics.positive_count
+    )
 
 
 def model_selection_score(
@@ -160,6 +186,7 @@ def model_selection_score(
 ) -> float:
     """Compatibility helper; new ranking is implemented in ModelTrainer.
 
-    Returns the fixed-payoff economic capture with a tiny complexity tie-break.
+    Returns the same precision/recall/payoff expected-return score used by
+    threshold selection and Top-3 ranking. Complexity is handled separately.
     """
-    return float(fold_economic_score(metrics) - 0.001 * complexity_rank)
+    return float(fold_economic_score(metrics))

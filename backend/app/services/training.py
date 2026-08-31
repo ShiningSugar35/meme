@@ -23,7 +23,12 @@ from ..ml.decision_policy import (
     age_gate,
     deployment_certification_is_current,
 )
-from ..ml.economics import ECONOMIC_OBJECTIVE_VERSION, theoretical_profit_units
+from ..ml.economics import (
+    BREAK_EVEN_PRECISION,
+    ECONOMIC_OBJECTIVE_VERSION,
+    expected_return_score_from_counts,
+    theoretical_profit_units,
+)
 from ..ml.features import (
     AGE_LOG1P_FEATURE,
     AVAILABLE_MODEL_FEATURES,
@@ -52,8 +57,6 @@ FINAL_CERTIFICATION_MIN_ROWS = 100
 FINAL_CERTIFICATION_MIN_POSITIVES = 10
 FINAL_CERTIFICATION_MIN_NEGATIVES = 30
 FINAL_CERTIFICATION_MIN_MODEL_THRESHOLD_SELECTED = 1
-FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED = 8
-FINAL_CERTIFICATION_MIN_ROC_AUC = 0.50
 
 
 def evaluate_final_deployment_evidence(
@@ -65,8 +68,8 @@ def evaluate_final_deployment_evidence(
 
     This is a deployment veto, not another model-selection stage. It never
     changes the estimator, feature set, calibrated threshold or Top-3 order.
-    Positive deployment evidence requires the same model to retain both
-    non-random ranking skill and positive frozen model-threshold utility.
+    Qualification requires adequate final support and positive frozen-threshold
+    expected return J. AP/AUC are retained as diagnostics only.
     """
     y = np.asarray(labels, dtype=int)
     probs = np.asarray(probabilities, dtype=float)
@@ -99,20 +102,22 @@ def evaluate_final_deployment_evidence(
         None if average_precision is None else float(average_precision - prevalence)
     )
     ranking_evidence = bool(
-        support_ok
-        and average_precision is not None
+        average_precision is not None
         and average_precision > prevalence
         and roc_auc is not None
-        and roc_auc >= FINAL_CERTIFICATION_MIN_ROC_AUC
+        and roc_auc >= 0.50
     )
 
     selected_count = int(np.sum(selected))
     true_positives = int(np.sum(selected & (y == 1)))
     false_positives = selected_count - true_positives
     profit_units = float(theoretical_profit_units(true_positives, false_positives))
+    expected_return_score = expected_return_score_from_counts(
+        true_positives, false_positives, positives
+    )
     positive_model_threshold_evidence = bool(
         selected_count >= FINAL_CERTIFICATION_MIN_MODEL_THRESHOLD_SELECTED
-        and profit_units > 0.0
+        and expected_return_score > 0.0
     )
 
     blockers: list[str] = []
@@ -122,14 +127,10 @@ def evaluate_final_deployment_evidence(
         blockers.append("final_positives_below_minimum")
     if negatives < FINAL_CERTIFICATION_MIN_NEGATIVES:
         blockers.append("final_negatives_below_minimum")
-    if average_precision is None or average_precision <= prevalence:
-        blockers.append("final_average_precision_not_above_prevalence")
-    if roc_auc is None or roc_auc < FINAL_CERTIFICATION_MIN_ROC_AUC:
-        blockers.append("final_roc_auc_below_random")
     if selected_count < FINAL_CERTIFICATION_MIN_MODEL_THRESHOLD_SELECTED:
         blockers.append("final_no_model_threshold_selected")
-    if profit_units <= 0.0:
-        blockers.append("final_model_threshold_profit_not_positive")
+    if expected_return_score <= 0.0:
+        blockers.append("final_expected_return_not_positive")
 
     return {
         "rows": rows,
@@ -145,8 +146,10 @@ def evaluate_final_deployment_evidence(
         "true_positives": true_positives,
         "false_positives": false_positives,
         "profit_units": profit_units,
+        "expected_return_score": expected_return_score,
+        "break_even_precision": BREAK_EVEN_PRECISION,
         "positive_model_threshold_evidence": positive_model_threshold_evidence,
-        "qualified": bool(ranking_evidence and positive_model_threshold_evidence),
+        "qualified": bool(support_ok and positive_model_threshold_evidence),
         "blockers": blockers,
     }
 
@@ -427,20 +430,9 @@ class TrainingService:
                 true_positives = int(evidence["true_positives"])
                 false_positives = int(evidence["false_positives"])
                 profit_units = float(evidence["profit_units"])
-                limited_evidence = (
-                    selected_count < FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED
-                )
-                certification_margin = 0.0
                 model_blockers = list(evidence["blockers"])
                 if evidence["qualified"]:
                     qualified_model_ids.append(str(bundle.model_id))
-                if (
-                    selected_count >= FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED
-                    and profit_units < 0
-                ):
-                    blocker = "final_model_threshold_profit_units_negative_with_8plus_selected"
-                    model_blockers.append(blocker)
-                    certification_blockers.append(f"{bundle.algorithm}:{blocker}")
                 certification_models.append(
                     {
                         "version": DEPLOYMENT_CERTIFICATION_VERSION,
@@ -452,6 +444,8 @@ class TrainingService:
                         "final_model_threshold_true_positives": true_positives,
                         "final_model_threshold_false_positives": false_positives,
                         "final_model_threshold_profit_units": profit_units,
+                        "final_expected_return_score": float(evidence["expected_return_score"]),
+                        "break_even_precision": BREAK_EVEN_PRECISION,
                         "final_rows": int(evidence["rows"]),
                         "final_positives": int(evidence["positives"]),
                         "final_negatives": int(evidence["negatives"]),
@@ -460,7 +454,7 @@ class TrainingService:
                         "final_average_precision_lift": evidence["average_precision_lift"],
                         "final_roc_auc": evidence["roc_auc"],
                         "final_support_ok": bool(evidence["support_ok"]),
-                        "final_ranking_evidence": bool(evidence["ranking_evidence"]),
+                        "final_ranking_diagnostic_pass": bool(evidence["ranking_evidence"]),
                         "positive_model_threshold_evidence": bool(
                             evidence["positive_model_threshold_evidence"]
                         ),
@@ -468,9 +462,7 @@ class TrainingService:
                         "probability_only_selected": int(
                             candidate.final_metrics.trade_count if candidate.final_metrics else 0
                         ),
-                        "limited_evidence": limited_evidence,
-                        "certification_margin": certification_margin,
-                        "development_budget_threshold": original_threshold,
+                        "development_operating_point_threshold": original_threshold,
                         "production_threshold": float(bundle.threshold),
                         "execution_risk_policy": "shadow_only",
                         "execution_risk_available_count": int(
@@ -483,23 +475,22 @@ class TrainingService:
 
             if not qualified_model_ids:
                 certification_blockers.append(
-                    "no_top3_model_has_positive_ranked_threshold_final_evidence"
+                    "no_top3_model_has_positive_expected_return_final_evidence"
                 )
             deployment_certification = {
                 "version": DEPLOYMENT_CERTIFICATION_VERSION,
                 "deployment_fit_scope": "final_train_only_certified_instance",
                 "eligible": not certification_blockers,
                 "qualified_model_ids": qualified_model_ids,
-                "has_top3_model_with_positive_ranked_threshold_final_evidence": bool(
+                "has_top3_model_with_positive_expected_return_final_evidence": bool(
                     qualified_model_ids
                 ),
                 "minimum_final_rows": FINAL_CERTIFICATION_MIN_ROWS,
                 "minimum_final_positives": FINAL_CERTIFICATION_MIN_POSITIVES,
                 "minimum_final_negatives": FINAL_CERTIFICATION_MIN_NEGATIVES,
-                "minimum_final_roc_auc": FINAL_CERTIFICATION_MIN_ROC_AUC,
                 "minimum_model_threshold_selected": FINAL_CERTIFICATION_MIN_MODEL_THRESHOLD_SELECTED,
-                "economic_loss_guard_min_selected": FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED,
-                "evidence_policy": "same_model_ranking_plus_positive_model_threshold_v2",
+                "evidence_policy": "positive_frozen_threshold_expected_return_v3",
+                "break_even_precision": BREAK_EVEN_PRECISION,
                 "blockers": certification_blockers,
                 "models": certification_models,
                 "final_window_start": final_window_start_iso,
@@ -595,7 +586,7 @@ class TrainingService:
                         "feature_names": list(bundle.feature_names),
                         "parameters": {
                             "candidate_pool": list(TrainerConfig().candidate_names),
-                            "selection": "top3_oos_fixed_payoff_decay_occam",
+                            "selection": "top3_oos_precision_recall_expected_return_occam",
                             "label_version": LabelPolicy().label_version,
                             "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
                             "decision_policy_version": DECISION_POLICY_VERSION,
@@ -611,13 +602,10 @@ class TrainingService:
                             "deployment_certification": next(
                                 item for item in certification_models if item["algorithm"] == bundle.algorithm
                             ),
-                            "economic_weight": TrainerConfig().economic_weight,
-                            "generalization_weight": TrainerConfig().generalization_weight,
                             "gap_hours": result.plan.gap_hours,
                             "feature_selection": "adaptive_train_fold_treeshap_interaction_one_se_relative_cap",
                             "max_relative_occam_score_drop": TrainerConfig().max_relative_occam_score_drop,
-                            "top3_diversity_policy": "distinct_model_family_within_relative_score_budget",
-                            "max_diversity_score_drop": TrainerConfig().max_diversity_score_drop,
+                            "top3_selection_policy": "pure_expected_return_score",
                             "execution_min_observations": TrainerConfig().execution_min_observations,
                             "execution_full_observations": TrainerConfig().execution_full_observations,
                             "execution_max_weight": TrainerConfig().execution_max_weight,
@@ -669,14 +657,16 @@ class TrainingService:
                     "certification_blockers": list(deployment_certification["blockers"]),
                 },
                 "selection_formula": {
-                    "economic": "mean_clip((3*TP-FP)/(3*N_positive),-1,1) [friction-adjusted E_proxy]",
-                    "execution": "E_exec shadow metric from route-validated rules-only net PnL; never used for ranking",
-                    "ranking_economic": "E_proxy only; E_exec is shadow/audit-only and has zero ranking weight",
-                    "generalization": "0.60*AP_skill_mean + 0.20*stability + 0.20*decay",
-                    "composite": "0.60*ranking_economic + 0.40*generalization",
-                    "occam": "adaptive feature count; smallest subset inside both one-SE and <=8% relative S-loss guards",
+                    "payoff_ratio": "+3 winner / -1 loser",
+                    "break_even_precision": BREAK_EVEN_PRECISION,
+                    "expected_return": "J=Recall*((4)-(1/Precision))=(3*TP-FP)/N_positive",
+                    "threshold_search": "all distinct calibrated development-OOS operating points; min_trades only",
+                    "ranking": "Top-3 by development-OOS J only; Recall then Precision break exact ties",
+                    "generalization": "AP/AUC/stability/decay audit-only; zero ranking weight",
+                    "execution": "route-validated execution score shadow-only; zero ranking weight",
+                    "occam": "adaptive feature count on the same J objective; one-SE and <=8% relative J-loss guards",
                     "feature_ranking": "fold-train-only XGBoost TreeSHAP interaction-aware ranking; mutual-information fallback",
-                    "top3_diversity": "prefer distinct model families inside <=8% relative S-loss budget; final holdout correlation is audit-only",
+                    "top3_diversity": "audit-only after pure-J Top-3 selection",
                 },
             }
             self.database.execute(
