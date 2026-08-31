@@ -52,7 +52,7 @@ class ConstantRiskModel:
         return self.probability
 
 
-def current_bundle_kwargs(*, risk_probability: float = 0.10) -> dict:
+def current_bundle_kwargs(*, risk_probability: float | None = 0.10) -> dict:
     return {
         "calibrator": SigmoidCalibrator(
             method="chronological_sigmoid_platt_v1",
@@ -67,7 +67,9 @@ def current_bundle_kwargs(*, risk_probability: float = 0.10) -> dict:
         "age_policy_version": DEFAULT_AGE_POLICY_VERSION,
         "label_version": LabelPolicy().label_version,
         "economic_objective_version": ECONOMIC_OBJECTIVE_VERSION,
-        "execution_risk_model": ConstantRiskModel(risk_probability),
+        "execution_risk_model": (
+            None if risk_probability is None else ConstantRiskModel(risk_probability)
+        ),
         "drift_reference": {
             "version": "test", "reference_rows": 100, "reference_label_prior": 0.20,
             "feature_stats": {}, "certified": True,
@@ -96,7 +98,7 @@ def current_model_parameters(*, qualified: bool = True) -> dict:
     }
 
 
-def seed_top3(database: Database, model_dir, now: datetime, *, probability: float = 0.60, risk_probability: float = 0.10, training_end: datetime | None = None, activation_at: datetime | None = None, feature_names=("feature_a",), qualified_slots=(1, 2, 3)) -> None:
+def seed_top3(database: Database, model_dir, now: datetime, *, probability: float = 0.60, risk_probability: float | None = 0.10, training_end: datetime | None = None, activation_at: datetime | None = None, feature_names=("feature_a",), qualified_slots=(1, 2, 3)) -> None:
     registry = ModelRegistry(model_dir)
     models = ModelRepository(database)
     thresholds = (0.20, 0.50, 0.80)
@@ -393,7 +395,7 @@ def test_prediction_to_four_strategy_market_exit_e2e(tmp_path):
     assert {row["exit_reason"] for row in rows} == {"take_profit_1_8x"}
     assert len({row["simulation_session_id"] for row in rows}) == 1
 
-def test_execution_risk_above_ceiling_blocks_models_but_rules_only_continues(tmp_path):
+def test_execution_risk_is_shadow_only_and_does_not_block_models(tmp_path):
     database = Database(tmp_path / "high-risk.db")
     database.initialize()
     settings = Settings(
@@ -421,10 +423,56 @@ def test_execution_risk_above_ceiling_blocks_models_but_rules_only_continues(tmp
     result = PredictionService(database, settings).run_cycle(now=now)
 
     assert result.predictions_written == 3
-    assert result.model_positions_opened == 0
+    assert result.model_positions_opened == 3
     assert result.rule_positions_opened == 1
-    reasons = {row["decision_reason"] for row in database.fetch_all("SELECT decision_reason FROM predictions")}
-    assert reasons == {"execution_risk_above_ceiling"}
+    rows = database.fetch_all(
+        "SELECT decision_reason,execution_risk_probability FROM predictions"
+    )
+    assert {row["decision_reason"] for row in rows} == {"selected"}
+    assert all(row["execution_risk_probability"] == pytest.approx(0.90) for row in rows)
+
+
+def test_execution_risk_unavailable_is_shadow_only_and_does_not_block_models(tmp_path):
+    database = Database(tmp_path / "risk-unavailable.db")
+    database.initialize()
+    settings = Settings(
+        _env_file=None,
+        sqlite_path=str(tmp_path / "risk-unavailable.db"),
+        background_workers_enabled=False,
+        modeling_min_mature_samples=0,
+        signal_max_age_seconds=300,
+        paper_market_monitor_enabled=False,
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    seed_sol_price(database, now - timedelta(seconds=10))
+    seed_top3(
+        database,
+        tmp_path / "risk-unavailable-models",
+        now,
+        probability=0.99,
+        risk_probability=None,
+    )
+    SampleRepository(database).insert(
+        SampleRecord(
+            address="RiskUnavailable11111111111111111111111111111111",
+            token_type="new_creation",
+            age_minutes=30.0,
+            entry_time=int((now - timedelta(seconds=10)).timestamp()),
+            entry_price=1.0,
+            liquidity=10_000.0,
+            features={"feature_a": 1.0},
+        )
+    )
+
+    result = PredictionService(database, settings).run_cycle(now=now)
+
+    assert result.predictions_written == 3
+    assert result.model_positions_opened == 3
+    rows = database.fetch_all(
+        "SELECT decision_reason,execution_risk_probability FROM predictions"
+    )
+    assert {row["decision_reason"] for row in rows} == {"selected"}
+    assert all(row["execution_risk_probability"] is None for row in rows)
 
 
 def test_severe_drift_is_monitoring_only_for_paper(monkeypatch, tmp_path):

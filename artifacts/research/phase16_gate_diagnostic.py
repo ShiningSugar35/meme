@@ -13,12 +13,11 @@ import numpy as np
 from backend.app.collector.constants import FEATURE_SCHEMA_VERSION, LabelPolicy
 from backend.app.config import get_settings
 from backend.app.database import Database
-from backend.app.ml.decision_policy import (
-    RISK_CEILING_CAUTION,
-    RISK_CEILING_NORMAL,
-    age_adjusted_threshold,
-    age_gate,
-)
+from backend.app.ml.decision_policy import age_adjusted_threshold, age_gate
+
+# Historical Phase16 replay constants only; current Phase18 paper does not gate on execution-risk.
+RISK_CEILING_CAUTION = 0.35
+RISK_CEILING_NORMAL = 0.40
 from backend.app.ml.features import FeatureBuilder, FeaturePolicy
 from backend.app.ml.registry import ModelRegistry
 from backend.app.services.training import TrainingService

@@ -16,7 +16,6 @@ from ..database import Database, utc_now_iso
 from ..ml.decision_policy import (
     AGE_POLICY_CANDIDATES,
     DECISION_POLICY_VERSION,
-    RISK_CEILING_NORMAL,
     age_adjusted_threshold,
     age_gate,
     clamp_adaptive_threshold,
@@ -203,17 +202,10 @@ class PredictionService:
                         risk_probability = float(risk_model.predict_probability(row))
                     except Exception:
                         risk_probability = None
-                risk_ceiling = RISK_CEILING_NORMAL
                 hard_gate_ok = True
                 if not age.allowed:
                     hard_gate_ok = False
                     decision_reason = age.reason
-                elif risk_probability is None:
-                    hard_gate_ok = False
-                    decision_reason = "execution_risk_unavailable"
-                elif risk_probability > risk_ceiling:
-                    hard_gate_ok = False
-                    decision_reason = "execution_risk_above_ceiling"
                 elif probability < threshold:
                     decision_reason = "calibrated_probability_below_threshold"
                 else:
@@ -399,7 +391,6 @@ class PredictionService:
             probabilities = np.clip(bundle.predict_probabilities(frame), 0.0, 1.0)
             drift = self.drift.evaluate(model_id=str(model["id"]), reference=bundle.drift_reference)
             risk_model = bundle.execution_risk_model
-            risk_ceiling = RISK_CEILING_NORMAL
             for row, raw_probability, calibrated_probability in zip(
                 rows, raw_probabilities, probabilities, strict=True
             ):
@@ -416,12 +407,6 @@ class PredictionService:
                 if not age.allowed:
                     chosen = False
                     decision_reason = f"shadow_{age.reason}"
-                elif risk_probability is None:
-                    chosen = False
-                    decision_reason = "shadow_execution_risk_unavailable"
-                elif risk_probability > risk_ceiling:
-                    chosen = False
-                    decision_reason = "shadow_execution_risk_above_ceiling"
                 elif probability < age_threshold:
                     chosen = False
                     decision_reason = "shadow_calibrated_probability_below_threshold"

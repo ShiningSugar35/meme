@@ -48,7 +48,7 @@ def test_current_per_model_certificate_is_explicit_and_fail_closed() -> None:
     assert not deployment_certification_is_current(None)
 
 
-def test_same_model_positive_ranking_and_end_to_end_evidence_can_qualify() -> None:
+def test_same_model_positive_ranking_and_model_threshold_evidence_can_qualify() -> None:
     labels, probabilities = _good_ranked_slice()
     selected = np.zeros_like(labels, dtype=bool)
     selected[:4] = True
@@ -57,14 +57,14 @@ def test_same_model_positive_ranking_and_end_to_end_evidence_can_qualify() -> No
 
     assert result["support_ok"]
     assert result["ranking_evidence"]
-    assert result["positive_end_to_end_evidence"]
+    assert result["positive_model_threshold_evidence"]
     assert result["qualified"]
     assert result["average_precision"] > result["prevalence"]
     assert result["roc_auc"] >= 0.50
     assert result["profit_units"] > 0
 
 
-def test_a_single_losing_policy_observation_never_qualifies() -> None:
+def test_a_single_losing_model_threshold_observation_never_qualifies() -> None:
     labels, probabilities = _good_ranked_slice()
     selected = np.zeros_like(labels, dtype=bool)
     selected[-1] = True
@@ -72,9 +72,9 @@ def test_a_single_losing_policy_observation_never_qualifies() -> None:
     result = evaluate_final_deployment_evidence(labels, probabilities, selected)
 
     assert result["ranking_evidence"]
-    assert not result["positive_end_to_end_evidence"]
+    assert not result["positive_model_threshold_evidence"]
     assert not result["qualified"]
-    assert "final_end_to_end_profit_not_positive" in result["blockers"]
+    assert "final_model_threshold_profit_not_positive" in result["blockers"]
 
 
 def test_reversed_ranking_is_blocked_even_when_manual_policy_mask_wins() -> None:
@@ -88,7 +88,7 @@ def test_reversed_ranking_is_blocked_even_when_manual_policy_mask_wins() -> None
         selected,
     )
 
-    assert result["positive_end_to_end_evidence"]
+    assert result["positive_model_threshold_evidence"]
     assert not result["ranking_evidence"]
     assert not result["qualified"]
     assert "final_roc_auc_below_random" in result["blockers"]

@@ -10,8 +10,8 @@
 - 研究对象：允许清单内的 Solana Launchpad 新创建及接近完成阶段 Token。
 - 当前特征代：`event1m_regime_v3`。
 - 当前标签：`sl090_tp180_m90_binary_v5`，90 分钟窗口，0.9x 止损、1.8x 止盈，同一分钟同时触发时止损优先，超时未触及止盈记负类。
-- 当前模型决策合同：`phase17_model_filter_paper_v1`。
-- 当前上线认证合同：`phase17_model_filter_certification_v1`。
+- 当前模型决策合同：`phase18_model_filter_paper_v1`。
+- 当前上线认证合同：`phase18_model_filter_certification_v1`。
 - 模拟交易和理论标签收益、可执行报价收益、真实链上收益分别核算，不混为同一 PnL。
 
 系统不是高频撮合器，不承诺覆盖所有 Meme Token，也不以“每天必须交易”为目标。没有满足质量与风控条件的机会时，模型保持不交易是合法状态。
@@ -25,7 +25,7 @@ GMGN Trenches 候选发现
   → 不可变入场时特征快照
   → rules_only 基线模拟
   → Active Top 3 校准概率与模型专属阈值
-  → 固定 execution-risk 0.40 门；年龄与 drift 只记录/建模
+  → 模拟交易；年龄、execution-risk 与 drift 只记录/建模
   → 模拟或受控实盘执行
   → 90 分钟 first-touch 标签补齐
   → chronological OOS 训练与上线认证
@@ -60,9 +60,9 @@ GMGN Trenches 候选发现
 - 经济评价、泛化评价和训练 provenance；
 - execution-risk 模型及 drift reference。
 
-Paper 模型复筛恢复为简单主链：规则安全准入 → 模型校准概率达到 development OOS 冻结阈值 → execution-risk `<=0.40` → 模拟交易。年龄只保留 Collector 的 `2 < age_minutes < 300` 原始准入事实；`ln(age+1)` 可以作为普通特征交给模型学习，但模型输出后不再追加年龄阈值，也不再对 60–120 分钟单独 abstain。
+Paper 模型复筛主链为：规则安全准入 → 模型校准概率达到 development OOS 冻结阈值 → 模拟交易。年龄只保留 Collector 的 `2 < age_minutes < 300` 原始准入事实；`ln(age+1)` 可以作为普通特征交给模型学习，但模型输出后不再追加年龄阈值，也不再对 60–120 分钟单独 abstain。execution-risk 继续计算和保存概率，仅用于 shadow outcome、监控与研究，不拥有 paper 一票否决权。
 
-Drift 的 normal/caution/severe 只用于模型健康监控、提前重训和特征治理，不直接改变 paper selected，也不因为 caution 自动收紧 execution-risk。AdaptivePolicy 可以在模型基础阈值之上收紧，但不能把 development OOS 冻结阈值向下放宽或绕过 execution-risk。
+Drift 的 normal/caution/severe 只用于模型健康监控、提前重训和特征治理，不直接改变 paper selected。AdaptivePolicy 可以在模型基础阈值之上收紧，但不能把 development OOS 冻结阈值向下放宽；execution-risk 与 drift 都不再是额外 paper 硬门。
 
 `rules_only` 不经过模型二筛，用于持续记录全准入池的可执行性事实；它不受模型换代暂停和有限资金余额影响，不是推荐策略，也不代表模型应当模仿全买。
 
@@ -75,9 +75,9 @@ Top 3、特征、概率校准和稀疏预算均先由 development OOS 冻结；�
 1. development 稀疏预算必须满足 `Precision >= 25%` 且 `3×TP-FP > 0`；
 2. final 窗口样本与正负类数量达到最低证据门；
 3. 同一模型在 final 上 `ROC-AUC >= 0.50`，且 Average Precision 严格高于该窗口正类率；
-4. 同一模型的“模型阈值 + 固定 execution-risk 0.40”策略至少选中 1 条且 `3×TP-FP > 0`；
-5. execution-risk head 未独立认证会阻断 generation；任一模型在 final 已有不少于 8 条 model+risk 样本且经济单位为负，也会阻断 generation；drift 仅记录监控状态，不作为 paper certification blocker；
-6. generation 至少存在 1 个具备上述联合正向证据的模型才可 staged activation；激活后仍只有自身 `qualified_deployment_evidence=true` 的 slot 可以开仓，其他 slot 只做 shadow。
+4. 同一模型按冻结的模型阈值至少选中 1 条且 `3×TP-FP > 0`；
+5. 任一模型在 final 已有不少于 8 条模型阈值命中且经济单位为负，会阻断 generation；execution-risk 与 drift 只记录监控/研究状态，不作为 paper certification blocker；
+6. generation 至少存在 1 个具备上述基础模型正向证据的模型才可 staged activation；激活后仍只有自身 `qualified_deployment_evidence=true` 的 slot 可以开仓，其他 slot 只做 shadow。
 
 旧标签、旧决策合同或旧认证合同的 Active 模型在新代码下 fail-closed；Collector、rules_only 与已有持仓退出继续运行。
 

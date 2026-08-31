@@ -19,7 +19,6 @@ from ..ml.decision_policy import (
     AGE_POLICY_CANDIDATES,
     DECISION_POLICY_VERSION,
     DEPLOYMENT_CERTIFICATION_VERSION,
-    RISK_CEILING_NORMAL,
     age_adjusted_threshold,
     age_gate,
     deployment_certification_is_current,
@@ -43,7 +42,7 @@ from ..ml.trainer import ModelTrainer, TrainerConfig
 from ..repositories.models import ModelRepository
 from ..repositories.samples import SampleRepository
 from .drift import build_drift_reference, evaluate_final_certification_drift
-from .execution_risk import ExecutionRiskTrainer
+from .execution_risk import ExecutionRiskTrainer, ExecutionRiskTrainingResult
 from .modeling_gate import ModelingReadiness, persist_modeling_readiness
 
 
@@ -52,7 +51,7 @@ TrainingTrigger = Literal["manual", "weekly", "daily", "startup_catchup", "degra
 FINAL_CERTIFICATION_MIN_ROWS = 100
 FINAL_CERTIFICATION_MIN_POSITIVES = 10
 FINAL_CERTIFICATION_MIN_NEGATIVES = 30
-FINAL_CERTIFICATION_MIN_END_TO_END_SELECTED = 1
+FINAL_CERTIFICATION_MIN_MODEL_THRESHOLD_SELECTED = 1
 FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED = 8
 FINAL_CERTIFICATION_MIN_ROC_AUC = 0.50
 
@@ -67,7 +66,7 @@ def evaluate_final_deployment_evidence(
     This is a deployment veto, not another model-selection stage. It never
     changes the estimator, feature set, calibrated threshold or Top-3 order.
     Positive deployment evidence requires the same model to retain both
-    non-random ranking skill and positive end-to-end policy utility.
+    non-random ranking skill and positive frozen model-threshold utility.
     """
     y = np.asarray(labels, dtype=int)
     probs = np.asarray(probabilities, dtype=float)
@@ -111,8 +110,8 @@ def evaluate_final_deployment_evidence(
     true_positives = int(np.sum(selected & (y == 1)))
     false_positives = selected_count - true_positives
     profit_units = float(theoretical_profit_units(true_positives, false_positives))
-    positive_end_to_end_evidence = bool(
-        selected_count >= FINAL_CERTIFICATION_MIN_END_TO_END_SELECTED
+    positive_model_threshold_evidence = bool(
+        selected_count >= FINAL_CERTIFICATION_MIN_MODEL_THRESHOLD_SELECTED
         and profit_units > 0.0
     )
 
@@ -127,10 +126,10 @@ def evaluate_final_deployment_evidence(
         blockers.append("final_average_precision_not_above_prevalence")
     if roc_auc is None or roc_auc < FINAL_CERTIFICATION_MIN_ROC_AUC:
         blockers.append("final_roc_auc_below_random")
-    if selected_count < FINAL_CERTIFICATION_MIN_END_TO_END_SELECTED:
-        blockers.append("final_no_end_to_end_selected")
+    if selected_count < FINAL_CERTIFICATION_MIN_MODEL_THRESHOLD_SELECTED:
+        blockers.append("final_no_model_threshold_selected")
     if profit_units <= 0.0:
-        blockers.append("final_end_to_end_profit_not_positive")
+        blockers.append("final_model_threshold_profit_not_positive")
 
     return {
         "rows": rows,
@@ -146,8 +145,8 @@ def evaluate_final_deployment_evidence(
         "true_positives": true_positives,
         "false_positives": false_positives,
         "profit_units": profit_units,
-        "positive_end_to_end_evidence": positive_end_to_end_evidence,
-        "qualified": bool(ranking_evidence and positive_end_to_end_evidence),
+        "positive_model_threshold_evidence": positive_model_threshold_evidence,
+        "qualified": bool(ranking_evidence and positive_model_threshold_evidence),
         "blockers": blockers,
     }
 
@@ -343,15 +342,29 @@ class TrainingService:
             risk_training_cutoff = (
                 final_window_start_epoch - LabelPolicy().window_seconds
             )
-            execution_risk = ExecutionRiskTrainer(self.database).train(
-                max_entry_time_exclusive=risk_training_cutoff,
-                max_exit_time_exclusive=final_window_start_iso,
-            )
+            try:
+                execution_risk = ExecutionRiskTrainer(self.database).train(
+                    max_entry_time_exclusive=risk_training_cutoff,
+                    max_exit_time_exclusive=final_window_start_iso,
+                )
+            except Exception as exc:
+                execution_risk = ExecutionRiskTrainingResult(
+                    available=False,
+                    certified=False,
+                    model=None,
+                    observations=0,
+                    positives=0,
+                    negatives=0,
+                    prevalence=0.0,
+                    reason=f"shadow_training_failed:{type(exc).__name__}",
+                    training_cutoff_entry_time_exclusive=risk_training_cutoff,
+                    training_cutoff_exit_time_exclusive=final_window_start_iso,
+                )
             self.database.set_runtime_state("execution_risk_training", execution_risk.as_dict())
             if not execution_risk.certified or execution_risk.model is None:
                 self.database.audit(
                     category="model",
-                    action="execution_risk_head_uncertified",
+                    action="shadow_execution_risk_head_unavailable",
                     severity="warning",
                     entity_type="training_run",
                     entity_id=run_id,
@@ -381,7 +394,6 @@ class TrainingService:
                 )
                 selected_mask: list[bool] = []
                 risk_probabilities: list[float | None] = []
-                risk_ceiling = RISK_CEILING_NORMAL
                 for row_source, probability in zip(
                     final_source_rows, probabilities, strict=True
                 ):
@@ -402,8 +414,6 @@ class TrainingService:
                     selected_mask.append(
                         bool(
                             age.allowed
-                            and risk_probability is not None
-                            and risk_probability <= risk_ceiling
                             and float(probability) >= hard_threshold
                         )
                     )
@@ -428,7 +438,7 @@ class TrainingService:
                     selected_count >= FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED
                     and profit_units < 0
                 ):
-                    blocker = "final_profit_units_negative_with_8plus_selected"
+                    blocker = "final_model_threshold_profit_units_negative_with_8plus_selected"
                     model_blockers.append(blocker)
                     certification_blockers.append(f"{bundle.algorithm}:{blocker}")
                 certification_models.append(
@@ -438,10 +448,10 @@ class TrainingService:
                         "algorithm": bundle.algorithm,
                         "age_policy_version": evaluation_bundle.age_policy_version,
                         "deployment_fit_scope": "final_train_only_certified_instance",
-                        "final_model_policy_selected": selected_count,
-                        "final_model_policy_true_positives": true_positives,
-                        "final_model_policy_false_positives": false_positives,
-                        "final_model_policy_profit_units": profit_units,
+                        "final_model_threshold_selected": selected_count,
+                        "final_model_threshold_true_positives": true_positives,
+                        "final_model_threshold_false_positives": false_positives,
+                        "final_model_threshold_profit_units": profit_units,
                         "final_rows": int(evidence["rows"]),
                         "final_positives": int(evidence["positives"]),
                         "final_negatives": int(evidence["negatives"]),
@@ -451,8 +461,8 @@ class TrainingService:
                         "final_roc_auc": evidence["roc_auc"],
                         "final_support_ok": bool(evidence["support_ok"]),
                         "final_ranking_evidence": bool(evidence["ranking_evidence"]),
-                        "positive_end_to_end_evidence": bool(
-                            evidence["positive_end_to_end_evidence"]
+                        "positive_model_threshold_evidence": bool(
+                            evidence["positive_model_threshold_evidence"]
                         ),
                         "qualified_deployment_evidence": bool(evidence["qualified"]),
                         "probability_only_selected": int(
@@ -462,8 +472,8 @@ class TrainingService:
                         "certification_margin": certification_margin,
                         "development_budget_threshold": original_threshold,
                         "production_threshold": float(bundle.threshold),
-                        "risk_ceiling": risk_ceiling,
-                        "risk_available_count": int(
+                        "execution_risk_policy": "shadow_only",
+                        "execution_risk_available_count": int(
                             sum(value is not None for value in risk_probabilities)
                         ),
                         "final_drift": drift_cert,
@@ -473,25 +483,23 @@ class TrainingService:
 
             if not qualified_model_ids:
                 certification_blockers.append(
-                    "no_top3_model_has_positive_ranked_end_to_end_final_evidence"
+                    "no_top3_model_has_positive_ranked_threshold_final_evidence"
                 )
-            if not execution_risk.certified or execution_risk.model is None:
-                certification_blockers.append("execution_risk_head_uncertified")
             deployment_certification = {
                 "version": DEPLOYMENT_CERTIFICATION_VERSION,
                 "deployment_fit_scope": "final_train_only_certified_instance",
                 "eligible": not certification_blockers,
                 "qualified_model_ids": qualified_model_ids,
-                "has_top3_model_with_positive_ranked_end_to_end_final_evidence": bool(
+                "has_top3_model_with_positive_ranked_threshold_final_evidence": bool(
                     qualified_model_ids
                 ),
                 "minimum_final_rows": FINAL_CERTIFICATION_MIN_ROWS,
                 "minimum_final_positives": FINAL_CERTIFICATION_MIN_POSITIVES,
                 "minimum_final_negatives": FINAL_CERTIFICATION_MIN_NEGATIVES,
                 "minimum_final_roc_auc": FINAL_CERTIFICATION_MIN_ROC_AUC,
-                "minimum_end_to_end_selected": FINAL_CERTIFICATION_MIN_END_TO_END_SELECTED,
+                "minimum_model_threshold_selected": FINAL_CERTIFICATION_MIN_MODEL_THRESHOLD_SELECTED,
                 "economic_loss_guard_min_selected": FINAL_CERTIFICATION_PROFIT_GUARD_MIN_SELECTED,
-                "evidence_policy": "same_model_ranking_plus_positive_end_to_end_v1",
+                "evidence_policy": "same_model_ranking_plus_positive_model_threshold_v2",
                 "blockers": certification_blockers,
                 "models": certification_models,
                 "final_window_start": final_window_start_iso,
@@ -777,7 +785,6 @@ class TrainingService:
                 except (TypeError, json.JSONDecodeError):
                     contract_current = False
                     break
-                risk = metrics.get("execution_risk") or {}
                 model_certification = (
                     metrics.get("deployment_certification")
                     or parameters.get("deployment_certification")
@@ -788,7 +795,6 @@ class TrainingService:
                     or parameters.get("decision_policy_version") != DECISION_POLICY_VERSION
                     or parameters.get("age_policy_version") not in AGE_POLICY_CANDIDATES
                     or parameters.get("deployment_fit_scope") != "final_train_only_certified_instance"
-                    or not bool(risk.get("certified"))
                     or not deployment_certification_is_current(model_certification)
                 ):
                     contract_current = False

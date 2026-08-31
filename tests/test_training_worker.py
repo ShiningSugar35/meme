@@ -387,6 +387,50 @@ def test_rollover_recovers_after_models_switch_before_run_commit(monkeypatch, tm
     assert status["accounts"]["rules_only"]["capital_mode"] == "unlimited_notional"
     assert TrainingService(database, settings).promote_pending_if_flat(run_id=run_id) is None
 
+def test_rollover_allows_current_certificate_when_execution_risk_is_uncertified_shadow(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    settings = make_settings(tmp_path)
+    _register_generation(database, "current-risk-shadow", activate=True)
+    candidate = _register_generation(database, "candidate-risk-shadow", activate=False)
+    for item in candidate:
+        row = database.fetch_one("SELECT metrics_json FROM models WHERE id=?", (item["id"],))
+        metrics = json.loads(row["metrics_json"] or "{}")
+        metrics["execution_risk"] = {"certified": False, "reason": "shadow_unavailable"}
+        database.execute(
+            "UPDATE models SET metrics_json=? WHERE id=?",
+            (json.dumps(metrics), item["id"]),
+        )
+    run_id = "risk-shadow-does-not-block-rollover"
+    database.execute(
+        """
+        INSERT INTO training_runs(
+            id,trigger,status,requested_at,completed_at,request_json,promoted,summary_json
+        ) VALUES(?, 'manual', 'completed', ?, ?, '{}', 0, ?)
+        """,
+        (
+            run_id,
+            utc_now_iso(),
+            utc_now_iso(),
+            json.dumps({
+                "top_models": candidate,
+                "deployment_certification": {
+                    "version": DEPLOYMENT_CERTIFICATION_VERSION,
+                    "deployment_fit_scope": "final_train_only_certified_instance",
+                    "eligible": True,
+                    "blockers": [],
+                },
+                "activation": {"status": "waiting_for_flat"},
+            }),
+        ),
+    )
+
+    promoted = TrainingService(database, settings).promote_pending_if_flat(run_id=run_id)
+
+    assert promoted == run_id
+    assert database.fetch_one("SELECT promoted FROM training_runs WHERE id=?", (run_id,))["promoted"] == 1
+    assert [row["id"] for row in ModelRepository(database).active_models()] == [row["id"] for row in candidate]
+
+
 def test_rollover_refuses_candidate_without_deployment_certification(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     settings = make_settings(tmp_path)
