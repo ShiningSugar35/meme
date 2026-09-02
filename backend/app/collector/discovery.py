@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from .client import GMGNDataClient
-from .constants import DISCOVERY_TYPES, LAUNCHPADS, SOL_TRENCH_QUOTE_ADDRESS_TYPES
+from .constants import DISCOVERY_TYPES, LAUNCHPADS, SOL_TRENCH_QUOTE_ADDRESS_TYPES, FilterThresholds
 from .errors import CollectorError, CollectorNetworkError, CollectorRateLimitError, CollectorValidationError
 from .models import ApiKeyRoles, TokenCandidate
 
@@ -116,21 +116,31 @@ class DiscoveryService:
         )
 
     @staticmethod
-    def trending_params(order_by: str, *, interval: str = "5m", limit: int = 80) -> dict[str, Any]:
+    def trending_params(order_by: str, *, interval: str = "5m") -> dict[str, Any]:
         if order_by not in TRENDING_ORDER_BY:
             raise CollectorValidationError(f"Unsupported trending order: {order_by}")
         if interval not in TRENDING_INTERVALS:
             raise CollectorValidationError(f"Unsupported trending interval: {interval}")
-        if not 1 <= limit <= 100:
-            raise CollectorValidationError("GMGN trending limit must be between 1 and 100")
+        thresholds = FilterThresholds()
+
         return {
             "chain": "sol",
             "interval": interval,
             "order_by": order_by,
             "direction": "desc",
-            "limit": limit,
+
             "filters": ["renounced", "frozen"],
             "platform": list(LAUNCHPADS),
+            "min_created": f"{thresholds.min_age_minutes:g}m",
+            "max_created": f"{thresholds.max_age_minutes_exclusive:g}m",
+            "min_liquidity": thresholds.min_liquidity,
+            "min_marketcap": thresholds.min_marketcap,
+            "min_holder_count": int(thresholds.min_holder_count_exclusive) + 1,
+            "max_holder_count": int(thresholds.max_holder_count_exclusive) - 1,
+            "min_top10_holder_rate": thresholds.min_top_10_holder_rate,
+            "max_top10_holder_rate": thresholds.max_top_10_holder_rate,
+            "max_insider_rate": thresholds.max_insider_ratio,
+            "max_bundler_rate": thresholds.max_bundler_rate,
         }
 
     @staticmethod
@@ -143,6 +153,7 @@ class DiscoveryService:
             "filters": ["offchain", "onchain"],
             "launchpad_platform_v2": True,
             "limit": limit,
+
             "launchpad_platform": list(LAUNCHPADS),
             "quote_address_type": list(SOL_TRENCH_QUOTE_ADDRESS_TYPES),
             "min_created": "2m",
@@ -210,9 +221,9 @@ class DiscoveryService:
         order_by: str,
         *,
         interval: str = "5m",
-        limit: int = 80,
+
     ) -> list[TokenCandidate]:
-        params = self.trending_params(order_by, interval=interval, limit=limit)
+        params = self.trending_params(order_by, interval=interval)
         slots = self._trending_slots()
         if not slots:
             remaining = [
@@ -229,7 +240,7 @@ class DiscoveryService:
             try:
                 data = await self.client.request(slot, self.client.endpoints.trending, params=params)
                 self._note_reserved_weight(slot, weight)
-                return extract_trending_candidates(data, order_by)[:limit]
+                return extract_trending_candidates(data, order_by)
             except CollectorNetworkError:
                 raise
             except CollectorRateLimitError as exc:

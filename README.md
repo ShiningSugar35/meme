@@ -34,7 +34,7 @@ GMGN Trenches 候选发现
 
 ### Discovery 来源实验
 
-生产 Collector 当前仍以 Trenches lifecycle 发现为正式入口；若需要评估其他发现策略，可使用独立 shadow discovery experiment 并行比较多个来源。实验来源只复用同一 SafetyFilter、enrichment 与 90 分钟标签合同，不写正式 `samples`、模型训练或 `rules_only`。GMGN 流量统一通过共享 weighted limiter；高权重 enrichment 先跨来源按地址去重，并按生产历史负载动态限制 shadow 深筛数量。状态可用 `scripts\discovery_experiment_status.py` 查询。
+生产 Collector 当前仍以 Trenches lifecycle 发现为正式入口；若需要评估其他发现策略，可使用独立 shadow discovery experiment 并行比较多个来源。Trending 会把 GMGN 官方能够等价表达的 age、liquidity、marketcap、holder、top10、insider、bundler 范围先推到 `/v1/market/rank` 服务器端，再由本地完整 SafetyFilter 严格复核；Trending 请求不显式设置 `limit`，使用 GMGN 默认/最大 100 条语义。实验来源不写正式 `samples`、模型训练或 `rules_only`。GMGN 流量统一通过共享 weighted limiter；高权重 enrichment 先跨来源按地址去重，并按生产历史负载动态限制 shadow 深筛数量。状态可用 `scripts\discovery_experiment_status.py` 查询。
 
 ## 3. 生产准入合同
 

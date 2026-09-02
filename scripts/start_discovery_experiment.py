@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import math
 from pathlib import Path
@@ -9,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.app.collector.discovery import DiscoveryService
 from backend.app.collector.discovery_experiment import DiscoveryExperimentManager
 from backend.app.config import get_settings
 from backend.app.database import Database
@@ -60,6 +62,9 @@ def _load_budget(database: Database, *, rps: float, poll_seconds: float) -> dict
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Start or replace the 24h discovery-source experiment.")
+    parser.add_argument("--replace-active", action="store_true")
+    args = parser.parse_args()
     settings = get_settings()
     database = Database(settings.database_path)
     database.initialize()
@@ -71,19 +76,32 @@ def main() -> None:
         poll_seconds=float(settings.collector_poll_seconds),
     )
     manager = DiscoveryExperimentManager(database)
+    cancelled = None
+    if args.replace_active:
+        cancelled = manager.cancel_current(
+            reason="invalid_pilot: trending universe changed to server-side prefilters and no explicit client limit (GMGN default/max 100)"
+        )
+    trending_contract = DiscoveryService.trending_params("volume", interval="5m")
+    server_prefilters = {
+        key: value
+        for key, value in trending_contract.items()
+        if key.startswith("min_") or key.startswith("max_")
+    }
     experiment = manager.create_or_resume(
         duration_seconds=86_400,
         interval="5m",
-        limit_per_source=min(int(settings.gmgn_trenches_limit), 80),
+
         max_shadow_enrich_per_cycle=int(budget["max_shadow_enrich_per_cycle"]),
         config={
             "load_budget": budget,
             "gmgn_global_weighted_rps": float(runtime["gmgn_global_rps"]),
             "collector_poll_seconds": float(settings.collector_poll_seconds),
+            "trending_result_limit": "gmgn_server_default_100",
+            "trending_server_prefilters": server_prefilters,
             "official_route_weights": {"trending": 1, "trenches": 3, "kline": 2, "top_holders": 5},
         },
     )
-    print(json.dumps({"experiment": experiment, "load_budget": budget}, ensure_ascii=False, indent=2))
+    print(json.dumps({"cancelled": cancelled, "experiment": experiment, "load_budget": budget}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

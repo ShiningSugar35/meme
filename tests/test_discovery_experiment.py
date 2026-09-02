@@ -14,7 +14,7 @@ from backend.app.database import Database
 
 class FakeTrendingDiscovery:
     def __init__(self, rows): self.rows = rows
-    async def discover_trending(self, order_by: str, *, interval: str, limit: int): return self.rows[order_by][:limit]
+    async def discover_trending(self, order_by: str, *, interval: str): return self.rows[order_by]
 
 
 class FakeEnrichment:

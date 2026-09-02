@@ -116,12 +116,22 @@ def test_trending_contract_and_parser_use_official_rank_fields() -> None:
     assert candidates[0].token_type == "trending"
     assert candidates[0].raw["_discovery_source"] == "trending:volume"
 
-    params = DiscoveryService.trending_params("change5m", interval="5m", limit=80)
+    params = DiscoveryService.trending_params("change5m", interval="5m")
     assert params["chain"] == "sol"
     assert params["interval"] == "5m"
     assert params["order_by"] == "change5m"
     assert params["direction"] == "desc"
-    assert params["limit"] == 80
+    assert "limit" not in params
+    assert params["min_created"] == "2m"
+    assert params["max_created"] == "300m"
+    assert params["min_liquidity"] == 4_800.0
+    assert params["min_marketcap"] == 5_000.0
+    assert params["min_holder_count"] == 30
+    assert params["max_holder_count"] == 999
+    assert params["min_top10_holder_rate"] == 0.14
+    assert params["max_top10_holder_rate"] == 0.25
+    assert params["max_insider_rate"] == 0.2
+    assert params["max_bundler_rate"] == 0.2
     assert params["filters"] == ["renounced", "frozen"]
     assert len(params["platform"]) == 8
 
@@ -133,7 +143,7 @@ def test_trending_discovery_balances_reserved_keys_by_documented_route_weight() 
     asyncio.run(service.discover("new_creation", limit=1))
     asyncio.run(service.discover("near_completion", limit=1))
     for order_by in ("volume", "smart_degen_count", "change5m"):
-        found = asyncio.run(service.discover_trending(order_by, interval="5m", limit=1))
+        found = asyncio.run(service.discover_trending(order_by, interval="5m"))
         assert len(found) == 1
     trench_slots = [slot for slot, path, _ in client.calls if path == "/v1/trenches"]
     trend_slots = [slot for slot, path, _ in client.calls if path == "/v1/market/rank"]

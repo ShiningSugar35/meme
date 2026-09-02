@@ -53,7 +53,7 @@ class DiscoveryExperimentManager:
         *,
         duration_seconds: int = 86_400,
         interval: str = "5m",
-        limit_per_source: int = 80,
+
         max_shadow_enrich_per_cycle: int = 8,
         config: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -85,7 +85,7 @@ class DiscoveryExperimentManager:
                 now,
                 now + int(duration_seconds),
                 interval,
-                int(limit_per_source),
+                100,  # legacy schema field; Trending request omits limit and uses GMGN default/max 100
                 int(max_shadow_enrich_per_cycle),
                 self._json(payload),
                 utc_now_iso(),
@@ -105,6 +105,27 @@ class DiscoveryExperimentManager:
     def current(self) -> dict[str, Any] | None:
         return self.database.fetch_one(
             "SELECT * FROM discovery_experiments WHERE status='active' ORDER BY started_at DESC LIMIT 1"
+        )
+
+    def cancel_current(self, *, reason: str) -> dict[str, Any] | None:
+        current = self.current()
+        if current is None:
+            return None
+        completed_at = utc_now_iso()
+        self.database.execute(
+            "UPDATE discovery_experiments SET status='cancelled', completed_at=? WHERE id=? AND status='active'",
+            (completed_at, current["id"]),
+        )
+        self.database.audit(
+            category="collector",
+            action="discovery_experiment_cancelled",
+            entity_type="discovery_experiment",
+            entity_id=str(current["id"]),
+            severity="warning",
+            details={"reason": reason, "cancelled_at": completed_at, "preserve_for_audit": True},
+        )
+        return self.database.fetch_one(
+            "SELECT * FROM discovery_experiments WHERE id=?", (current["id"],)
         )
 
     def is_collecting(self) -> bool:
@@ -220,7 +241,7 @@ class DiscoveryExperimentManager:
         self.database.set_runtime_state("discovery_experiment_status", status)
         self._cycle_id = None
         self._api_metrics = {}
-        self._control_samples = {}
+
         self._maybe_complete()
 
     def _upsert_observation(
@@ -370,14 +391,14 @@ class DiscoveryExperimentManager:
         if not experiment or not self.is_collecting() or not self._cycle_id:
             return {"state": "inactive"}
         interval = str(experiment["interval"])
-        limit = int(experiment["limit_per_source"])
+
         cap = int(experiment["max_shadow_enrich_per_cycle"])
         source_candidates: dict[str, list[TokenCandidate]] = {}
         errors: list[str] = []
         for order_by in TRENDING_ORDER_BY:
             source_key = f"trending:{order_by}"
             try:
-                candidates = await discovery.discover_trending(order_by, interval=interval, limit=limit)
+                candidates = await discovery.discover_trending(order_by, interval=interval)
             except Exception as exc:
                 source_candidates[source_key] = []
                 errors.append(f"{source_key}:{type(exc).__name__}")
@@ -590,6 +611,12 @@ class DiscoveryExperimentManager:
         if not experiment:
             return {"state": "none"}
         exp_id = str(experiment["id"])
+        try:
+            experiment_config = json.loads(experiment.get("config_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            experiment_config = {}
+        if not isinstance(experiment_config, dict):
+            experiment_config = {}
         now = int(self._clock())
         source_rows: list[dict[str, Any]] = []
         winner_union_rows = self.database.fetch_all(
@@ -718,7 +745,7 @@ class DiscoveryExperimentManager:
                 (exp_id,),
             ) or {}).get("count") or 0),
             "interval": experiment["interval"],
-            "limit_per_source": int(experiment["limit_per_source"]),
+            "trending_result_limit": experiment_config.get("trending_result_limit") or f"legacy_explicit_{int(experiment['limit_per_source'])}",
             "max_shadow_enrich_per_cycle": int(experiment["max_shadow_enrich_per_cycle"]),
             "winner_union_addresses": len(winner_union),
             "sources": source_rows,
