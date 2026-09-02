@@ -27,10 +27,20 @@ class AsyncRateLimiter:
         self._lock = asyncio.Lock()
         self._next_request_at = 0.0
         self._pause_until = 0.0
+        self._total_weight_acquired = 0.0
+        self._acquire_calls = 0
 
     @property
     def pause_until(self) -> float:
         return self._pause_until
+
+    def snapshot(self) -> dict[str, float | int]:
+        return {
+            "requests_per_second": float(self.requests_per_second),
+            "total_weight_acquired": float(self._total_weight_acquired),
+            "acquire_calls": int(self._acquire_calls),
+            "pause_until": float(self._pause_until),
+        }
 
     def note_rate_limit(self, reset_at: int | None) -> None:
         fallback = self._wall_clock() + 300.0
@@ -48,6 +58,7 @@ class AsyncRateLimiter:
         # to interleave between heavy collector routes instead of waiting behind
         # a single 3x/5x sleep reservation.
         remaining_weight = float(weight)
+        self._acquire_calls += 1
         while remaining_weight > 1e-12:
             quantum = min(1.0, remaining_weight)
             async with self._lock:
@@ -62,6 +73,7 @@ class AsyncRateLimiter:
                 self._next_request_at = max(granted_at, self._next_request_at) + (
                     quantum / self.requests_per_second
                 )
+                self._total_weight_acquired += quantum
             remaining_weight -= quantum
             if remaining_weight > 1e-12:
                 await self._sleep(0)

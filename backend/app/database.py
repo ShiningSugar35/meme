@@ -10,7 +10,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .config import get_settings
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 def utc_now_iso() -> str:
@@ -944,6 +944,67 @@ CREATE TABLE IF NOT EXISTS collector_cycle_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_collector_cycle_observed
     ON collector_cycle_snapshots(observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS discovery_experiments (
+    id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, ends_at INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','completed','cancelled')),
+    interval TEXT NOT NULL, limit_per_source INTEGER NOT NULL CHECK(limit_per_source>0),
+    max_shadow_enrich_per_cycle INTEGER NOT NULL CHECK(max_shadow_enrich_per_cycle>=0),
+    config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, completed_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS only_one_active_discovery_experiment
+    ON discovery_experiments(status) WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_discovery_experiments_started ON discovery_experiments(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS discovery_experiment_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL REFERENCES discovery_experiments(id) ON DELETE CASCADE,
+    cycle_id TEXT NOT NULL, observed_at INTEGER NOT NULL, source_key TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('trenches','trending')),
+    address TEXT NOT NULL, source_rank INTEGER,
+    prefilter_accepted INTEGER CHECK(prefilter_accepted IN (0,1) OR prefilter_accepted IS NULL),
+    outcome TEXT NOT NULL, rejection_reasons_json TEXT NOT NULL DEFAULT '[]',
+    raw_json TEXT NOT NULL DEFAULT '{}', experiment_sample_id INTEGER, recorded_at TEXT NOT NULL,
+    UNIQUE(experiment_id,cycle_id,source_key,address)
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_experiment_observations_source
+    ON discovery_experiment_observations(experiment_id,source_key,observed_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_experiment_observations_address
+    ON discovery_experiment_observations(experiment_id,address,observed_at);
+
+CREATE TABLE IF NOT EXISTS discovery_experiment_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL REFERENCES discovery_experiments(id) ON DELETE CASCADE,
+    cycle_id TEXT NOT NULL, source_key TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('trenches','trending')),
+    address TEXT NOT NULL, entry_time INTEGER NOT NULL, entry_price REAL NOT NULL CHECK(entry_price>0),
+    launchpad TEXT, liquidity REAL, features_json TEXT NOT NULL DEFAULT '{}', raw_json TEXT NOT NULL DEFAULT '{}',
+    production_sample INTEGER NOT NULL DEFAULT 0 CHECK(production_sample IN (0,1)),
+    label_status TEXT NOT NULL DEFAULT 'pending' CHECK(label_status IN ('pending','mature')),
+    tag INTEGER CHECK(tag IN (0,1) OR tag IS NULL), label_max_price_ratio REAL, label_min_price_ratio REAL,
+    label_final_close_ratio REAL, first_take_profit_at INTEGER, first_stop_loss_at INTEGER, exit_reason TEXT,
+    same_bar_conflict INTEGER NOT NULL DEFAULT 0 CHECK(same_bar_conflict IN (0,1)),
+    gross_return_rate REAL, label_version TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_experiment_samples_due
+    ON discovery_experiment_samples(experiment_id,label_status,entry_time);
+CREATE INDEX IF NOT EXISTS idx_discovery_experiment_samples_source
+    ON discovery_experiment_samples(experiment_id,source_key,label_status);
+CREATE INDEX IF NOT EXISTS idx_discovery_experiment_samples_address
+    ON discovery_experiment_samples(experiment_id,address,entry_time);
+
+CREATE TABLE IF NOT EXISTS discovery_experiment_api_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL REFERENCES discovery_experiments(id) ON DELETE CASCADE,
+    cycle_id TEXT NOT NULL, observed_at INTEGER NOT NULL, route_key TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0, route_weight REAL NOT NULL DEFAULT 0,
+    weighted_units REAL NOT NULL DEFAULT 0, rate_limited_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0, total_latency_ms REAL NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL DEFAULT '{}', recorded_at TEXT NOT NULL,
+    UNIQUE(experiment_id,cycle_id,route_key)
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_experiment_api_metrics_time
+    ON discovery_experiment_api_metrics(experiment_id,observed_at);
 
 CREATE TABLE IF NOT EXISTS market_regime_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -58,6 +58,7 @@ class CollectorService:
         limit: int = 80,
         now_ts: int | None = None,
         event_sink: Callable[[str, Mapping[str, object]], None] | None = None,
+        observation_sink: Callable[[str, Mapping[str, object]], None] | None = None,
     ) -> CollectionReport:
         discovered = accepted = rejected = duplicates = 0
         prefilter_rejected = enrichment_rejected = 0
@@ -67,6 +68,10 @@ class CollectorService:
         def emit(action: str, details: Mapping[str, object]) -> None:
             if event_sink is not None:
                 event_sink(action, details)
+
+        def observe(action: str, details: Mapping[str, object]) -> None:
+            if observation_sink is not None:
+                observation_sink(action, details)
 
         for token_type in DISCOVERY_TYPES:
             emit("discovery_start", {"token_type": token_type, "requested_limit": limit})
@@ -85,7 +90,15 @@ class CollectorService:
                 "discovery_result",
                 {"token_type": token_type, "returned": len(candidates), "requested_limit": limit},
             )
-            for candidate in candidates:
+            for source_rank, candidate in enumerate(candidates, start=1):
+                observe("candidate_discovered", {
+                    "source_key": f"trenches:{token_type}",
+                    "source_kind": "trenches",
+                    "token_type": token_type,
+                    "address": candidate.address,
+                    "source_rank": source_rank,
+                    "raw": dict(candidate.raw),
+                })
                 token_label = str(
                     candidate.raw.get("symbol")
                     or candidate.raw.get("name")
@@ -95,6 +108,7 @@ class CollectorService:
                     duplicates += 1
                     current["duplicates"] += 1
                     emit("candidate_duplicate", {"token_type": token_type, "token": token_label})
+                    observe("candidate_duplicate", {"source_key": f"trenches:{token_type}", "address": candidate.address})
                     continue
                 prefilter = self.enrichment.prefilter(candidate)
                 if not prefilter.accepted:
@@ -113,7 +127,11 @@ class CollectorService:
                             "reasons": list(reasons),
                         },
                     )
+                    observe("candidate_prefilter_rejected", {
+                        "source_key": f"trenches:{token_type}", "address": candidate.address, "reasons": list(reasons)
+                    })
                     continue
+                observe("candidate_prefilter_passed", {"source_key": f"trenches:{token_type}", "address": candidate.address})
                 result = await self.enrichment.enrich(candidate, now_ts=now_ts)
                 if result.sample is None:
                     rejected += 1
@@ -131,10 +149,18 @@ class CollectorService:
                             "reasons": list(reasons),
                         },
                     )
+                    observe("candidate_enrichment_rejected", {
+                        "source_key": f"trenches:{token_type}", "address": candidate.address, "reasons": list(reasons)
+                    })
                     continue
                 await self.sink.add_sample(result.sample)
                 accepted += 1
                 current["accepted"] += 1
+                observe("candidate_accepted", {
+                    "source_key": f"trenches:{token_type}",
+                    "address": candidate.address,
+                    "sample": result.sample,
+                })
                 emit("candidate_accepted", {"token_type": token_type, "token": token_label})
             emit("discovery_type_complete", {"token_type": token_type, **current})
         return CollectionReport(

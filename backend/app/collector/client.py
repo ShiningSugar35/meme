@@ -7,7 +7,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from .errors import (
     CollectorAPIError,
@@ -170,6 +170,7 @@ class GMGNDataClient:
         limiter: AsyncRateLimiter | None = None,
         endpoints: CollectorEndpoints | None = None,
         timeout_seconds: float = 8.0,
+        telemetry_sink: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         if not base_url.strip():
             raise CollectorValidationError("GMGN base URL is required")
@@ -178,6 +179,7 @@ class GMGNDataClient:
         self.limiter = limiter or AsyncRateLimiter(2.0)
         self.endpoints = endpoints or CollectorEndpoints()
         self.timeout_seconds = timeout_seconds
+        self.telemetry_sink = telemetry_sink
         self._slot_locks: dict[int, asyncio.Lock] = {}
         self._slot_rate_limit_until: dict[int, float] = {}
         self._slot_rate_limit_reset_at: dict[int, int | None] = {}
@@ -213,6 +215,15 @@ class GMGNDataClient:
             return 2
         return 1
 
+    def _emit_telemetry(self, payload: Mapping[str, Any]) -> None:
+        if self.telemetry_sink is None:
+            return
+        try:
+            self.telemetry_sink(dict(payload))
+        except Exception:
+            # Telemetry is audit-only and must never break production data calls.
+            return
+
     async def request(
         self,
         slot: ApiSlot,
@@ -225,12 +236,14 @@ class GMGNDataClient:
     ) -> Mapping[str, Any]:
         lock = self._slot_locks.setdefault(slot.index, asyncio.Lock())
         async with lock:
+            route_weight = self.route_weight(path)
+            request_started = time.monotonic()
             if self.slot_rate_limit_remaining(slot) > 0:
                 raise CollectorRateLimitError(
                     f"GMGN API slot cooling down after rate limit (slot={slot.index}, path={path})",
                     reset_at=self._slot_rate_limit_reset_at.get(slot.index),
                 )
-            await self.limiter.acquire(self.route_weight(path))
+            await self.limiter.acquire(route_weight)
             request_params = {
                 key: value
                 for key, value in dict(params or {}).items()
@@ -258,6 +271,11 @@ class GMGNDataClient:
             except CollectorRateLimitError:
                 raise
             except Exception as exc:
+                self._emit_telemetry({
+                    "path": path, "route_weight": route_weight, "slot": slot.index,
+                    "latency_ms": (time.monotonic() - request_started) * 1000.0,
+                    "outcome": "network_failure", "rate_limited": False,
+                })
                 raise CollectorNetworkError(
                     f"GMGN network request failed (slot={slot.index}, path={path})"
                 ) from exc
@@ -275,11 +293,23 @@ class GMGNDataClient:
                 # the server reset window. The shared limiter still enforces the
                 # configured total request rate across all slots.
                 self._note_slot_rate_limit(slot, reset_at)
+                self._emit_telemetry({
+                    "path": path, "route_weight": route_weight, "slot": slot.index,
+                    "latency_ms": (time.monotonic() - request_started) * 1000.0,
+                    "outcome": "rate_limited", "rate_limited": True,
+                    "status_code": response.status_code,
+                })
                 raise CollectorRateLimitError(
                     f"GMGN rate limited (slot={slot.index}, path={path})",
                     reset_at=reset_at,
                 )
             if response.status_code >= 400:
+                self._emit_telemetry({
+                    "path": path, "route_weight": route_weight, "slot": slot.index,
+                    "latency_ms": (time.monotonic() - request_started) * 1000.0,
+                    "outcome": "api_failure", "rate_limited": False,
+                    "status_code": response.status_code,
+                })
                 error_type = CollectorValidationError if response.status_code in (400, 422) else CollectorAPIError
                 if error_type is CollectorValidationError:
                     raise error_type(
@@ -291,11 +321,23 @@ class GMGNDataClient:
                     code=code,
                 )
             if code and code.lower() not in {"success"}:
+                self._emit_telemetry({
+                    "path": path, "route_weight": route_weight, "slot": slot.index,
+                    "latency_ms": (time.monotonic() - request_started) * 1000.0,
+                    "outcome": "business_failure", "rate_limited": False,
+                    "status_code": response.status_code,
+                })
                 raise CollectorAPIError(
                     f"GMGN business response failed (path={path}): {message}",
                     status_code=response.status_code,
                     code=code,
                 )
+            self._emit_telemetry({
+                "path": path, "route_weight": route_weight, "slot": slot.index,
+                "latency_ms": (time.monotonic() - request_started) * 1000.0,
+                "outcome": "success", "rate_limited": False,
+                "status_code": response.status_code,
+            })
             if isinstance(response.data, Mapping):
                 return response.data
             return {"data": response.data}

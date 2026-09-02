@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from backend.app.collector.discovery import DiscoveryService, extract_trench_candidates
+from backend.app.collector.discovery import DiscoveryService, extract_trench_candidates, extract_trending_candidates
 from backend.app.collector.models import ApiKeyRoles
 
 
@@ -80,3 +80,64 @@ def test_discovery_parser_never_relabels_unrelated_sections() -> None:
     found = extract_trench_candidates(response, "new_creation")
     assert [candidate.address for candidate in found] == ["new-only"]
 
+
+
+class FakeTrendingClient:
+    def __init__(self) -> None:
+        self.endpoints = SimpleNamespace(trenches="/v1/trenches", trending="/v1/market/rank")
+        self.calls: list[tuple[int, str, dict[str, object]]] = []
+
+    def slot_rate_limit_remaining(self, _slot) -> float:
+        return 0.0
+
+    async def request(self, slot, path, **kwargs):
+        self.calls.append((slot.index, path, dict(kwargs.get("params") or {})))
+        if path == self.endpoints.trenches:
+            body = kwargs["json_body"]
+            if "new_creation" in body:
+                return {"data": {"new_creation": [{"address": "new-1"}]}}
+            return {"data": {"pump": {"items": [{"address": "pump-1"}]}}}
+        order_by = kwargs["params"]["order_by"]
+        return {"data": {"rank": [{"address": f"{order_by}-1", "volume": 10}]}}
+
+
+def test_trending_contract_and_parser_use_official_rank_fields() -> None:
+    response = {
+        "data": {
+            "rank": [
+                {"address": "mint-a", "volume": 123, "smart_degen_count": 4, "price_change_percent5m": 12.5},
+                {"address": "mint-a", "volume": 122},
+                {"address": "mint-b", "volume": 99},
+            ]
+        }
+    }
+    candidates = extract_trending_candidates(response, "volume")
+    assert [item.address for item in candidates] == ["mint-a", "mint-b"]
+    assert candidates[0].token_type == "trending"
+    assert candidates[0].raw["_discovery_source"] == "trending:volume"
+
+    params = DiscoveryService.trending_params("change5m", interval="5m", limit=80)
+    assert params["chain"] == "sol"
+    assert params["interval"] == "5m"
+    assert params["order_by"] == "change5m"
+    assert params["direction"] == "desc"
+    assert params["limit"] == 80
+    assert params["filters"] == ["renounced", "frozen"]
+    assert len(params["platform"]) == 8
+
+
+def test_trending_discovery_balances_reserved_keys_by_documented_route_weight() -> None:
+    roles = ApiKeyRoles.from_secrets([f"key-{i}" for i in range(12)])
+    client = FakeTrendingClient()
+    service = DiscoveryService(client, roles, retry_delay_seconds=0, sleeper=no_sleep)
+    asyncio.run(service.discover("new_creation", limit=1))
+    asyncio.run(service.discover("near_completion", limit=1))
+    for order_by in ("volume", "smart_degen_count", "change5m"):
+        found = asyncio.run(service.discover_trending(order_by, interval="5m", limit=1))
+        assert len(found) == 1
+    trench_slots = [slot for slot, path, _ in client.calls if path == "/v1/trenches"]
+    trend_slots = [slot for slot, path, _ in client.calls if path == "/v1/market/rank"]
+    assert trench_slots == [0, 1]
+    # 3+3 weighted Trenches load on slots 0/1; three weight-1 Trending calls fill slot 2 to 3.
+    assert trend_slots == [2, 2, 2]
+    assert service._reserved_weight == {0: 3.0, 1: 3.0, 2: 3.0}

@@ -87,3 +87,26 @@ def test_weighted_limiter_reserves_capacity_after_each_request() -> None:
     asyncio.run(run())
     assert waits == [0, 0.5, 0, 0.5, 0.5]
     assert sum(waits) == 1.5
+    snapshot = limiter.snapshot()
+    assert snapshot["total_weight_acquired"] == pytest.approx(4.0)
+    assert snapshot["acquire_calls"] == 2
+
+
+def test_client_telemetry_records_weight_latency_and_rate_limit_without_secrets() -> None:
+    limiter = FakeLimiter()
+    transport = RateLimitedTransport()
+    events: list[dict[str, object]] = []
+    client = GMGNDataClient(
+        base_url="https://example.invalid", transport=transport, limiter=limiter, telemetry_sink=events.append
+    )
+    slot = ApiSlot(2, "secret-must-never-appear")
+    with pytest.raises(CollectorRateLimitError):
+        asyncio.run(client.request(slot, client.endpoints.trenches))
+    assert len(events) == 1
+    assert events[0]["path"] == client.endpoints.trenches
+    assert events[0]["route_weight"] == 3
+    assert events[0]["slot"] == 2
+    assert events[0]["outcome"] == "rate_limited"
+    assert events[0]["rate_limited"] is True
+    assert float(events[0]["latency_ms"]) >= 0
+    assert "secret-must-never-appear" not in repr(events[0])

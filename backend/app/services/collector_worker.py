@@ -31,6 +31,7 @@ from ..collector import (
 from ..config import PROJECT_ROOT, Settings, get_settings
 from ..database import Database, utc_now_iso
 from ..collector.market_regime import GMGNMarketRegimeProvider
+from ..collector.discovery_experiment import DiscoveryExperimentManager
 from ..repositories.samples import SampleRecord, SampleRepository
 from .platform_configuration import ENV_PATH, PlatformConfigurationService
 from .sol_price import SolUsdPriceService
@@ -197,6 +198,7 @@ class CollectorWorker:
         self._service: CollectorService | None = None
         self._regime_provider: GMGNMarketRegimeProvider | None = None
         self._gmgn_limiter = gmgn_limiter
+        self._experiment = DiscoveryExperimentManager(database, gmgn_limiter)
         self._env_mtime_ns: int | None = None
         self._transport_rebuilds = 0
         self._sol_price = SolUsdPriceService(database)
@@ -401,11 +403,13 @@ class CollectorWorker:
         limiter = self._gmgn_limiter or AsyncRateLimiter(runtime["gmgn_global_rps"])
         limiter.requests_per_second = runtime["gmgn_global_rps"]
         self._gmgn_limiter = limiter
+        self._experiment.limiter = limiter
         client = GMGNDataClient(
             base_url=base_url,
             transport=self._transport,
             limiter=limiter,
             endpoints=endpoints,
+            telemetry_sink=self._experiment.record_api_event,
         )
         discovery = DiscoveryService(client, roles)
         provider = GMGNEnrichmentProvider(client, roles)
@@ -600,6 +604,7 @@ class CollectorWorker:
 
             started = time.time()
             self._active_cycle_id = uuid.uuid4().hex[:10]
+            self._experiment.begin_cycle(self._active_cycle_id, observed_at=int(started))
             previous_status = self.database.get_runtime_state("collector_status", {})
             previous_status = previous_status if isinstance(previous_status, dict) else {}
             self.database.set_runtime_state(
@@ -678,11 +683,25 @@ class CollectorWorker:
                     details={"error": message},
                 )
 
+            experiment_stats: dict[str, Any] = {"state": "inactive"}
+            experiment_finalized = 0
+            if not self.monitor_only and self._experiment.current() is not None:
+                try:
+                    experiment_finalized = await self._experiment.finalize_due(self._service.provider)
+                except Exception as exc:
+                    message = f"{type(exc).__name__}: {exc}"[:500]
+                    experiment_stats = {"state": "degraded", "errors": [{"stage": "label_finalization", "error": message}]}
+                    self.database.audit(
+                        category="collector", action="discovery_experiment_label_failed", severity="warning",
+                        details={"cycle_id": self._active_cycle_id, "error": message},
+                    )
+
             if not self.monitor_only:
                 try:
                     collection = await self._service.collect_once(
                         limit=requested_limit,
                         event_sink=self._record_event,
+                        observation_sink=self._experiment.observe_control,
                     )
                     collection_stats = {
                         "discovered": collection.discovered,
@@ -710,6 +729,44 @@ class CollectorWorker:
                         rate_limit_circuit = self._open_rate_limit_circuit(
                             exc, stage="discovery"
                         )
+
+            if (
+                not self.monitor_only
+                and self._experiment.current() is not None
+                and rate_limit_circuit is None
+                and not network_failure
+            ):
+                try:
+                    trending_stats = await self._experiment.run_trending_cycle(
+                        self._service.discovery, self._service.enrichment
+                    )
+                    experiment_stats = {**trending_stats, "labels_finalized": experiment_finalized}
+                except Exception as exc:
+                    # Shadow experiment failures are isolated from production Trenches.
+                    message = f"{type(exc).__name__}: {exc}"[:500]
+                    experiment_stats = {
+                        "state": "degraded",
+                        "labels_finalized": experiment_finalized,
+                        "errors": [{"stage": "trending_shadow", "error": message}],
+                    }
+                    self.database.audit(
+                        category="collector", action="discovery_experiment_cycle_failed", severity="warning",
+                        details={"cycle_id": self._active_cycle_id, "error": message},
+                    )
+            elif not self.monitor_only and self._experiment.current() is not None:
+                experiment_stats = {
+                    "state": "skipped_production_pressure",
+                    "labels_finalized": experiment_finalized,
+                    "production_rate_limited": rate_limit_circuit is not None,
+                    "production_network_failure": bool(network_failure),
+                }
+            try:
+                self._experiment.finish_cycle()
+            except Exception as exc:
+                self.database.audit(
+                    category="collector", action="discovery_experiment_metric_flush_failed", severity="warning",
+                    details={"cycle_id": self._active_cycle_id, "error": f"{type(exc).__name__}: {exc}"[:300]},
+                )
 
             elapsed = time.time() - started
             if not self.monitor_only:
@@ -739,6 +796,7 @@ class CollectorWorker:
                     "finalized": finalized,
                     "errors": cycle_errors,
                     "transport_rebuilds": self._transport_rebuilds,
+                    "discovery_experiment": experiment_stats,
                     "rate_limit_streak": self._rate_limit_streak if rate_limit_circuit is not None else 0,
                     "next_probe_at": rate_limit_circuit.get("next_probe_at") if rate_limit_circuit else None,
                 },
