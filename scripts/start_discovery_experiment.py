@@ -79,7 +79,7 @@ def main() -> None:
     cancelled = None
     if args.replace_active:
         cancelled = manager.cancel_current(
-            reason="invalid_pilot: trending universe changed to server-side prefilters and no explicit client limit (GMGN default/max 100)"
+            reason="invalid_experiment: Trending missing-insider qualification and internal-market lifecycle contract corrected; restart full 24h window"
         )
     trending_contract = DiscoveryService.trending_params("volume", interval="5m")
     server_prefilters = {
@@ -98,6 +98,7 @@ def main() -> None:
             "collector_poll_seconds": float(settings.collector_poll_seconds),
             "trending_result_limit": "gmgn_server_default_100",
             "trending_server_prefilters": server_prefilters,
+            "trending_server_filters": list(trending_contract.get("filters") or []),
             "official_route_weights": {"trending": 1, "trenches": 3, "kline": 2, "top_holders": 5},
         },
     )

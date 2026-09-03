@@ -18,10 +18,11 @@ class FakeTrendingDiscovery:
 
 
 class FakeEnrichment:
-    def __init__(self, now_ts: int): self.now_ts, self.enrich_calls = now_ts, []
+    def __init__(self, now_ts: int): self.now_ts, self.enrich_calls, self.trending_facts = now_ts, [], []
     def prefilter(self, candidate): return FilterDecision(True, ())
-    async def enrich(self, candidate, *, now_ts=None):
+    async def enrich(self, candidate, *, trending=None, now_ts=None):
         self.enrich_calls.append(candidate.address)
+        self.trending_facts.append(dict(trending or {}))
         sample = CollectedSample(address=candidate.address, token_type="trending", entry_time=int(now_ts or self.now_ts), entry_price=1.0, launchpad="Pump.fun", liquidity=10_000.0, features={"feature": 1.0}, age_minutes=10.0, holder_count=100.0, source=dict(candidate.raw))
         return SimpleNamespace(sample=sample, decision=FilterDecision(True, ()))
 
@@ -52,6 +53,25 @@ def test_trending_shadow_deduplicates_enrichment_and_never_writes_production_sam
         raw = json.loads(row["raw_json"])
         assert int(row["entry_time"]) >= int(raw["_experiment_source_observed_at"])
     assert [row["samples"] for row in manager.summary()["sources"] if row["source_key"].startswith("trending:")] == [1,1,1]
+
+
+def test_trending_reuses_same_cycle_trenches_missing_facts_without_overriding_rank_price(tmp_path):
+    db = Database(tmp_path / "same-cycle.db"); db.initialize()
+    manager = DiscoveryExperimentManager(db); manager.create_or_resume(max_shadow_enrich_per_cycle=8)
+    now = int(time.time()); manager.begin_cycle("same-cycle", observed_at=now); address = "shared-facts"
+    manager.observe_control("candidate_discovered", {
+        "source_key": "trenches:new_creation", "address": address, "source_rank": 1,
+        "raw": {"address": address, "insider_ratio": 0.11, "price": 0.5},
+    })
+    discovery = FakeTrendingDiscovery({
+        "volume": [TokenCandidate(address, "trending", {"address": address, "price": 1.0})],
+        "smart_degen_count": [], "change5m": [],
+    })
+    enrichment = FakeEnrichment(now)
+    result = asyncio.run(manager.run_trending_cycle(discovery, enrichment))
+    manager.finish_cycle()
+    assert result["accepted_unique"] == 1
+    assert enrichment.trending_facts == [{"address": address, "insider_ratio": 0.11, "price": 0.5}]
 
 
 def test_trending_budget_censoring_is_explicit(tmp_path):

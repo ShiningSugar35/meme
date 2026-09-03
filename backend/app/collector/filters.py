@@ -106,6 +106,9 @@ def _known_bool(value: Any) -> bool | None:
 
 
 def normalize_token(raw: Mapping[str, Any], token_type: str) -> dict[str, Any]:
+    qualified_facts = raw.get("_server_qualified_facts") if token_type == "trending" else None
+    if not isinstance(qualified_facts, Mapping):
+        qualified_facts = {}
     return {
         "address": first(raw, ("token_mint", "token_address", "address", "mint", "base_address"), ""),
         "type": token_type or first(raw, ("type", "trench_type", "category"), ""),
@@ -152,6 +155,7 @@ def normalize_token(raw: Mapping[str, Any], token_type: str) -> dict[str, Any]:
         "smart_degen_count": to_float(first(raw, ("smart_degen_count", "smartDegenCount"))),
         "renowned_count": to_float(first(raw, ("renowned_count", "renownedCount"))),
         "age": _age_minutes(raw),
+        "_server_qualified_facts": dict(qualified_facts),
     }
 
 
@@ -262,14 +266,38 @@ class SafetyFilter:
     def evaluate(self, token: Mapping[str, Any]) -> FilterDecision:
         t = self.t
         fail: list[str] = []
+        qualified = token.get("_server_qualified_facts")
+        qualified = qualified if isinstance(qualified, Mapping) else {}
+
+        def is_qualified(name: str) -> bool:
+            if name != "insider_ratio":
+                return False
+            fact = qualified.get(name)
+            if not isinstance(fact, Mapping):
+                return False
+            try:
+                declared_limit = float(fact.get("limit"))
+                request_limit = float(fact.get("request_max_insider_rate"))
+            except (TypeError, ValueError):
+                return False
+            return (
+                fact.get("source") == "gmgn_market_rank"
+                and fact.get("predicate") == "lt"
+                and declared_limit <= t.max_insider_ratio
+                and request_limit < t.max_insider_ratio
+            )
 
         def gt(name: str, value: Any, limit: float) -> None:
             parsed = _nonnegative_float(value)
+            if parsed is None and is_qualified(name):
+                return
             if parsed is None or not parsed > limit:
                 fail.append(f"{name}>{limit:g}")
 
         def lt(name: str, value: Any, limit: float) -> None:
             parsed = _nonnegative_float(value)
+            if parsed is None and is_qualified(name):
+                return
             if parsed is None or not parsed < limit:
                 fail.append(f"{name}<{limit:g}")
 
@@ -327,20 +355,51 @@ class SafetyFilter:
             fail.append("weighted_activity")
         return FilterDecision(not fail, tuple(fail))
 
-    def evaluate_required_facts(self, token: Mapping[str, Any]) -> FilterDecision:
-        """Validate filter inputs without assuming that unknown means safe."""
+    def evaluate_required_facts(
+        self,
+        token: Mapping[str, Any],
+        *,
+        allow_server_qualified: bool = True,
+    ) -> FilterDecision:
+        """Validate filter inputs without assuming that unknown means safe.
+
+        A missing field may be accepted only when the discovery response carries
+        an explicit server qualification for that same fact.  The qualification
+        is provenance, not a fabricated numeric value.
+        """
+        t = self.t
         invalid: list[str] = []
+        qualified = token.get("_server_qualified_facts")
+        qualified = qualified if isinstance(qualified, Mapping) else {}
+
+        def is_qualified(name: str) -> bool:
+            if not allow_server_qualified or name != "insider_ratio":
+                return False
+            fact = qualified.get(name)
+            if not isinstance(fact, Mapping):
+                return False
+            try:
+                declared_limit = float(fact.get("limit"))
+                request_limit = float(fact.get("request_max_insider_rate"))
+            except (TypeError, ValueError):
+                return False
+            return (
+                fact.get("source") == "gmgn_market_rank"
+                and fact.get("predicate") == "lt"
+                and declared_limit <= t.max_insider_ratio
+                and request_limit < t.max_insider_ratio
+            )
 
         def require_text(name: str) -> None:
-            if not str(token.get(name) or "").strip():
+            if not str(token.get(name) or "").strip() and not is_qualified(name):
                 invalid.append(name)
 
         def require_nonnegative(name: str) -> None:
-            if _nonnegative_float(token.get(name)) is None:
+            if _nonnegative_float(token.get(name)) is None and not is_qualified(name):
                 invalid.append(name)
 
         def require_ratio(name: str) -> None:
-            if _ratio_float(token.get(name)) is None:
+            if _ratio_float(token.get(name)) is None and not is_qualified(name):
                 invalid.append(name)
 
         for name in ("address", "launchpad", "symbol", "quote_symbol", "burn_status"):

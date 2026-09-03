@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
@@ -61,6 +62,7 @@ def extract_trench_candidates(data: Mapping[str, Any], requested_type: str) -> l
 
 TRENDING_ORDER_BY = ("volume", "smart_degen_count", "change5m")
 TRENDING_INTERVALS = ("1m", "5m", "1h", "6h", "24h")
+TRENDING_QUALIFIED_FACTS_KEY = "_server_qualified_facts"
 
 
 def extract_trending_candidates(data: Mapping[str, Any], order_by: str) -> list[TokenCandidate]:
@@ -129,7 +131,7 @@ class DiscoveryService:
             "order_by": order_by,
             "direction": "desc",
 
-            "filters": ["renounced", "frozen"],
+            "filters": ["renounced", "frozen", "is_internal_market"],
             "platform": list(LAUNCHPADS),
             "min_created": f"{thresholds.min_age_minutes:g}m",
             "max_created": f"{thresholds.max_age_minutes_exclusive:g}m",
@@ -139,7 +141,10 @@ class DiscoveryService:
             "max_holder_count": int(thresholds.max_holder_count_exclusive) - 1,
             "min_top10_holder_rate": thresholds.min_top_10_holder_rate,
             "max_top10_holder_rate": thresholds.max_top_10_holder_rate,
-            "max_insider_rate": thresholds.max_insider_ratio,
+            # GMGN range bounds are inclusive while the local contract is strict.
+            # Use the nearest representable value below 0.2 so a server-qualified
+            # missing insider fact never weakens the local `insider_ratio < 0.2` rule.
+            "max_insider_rate": math.nextafter(thresholds.max_insider_ratio, -math.inf),
             "max_bundler_rate": thresholds.max_bundler_rate,
         }
 
@@ -240,7 +245,28 @@ class DiscoveryService:
             try:
                 data = await self.client.request(slot, self.client.endpoints.trending, params=params)
                 self._note_reserved_weight(slot, weight)
-                return extract_trending_candidates(data, order_by)
+                candidates = extract_trending_candidates(data, order_by)
+                qualification = {
+                    "insider_ratio": {
+                        "source": "gmgn_market_rank",
+                        "predicate": "lt",
+                        "limit": FilterThresholds().max_insider_ratio,
+                        "request_max_insider_rate": params["max_insider_rate"],
+                    },
+                    "lifecycle_scope": {
+                        "source": "gmgn_market_rank",
+                        "predicate": "is_internal_market",
+                        "scope": "new_creation_or_near_completion",
+                    },
+                }
+                return [
+                    TokenCandidate(
+                        candidate.address,
+                        candidate.token_type,
+                        {**dict(candidate.raw), TRENDING_QUALIFIED_FACTS_KEY: qualification},
+                    )
+                    for candidate in candidates
+                ]
             except CollectorNetworkError:
                 raise
             except CollectorRateLimitError as exc:

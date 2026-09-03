@@ -22,7 +22,12 @@ def _all_dicts(value: Any, depth: int = 0) -> list[Mapping[str, Any]]:
         return []
     if isinstance(value, Mapping):
         result: list[Mapping[str, Any]] = [value]
-        for nested in value.values():
+        for key, nested in value.items():
+            # Private collector metadata (for example server-qualification
+            # provenance) must remain nested and must not leak generic keys such
+            # as `source`, `predicate` or `limit` into the business namespace.
+            if str(key).startswith("_"):
+                continue
             result.extend(_all_dicts(nested, depth + 1))
         return result
     if isinstance(value, list):
@@ -82,6 +87,10 @@ def extract_items(value: Any, keys: Sequence[str]) -> list[Mapping[str, Any]]:
 
 class EnrichmentProvider(Protocol):
     async def token_bundle(self, address: str) -> Mapping[str, Any]: ...
+
+    async def supplement_missing_facts(
+        self, address: str, missing_fields: Sequence[str]
+    ) -> Mapping[str, Any]: ...
 
     async def top_holders(self, address: str, limit: int = 20) -> Sequence[Mapping[str, Any]]: ...
 
@@ -172,6 +181,47 @@ class GMGNEnrichmentProvider:
             except CollectorError:
                 # Missing API values remain absent and therefore fail closed in
                 # SafetyFilter.  They must never be rewritten as numeric zero.
+                bundle[name] = {}
+        return bundle
+
+    async def supplement_missing_facts(
+        self, address: str, missing_fields: Sequence[str]
+    ) -> Mapping[str, Any]:
+        """Refetch only endpoint families capable of supplying missing facts."""
+        fields = {str(field) for field in missing_fields}
+        security_fields = {
+            "rug_ratio", "insider_ratio", "bundler_rate", "top_10_holder_rate",
+            "fresh_wallet_rate", "burn_status", "renounced_mint",
+            "renounced_freeze_account", "is_wash_trading",
+            "rat_trader_amount_rate", "sell_tax", "buy_tax", "sniper_count",
+        }
+        info_fields = {
+            "address", "launchpad", "symbol", "price", "liquidity",
+            "holder_count", "marketcap", "age", "swaps_1h", "volume_1h",
+            "volume", "smart_degen_count", "renowned_count",
+        }
+        pool_fields = {"quote_symbol", "price", "liquidity"}
+        wanted: list[tuple[str, str]] = []
+        if fields & security_fields:
+            wanted.append(("security", self.client.endpoints.token_security))
+        if fields & info_fields:
+            wanted.append(("token_info", self.client.endpoints.token_info))
+        if fields & pool_fields:
+            wanted.append(("pool", self.client.endpoints.token_pool_info))
+        if not wanted:
+            wanted = [
+                ("token_info", self.client.endpoints.token_info),
+                ("security", self.client.endpoints.token_security),
+                ("pool", self.client.endpoints.token_pool_info),
+            ]
+        params = {"chain": "sol", "address": address}
+        bundle: dict[str, Any] = {}
+        for name, path in wanted:
+            try:
+                bundle[name] = await self._realtime_request(path, params=params)
+            except CollectorNetworkError:
+                raise
+            except CollectorError:
                 bundle[name] = {}
         return bundle
 
@@ -325,21 +375,60 @@ class EnrichmentService:
         trending: Mapping[str, Any] | None = None,
         now_ts: int | None = None,
     ) -> EnrichmentResult:
-        bundle: Mapping[str, Any] = {}
-        source: Mapping[str, Any] = {}
-        normalized: dict[str, Any] = {}
-        readiness = FilterDecision(False, ("missing_or_invalid:unknown",))
-        for attempt in range(self.readiness_attempts):
-            bundle = await self.provider.token_bundle(candidate.address)
-            source = merge_sources(candidate.raw, bundle, trending or {})
-            normalized = normalize_token(source, candidate.token_type)
-            if not normalized.get("address"):
-                normalized["address"] = candidate.address
-            readiness = self.safety_filter.evaluate_required_facts(normalized)
-            if readiness.accepted:
-                break
-            if attempt < self.readiness_attempts - 1 and self.readiness_retry_seconds:
-                await self._sleep(self.readiness_retry_seconds)
+        bundle: Mapping[str, Any] = await self.provider.token_bundle(candidate.address)
+        source: Mapping[str, Any] = merge_sources(candidate.raw, bundle, trending or {})
+        normalized: dict[str, Any] = normalize_token(source, candidate.token_type)
+        if not normalized.get("address"):
+            normalized["address"] = candidate.address
+
+        # Prefer a real PIT field value. Server qualification is only a final
+        # fallback for a fact that the upstream rank query proved but did not echo.
+        strict_readiness = self.safety_filter.evaluate_required_facts(
+            normalized, allow_server_qualified=False
+        )
+        if not strict_readiness.accepted:
+            missing = tuple(
+                str(reason).split(":", 1)[1]
+                for reason in strict_readiness.reasons
+                if str(reason).startswith("missing_or_invalid:") and ":" in str(reason)
+            )
+            supplement = getattr(self.provider, "supplement_missing_facts", None)
+            if callable(supplement):
+                if self.readiness_retry_seconds:
+                    await self._sleep(self.readiness_retry_seconds)
+                extra = await supplement(candidate.address, missing)
+                bundle = merge_sources(bundle, extra)
+                source = merge_sources(candidate.raw, bundle, trending or {})
+                normalized = normalize_token(source, candidate.token_type)
+                if not normalized.get("address"):
+                    normalized["address"] = candidate.address
+                strict_readiness = self.safety_filter.evaluate_required_facts(
+                    normalized, allow_server_qualified=False
+                )
+            else:
+                # Compatibility path for alternate/test providers that cannot
+                # target a missing endpoint family. Production GMGN never uses
+                # this whole-bundle retry loop.
+                for _attempt in range(max(0, self.readiness_attempts - 1)):
+                    if strict_readiness.accepted:
+                        break
+                    if self.readiness_retry_seconds:
+                        await self._sleep(self.readiness_retry_seconds)
+                    extra = await self.provider.token_bundle(candidate.address)
+                    bundle = merge_sources(bundle, extra)
+                    source = merge_sources(candidate.raw, bundle, trending or {})
+                    normalized = normalize_token(source, candidate.token_type)
+                    if not normalized.get("address"):
+                        normalized["address"] = candidate.address
+                    strict_readiness = self.safety_filter.evaluate_required_facts(
+                        normalized, allow_server_qualified=False
+                    )
+
+        readiness = strict_readiness
+        if not readiness.accepted:
+            readiness = self.safety_filter.evaluate_required_facts(
+                normalized, allow_server_qualified=True
+            )
         if not readiness.accepted:
             return EnrichmentResult(None, readiness)
 

@@ -382,6 +382,29 @@ class DiscoveryExperimentManager:
                 prefilter_accepted=True, outcome="accepted", sample_id=sample_id,
             )
 
+    def _control_raw_for_current_cycle(self, address: str) -> Mapping[str, Any]:
+        """Return PIT-safe Trenches facts already observed in the same cycle."""
+        experiment = self.current()
+        if not experiment or not self._cycle_id or not address:
+            return {}
+        rows = self.database.fetch_all(
+            """
+            SELECT raw_json FROM discovery_experiment_observations
+            WHERE experiment_id=? AND cycle_id=? AND source_kind='trenches' AND address=?
+            ORDER BY source_key
+            """,
+            (experiment["id"], self._cycle_id, address),
+        )
+        values: list[Mapping[str, Any]] = []
+        for row in rows:
+            try:
+                decoded = json.loads(row.get("raw_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(decoded, Mapping):
+                values.append(decoded)
+        return merge_sources(*values) if values else {}
+
     async def run_trending_cycle(
         self,
         discovery: DiscoveryService,
@@ -465,7 +488,12 @@ class DiscoveryExperimentManager:
             representative = TokenCandidate(address, "trending", merged_raw)
             # Entry-time facts must be no earlier than the actual Trending observation.
             enrichment_time = int(self._clock())
-            result = await enrichment.enrich(representative, now_ts=enrichment_time)
+            control_raw = self._control_raw_for_current_cycle(address)
+            result = await enrichment.enrich(
+                representative,
+                trending=control_raw or None,
+                now_ts=enrichment_time,
+            )
             if result.sample is None:
                 rejected += 1
                 for source_key, rank, _ in memberships:

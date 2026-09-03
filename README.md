@@ -34,7 +34,7 @@ GMGN Trenches 候选发现
 
 ### Discovery 来源实验
 
-生产 Collector 当前仍以 Trenches lifecycle 发现为正式入口；若需要评估其他发现策略，可使用独立 shadow discovery experiment 并行比较多个来源。Trending 会把 GMGN 官方能够等价表达的 age、liquidity、marketcap、holder、top10、insider、bundler 范围先推到 `/v1/market/rank` 服务器端，再由本地完整 SafetyFilter 严格复核；Trending 请求不显式设置 `limit`，使用 GMGN 默认/最大 100 条语义。实验来源不写正式 `samples`、模型训练或 `rules_only`。GMGN 流量统一通过共享 weighted limiter；高权重 enrichment 先跨来源按地址去重，并按生产历史负载动态限制 shadow 深筛数量。状态可用 `scripts\discovery_experiment_status.py` 查询。
+生产 Collector 当前仍以 Trenches lifecycle 发现为正式入口；若需要评估其他发现策略，可使用独立 shadow discovery experiment 并行比较多个来源。Trending 会把 GMGN 官方能够等价表达的 age、liquidity、marketcap、holder、top10、insider、bundler 范围以及 `is_internal_market` 生命周期范围先推到 `/v1/market/rank`，从服务器端限定为尚未 migrated/completed 的 launchpad 内部市场；Trending 请求不显式设置 `limit`，使用 GMGN 默认/最大 100 条语义。缺失 required fact 必须优先使用同一采集周期已观测到的 Trenches 原始事实补齐，再按字段定向补拉对应 endpoint family；只有上游 range 已严格证明某个安全事实、而 PIT 可用的 rank/Trenches/address API 均不返回该数值时，才允许以带来源、谓词和实际请求阈值的 server-qualification provenance 作为最终 fallback，不得伪造数值，也不得替代其他 SafetyFilter。完整 SafetyFilter、top-holder 和 PIT 特征链仍必须执行。实验来源不写正式 `samples`、模型训练或 `rules_only`。状态可用 `scripts\discovery_experiment_status.py` 查询。
 
 ## 3. 生产准入合同
 

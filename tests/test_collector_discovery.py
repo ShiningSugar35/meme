@@ -130,9 +130,10 @@ def test_trending_contract_and_parser_use_official_rank_fields() -> None:
     assert params["max_holder_count"] == 999
     assert params["min_top10_holder_rate"] == 0.14
     assert params["max_top10_holder_rate"] == 0.25
-    assert params["max_insider_rate"] == 0.2
+    assert params["max_insider_rate"] < 0.2
+    assert params["max_insider_rate"] > 0.199999999
     assert params["max_bundler_rate"] == 0.2
-    assert params["filters"] == ["renounced", "frozen"]
+    assert params["filters"] == ["renounced", "frozen", "is_internal_market"]
     assert len(params["platform"]) == 8
 
 
