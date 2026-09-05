@@ -150,6 +150,8 @@ def normalize_token(raw: Mapping[str, Any], token_type: str) -> dict[str, Any]:
         "buy_tax": to_float(first(raw, ("buy_tax", "buy_tax_rate", "buy_tax_percent"))),
         "sniper_count": to_float(first(raw, ("sniper_count", "sniper_wallets", "snipers", "sniper_trader_count"))),
         "swaps_1h": to_float(first(raw, ("swaps_1h", "swaps1h", "trade_1h", "trades_1h"))),
+        "buys_1h": to_float(first(raw, ("buys_1h", "buy_1h", "buy_count_1h"))),
+        "sells_1h": to_float(first(raw, ("sells_1h", "sell_1h", "sell_count_1h"))),
         "volume_1h": to_float(first(raw, ("volume_1h", "volume1h", "volume_1h_usd", "volume_h1"))),
         "volume": to_float(first(raw, ("volume", "volume_usd", "volume_24h", "volume_h24"))),
         "smart_degen_count": to_float(first(raw, ("smart_degen_count", "smartDegenCount"))),
@@ -247,12 +249,16 @@ class SafetyFilter:
                 fail.append("liquidity/holder_count")
 
         swaps = _nonnegative_float(token.get("swaps_1h"))
+        buys = _nonnegative_float(token.get("buys_1h"))
         volume_1h = _nonnegative_float(token.get("volume_1h"))
         if swaps is not None and not swaps > t.min_swaps_1h:
             fail.append(f"swaps_1h>{t.min_swaps_1h:g}")
         if swaps is not None and volume_1h is not None:
             if not swaps or not volume_1h or volume_1h / swaps <= t.min_volume_per_swap_1h:
                 fail.append("volume_1h/swaps_1h")
+        if swaps is not None and buys is not None:
+            if not swaps or buys > swaps or buys / swaps >= t.max_buy_swap_ratio_1h:
+                fail.append(f"buys_1h/swaps_1h<{t.max_buy_swap_ratio_1h:g}")
 
         smart = _nonnegative_float(token.get("smart_degen_count"))
         renowned = _nonnegative_float(token.get("renowned_count"))

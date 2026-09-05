@@ -154,6 +154,7 @@ class DiscoveryService:
             raise CollectorValidationError(f"Unsupported discovery type: {token_type}")
         if not 1 <= limit <= 80:
             raise CollectorValidationError("GMGN trenches limit must be between 1 and 80")
+        thresholds = FilterThresholds()
         section: dict[str, Any] = {
             "filters": ["offchain", "onchain"],
             "launchpad_platform_v2": True,
@@ -161,8 +162,8 @@ class DiscoveryService:
 
             "launchpad_platform": list(LAUNCHPADS),
             "quote_address_type": list(SOL_TRENCH_QUOTE_ADDRESS_TYPES),
-            "min_created": "2m",
-            "max_created": "300m",
+            "min_created": f"{thresholds.min_age_minutes:g}m",
+            "max_created": f"{thresholds.max_age_minutes_exclusive:g}m",
         }
         return {"version": "v2", token_type: section}
 

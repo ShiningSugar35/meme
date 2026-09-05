@@ -215,7 +215,7 @@ async def test_scheduled_training_uses_persisted_feature_pool_not_champion_subse
     assert json.loads(row["request_json"])["feature_names"] == [
         "ln(age+1)",
         "momentum_accel_1m_vs_5m",
-        "ln(marketcap+1)",
+        "ln(marketcap/liquidity)",
     ]
 
 

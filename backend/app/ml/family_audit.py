@@ -21,7 +21,7 @@ TOKEN_LOCAL_FAMILY: tuple[str, ...] = (
     "buy_volume_imbalance_1m",
     "ln(volume_1m/swaps_1m+1)",
     "holder_count/age",
-    "ln(marketcap+1)",
+    "ln(marketcap/liquidity)",
 )
 
 TOKEN_ATTENTION_FAMILY: tuple[str, ...] = (

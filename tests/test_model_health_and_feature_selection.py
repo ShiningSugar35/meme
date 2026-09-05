@@ -119,7 +119,7 @@ def test_deprecated_absolute_liquidity_feature_is_filtered(tmp_path: Path) -> No
     assert "momentum_accel_1m_vs_5m" in defaults
     assert "ln(liquidity_usd)" not in defaults
     selected = service.normalize_feature_selection(["price", "ln(liquidity_usd)"])
-    assert selected == ("ln(marketcap+1)",)
+    assert selected == ("ln(marketcap/liquidity)",)
     migrated = service.normalize_feature_selection(["price_change_1h", "top_bot_degen_percentage"])
     assert migrated == ("bot_degen_rate", "momentum_accel_1m_vs_5m")
     with pytest.raises(ValueError):
@@ -129,6 +129,22 @@ def test_deprecated_absolute_liquidity_feature_is_filtered(tmp_path: Path) -> No
     run_id = service.create_run("manual", feature_names=list(selected))
     row = database.fetch_one("SELECT request_json FROM training_runs WHERE id=?", (run_id,))
     assert json.loads(row["request_json"])["feature_names"] == list(selected)
+
+
+def test_v4_feature_pool_migration_keeps_legacy_choices_and_enrolls_new_candidates(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    database.set_runtime_state(
+        "model_training_feature_pool:event1m_regime_v3",
+        ["ln(marketcap+1)", "price_change_1h"],
+    )
+    selected = TrainingService(database, make_settings(tmp_path)).configured_feature_selection()
+    assert "ln(marketcap+1)" not in selected
+    assert "ln(marketcap/liquidity)" in selected
+    assert "momentum_accel_1m_vs_5m" in selected
+    assert "buy_swap_ratio_1h" in selected
+    assert "ln(creator_launches_24h+1)" in selected
+    assert "monitor_fomo_buy_ratio_15m" in selected
+    assert "monitor_source_coverage" in selected
 
 
 def test_insufficient_recent_predictions_do_not_queue_retraining(tmp_path: Path) -> None:

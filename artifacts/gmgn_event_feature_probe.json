@@ -1,43 +1,98 @@
 {
   "candidate_count": 10,
+  "creator_history": [
+    {
+      "creator_present": true,
+      "launch_count_24h": 1,
+      "launch_qualified_without_exact_count": false,
+      "launch_source": "gmgn_created_tokens_exact",
+      "returned_items": 1,
+      "timestamp_fields": {
+        "create_timestamp": 1
+      }
+    },
+    {
+      "creator_present": true,
+      "launch_count_24h": 1,
+      "launch_qualified_without_exact_count": false,
+      "launch_source": "gmgn_created_tokens_exact",
+      "returned_items": 38,
+      "timestamp_fields": {
+        "create_timestamp": 38
+      }
+    },
+    {
+      "creator_present": true,
+      "launch_count_24h": 1,
+      "launch_qualified_without_exact_count": false,
+      "launch_source": "gmgn_created_tokens_exact",
+      "returned_items": 1,
+      "timestamp_fields": {
+        "create_timestamp": 1
+      }
+    }
+  ],
   "credentials_redacted": true,
   "feature_probe_samples": 3,
   "field_null_or_missing_count": {
+    "buy_volume_1h": 0,
     "buy_volume_1m": 0,
+    "buys_1h": 0,
     "buys_1m": 0,
+    "creator_address": 0,
     "dexscr_ad": 0,
     "dexscr_boost_fee": 0,
     "dexscr_trending_bar": 0,
     "holder_count": 0,
     "marketcap": 0,
+    "pool_created_at": 3,
+    "sell_volume_1h": 0,
     "sell_volume_1m": 0,
+    "sells_1h": 0,
     "sells_1m": 0,
+    "swaps_1h": 0,
     "swaps_1m": 0,
     "tg_call_count": 0,
     "volume_1m": 0,
     "x_user_follower": 2
   },
   "field_presence_count": {
+    "buy_volume_1h": 3,
     "buy_volume_1m": 3,
+    "buys_1h": 3,
     "buys_1m": 3,
+    "creator_address": 3,
     "dexscr_ad": 3,
     "dexscr_boost_fee": 3,
     "dexscr_trending_bar": 3,
     "holder_count": 3,
     "marketcap": 3,
+    "pool_created_at": 0,
+    "sell_volume_1h": 3,
     "sell_volume_1m": 3,
+    "sells_1h": 3,
     "sells_1m": 3,
+    "swaps_1h": 3,
     "swaps_1m": 3,
     "tg_call_count": 3,
     "volume_1m": 3,
     "x_user_follower": 1
   },
   "field_type_counts": {
+    "buy_volume_1h": {
+      "str": 3
+    },
     "buy_volume_1m": {
       "str": 3
     },
+    "buys_1h": {
+      "int": 3
+    },
     "buys_1m": {
       "int": 3
+    },
+    "creator_address": {
+      "str": 3
     },
     "dexscr_ad": {
       "bool": 3
@@ -54,10 +109,20 @@
     "marketcap": {
       "float": 3
     },
+    "pool_created_at": {},
+    "sell_volume_1h": {
+      "str": 3
+    },
     "sell_volume_1m": {
       "str": 3
     },
+    "sells_1h": {
+      "int": 3
+    },
     "sells_1m": {
+      "int": 3
+    },
+    "swaps_1h": {
       "int": 3
     },
     "swaps_1m": {
@@ -76,12 +141,12 @@
   "regime": {
     "available": true,
     "errors": [],
-    "hot_search_count_1m": 16,
-    "hot_search_visits_1m": 1705.0,
-    "market_activity_rows": 26,
-    "market_buy_count_imbalance_1m": 0.30912973838761343,
+    "hot_search_count_1m": 17,
+    "hot_search_visits_1m": 973.0,
+    "market_activity_rows": 27,
+    "market_buy_count_imbalance_1m": 0.13873473917869034,
     "market_buy_volume_imbalance_1m": null,
-    "observed_at": 1786874049,
+    "observed_at": 1788625957,
     "signal_dex_ad_15m": 0,
     "signal_dex_boost_15m": 0,
     "signal_dex_trending_15m": 0,
@@ -90,6 +155,6 @@
     "signal_multi_buy_15m": 0,
     "signal_multi_large_buy_15m": 0,
     "signal_smart_money_buy_15m": 0,
-    "trending_count_1m": 26
+    "trending_count_1m": 27
   }
 }

@@ -9,7 +9,7 @@ from .sparse_budget import GLOBAL_PROBABILITY_FLOOR
 DECISION_POLICY_VERSION = "phase19_expected_return_paper_v1"
 DEPLOYMENT_CERTIFICATION_VERSION = "phase19_expected_return_certification_v1"
 
-AGE_POLICY_ADMISSION_ONLY = "age_admission_only_v1"
+AGE_POLICY_ADMISSION_ONLY = "age_admission_only_v2"
 AGE_POLICY_CANDIDATES = (AGE_POLICY_ADMISSION_ONLY,)
 DEFAULT_AGE_POLICY_VERSION = AGE_POLICY_ADMISSION_ONLY
 
@@ -53,7 +53,7 @@ def age_gate(
     if age_minutes is None:
         return AgeGateDecision(False, 0.0, "age_missing")
     age = float(age_minutes)
-    if not 2.0 < age < 300.0:
+    if not 5.0 < age < 240.0:
         return AgeGateDecision(False, 0.0, "age_outside_admission_contract")
     return AgeGateDecision(True, 0.0, "age_admission_only")
 

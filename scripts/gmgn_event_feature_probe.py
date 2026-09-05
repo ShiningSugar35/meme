@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
@@ -11,7 +12,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.app.collector.enrichment import extract_items, recursive_find
 from backend.app.database import Database
+from backend.app.services.onchain_admission import gmgn_creator_launches_24h
 from backend.app.services.collector_worker import CollectorWorker
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -26,6 +29,13 @@ FIELDS = (
     "sells_1m",
     "buy_volume_1m",
     "sell_volume_1m",
+    "swaps_1h",
+    "buys_1h",
+    "sells_1h",
+    "buy_volume_1h",
+    "sell_volume_1h",
+    "creator_address",
+    "pool_created_at",
 
     "dexscr_ad",
     "dexscr_boost_fee",
@@ -67,6 +77,7 @@ async def main() -> int:
         sample_count = min(3, len(candidates))
         availability: Counter[str] = Counter()
         type_counts: dict[str, Counter[str]] = {field: Counter() for field in FIELDS}
+        created_tokens_probe: list[dict[str, object]] = []
         for candidate in candidates[:sample_count]:
             try:
                 bundle = await service.provider.token_bundle(candidate.address)
@@ -83,6 +94,31 @@ async def main() -> int:
                     availability[field] += 1
                     type_counts[field][type(value).__name__] += 1
 
+            creator = recursive_find(composite, "creator_address") or recursive_find(composite, "creator")
+            created_tokens = {}
+            if creator:
+                try:
+                    created_tokens = await service.provider.created_tokens(str(creator))
+                except Exception:
+                    created_tokens = {}
+            items = extract_items(created_tokens, ("tokens", "list", "items", "rows", "data"))
+            timestamp_fields = Counter()
+            for item in items[:100]:
+                for name in ("create_timestamp", "created_at", "creation_time", "created_timestamp", "open_time", "launch_time"):
+                    if item.get(name) not in (None, ""):
+                        timestamp_fields[name] += 1
+            launch_count, launch_source, launch_qualified = gmgn_creator_launches_24h(
+                created_tokens, end_ts=int(time.time()), reject_at=20
+            )
+            created_tokens_probe.append({
+                "creator_present": bool(creator),
+                "returned_items": len(items),
+                "timestamp_fields": dict(timestamp_fields),
+                "launch_count_24h": launch_count,
+                "launch_source": launch_source,
+                "launch_qualified_without_exact_count": bool(launch_qualified),
+            })
+
         regime = worker._regime_provider
         regime_snapshot = await regime.snapshot() if regime is not None else {"available": False, "errors": ["provider_missing"]}
         report = {
@@ -96,6 +132,7 @@ async def main() -> int:
             "field_type_counts": {
                 field: dict(type_counts[field]) for field in FIELDS
             },
+            "creator_history": created_tokens_probe,
             "regime": {
                 key: value
                 for key, value in regime_snapshot.items()

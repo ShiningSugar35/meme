@@ -85,11 +85,12 @@ def test_secondary_shadow_features_preserve_unknowns_and_explicit_semantics() ->
         age_minutes=2.5,
         holder_count=40,
         marketcap=10_000,
+        liquidity=5_000,
     )
     assert features["dexscr_ad"] is None
     assert "creator_token_status" not in features
     assert features["holder_count/age"] == pytest.approx(16.0)
-    assert features["ln(marketcap+1)"] == pytest.approx(math.log1p(10_000))
+    assert features["ln(marketcap/liquidity)"] == pytest.approx(math.log(2.0))
 
 
 def test_new_feature_generation_keeps_event_candidates_shadow_only() -> None:
@@ -100,7 +101,7 @@ def test_new_feature_generation_keeps_event_candidates_shadow_only() -> None:
     assert "ln(swaps_1m+1)" not in AVAILABLE_MODEL_FEATURES
     assert "ln(volume_2m+1)" not in AVAILABLE_MODEL_FEATURES
     assert "ln(liquidity_usd)" not in AVAILABLE_MODEL_FEATURES
-    assert len(AVAILABLE_MODEL_FEATURES) == 39
+    assert len(AVAILABLE_MODEL_FEATURES) == 57
     assert "price_change_1m" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "volume_acceleration_2m" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "holder_count/age" not in DEFAULT_MODEL_TRAINING_FEATURES
@@ -138,6 +139,18 @@ def test_rpc_endpoint_order_uses_four_alchemy_then_public(tmp_path: Path) -> Non
     assert endpoints[-1].production_grade is False
 
 
+def test_rpc_configuration_explicitly_excludes_ankr_urls(tmp_path) -> None:
+    env = tmp_path / ".env"
+    env.write_text(
+        "SOLANA_RPC_HTTP_URLS=https://rpc.ankr.com/solana/example,https://rpc.example.com/solana,https://solana-mainnet.g.alchemy.com/v2/example\n",
+        encoding="utf-8",
+    )
+    endpoints = configured_rpc_endpoints(env)
+    assert any(item.provider == "alchemy" for item in endpoints)
+    assert all("ankr.com" not in item.url for item in endpoints)
+    assert all("example.com" not in item.url for item in endpoints)
+
+
 def test_rpc_http_error_redaction_never_persists_embedded_credential() -> None:
     credential = "fixture_credential_value"
     endpoint = RpcEndpoint("alchemy", 1, f"https://solana-mainnet.g.alchemy.com/v2/{credential}")
@@ -147,6 +160,26 @@ def test_rpc_http_error_redaction_never_persists_embedded_credential() -> None:
     safe = SolanaRpcPool._safe_error(endpoint, error)
     assert safe == "alchemy:1:http_403"
     assert credential not in safe
+
+
+@pytest.mark.asyncio
+async def test_solana_rpc_owned_http_client_ignores_workstation_proxy_env(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        async def aclose(self) -> None:
+            return None
+
+    def fake_async_client(**kwargs):
+        captured.update(kwargs)
+        return FakeClient()
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
+    pool = SolanaRpcPool((RpcEndpoint("alchemy", 1, "https://solana-mainnet.g.alchemy.com/v2/test"),))
+    client = await pool._http_client()
+    assert isinstance(client, FakeClient)
+    assert captured["trust_env"] is False
+    await pool.close()
 
 
 @pytest.mark.asyncio

@@ -166,23 +166,35 @@ class GMGNEnrichmentProvider:
                 delay_before_next = True
         raise CollectorError(f"Realtime enrichment failed for path={path}") from last_error
 
+    async def _parallel_bundle_requests(
+        self,
+        requests: Sequence[tuple[str, str]],
+        *,
+        params: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        async def fetch(name: str, path: str) -> tuple[str, Any]:
+            try:
+                return name, await self._realtime_request(path, params=params)
+            except CollectorNetworkError as exc:
+                return name, exc
+            except CollectorError:
+                return name, {}
+
+        results = await asyncio.gather(*(fetch(name, path) for name, path in requests))
+        bundle: dict[str, Any] = {}
+        for name, result in results:
+            if isinstance(result, CollectorNetworkError):
+                raise result
+            bundle[name] = result
+        return bundle
+
     async def token_bundle(self, address: str) -> Mapping[str, Any]:
         params = {"chain": "sol", "address": address}
-        bundle: dict[str, Any] = {}
-        for name, path in (
+        return await self._parallel_bundle_requests((
             ("token_info", self.client.endpoints.token_info),
             ("security", self.client.endpoints.token_security),
             ("pool", self.client.endpoints.token_pool_info),
-        ):
-            try:
-                bundle[name] = await self._realtime_request(path, params=params)
-            except CollectorNetworkError:
-                raise
-            except CollectorError:
-                # Missing API values remain absent and therefore fail closed in
-                # SafetyFilter.  They must never be rewritten as numeric zero.
-                bundle[name] = {}
-        return bundle
+        ), params=params)
 
     async def supplement_missing_facts(
         self, address: str, missing_fields: Sequence[str]
@@ -215,15 +227,7 @@ class GMGNEnrichmentProvider:
                 ("pool", self.client.endpoints.token_pool_info),
             ]
         params = {"chain": "sol", "address": address}
-        bundle: dict[str, Any] = {}
-        for name, path in wanted:
-            try:
-                bundle[name] = await self._realtime_request(path, params=params)
-            except CollectorNetworkError:
-                raise
-            except CollectorError:
-                bundle[name] = {}
-        return bundle
+        return await self._parallel_bundle_requests(wanted, params=params)
 
     async def top_holders(self, address: str, limit: int = 20) -> Sequence[Mapping[str, Any]]:
         data = await self._realtime_request(
@@ -351,6 +355,8 @@ class EnrichmentService:
         self,
         provider: EnrichmentProvider,
         safety_filter: SafetyFilter | None = None,
+        onchain_admission: Any | None = None,
+        public_social_signals: Any | None = None,
         *,
         readiness_attempts: int = 3,
         readiness_retry_seconds: float = 2.0,
@@ -358,6 +364,8 @@ class EnrichmentService:
     ) -> None:
         self.provider = provider
         self.safety_filter = safety_filter or SafetyFilter()
+        self.onchain_admission = onchain_admission
+        self.public_social_signals = public_social_signals
         self.readiness_attempts = max(1, int(readiness_attempts))
         self.readiness_retry_seconds = max(0.0, float(readiness_retry_seconds))
         self._sleep = sleeper
@@ -450,7 +458,63 @@ class EnrichmentService:
             return EnrichmentResult(None, holders_decision)
 
         creator = str(recursive_find(source, ("creator_address", "creator", "owner")) or "")
-        created_tokens = await self.provider.created_tokens(creator)
+        created_tokens: Mapping[str, Any] = {}
+        entry_time = int(now_ts or time.time())
+        onchain_decision = None
+        if self.onchain_admission is not None:
+            age_minutes = to_float(normalized.get("age"))
+            pool_address = str(recursive_find(
+                source,
+                ("biggest_pool_address", "pool_address", "pair_address", "amm_address", "pool_id"),
+            ) or "")
+            if age_minutes is None:
+                return EnrichmentResult(None, FilterDecision(False, ("missing_or_invalid:age",)))
+
+            async def load_created_tokens() -> Mapping[str, Any]:
+                nonlocal created_tokens
+                created_tokens = await self.provider.created_tokens(creator)
+                return created_tokens
+
+            onchain_decision = await self.onchain_admission.evaluate(
+                token_mint=candidate.address,
+                pool_address=pool_address,
+                creator=creator,
+                entry_time=entry_time,
+                age_minutes=age_minutes,
+                gmgn_buys_1h=normalized.get("buys_1h"),
+                gmgn_swaps_1h=normalized.get("swaps_1h"),
+                created_tokens_loader=load_created_tokens,
+            )
+            if not onchain_decision.accepted:
+                return EnrichmentResult(None, FilterDecision(False, onchain_decision.reasons))
+            source = dict(source)
+            source["_onchain_admission"] = {
+                "buy_swap_source": onchain_decision.buy_swap_source,
+                "creator_launch_source": onchain_decision.creator_launch_source,
+                "rpc_used": bool(onchain_decision.rpc_used),
+            }
+        else:
+            created_tokens = await self.provider.created_tokens(creator)
+
+        social_features: Mapping[str, Any] = {}
+        if self.public_social_signals is not None:
+            try:
+                social_snapshot = await self.public_social_signals.snapshot(
+                    candidate.address, entry_time=entry_time
+                )
+                social_features = dict(social_snapshot.features)
+                source = dict(source)
+                source["_public_social_signals"] = {
+                    "provider": "985monitor_public",
+                    "fetched_at": int(social_snapshot.fetched_at),
+                    "successful_sources": list(social_snapshot.successful_sources),
+                    "incomplete_sources": list(social_snapshot.incomplete_sources),
+                    "failed_sources": list(social_snapshot.failed_sources),
+                    "matched_events_15m": int(social_snapshot.matched_events),
+                }
+            except Exception:
+                social_features = {}
+
         price = to_float(normalized.get("price"))
         liquidity = to_float(normalized.get("liquidity"))
         if not price or liquidity is None:
@@ -468,7 +532,6 @@ class EnrichmentService:
         if twitter_rename in (None, "") and isinstance(twitter_history, list):
             twitter_rename = len(twitter_history)
 
-        entry_time = int(now_ts or time.time())
         price_change_1h = _price_change(price, source, ("price_1h", "price1h", "price_h1"))
         price_change_5m = _price_change(price, source, ("price_5m", "price5m", "price_m5"))
         # One bounded pre-entry OHLCV request supplies the optional 2m event
@@ -498,12 +561,15 @@ class EnrichmentService:
             age_minutes=normalized.get("age"),
             holder_count=normalized.get("holder_count"),
             marketcap=normalized.get("marketcap"),
+            liquidity=normalized.get("liquidity"),
         )
         features = {
             "ln(age+1)": _ln1p(normalized.get("age")),
             "ln(liquidity_usd)": _ln(liquidity),
             "liquidity/holder_count": _ln(_ratio(normalized.get("liquidity"), normalized.get("holder_count"))),
             "volume_1h/swaps_1h": _ln(_ratio(normalized.get("volume_1h"), normalized.get("swaps_1h"))),
+            "buy_swap_ratio_1h": onchain_decision.buy_swap_ratio_1h if onchain_decision is not None else None,
+            "ln(creator_launches_24h+1)": _ln1p(onchain_decision.creator_launches_24h) if onchain_decision is not None else None,
             "has_twitter": _bool01(twitter),
             "has_website": _bool01(website),
             "ln(image_dup+1)": _ln1p(recursive_find(source, ("image_dup", "image_duplicate", "imageDup"))),
@@ -532,6 +598,7 @@ class EnrichmentService:
             "ln(creator_open_count+1)": _ln1p(recursive_find([source, created_tokens], ("creator_open_count", "open_count"))),
             "creator_open_ratio": recursive_find([source, created_tokens], ("creator_open_ratio", "open_ratio")),
             "ln(top_wallets+1)": _ln1p(recursive_find(source, ("top_wallets", "topWallets"))),
+            **social_features,
         }
         sample = CollectedSample(
             address=candidate.address,

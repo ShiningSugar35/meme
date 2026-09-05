@@ -36,7 +36,7 @@ def complete_facts(address: str = "TokenSafety111111111111111111111111111111111"
         "volume": 10_000.0,
         "smart_degen_count": 1,
         "renowned_count": 0,
-        "age": 2.1,
+        "age": 10.0,
     }
 
 

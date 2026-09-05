@@ -35,7 +35,7 @@ def test_csv_import_is_idempotent_and_migrates_legacy_terminal(tmp_path: Path) -
         writer.writeheader()
         writer.writerow({
             "address": "token-a", "name": "A", "symbol": "A", "type": "new_creation",
-            "time": "1700000000", "age": "1.2", "launchpad": "Pump.fun", "price": "0.1",
+            "time": "1700000000", "age": str(math.log(10.0)), "launchpad": "Pump.fun", "price": "0.1",
             "price_2h_max/price": "1.30", "price_2h_min/price": "0.91",
             "top_10_holder_rate": "0.20", "fresh_wallet_rate": "0.1", "tag": "1",
         })
@@ -55,7 +55,7 @@ def test_csv_import_is_idempotent_and_migrates_legacy_terminal(tmp_path: Path) -
     assert row["exit_reason"] == "h1_negative_inferred_from_h2_negative"
 
 
-def test_csv_import_skips_age_at_or_above_300_minutes(tmp_path: Path) -> None:
+def test_csv_import_skips_age_at_or_above_240_minutes(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     path = tmp_path / "legacy-age.csv"
     fields = [
@@ -67,13 +67,13 @@ def test_csv_import_skips_age_at_or_above_300_minutes(tmp_path: Path) -> None:
         writer.writeheader()
         writer.writerow({
             "address": "token-young", "name": "Y", "symbol": "Y", "type": "new_creation",
-            "time": "1700000000", "age": str(math.log(299.0)), "launchpad": "Pump.fun", "price": "0.1",
+            "time": "1700000000", "age": str(math.log(239.0)), "launchpad": "Pump.fun", "price": "0.1",
             "price_2h_max/price": "1.30", "price_2h_min/price": "0.91",
             "top_10_holder_rate": "0.20", "fresh_wallet_rate": "0.1", "tag": "0",
         })
         writer.writerow({
             "address": "token-old", "name": "O", "symbol": "O", "type": "new_creation",
-            "time": "1700000001", "age": str(math.log(300.0)), "launchpad": "Pump.fun", "price": "0.1",
+            "time": "1700000001", "age": str(math.log(240.0)), "launchpad": "Pump.fun", "price": "0.1",
             "price_2h_max/price": "1.30", "price_2h_min/price": "0.91",
             "top_10_holder_rate": "0.20", "fresh_wallet_rate": "0.1", "tag": "0",
         })

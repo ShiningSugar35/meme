@@ -1,0 +1,18 @@
+{
+  "balance_changed": {
+    "buys": 160,
+    "classified": 298,
+    "more_pages": true,
+    "rows": 300,
+    "sells": 138
+  },
+  "credentials_redacted": true,
+  "sample_id": 2807,
+  "unfiltered": {
+    "buys": 160,
+    "classified": 298,
+    "more_pages": true,
+    "rows": 300,
+    "sells": 138
+  }
+}

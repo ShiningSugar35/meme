@@ -32,14 +32,14 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
     catalog = models.json()["feature_catalog"]
     assert "ln(age+1)" in catalog["default_features"]
     assert "ln(price+1)" not in catalog["default_features"]
-    assert "ln(marketcap+1)" in catalog["available_features"]
+    assert "ln(marketcap/liquidity)" in catalog["available_features"]
     assert "momentum_accel_1m_vs_5m" in catalog["default_features"]
     assert catalog["selected_features"] == catalog["default_features"]
     assert "price" not in catalog["available_features"]
     assert "price_change_1h" not in catalog["available_features"]
     assert "top_bot_degen_percentage" not in catalog["available_features"]
     assert "ln(liquidity_usd)" not in catalog["default_features"]
-    assert len(catalog["available_features"]) == 39
+    assert len(catalog["available_features"]) == 57
     assert len(catalog["default_features"]) == 29
     assert "price_change_1m" in catalog["available_features"]
     assert "price_change_1m" not in catalog["default_features"]
@@ -57,11 +57,11 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
     assert saved.status_code == 200
     assert saved.json()["selected_features"] == [
         "momentum_accel_1m_vs_5m",
-        "ln(marketcap+1)",
+        "ln(marketcap/liquidity)",
     ]
     assert client.get("/api/models").json()["feature_catalog"]["selected_features"] == [
         "momentum_accel_1m_vs_5m",
-        "ln(marketcap+1)",
+        "ln(marketcap/liquidity)",
     ]
 
     response = client.post(
@@ -75,7 +75,7 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
         (run_id,),
     )
     assert row is not None and row["status"] == "queued"
-    assert '"ln(marketcap+1)"' in row["request_json"]
+    assert '"ln(marketcap/liquidity)"' in row["request_json"]
     assert '"momentum_accel_1m_vs_5m"' in row["request_json"]
     assert '"ln(price+1)"' not in row["request_json"]
     assert '"price_change_1h"' not in row["request_json"]

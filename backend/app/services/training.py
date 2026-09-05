@@ -34,9 +34,11 @@ from ..ml.features import (
     AVAILABLE_MODEL_FEATURES,
     DEPRECATED_MODEL_FEATURES,
     DEFAULT_MODEL_TRAINING_FEATURES,
-    MARKETCAP_LOG1P_FEATURE,
+    LEGACY_MARKETCAP_LOG1P_FEATURE,
+    MARKETCAP_LIQUIDITY_LOG_FEATURE,
     MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
     PRICE_LOG1P_FEATURE,
+    V4_ADDED_MODEL_FEATURES,
     FeatureBuilder,
     FeaturePolicy,
     materialize_entry_feature,
@@ -160,6 +162,7 @@ class TrainingService:
     # Generation-scoped selection prevents the saved legacy 31-feature pool from
     # silently excluding new event2m candidates after the sample reset.
     FEATURE_SELECTION_STATE_KEY = f"model_training_feature_pool:{FEATURE_SCHEMA_VERSION}"
+    LEGACY_FEATURE_SELECTION_STATE_KEYS = ("model_training_feature_pool:event1m_regime_v3",)
 
     def __init__(self, database: Database, settings: Settings | None = None) -> None:
         self.database = database
@@ -221,9 +224,10 @@ class TrainingService:
     ) -> tuple[str, ...]:
         if feature_names is None:
             return DEFAULT_MODEL_TRAINING_FEATURES
-        aliases = {"age": AGE_LOG1P_FEATURE, "price": MARKETCAP_LOG1P_FEATURE}
+        aliases = {"age": AGE_LOG1P_FEATURE, "price": MARKETCAP_LIQUIDITY_LOG_FEATURE}
         replacements = {
-            PRICE_LOG1P_FEATURE: MARKETCAP_LOG1P_FEATURE,
+            PRICE_LOG1P_FEATURE: MARKETCAP_LIQUIDITY_LOG_FEATURE,
+            LEGACY_MARKETCAP_LOG1P_FEATURE: MARKETCAP_LIQUIDITY_LOG_FEATURE,
             "price_change_1h": MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
             "top_bot_degen_percentage": "bot_degen_rate",
         }
@@ -246,6 +250,15 @@ class TrainingService:
     def configured_feature_selection(self) -> tuple[str, ...]:
         stored = self.database.get_runtime_state(self.FEATURE_SELECTION_STATE_KEY)
         if not isinstance(stored, list):
+            for legacy_key in self.LEGACY_FEATURE_SELECTION_STATE_KEYS:
+                legacy = self.database.get_runtime_state(legacy_key)
+                if isinstance(legacy, list):
+                    try:
+                        migrated = set(self.normalize_feature_selection(legacy))
+                        migrated.update(V4_ADDED_MODEL_FEATURES)
+                        return tuple(name for name in AVAILABLE_MODEL_FEATURES if name in migrated)
+                    except ValueError:
+                        continue
             return DEFAULT_MODEL_TRAINING_FEATURES
         try:
             return self.normalize_feature_selection(stored)

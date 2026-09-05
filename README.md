@@ -8,7 +8,7 @@
 
 - 运行形态：Windows、单机、单用户、SQLite、CPU-first。
 - 研究对象：允许清单内的 Solana Launchpad 新创建及接近完成阶段 Token。
-- 当前特征代：`event1m_regime_v3`。
+- 当前特征代：`event1m_regime_v4`。
 - 当前标签：`sl090_tp180_m90_binary_v5`，90 分钟窗口，0.9x 止损、1.8x 止盈，同一分钟同时触发时止损优先，超时未触及止盈记负类。
 - 当前模型决策合同：`phase19_expected_return_paper_v1`。
 - 当前上线认证合同：`phase19_expected_return_certification_v1`。
@@ -44,14 +44,18 @@ GMGN Trenches 候选发现
 - rug、insider、bundler、fresh-wallet、wash-trading、税费、sniper 等安全指标通过；
 - `liquidity > 4800`；
 - 严格 `0.14 < top_10_holder_rate < 0.25`；
-- 严格 `2 < age_minutes < 300`；
-- `29 < holder_count < 1000`、`marketcap > 5000`；
+- 严格 `5 < age_minutes < 240`；
+- `29 < holder_count < 1000`、`marketcap > 10000`；
 - `liquidity / holder_count > 50`；
 - `swaps_1h > 19`、`volume_1h / swaps_1h > 31`；
+- 过去 1 小时（年龄不足 1 小时时从出生起）`buy_swaps / total_swaps < 0.95`；
+- 创建来源钱包过去 24 小时发池/发币次数 `<20`；Solana 用创建交易 fee payer/originating signer 对应 EVM `tx.origin` 意图；
 - mint/freeze 权限已放弃、burn 状态明确；
 - top-holder 结构满足冻结合同。
 
-关键字段缺失、不可解析、非有限值或状态未知时拒绝，不用默认值伪造安全事实。完整阈值以 `backend/app/collector/` 与《开发文档.md》为准。
+关键字段缺失、不可解析、非有限值或状态未知时拒绝，不用默认值伪造安全事实。新增链上条件放在常规本地深筛与 top-holder 之后：GMGN 入场时事实优先，缺失/不完整才使用 Alchemy Mainnet RPC，Ankr 不参与。完整阈值以 `backend/app/collector/` 与《开发文档.md》为准。
+
+模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。系统还可在入场时采集 985monitor 公共只读事件流，形成跨交易所广场、资讯、TG/FOMO 等来源的 PIT 社媒/事件候选特征。默认 29 项仅用于没有持久特征选择时的 fallback；现有 v3 持久特征池迁移到 v4 时会保留旧选择并自动加入 18 个新链上/985monitor 候选，使其参加 chronological OOS 特征竞争，而不是直接强制进入最终模型。整个路径不依赖 LLM/Agent。
 
 ## 4. 模型与决策
 
@@ -65,7 +69,7 @@ GMGN Trenches 候选发现
 - 经济评价、泛化评价和训练 provenance；
 - execution-risk 模型及 drift reference。
 
-Paper 模型复筛主链为：规则安全准入 → 模型校准概率达到 development OOS 冻结阈值 → 模拟交易。阈值在 development OOS 的全部 distinct calibrated-probability operating points 中搜索，唯一主目标为 `J = Recall × (4 - 1/Precision) = (3TP-FP)/N_positive`；当前 +3/-1 盈亏比对应 25% 盈亏平衡 Precision。年龄只保留 Collector 的 `2 < age_minutes < 300` 原始准入事实；execution-risk 与 drift 继续记录/监控但不投票。
+Paper 模型复筛主链为：规则安全准入 → 模型校准概率达到 development OOS 冻结阈值 → 模拟交易。阈值在 development OOS 的全部 distinct calibrated-probability operating points 中搜索，唯一主目标为 `J = Recall × (4 - 1/Precision) = (3TP-FP)/N_positive`；当前 +3/-1 盈亏比对应 25% 盈亏平衡 Precision。年龄只保留 Collector 的 `5 < age_minutes < 240` 原始准入事实；execution-risk 与 drift 继续记录/监控但不投票。
 
 Drift 的 normal/caution/severe 只用于模型健康监控、提前重训和特征治理，不直接改变 paper selected。AdaptivePolicy 可以在模型基础阈值之上收紧，但不能把 development OOS 冻结阈值向下放宽；execution-risk 与 drift 都不再是额外 paper 硬门。
 

@@ -130,11 +130,11 @@ def test_discovery_prefilter_defers_missing_facts_but_rejects_known_failures() -
     }
     assert safety.evaluate_discovery_prefilter(sparse).accepted
 
-    known_bad = dict(sparse, liquidity=4_800, holder_count=100, marketcap=5_000)
+    known_bad = dict(sparse, liquidity=4_800, holder_count=100, marketcap=10_000)
     decision = safety.evaluate_discovery_prefilter(known_bad)
     assert not decision.accepted
     assert "liquidity>4800" in decision.reasons
-    assert "marketcap>5000" in decision.reasons
+    assert "marketcap>10000" in decision.reasons
 
 
 def test_quote_asset_is_limited_to_sol_usdc_usdt() -> None:
@@ -161,28 +161,28 @@ def test_top1_addr_type_zero_uses_strict_range() -> None:
     assert not safety.evaluate_top_holders([{"addr_type": 0, "rate": 0.056}]).accepted
 
 
-def test_age_must_be_strictly_between_two_and_300_minutes() -> None:
+def test_age_must_be_strictly_between_five_and_240_minutes() -> None:
     safety = SafetyFilter()
 
     lower = valid_token()
-    lower["age"] = 2.0
+    lower["age"] = 5.0
     decision = safety.evaluate(lower)
     assert not decision.accepted
-    assert "age>2" in decision.reasons
+    assert "age>5" in decision.reasons
 
     just_over_lower = valid_token()
-    just_over_lower["age"] = 2.0001
+    just_over_lower["age"] = 5.0001
     assert safety.evaluate(just_over_lower).accepted
 
     accepted = valid_token()
-    accepted["age"] = 299.9999
+    accepted["age"] = 239.9999
     assert safety.evaluate(accepted).accepted
 
     upper = valid_token()
-    upper["age"] = 300.0
+    upper["age"] = 240.0
     decision = safety.evaluate(upper)
     assert not decision.accepted
-    assert "age<300" in decision.reasons
+    assert "age<240" in decision.reasons
 
 
 def test_missing_or_malformed_safety_facts_never_count_as_safe() -> None:

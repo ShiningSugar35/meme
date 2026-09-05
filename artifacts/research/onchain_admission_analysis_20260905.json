@@ -1,0 +1,223 @@
+{
+  "baseline": {
+    "by_type": {
+      "near_completion": {
+        "mature_v5": 2797,
+        "positive_rate_v5": 0.14336789417232748,
+        "positives_v5": 401,
+        "samples": 2797
+      },
+      "new_creation": {
+        "mature_v5": 774,
+        "positive_rate_v5": 0.18087855297157623,
+        "positives_v5": 140,
+        "samples": 774
+      }
+    },
+    "mature_v5": 3571,
+    "positive_rate_v5": 0.1514981797815738,
+    "positive_rate_wilson95_v5": [
+      0.14011367993502305,
+      0.16363166690866687
+    ],
+    "positives_v5": 541,
+    "samples": 3571
+  },
+  "membership_cutoff_utc": "2026-09-05T13:59:44+00:00",
+  "notes": [
+    "Sample membership is frozen at task cutoff by entry_time; label maturity is read at analysis time.",
+    "All round-2 historical chain facts are queried through Alchemy mainnet RPC/enhanced RPC, not GMGN and not Ankr.",
+    "Historical creator-launch RPC classification is a conservative Solana proxy: creator must be a top-level signer and the transaction must contain initializeMint/initializeMint2. It can include non-launchpad mint creation when program identity is unavailable; production live admission prefers GMGN created_tokens/create_timestamp and uses this RPC path only as fallback.",
+    "Payoff proxy uses the project's +3/-1 binary-label utility and is descriptive, not realized execution PnL."
+  ],
+  "policy": {
+    "baseline_admission": {
+      "age_minutes_gt": 2.0,
+      "age_minutes_lt": 300.0,
+      "liquidity_gt": 4800.0,
+      "marketcap_gt": 5000.0
+    },
+    "buy_swap_ratio_lt": 0.95,
+    "creator_launches_24h_lt": 20,
+    "round1": {
+      "age_minutes_gt": 5.0,
+      "age_minutes_lt": 240.0,
+      "liquidity_gt": 4800.0,
+      "marketcap_gt": 10000.0
+    },
+    "round1_admission": {
+      "age_minutes_gt": 5.0,
+      "age_minutes_lt": 240.0,
+      "liquidity_gt": 4800.0,
+      "marketcap_gt": 10000.0
+    }
+  },
+  "positive_rate_change_percentage_points": {
+    "round1_minus_baseline": 2.2414863696687077,
+    "round2_minus_baseline": 3.391215456493077,
+    "round2_minus_round1": 1.1497290868243693
+  },
+  "rejections": {
+    "buy_ratio_fail": {
+      "by_type": {
+        "near_completion": {
+          "mature_v5": 0,
+          "positive_rate_v5": null,
+          "positives_v5": 0,
+          "samples": 0
+        },
+        "new_creation": {
+          "mature_v5": 0,
+          "positive_rate_v5": null,
+          "positives_v5": 0,
+          "samples": 0
+        }
+      },
+      "mature_v5": 0,
+      "payoff_proxy_units_per_sample_3_to_1": null,
+      "positive_rate_v5": null,
+      "positives_v5": 0,
+      "samples": 0
+    },
+    "buy_ratio_unresolved": {
+      "by_type": {
+        "near_completion": {
+          "mature_v5": 0,
+          "positive_rate_v5": null,
+          "positives_v5": 0,
+          "samples": 0
+        },
+        "new_creation": {
+          "mature_v5": 0,
+          "positive_rate_v5": null,
+          "positives_v5": 0,
+          "samples": 0
+        }
+      },
+      "mature_v5": 0,
+      "payoff_proxy_units_per_sample_3_to_1": null,
+      "positive_rate_v5": null,
+      "positives_v5": 0,
+      "samples": 0
+    },
+    "creator_launches_fail": {
+      "by_type": {
+        "near_completion": {
+          "mature_v5": 59,
+          "positive_rate_v5": 0.11864406779661017,
+          "positives_v5": 7,
+          "samples": 59
+        },
+        "new_creation": {
+          "mature_v5": 3,
+          "positive_rate_v5": 0.0,
+          "positives_v5": 0,
+          "samples": 3
+        }
+      },
+      "mature_v5": 62,
+      "payoff_proxy_units_per_sample_3_to_1": -0.5483870967741935,
+      "positive_rate_v5": 0.11290322580645161,
+      "positives_v5": 7,
+      "samples": 62
+    },
+    "creator_launches_unresolved": {
+      "by_type": {
+        "near_completion": {
+          "mature_v5": 0,
+          "positive_rate_v5": null,
+          "positives_v5": 0,
+          "samples": 0
+        },
+        "new_creation": {
+          "mature_v5": 0,
+          "positive_rate_v5": null,
+          "positives_v5": 0,
+          "samples": 0
+        }
+      },
+      "mature_v5": 0,
+      "payoff_proxy_units_per_sample_3_to_1": null,
+      "positive_rate_v5": null,
+      "positives_v5": 0,
+      "samples": 0
+    }
+  },
+  "round1": {
+    "by_type": {
+      "near_completion": {
+        "mature_v5": 361,
+        "positive_rate_v5": 0.1745152354570637,
+        "positives_v5": 63,
+        "samples": 361
+      },
+      "new_creation": {
+        "mature_v5": 30,
+        "positive_rate_v5": 0.16666666666666666,
+        "positives_v5": 5,
+        "samples": 30
+      }
+    },
+    "mature_v5": 391,
+    "payoff_proxy_units_per_sample_3_to_1": -0.30434782608695654,
+    "positive_rate_v5": 0.17391304347826086,
+    "positives_v5": 68,
+    "samples": 391
+  },
+  "round1_fraction_of_baseline": 0.1094931391767012,
+  "round2": {
+    "by_type": {
+      "near_completion": {
+        "mature_v5": 302,
+        "positive_rate_v5": 0.18543046357615894,
+        "positives_v5": 56,
+        "samples": 302
+      },
+      "new_creation": {
+        "mature_v5": 27,
+        "positive_rate_v5": 0.18518518518518517,
+        "positives_v5": 5,
+        "samples": 27
+      }
+    },
+    "mature_v5": 329,
+    "payoff_proxy_units_per_sample_3_to_1": -0.25835866261398177,
+    "positive_rate_v5": 0.18541033434650456,
+    "positives_v5": 61,
+    "samples": 329
+  },
+  "round2_fraction_of_baseline": 0.0921310557266872,
+  "round2_fraction_of_round1": 0.8414322250639387,
+  "rpc_evidence": {
+    "alchemy_keys_used": 3,
+    "creator": {
+      "exhaustive": 329,
+      "fail": 62,
+      "pass": 329,
+      "queried": 391,
+      "unresolved": 0
+    },
+    "creator_query_clusters": 390,
+    "creator_workers_per_key": 8,
+    "errors": {},
+    "gmgn_rpc_buy_ratio_validation": {
+      "absolute_error_mean": 0.011458478984210154,
+      "absolute_error_median": 0.006406578695735354,
+      "paired": 391,
+      "within_0_05": 0.9769820971867008
+    },
+    "rpc_start_interval_seconds_account_wide": 0.34,
+    "swap": {
+      "classified_transactions": 322754,
+      "exhaustive": 391,
+      "fail": 0,
+      "pass": 391,
+      "raw_transactions": 340852,
+      "unresolved": 0
+    },
+    "swap_query_clusters": 391,
+    "swap_workers_per_key": 20,
+    "unique_creators": 328,
+    "unique_pools": 354
+  }
+}

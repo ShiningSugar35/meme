@@ -33,6 +33,8 @@ from ..database import Database, utc_now_iso
 from ..collector.market_regime import GMGNMarketRegimeProvider
 from ..collector.discovery_experiment import DiscoveryExperimentManager
 from ..repositories.samples import SampleRecord, SampleRepository
+from .onchain_admission import OnchainAdmissionService
+from .public_social_signals import PublicSocialSignalProvider
 from .platform_configuration import ENV_PATH, PlatformConfigurationService
 from .sol_price import SolUsdPriceService
 
@@ -195,6 +197,8 @@ class CollectorWorker:
         self.monitor_only = monitor_only
         self._stop = asyncio.Event()
         self._transport: HttpxTransport | None = None
+        self._onchain_admission: OnchainAdmissionService | None = None
+        self._public_social_signals: PublicSocialSignalProvider | None = None
         self._service: CollectorService | None = None
         self._regime_provider: GMGNMarketRegimeProvider | None = None
         self._gmgn_limiter = gmgn_limiter
@@ -414,19 +418,33 @@ class CollectorWorker:
         discovery = DiscoveryService(client, roles)
         provider = GMGNEnrichmentProvider(client, roles)
         self._regime_provider = GMGNMarketRegimeProvider(client, roles)
+        self._onchain_admission = OnchainAdmissionService()
+        self._public_social_signals = PublicSocialSignalProvider()
         return CollectorService(
             discovery,
-            EnrichmentService(provider),
+            EnrichmentService(
+                provider,
+                onchain_admission=self._onchain_admission,
+                public_social_signals=self._public_social_signals,
+            ),
             provider,
             SqliteCollectorSink(self.database),
         )
 
     async def _rebuild_after_network_failure(self) -> None:
         old_transport = self._transport
+        old_onchain = self._onchain_admission
+        old_social = self._public_social_signals
         self._service = None
         self._transport = None
+        self._onchain_admission = None
+        self._public_social_signals = None
         if old_transport is not None:
             await old_transport.close()
+        if old_onchain is not None:
+            await old_onchain.close()
+        if old_social is not None:
+            await old_social.close()
         self._service = self._build()
         self._transport_rebuilds += 1
 
@@ -450,6 +468,12 @@ class CollectorWorker:
                 try:
                     if self._transport is not None:
                         await self._transport.close()
+                    if self._onchain_admission is not None:
+                        await self._onchain_admission.close()
+                        self._onchain_admission = None
+                    if self._public_social_signals is not None:
+                        await self._public_social_signals.close()
+                        self._public_social_signals = None
                     self._service = self._build()
                     self._env_mtime_ns = current_mtime
                 except Exception as exc:
@@ -852,6 +876,10 @@ class CollectorWorker:
         )
         if self._transport is not None:
             await self._transport.close()
+        if self._onchain_admission is not None:
+            await self._onchain_admission.close()
+        if self._public_social_signals is not None:
+            await self._public_social_signals.close()
 
     def stop(self) -> None:
         self._stop.set()

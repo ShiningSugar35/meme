@@ -7,7 +7,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
@@ -68,6 +69,16 @@ def _split_urls(raw: str) -> list[str]:
     return [item.strip() for item in normalized.split(",") if item.strip()]
 
 
+def _is_ankr_url(url: str) -> bool:
+    host = (urlparse(str(url)).hostname or "").lower()
+    return host == "ankr.com" or host.endswith(".ankr.com")
+
+
+def _is_alchemy_url(url: str) -> bool:
+    host = (urlparse(str(url)).hostname or "").lower()
+    return host == "alchemy.com" or host.endswith(".alchemy.com")
+
+
 def configured_rpc_endpoints(path: Path | None = None) -> tuple[RpcEndpoint, ...]:
     """Build a secret-safe provider order: Alchemy -> public emergency.
 
@@ -79,6 +90,7 @@ def configured_rpc_endpoints(path: Path | None = None) -> tuple[RpcEndpoint, ...
     alchemy_urls = _split_urls(env.get("SOLANA_RPC_HTTP_URLS", ""))
     if not alchemy_urls:
         alchemy_urls = _split_urls(env.get("SOLANA_RPC_URL", ""))
+    alchemy_urls = [url for url in alchemy_urls if _is_alchemy_url(url) and not _is_ankr_url(url)]
     alchemy_keys = [
         value for key, value in sorted(env.items())
         if key.startswith("ALCHEMY_API_KEY_") and value.strip()
@@ -130,7 +142,10 @@ class SolanaRpcPool:
     async def _http_client(self) -> Any:
         if self._client is None:
             import httpx
-            self._client = httpx.AsyncClient(timeout=self.timeout_seconds)
+            # Solana RPC must not inherit workstation HTTP(S)/ALL_PROXY settings.
+            # The local proxy route can make Alchemy mainnet RPC time out even
+            # while direct TCP/HTTPS is healthy; keep this provider pool direct.
+            self._client = httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False)
         return self._client
 
     async def close(self) -> None:
@@ -235,6 +250,66 @@ class SolanaRpcPool:
             healthy=False,
             errors=tuple(errors),
         )
+
+    async def transactions_for_address(
+        self,
+        address: str,
+        *,
+        start_ts: int,
+        end_ts: int,
+        max_pages: int = 10,
+        page_limit: int = 100,
+        stop_after_page: Callable[[Sequence[Mapping[str, Any]]], bool] | None = None,
+    ) -> tuple[list[Mapping[str, Any]], str, bool]:
+        """Read a bounded historical window through Alchemy archival RPC only."""
+        if not address or int(end_ts) < int(start_ts):
+            raise ValueError("invalid address/time window")
+        pages = max(1, int(max_pages))
+        limit = max(1, min(100, int(page_limit)))
+        errors: list[str] = []
+        for endpoint in self._ordered():
+            if endpoint.provider != "alchemy":
+                continue
+            if self._cooldown_until.get(endpoint.label, 0.0) > time.monotonic():
+                continue
+            rows: list[Mapping[str, Any]] = []
+            pagination_token: str | None = None
+            try:
+                for _page in range(pages):
+                    config: dict[str, Any] = {
+                        "transactionDetails": "full",
+                        "sortOrder": "desc",
+                        "limit": limit,
+                        "commitment": "finalized",
+                        "encoding": "jsonParsed",
+                        "filters": {
+                            "status": "succeeded",
+                            "blockTime": {"gte": int(start_ts), "lte": int(end_ts)},
+                        },
+                    }
+                    if pagination_token:
+                        config["paginationToken"] = pagination_token
+                    result, _latency = await self._rpc(
+                        endpoint, "getTransactionsForAddress", [address, config]
+                    )
+                    if not isinstance(result, Mapping):
+                        raise RuntimeError(f"rpc_error:{endpoint.label}:malformed_result")
+                    data = result.get("data")
+                    if not isinstance(data, list):
+                        raise RuntimeError(f"rpc_error:{endpoint.label}:malformed_data")
+                    page_rows = [item for item in data if isinstance(item, Mapping)]
+                    rows.extend(page_rows)
+                    if stop_after_page is not None and stop_after_page(page_rows):
+                        return rows, endpoint.label, False
+                    next_token = result.get("paginationToken")
+                    pagination_token = str(next_token) if next_token else None
+                    if not pagination_token:
+                        return rows, endpoint.label, True
+                return rows, endpoint.label, False
+            except Exception as exc:
+                self._cooldown_until[endpoint.label] = time.monotonic() + self.circuit_seconds
+                errors.append(self._safe_error(endpoint, exc))
+        raise RuntimeError("alchemy_history_unavailable:" + ",".join(errors[:4]))
 
 
 async def bounded_rate_probe(

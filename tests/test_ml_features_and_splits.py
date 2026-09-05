@@ -7,6 +7,8 @@ import pytest
 from backend.app.ml import FeatureBuilder, TemporalSplitConfig, TemporalSplitter
 from backend.app.ml.features import (
     AGE_LOG1P_FEATURE,
+    LEGACY_MARKETCAP_LOG1P_FEATURE,
+    MARKETCAP_LIQUIDITY_LOG_FEATURE,
     PRICE_LOG1P_FEATURE,
     MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
     FeaturePolicy,
@@ -128,6 +130,17 @@ def test_log1p_entry_feature_materialization_keeps_legacy_models_compatible() ->
     assert materialize_entry_feature(
         MOMENTUM_ACCEL_1M_VS_5M_FEATURE, source, entry_price=entry_price
     ) == pytest.approx(expected_acceleration)
+
+    legacy_marketcap = float(np.log1p(10_000.0))
+    legacy_liquidity = float(np.log(5_000.0))
+    ratio_source = {LEGACY_MARKETCAP_LOG1P_FEATURE: legacy_marketcap, "ln(liquidity_usd)": legacy_liquidity}
+    assert materialize_entry_feature(
+        MARKETCAP_LIQUIDITY_LOG_FEATURE, ratio_source, entry_price=entry_price
+    ) == pytest.approx(np.log(2.0))
+    new_source = {MARKETCAP_LIQUIDITY_LOG_FEATURE: float(np.log(2.0)), "ln(liquidity_usd)": legacy_liquidity}
+    assert materialize_entry_feature(
+        LEGACY_MARKETCAP_LOG1P_FEATURE, new_source, entry_price=entry_price
+    ) == pytest.approx(legacy_marketcap)
 
 
 def test_legacy_missing_liquidity_is_proxy_not_dollar_pnl() -> None:

@@ -76,6 +76,11 @@ def ratio_nonnegative(numerator: Any, denominator: Any) -> float | None:
     return left / right
 
 
+def log_positive_ratio(numerator: Any, denominator: Any) -> float | None:
+    ratio = ratio_nonnegative(numerator, denominator)
+    return math.log(ratio) if ratio is not None and ratio > 0 else None
+
+
 def price_change_from_history(
     current_price: float,
     klines: Sequence[Kline],
@@ -124,6 +129,7 @@ def build_gmgn_event_features(
     age_minutes: Any = None,
     holder_count: Any = None,
     marketcap: Any = None,
+    liquidity: Any = None,
 ) -> dict[str, Any]:
     """Build non-duplicative Shadow features known no later than entry_time.
 
@@ -156,8 +162,9 @@ def build_gmgn_event_features(
             holder_count if holder_count not in (None, "") else first_recursive(source, ("holder_count", "holders")),
             age_minutes if age_minutes not in (None, "") else _age_minutes(source, entry_time),
         ),
-        "ln(marketcap+1)": log1p_nonnegative(
-            marketcap if marketcap not in (None, "") else first_recursive(source, ("marketcap", "market_cap", "marketCap"))
+        "ln(marketcap/liquidity)": log_positive_ratio(
+            marketcap if marketcap not in (None, "") else first_recursive(source, ("marketcap", "market_cap", "marketCap")),
+            liquidity if liquidity not in (None, "") else first_recursive(source, ("liquidity", "liquidity_usd", "pool_liquidity_usd")),
         ),
         "dexscr_ad": optional_bool01(first_recursive(source, ("dexscr_ad", "dexscreener_ad", "dexscrAd"))),
         "ln(dexscr_boost_fee+1)": log1p_nonnegative(

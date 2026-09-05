@@ -71,7 +71,8 @@ _RETURN_ESTIMATE_COLUMNS = (
 
 AGE_LOG1P_FEATURE = "ln(age+1)"
 PRICE_LOG1P_FEATURE = "ln(price+1)"  # legacy model compatibility only
-MARKETCAP_LOG1P_FEATURE = "ln(marketcap+1)"
+MARKETCAP_LIQUIDITY_LOG_FEATURE = "ln(marketcap/liquidity)"
+LEGACY_MARKETCAP_LOG1P_FEATURE = "ln(marketcap+1)"
 MOMENTUM_ACCEL_1M_VS_5M_FEATURE = "momentum_accel_1m_vs_5m"
 LEGACY_AGE_FEATURE = "age"
 LEGACY_PRICE_FEATURE = "price"
@@ -137,6 +138,37 @@ def materialize_entry_feature(
             return None
         return math.log1p(one_minute) - math.log1p(five_minute) / 5.0
 
+    if name == MARKETCAP_LIQUIDITY_LOG_FEATURE:
+        current = _finite_float(source.get(MARKETCAP_LIQUIDITY_LOG_FEATURE))
+        if current is not None:
+            return current
+        legacy_marketcap = _finite_float(source.get(LEGACY_MARKETCAP_LOG1P_FEATURE))
+        liquidity = _finite_float(source.get("liquidity"))
+        if liquidity is None:
+            liquidity_log = _finite_float(source.get("ln(liquidity_usd)"))
+            liquidity = math.exp(liquidity_log) if liquidity_log is not None else None
+        if legacy_marketcap is None or liquidity is None or liquidity <= 0:
+            return None
+        try:
+            marketcap = math.expm1(legacy_marketcap)
+        except OverflowError:
+            return None
+        return math.log(marketcap / liquidity) if marketcap > 0 else None
+
+    if name == LEGACY_MARKETCAP_LOG1P_FEATURE:
+        legacy = _finite_float(source.get(LEGACY_MARKETCAP_LOG1P_FEATURE))
+        if legacy is not None:
+            return legacy
+        ratio_log = _finite_float(source.get(MARKETCAP_LIQUIDITY_LOG_FEATURE))
+        liquidity_log = _finite_float(source.get("ln(liquidity_usd)"))
+        if ratio_log is None or liquidity_log is None:
+            return None
+        try:
+            marketcap = math.exp(ratio_log + liquidity_log)
+        except OverflowError:
+            return None
+        return math.log1p(marketcap) if math.isfinite(marketcap) and marketcap >= 0 else None
+
     return source.get(name)
 
 
@@ -155,12 +187,36 @@ DEPRECATED_MODEL_FEATURES: frozenset[str] = frozenset({
     "top_bot_degen_percentage",
     "dexscr_ad",
     "dexscr_trending_bar",
+    LEGACY_MARKETCAP_LOG1P_FEATURE,
 })
+
+V4_ADDED_MODEL_FEATURES: tuple[str, ...] = (
+    "buy_swap_ratio_1h",
+    "ln(creator_launches_24h+1)",
+    "ln(monitor_mentions_5m+1)",
+    "ln(monitor_mentions_15m+1)",
+    "ln(monitor_unique_authors_15m+1)",
+    "monitor_unique_sources_15m",
+    "ln(monitor_follower_reach_15m+1)",
+    "monitor_mention_accel_5m_vs_15m",
+    "ln(monitor_latest_mention_age_s+1)",
+    "monitor_fomo_buy_ratio_15m",
+    "monitor_fomo_usd_imbalance_15m",
+    "ln(monitor_fomo_usd_15m+1)",
+    "monitor_exchange_hits_15m",
+    "monitor_news_hits_15m",
+    "monitor_social_hits_15m",
+    "ln(monitor_global_events_5m+1)",
+    "monitor_global_source_diversity_5m",
+    "monitor_source_coverage",
+)
 
 AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     AGE_LOG1P_FEATURE,
     "liquidity/holder_count",
     "volume_1h/swaps_1h",
+    "buy_swap_ratio_1h",
+    "ln(creator_launches_24h+1)",
     "has_twitter",
     "has_website",
     "ln(image_dup+1)",
@@ -190,13 +246,29 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "buy_volume_imbalance_1m",
     "ln(volume_1m/swaps_1m+1)",
     "holder_count/age",
-    "ln(marketcap+1)",
+    MARKETCAP_LIQUIDITY_LOG_FEATURE,
     "ln(dexscr_boost_fee+1)",
     "ln(x_user_follower+1)",
     "ln(tg_call_count+1)",
     "ln(creator_open_count+1)",
     "creator_open_ratio",
     "ln(top_wallets+1)",
+    "ln(monitor_mentions_5m+1)",
+    "ln(monitor_mentions_15m+1)",
+    "ln(monitor_unique_authors_15m+1)",
+    "monitor_unique_sources_15m",
+    "ln(monitor_follower_reach_15m+1)",
+    "monitor_mention_accel_5m_vs_15m",
+    "ln(monitor_latest_mention_age_s+1)",
+    "monitor_fomo_buy_ratio_15m",
+    "monitor_fomo_usd_imbalance_15m",
+    "ln(monitor_fomo_usd_15m+1)",
+    "monitor_exchange_hits_15m",
+    "monitor_news_hits_15m",
+    "monitor_social_hits_15m",
+    "ln(monitor_global_events_5m+1)",
+    "monitor_global_source_diversity_5m",
+    "monitor_source_coverage",
 )
 
 # Event1m samples are generation-isolated from legacy CSV/pre-event rows;
