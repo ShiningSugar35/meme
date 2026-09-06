@@ -39,7 +39,7 @@ def test_model_training_api_creates_durable_queue_item(monkeypatch, tmp_path: Pa
     assert "price_change_1h" not in catalog["available_features"]
     assert "top_bot_degen_percentage" not in catalog["available_features"]
     assert "ln(liquidity_usd)" not in catalog["default_features"]
-    assert len(catalog["available_features"]) == 57
+    assert len(catalog["available_features"]) == 69
     assert len(catalog["default_features"]) == 29
     assert "price_change_1m" in catalog["available_features"]
     assert "price_change_1m" not in catalog["default_features"]

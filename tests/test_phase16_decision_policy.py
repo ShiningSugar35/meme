@@ -116,7 +116,7 @@ def test_age_gate_is_admission_only_and_never_reweights_model_threshold() -> Non
         assert decision.threshold_delta == pytest.approx(0.0)
         assert age_adjusted_threshold(0.18, decision) == pytest.approx(0.18)
     assert not age_gate(5).allowed
-    assert not age_gate(240).allowed
+    assert not age_gate(300).allowed
 
 
 def test_adaptive_expansive_cannot_undercut_relative_age_threshold() -> None:

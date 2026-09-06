@@ -101,7 +101,7 @@ def test_new_feature_generation_keeps_event_candidates_shadow_only() -> None:
     assert "ln(swaps_1m+1)" not in AVAILABLE_MODEL_FEATURES
     assert "ln(volume_2m+1)" not in AVAILABLE_MODEL_FEATURES
     assert "ln(liquidity_usd)" not in AVAILABLE_MODEL_FEATURES
-    assert len(AVAILABLE_MODEL_FEATURES) == 57
+    assert len(AVAILABLE_MODEL_FEATURES) == 69
     assert "price_change_1m" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "volume_acceleration_2m" not in DEFAULT_MODEL_TRAINING_FEATURES
     assert "holder_count/age" not in DEFAULT_MODEL_TRAINING_FEATURES

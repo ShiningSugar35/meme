@@ -26,11 +26,11 @@ CURRENT_LABEL = "sl090_tp180_m90_binary_v5"
 MAX_BUY_RATIO = 0.95
 MAX_LAUNCHES = 20
 SWAP_MAX_PAGES = 100
-CREATOR_MAX_PAGES = 500
-CREATOR_CLUSTER_MAX_SPAN_SECONDS = 3600
+CREATOR_MAX_PAGES = 2_000
+CREATOR_CLUSTER_MAX_SPAN_SECONDS = 86_400
 SWAP_WORKERS_PER_ALCHEMY = 20
-CREATOR_WORKERS_PER_ALCHEMY = 36
-RPC_REQUEST_INTERVAL_SECONDS_PER_KEY = 0.34
+CREATOR_WORKERS_PER_ALCHEMY = 12
+RPC_REQUEST_INTERVAL_SECONDS_ACCOUNT = 0.34
 
 
 class RpcStartGate:
@@ -335,7 +335,7 @@ async def main() -> int:
     if len(endpoints) < 3:
         raise RuntimeError(f"need_three_alchemy_endpoints:{len(endpoints)}")
 
-    rpc_start_gates = [RpcStartGate(RPC_REQUEST_INTERVAL_SECONDS_PER_KEY) for _ in endpoints]
+    rpc_start_gate = RpcStartGate(RPC_REQUEST_INTERVAL_SECONDS_ACCOUNT)
     remaining_swap_samples = [sample for sample in samples if int(sample["id"]) not in cached]
     swap_clusters = _pool_clusters(remaining_swap_samples)
     swap_queue: asyncio.Queue[tuple[str, str, list[dict[str, Any]], int, int]] = asyncio.Queue()
@@ -346,7 +346,7 @@ async def main() -> int:
 
     async def swap_worker(endpoint_index: int) -> None:
         nonlocal swap_done
-        pool = ThrottledSolanaRpcPool((endpoints[endpoint_index],), timeout_seconds=25.0, circuit_seconds=5.0, start_gate=rpc_start_gates[endpoint_index])
+        pool = ThrottledSolanaRpcPool((endpoints[endpoint_index],), timeout_seconds=25.0, circuit_seconds=5.0, start_gate=rpc_start_gate)
         try:
             while True:
                 try:
@@ -408,7 +408,7 @@ async def main() -> int:
 
     async def creator_worker(endpoint_index: int) -> None:
         nonlocal creator_done
-        pool = ThrottledSolanaRpcPool((endpoints[endpoint_index],), timeout_seconds=25.0, circuit_seconds=5.0, start_gate=rpc_start_gates[endpoint_index])
+        pool = ThrottledSolanaRpcPool((endpoints[endpoint_index],), timeout_seconds=25.0, circuit_seconds=5.0, start_gate=rpc_start_gate)
         try:
             while True:
                 try:
@@ -478,7 +478,7 @@ async def main() -> int:
         "alchemy_keys_used": len(endpoints),
         "swap_workers_per_key": SWAP_WORKERS_PER_ALCHEMY,
         "creator_workers_per_key": CREATOR_WORKERS_PER_ALCHEMY,
-        "rpc_start_interval_seconds_per_key": RPC_REQUEST_INTERVAL_SECONDS_PER_KEY,
+        "rpc_start_interval_seconds_account": RPC_REQUEST_INTERVAL_SECONDS_ACCOUNT,
         "policy": {
             "buy_swap_ratio_lt": MAX_BUY_RATIO,
             "creator_launches_24h_lt": MAX_LAUNCHES,

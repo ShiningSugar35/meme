@@ -6,7 +6,7 @@
 
 本轮已落地的原则：
 
-1. 只使用可自动化的免费只读来源；当前生产代码不读取浏览器 Cookie、不保存站点 Token、不调用 LLM。
+1. 只使用可自动化的免费只读来源；公共源无需登录，确需登录的来源允许后端在本机读取 Chrome/Edge 的**白名单登录态**。可正常解密的 Chromium Cookie 仅在进程内使用；985monitor 实际主鉴权位于同源 localStorage，后端只读取 `xMonitorWalletAddress/xMonitorWalletToken` 等白名单键并换取站方 90 天只读 extension session。任何 Cookie/Token/session 都不写日志、数据库、artifact 或 Git，也不调用 LLM。
 2. 所有 token-local 事件必须满足 `event_time <= sample.entry_time`；未来事件永不回填入场特征。
 3. 远端列表达到最大行数时，必须确认最老事件已覆盖完整 5m/15m 窗口；否则该来源标记 incomplete，不能把“未看到 CA”当作 0 提及。
 4. 单源失败或超时只降低 `monitor_source_coverage`，不阻断 Collector，也不伪造为 0。
@@ -73,27 +73,32 @@
 - fomo 登录令牌只在 fomo 页面读取并只发往 fomo 官方 API；GMGN Bearer 也只在 gmgn.ai 页面内使用。
 - 插件把 985monitor Pump/FOMO 真实时间事件混排到 GMGN/DeBot，说明“浏览器登录态 -> 确定性本地桥 -> 结构化事件”是可行路线，不需要 Agent skills。
 
-### 适合本项目的下一层浏览器桥
+### 已落地的浏览器登录态后端桥
 
-若以后要补 X 私有/个性化流、985monitor 个人关注 Pump/FOMO 或 fomo 个人持仓观点，建议复用同类架构，而不是 Python 直接解密 Chrome Cookie：
+用户明确要求登录态来源由后端直接复用本机浏览器鉴权。本轮按“最小权限、只读、白名单”落地，不引入扩展或 Agent：
 
 ```text
-Chrome/Edge MV3 content script（站点原域，复用已登录 session）
-  -> 只提取白名单结构化字段
-  -> Native Messaging / localhost loopback
-  -> D:\meme 后端的只读 event ingest
-  -> observed_at + source + event_time + token CA
+Chrome / Edge profile
+  -> Cookie DB：仅匹配目标域；DPAPI / AES-GCM v10/v11 可解密则内存使用
+  -> Local Storage：仅允许调用方指定的白名单 key
+  -> 985monitor：xMonitorWalletAddress + xMonitorWalletToken
+  -> POST /api/extension/session 换取站方 read-only Bearer session
+  -> GET /api/extension/fomo-events / pump-trade-events
+  -> 只保留 event_time<=entry_time 的 Solana 结构化聚合特征
 ```
 
-这样登录凭据不离开原站域，后端只收到结构化事件。它是普通确定性采集器，不是 LLM/Agent。
+Chromium 新版 `v20` App-Bound Cookie 会明确 fail-closed；系统**不**通过进程注入、提权或绕过浏览器应用绑定来解密。浏览器 SQLite/LevelDB 因锁文件需要复制时，临时副本只创建在 `D:\meme\data\.browser_session_tmp\`，使用后立即删除。985monitor 的钱包主 token 和 extension session 均只存在于当前后端进程内。
+
+当前账号私有候选特征包括：`ln(monitor_private_fomo_events_15m+1)`、`ln(monitor_private_fomo_unique_authors_15m+1)`、`monitor_private_fomo_buy_ratio_15m`、`monitor_private_fomo_usd_imbalance_15m`、`ln(monitor_private_fomo_usd_15m+1)`、`ln(monitor_private_pump_events_{5m,15m}+1)`、`ln(monitor_private_pump_unique_wallets_15m+1)`、`monitor_private_pump_buy_ratio_15m`、`monitor_private_pump_usd_imbalance_15m`、`ln(monitor_private_pump_usd_15m+1)`、`monitor_private_source_coverage`。全部仍只是 v4 候选特征，不是准入硬门。
+
+本机脱敏实机探针检测到 5 个 Chromium profile，但当前没有发现 985monitor 钱包登录 localStorage 键，也没有可用 985monitor Cookie；因此当前运行时该私有来源为 missing/non-blocking。用户以后在 Chrome/Edge 完成 985monitor 登录后，后端可自动发现白名单键并启用只读 session，无需把 token 写入 `.env`。
 
 ## 本轮暂不直接接入的信号
 
-1. **X 私有流**：主站有 X 数据，但公开 REST 在本机不稳定；应等浏览器只读 session 桥，而不是抓 Cookie 或用付费 X API。
-2. **Pump 个性化关注流**：公开端点延迟不稳定；扩展仓库表明可以通过 985monitor 只读 session 获取个人关注/过滤后的事件，适合浏览器桥后接入。
-3. **fomo 个人持仓、7日盈亏、观点**：需要用户自己的 fomo 登录态。可以免费复用浏览器鉴权，但应保持 token 只在 fomo 原域使用。
-4. **文本“正/负情绪分数”**：当前不引入云 LLM，也不新增常驻深度 NLP 模型。短文本 Meme 语境下，通用词典很容易把反讽/黑话误判；本轮优先使用真实交易行为、事件速度、传播覆盖与来源共振。
-5. **自动翻译后的文本特征**：插件使用 Chrome 本地翻译，但翻译结果是展示辅助，不应在没有独立 OOS 验证前成为交易特征。
+1. **X 私有流**：主站有 X 数据，但公开 REST 在本机不稳定；当前不使用付费 X API，也不把不可稳定获取的私有 X 流伪装为已接入。
+2. **fomo 个人持仓、7日盈亏、观点**：需要用户自己的 fomo 登录态。通用 Chromium Cookie/localStorage 读取基础设施已经具备，但尚未为 fomo 冻结白名单字段与 PIT 结构化合同，因此本轮不接入。
+3. **文本“正/负情绪分数”**：当前不引入云 LLM，也不新增常驻深度 NLP 模型。短文本 Meme 语境下，通用词典很容易把反讽/黑话误判；本轮优先使用真实交易行为、事件速度、传播覆盖与来源共振。
+4. **自动翻译后的文本特征**：插件使用 Chrome 本地翻译，但翻译结果是展示辅助，不应在没有独立 OOS 验证前成为交易特征。
 
 ## 失败与降级语义
 
@@ -105,11 +110,14 @@ Chrome/Edge MV3 content script（站点原域，复用已登录 session）
 
 ## 代码与证据
 
-- 实现：`backend/app/services/public_social_signals.py`
+- 公共事件实现：`backend/app/services/public_social_signals.py`
+- 浏览器登录态读取/解密：`backend/app/services/browser_session.py`
+- 985monitor 账号只读事件：`backend/app/services/monitor985_private_signals.py`
 - Collector 接入：`backend/app/collector/enrichment.py`
 - 候选目录：`backend/app/ml/features.py`
-- 单元回归：`tests/test_public_social_signals.py`
-- 实机探针：`artifacts/research/monitor985_public_probe_20260905.py`
-- 实机结果：`artifacts/research/monitor985_public_probe_20260905.json`
+- 单元回归：`tests/test_public_social_signals.py`、`tests/test_browser_session.py`、`tests/test_monitor985_private_signals.py`
+- 公共实机探针：`artifacts/research/monitor985_public_probe_20260905.py`
+- 公共实机结果：`artifacts/research/monitor985_public_probe_20260905.json`
+- 登录态脱敏实机探针事实（2026-09-06）：5 个 Chromium profile；985monitor Cookie/钱包 localStorage 当前均不可用，错误只记录计数，不记录任何凭据值。
 - 参考：`https://985monitor.xyz/`
 - 参考：`https://github.com/0xuezhang985/985gmgn-helper`

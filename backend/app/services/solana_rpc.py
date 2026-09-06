@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import time
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
@@ -77,6 +78,47 @@ def _is_ankr_url(url: str) -> bool:
 def _is_alchemy_url(url: str) -> bool:
     host = (urlparse(str(url)).hostname or "").lower()
     return host == "alchemy.com" or host.endswith(".alchemy.com")
+
+
+ALCHEMY_SAFE_CU_PER_SECOND = 275.0
+_ALCHEMY_METHOD_CU = {
+    "getTransactionsForAddress": 100.0,
+    "getTransaction": 40.0,
+}
+_ALCHEMY_GATES: weakref.WeakKeyDictionary[Any, "_AlchemyCuStartGate"] = weakref.WeakKeyDictionary()
+
+
+class _AlchemyCuStartGate:
+    """Process-wide conservative leaky bucket for account-level Alchemy CUs."""
+
+    def __init__(self, rate_cu_per_second: float = ALCHEMY_SAFE_CU_PER_SECOND) -> None:
+        self.rate_cu_per_second = max(1.0, float(rate_cu_per_second))
+        self._lock = asyncio.Lock()
+        self._next_at = 0.0
+
+    async def acquire(self, cost_cu: float) -> None:
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            now = loop.time()
+            if self._next_at > now:
+                await asyncio.sleep(self._next_at - now)
+                now = loop.time()
+            self._next_at = max(now, self._next_at) + max(1.0, float(cost_cu)) / self.rate_cu_per_second
+
+
+def _alchemy_cu_gate() -> _AlchemyCuStartGate:
+    loop = asyncio.get_running_loop()
+    gate = _ALCHEMY_GATES.get(loop)
+    if gate is None:
+        gate = _AlchemyCuStartGate()
+        _ALCHEMY_GATES[loop] = gate
+    return gate
+
+
+def _alchemy_method_cost(method: str) -> float:
+    # Alchemy's current Solana table prices most lightweight JSON-RPC calls at
+    # 20 CU, getTransaction at 40 CU, and getTransactionsForAddress at 100 CU.
+    return _ALCHEMY_METHOD_CU.get(str(method), 20.0)
 
 
 def configured_rpc_endpoints(path: Path | None = None) -> tuple[RpcEndpoint, ...]:
@@ -176,6 +218,8 @@ class SolanaRpcPool:
         return f"{endpoint.label}:{type(exc).__name__}"
 
     async def _rpc(self, endpoint: RpcEndpoint, method: str, params: list[Any]) -> Any:
+        if endpoint.provider == "alchemy":
+            await _alchemy_cu_gate().acquire(_alchemy_method_cost(method))
         client = await self._http_client()
         started = time.perf_counter()
         response = await client.post(
@@ -319,12 +363,11 @@ async def bounded_rate_probe(
 ) -> dict[str, Any]:
     """Small same-IP diagnostic; deliberately not a rate-limit stress test.
 
-    getSlot currently costs 20 CU, so 75 requests consume 1,500 CU per account
-    and four independent accounts issue a 6,000-CU same-IP burst. Alchemy's Free
-    pricing page currently shows 500 CUPS in its overview and 1,000 CUPS in a
-    lower throughput table, while also documenting elastic headroom. Therefore
-    a clean concurrent pass is useful evidence against a small hard IP-wide
-    bucket, but it cannot prove universal rate-limit independence.
+    getSlot currently costs 20 CU. Alchemy documents Free throughput at 300 CU/s
+    and evaluates throughput at the account level over a rolling 10-second token
+    bucket. This diagnostic deliberately bypasses the production governor so it
+    can observe provider behaviour, but remains bounded and must not be used as
+    a production load generator.
     """
     selected = [item for item in (endpoints or configured_rpc_endpoints()) if item.provider == "alchemy"]
     try:
@@ -371,7 +414,7 @@ async def bounded_rate_probe(
     return {
         "status": "bounded_probe_complete",
         "same_ip_shared_rate_limit_conclusion": (
-            "no_strict_shared_500_cups_bucket_observed"
+            "no_429_in_bounded_same_ip_probe"
             if not any_429
             else "possible_shared_or_account_limit"
         ),

@@ -357,6 +357,7 @@ class EnrichmentService:
         safety_filter: SafetyFilter | None = None,
         onchain_admission: Any | None = None,
         public_social_signals: Any | None = None,
+        account_social_signals: Any | None = None,
         *,
         readiness_attempts: int = 3,
         readiness_retry_seconds: float = 2.0,
@@ -366,6 +367,7 @@ class EnrichmentService:
         self.safety_filter = safety_filter or SafetyFilter()
         self.onchain_admission = onchain_admission
         self.public_social_signals = public_social_signals
+        self.account_social_signals = account_social_signals
         self.readiness_attempts = max(1, int(readiness_attempts))
         self.readiness_retry_seconds = max(0.0, float(readiness_retry_seconds))
         self._sleep = sleeper
@@ -515,6 +517,26 @@ class EnrichmentService:
             except Exception:
                 social_features = {}
 
+        account_social_features: Mapping[str, Any] = {}
+        if self.account_social_signals is not None:
+            try:
+                account_snapshot = await self.account_social_signals.snapshot(
+                    candidate.address, entry_time=entry_time
+                )
+                account_social_features = dict(account_snapshot.features)
+                source = dict(source)
+                source["_account_social_signals"] = {
+                    "provider": "985monitor_account_readonly",
+                    "fetched_at": int(account_snapshot.fetched_at),
+                    "connected": bool(account_snapshot.connected),
+                    "successful_sources": list(account_snapshot.successful_sources),
+                    "incomplete_sources": list(account_snapshot.incomplete_sources),
+                    "failed_sources": list(account_snapshot.failed_sources),
+                    "matched_events_15m": int(account_snapshot.matched_events),
+                }
+            except Exception:
+                account_social_features = {}
+
         price = to_float(normalized.get("price"))
         liquidity = to_float(normalized.get("liquidity"))
         if not price or liquidity is None:
@@ -599,6 +621,7 @@ class EnrichmentService:
             "creator_open_ratio": recursive_find([source, created_tokens], ("creator_open_ratio", "open_ratio")),
             "ln(top_wallets+1)": _ln1p(recursive_find(source, ("top_wallets", "topWallets"))),
             **social_features,
+            **account_social_features,
         }
         sample = CollectedSample(
             address=candidate.address,

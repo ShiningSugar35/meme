@@ -20,7 +20,7 @@ NEW_LIQUIDITY_MIN = 5_000.0
 ORIGINAL_AGE_MIN = 2.0
 ORIGINAL_AGE_MAX = 300.0
 NEW_AGE_MIN = 5.0
-NEW_AGE_MAX = 240.0
+NEW_AGE_MAX = 300.0
 
 
 def _finite(value: Any) -> float | None:
@@ -216,16 +216,6 @@ def main() -> int:
         for item in baseline
         if NEW_AGE_MIN < float(item["age_minutes"]) < ORIGINAL_AGE_MAX
     ]
-    age_lt240_only = [
-        item
-        for item in baseline
-        if ORIGINAL_AGE_MIN < float(item["age_minutes"]) < NEW_AGE_MAX
-    ]
-    age_gt5_lt240_only = [
-        item
-        for item in baseline
-        if NEW_AGE_MIN < float(item["age_minutes"]) < NEW_AGE_MAX
-    ]
     liquidity_gt5000_only = [
         item for item in baseline if float(item["liquidity"]) > NEW_LIQUIDITY_MIN
     ]
@@ -261,10 +251,8 @@ def main() -> int:
         "feature_schema_counts": dict(schema_counts),
         "baseline": _summary(baseline),
         "age_gt5_only": _summary(age_gt5_only),
-        "age_lt240_only": _summary(age_lt240_only),
-        "age_gt5_lt240_only": _summary(age_gt5_lt240_only),
         "liquidity_gt5000_only": _summary(liquidity_gt5000_only),
-        "deployed_liquidity_gt5000_age_gt5_lt240": _summary(deployed),
+        "deployed_liquidity_gt5000_age_gt5": _summary(deployed),
         "deployed_fraction_of_baseline": len(deployed) / len(baseline) if baseline else None,
         "deployed_raw_fact_presence": {
             name: sum(int(item["raw_fact_presence"].get(name, False)) for item in deployed)
@@ -279,10 +267,8 @@ def main() -> int:
             {
                 "baseline": report["baseline"],
                 "age_gt5_only": report["age_gt5_only"],
-                "age_lt240_only": report["age_lt240_only"],
-                "age_gt5_lt240_only": report["age_gt5_lt240_only"],
                 "liquidity_gt5000_only": report["liquidity_gt5000_only"],
-                "deployed": report["deployed_liquidity_gt5000_age_gt5_lt240"],
+                "deployed": report["deployed_liquidity_gt5000_age_gt5"],
                 "deployed_fraction_of_baseline": report["deployed_fraction_of_baseline"],
             },
             ensure_ascii=False,

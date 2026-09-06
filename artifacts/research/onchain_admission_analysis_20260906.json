@@ -1,0 +1,81 @@
+{
+  "baseline": {
+    "by_type": {
+      "near_completion": {
+        "mature_v5": 2797,
+        "positive_rate_v5": 0.14336789417232748,
+        "positives_v5": 401,
+        "samples": 2797
+      },
+      "new_creation": {
+        "mature_v5": 774,
+        "positive_rate_v5": 0.18087855297157623,
+        "positives_v5": 140,
+        "samples": 774
+      }
+    },
+    "mature_v5": 3571,
+    "positive_rate_v5": 0.1514981797815738,
+    "positive_rate_wilson95_v5": [
+      0.14011367993502305,
+      0.16363166690866687
+    ],
+    "positives_v5": 541,
+    "samples": 3571
+  },
+  "first_round": {
+    "fraction_of_original": 0.7846541584990199,
+    "mature_v5": 2802,
+    "positive_rate_v5": 0.14132762312633834,
+    "positives_v5": 396,
+    "samples": 2802
+  },
+  "generated_from": {
+    "admission_report": "artifacts\\research\\admission_counterfactual_20260905.json",
+    "credentials_redacted": true,
+    "database": "D:\\meme\\data\\meme_quant.db",
+    "rpc_cache": "artifacts\\research\\onchain_admission_backfill_20260905.jsonl"
+  },
+  "gmgn_vs_rpc_buy_ratio": {
+    "absolute_error_mean": 0.011505471293171619,
+    "absolute_error_median": 0.005899434454102237,
+    "paired": 2802,
+    "within_0_05": 0.9700214132762313
+  },
+  "limitations": [
+    "15 first-round samples could not prove a complete 24h creator window within the bounded Alchemy archival budget and are excluded fail-closed.",
+    "The historical creator rule is a conservative Solana signer/fee-payer proxy for the user's tx.origin intent; Solana has no EVM tx.origin field.",
+    "This report is retrospective rule analysis only and was not used to tune against the frozen final holdout."
+  ],
+  "policy": {
+    "age_minutes_gt": 5.0,
+    "age_minutes_lt": 300.0,
+    "buy_swap_ratio_1h_lt": 0.95,
+    "creator_launches_24h_lt": 20,
+    "creator_origin_semantics": "Solana creation transaction fee payer/originating signer proxy; no EVM tx.origin",
+    "historical_unresolved_policy": "fail_closed",
+    "liquidity_gt": 5000.0,
+    "marketcap_gt": 5000.0
+  },
+  "rpc_second_round": {
+    "creator_fail": 715,
+    "creator_pass": 2072,
+    "creator_resolved": 2787,
+    "creator_unresolved_fail_closed": 15,
+    "final_samples": 2072,
+    "fraction_of_first_round": 0.7394718058529621,
+    "fraction_of_original": 0.5802296275553066,
+    "mature_v5": 2072,
+    "positive_rate_change_pp_vs_first_round": 0.5390523591808388,
+    "positive_rate_change_pp_vs_original": -0.4780033063427058,
+    "positive_rate_v5": 0.14671814671814673,
+    "positive_rate_wilson95_v5": [
+      0.13213702105864,
+      0.16260680738781919
+    ],
+    "positives_v5": 304,
+    "rows_with_swap_result": 2802,
+    "swap_fail": 0,
+    "swap_pass": 2802
+  }
+}
