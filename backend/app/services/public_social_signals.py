@@ -184,12 +184,20 @@ class PublicSocialSignalProvider:
         endpoints: Sequence[PublicSignalEndpoint] = PUBLIC_SIGNAL_ENDPOINTS,
         cache_seconds: float = 20.0,
         timeout_seconds: float = 6.0,
+        retry_delay_seconds: float = 0.20,
         client: Any | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        if self.base_url.lower() == "https://985monitor.xyz":
+            self.retry_base_url: str | None = "https://www.985monitor.xyz"
+        elif self.base_url.lower() == "https://www.985monitor.xyz":
+            self.retry_base_url = "https://985monitor.xyz"
+        else:
+            self.retry_base_url = None
         self.endpoints = tuple(endpoints)
         self.cache_seconds = max(1.0, float(cache_seconds))
         self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.retry_delay_seconds = max(0.0, float(retry_delay_seconds))
         self._client = client
         self._owns_client = client is None
         self._lock = asyncio.Lock()
@@ -216,22 +224,34 @@ class PublicSocialSignalProvider:
 
     async def _fetch_one(self, endpoint: PublicSignalEndpoint) -> tuple[str, list[Mapping[str, Any]] | None]:
         client = await self._http_client()
-        try:
-            response = await client.get(f"{self.base_url}{endpoint.path}")
-            if int(response.status_code) != 200:
+        bases = (self.base_url, self.retry_base_url or self.base_url)
+        for attempt, base in enumerate(bases):
+            try:
+                response = await client.get(f"{base}{endpoint.path}")
+                status = int(response.status_code)
+                if status == 200:
+                    return endpoint.key, _event_items(response.json())
+                retryable = status in {408, 425, 429} or status >= 500
+                if attempt == 0 and retryable:
+                    if self.retry_delay_seconds > 0:
+                        await asyncio.sleep(self.retry_delay_seconds)
+                    continue
                 return endpoint.key, None
-            payload = response.json()
-            return endpoint.key, _event_items(payload)
-        except Exception:
-            return endpoint.key, None
+            except Exception:
+                if attempt == 0:
+                    if self.retry_delay_seconds > 0:
+                        await asyncio.sleep(self.retry_delay_seconds)
+                    continue
+                return endpoint.key, None
+        return endpoint.key, None
 
     async def _refresh(self) -> tuple[dict[str, list[Mapping[str, Any]]], tuple[str, ...], int]:
         now_mono = time.monotonic()
-        if self._cache and now_mono - self._cache_mono <= self.cache_seconds:
+        if self._fetched_at and now_mono - self._cache_mono <= self.cache_seconds:
             return self._cache, self._failures, self._fetched_at
         async with self._lock:
             now_mono = time.monotonic()
-            if self._cache and now_mono - self._cache_mono <= self.cache_seconds:
+            if self._fetched_at and now_mono - self._cache_mono <= self.cache_seconds:
                 return self._cache, self._failures, self._fetched_at
             results = await asyncio.gather(*(self._fetch_one(endpoint) for endpoint in self.endpoints))
             cache: dict[str, list[Mapping[str, Any]]] = {}

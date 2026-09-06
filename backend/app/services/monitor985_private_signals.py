@@ -201,12 +201,14 @@ class Monitor985PrivateSignalProvider:
         cache_seconds: float = 15.0,
         auth_probe_seconds: float = 60.0,
         timeout_seconds: float = 8.0,
+        retry_delay_seconds: float = 0.20,
         client: Any | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.cache_seconds = max(5.0, float(cache_seconds))
         self.auth_probe_seconds = max(15.0, float(auth_probe_seconds))
         self.timeout_seconds = max(2.0, float(timeout_seconds))
+        self.retry_delay_seconds = max(0.0, float(retry_delay_seconds))
         self._client = client
         self._owns_client = client is None
         self._lock = asyncio.Lock()
@@ -278,50 +280,73 @@ class Monitor985PrivateSignalProvider:
             self._session_expires_at_ms = 0
             return None
         client = await self._http_client()
-        try:
-            response = await client.post(
-                f"{self.base_url}/api/extension/session",
-                headers={
-                    "Content-Type": "application/json",
-                    "X-User-Id": wallet,
-                    "X-User-Token": token,
-                    "X-Wallet-Address": wallet,
-                },
-                json={"clientId": self._client_id, "prefs": _prefs(auth.values)},
-            )
-            if int(response.status_code) != 200:
-                self._session_token = None
-                self._session_expires_at_ms = 0
+        for attempt in range(2):
+            try:
+                response = await client.post(
+                    f"{self.base_url}/api/extension/session",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-User-Id": wallet,
+                        "X-User-Token": token,
+                        "X-Wallet-Address": wallet,
+                    },
+                    json={"clientId": self._client_id, "prefs": _prefs(auth.values)},
+                )
+                status = int(response.status_code)
+                if status != 200:
+                    retryable = status in {408, 425, 429} or status >= 500
+                    if attempt == 0 and retryable:
+                        if self.retry_delay_seconds > 0:
+                            await asyncio.sleep(self.retry_delay_seconds)
+                        continue
+                    self._session_token = None
+                    self._session_expires_at_ms = 0
+                    return None
+                body = response.json()
+                if not isinstance(body, Mapping) or body.get("ok") is not True:
+                    return None
+                session = body.get("session")
+                if not isinstance(session, Mapping) or not session.get("token"):
+                    return None
+                self._session_token = str(session["token"])
+                self._session_expires_at_ms = int(float(session.get("expiresAt") or 0))
+                return self._session_token
+            except Exception:
+                if attempt == 0:
+                    if self.retry_delay_seconds > 0:
+                        await asyncio.sleep(self.retry_delay_seconds)
+                    continue
                 return None
-            body = response.json()
-            if not isinstance(body, Mapping) or body.get("ok") is not True:
-                return None
-            session = body.get("session")
-            if not isinstance(session, Mapping) or not session.get("token"):
-                return None
-            self._session_token = str(session["token"])
-            self._session_expires_at_ms = int(float(session.get("expiresAt") or 0))
-            return self._session_token
-        except Exception:
-            return None
+        return None
 
     async def _fetch_one(self, key: str, path: str, session: str) -> tuple[str, list[Mapping[str, Any]] | None, bool]:
         client = await self._http_client()
-        try:
-            response = await client.get(
-                f"{self.base_url}{path}",
-                headers={"Authorization": f"Bearer {session}", "Accept": "application/json"},
-            )
-            if int(response.status_code) == 401:
-                self._session_token = None
-                self._session_expires_at_ms = 0
-                return key, None, True
-            if int(response.status_code) != 200:
+        for attempt in range(2):
+            try:
+                response = await client.get(
+                    f"{self.base_url}{path}",
+                    headers={"Authorization": f"Bearer {session}", "Accept": "application/json"},
+                )
+                status = int(response.status_code)
+                if status == 401:
+                    self._session_token = None
+                    self._session_expires_at_ms = 0
+                    return key, None, True
+                if status == 200:
+                    return key, _event_items(response.json()), False
+                retryable = status in {408, 425, 429} or status >= 500
+                if attempt == 0 and retryable:
+                    if self.retry_delay_seconds > 0:
+                        await asyncio.sleep(self.retry_delay_seconds)
+                    continue
                 return key, None, False
-            payload = response.json()
-            return key, _event_items(payload), False
-        except Exception:
-            return key, None, False
+            except Exception:
+                if attempt == 0:
+                    if self.retry_delay_seconds > 0:
+                        await asyncio.sleep(self.retry_delay_seconds)
+                    continue
+                return key, None, False
+        return key, None, False
 
     async def _refresh(self) -> tuple[dict[str, list[Mapping[str, Any]]], tuple[str, ...], int, bool]:
         now_mono = time.monotonic()

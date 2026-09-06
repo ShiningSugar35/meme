@@ -138,7 +138,39 @@ async def test_all_sources_down_keeps_features_missing() -> None:
         client=FakeClient({}),
     )
     snapshot = await provider.snapshot(ADDRESS, entry_time=ENTRY)
+    second = await provider.snapshot(ADDRESS, entry_time=ENTRY)
     assert snapshot.successful_sources == ()
     assert snapshot.failed_sources == ("down",)
     assert snapshot.features["monitor_source_coverage"] is None
     assert snapshot.features["ln(monitor_mentions_5m+1)"] is None
+    assert second.failed_sources == ("down",)
+    assert len(provider._client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_recovers_transient_public_source_failure() -> None:
+    endpoint = PublicSignalEndpoint("flaky", "/flaky", "social")
+
+    class FlakyClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get(self, _url: str):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse({}, 503)
+            return FakeResponse({"events": []}, 200)
+
+    client = FlakyClient()
+    provider = PublicSocialSignalProvider(
+        base_url="https://example.invalid",
+        endpoints=(endpoint,),
+        retry_delay_seconds=0,
+        client=client,
+    )
+    snapshot = await provider.snapshot(ADDRESS, entry_time=ENTRY)
+    assert client.calls == 2
+    assert snapshot.successful_sources == ("flaky",)
+    assert snapshot.failed_sources == ()
+    assert snapshot.features["monitor_source_coverage"] == 1.0
+    assert snapshot.features["ln(monitor_mentions_5m+1)"] == 0.0

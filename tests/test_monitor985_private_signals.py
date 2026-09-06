@@ -164,6 +164,48 @@ async def test_monitor985_future_event_is_never_used(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_monitor985_transient_session_and_feed_failures_retry_once(monkeypatch) -> None:
+    entry_time = 1_800_000_000
+    address = "SoLRetryFixture111111111111111111111111111"
+
+    class RetryClient(FakeClient):
+        def __init__(self, *, entry_time: int, address: str) -> None:
+            super().__init__(entry_time=entry_time, address=address)
+            self.post_attempts = 0
+            self.pump_attempts = 0
+
+        async def post(self, url: str, **kwargs):
+            self.post_attempts += 1
+            if self.post_attempts == 1:
+                return FakeResponse(503, {})
+            return await super().post(url, **kwargs)
+
+        async def get(self, url: str, **kwargs):
+            if "pump-trade-events" in url:
+                self.pump_attempts += 1
+                if self.pump_attempts == 1:
+                    return FakeResponse(503, {})
+            return await super().get(url, **kwargs)
+
+    monkeypatch.setattr(
+        "backend.app.services.monitor985_private_signals.read_local_storage",
+        lambda _origin, _keys: BrowserCredentialSnapshot(
+            "chrome:Default", {"xMonitorWalletAddress": "w", "xMonitorWalletToken": "t"}, "fixture"
+        ),
+    )
+    client = RetryClient(entry_time=entry_time, address=address)
+    provider = Monitor985PrivateSignalProvider(client=client, retry_delay_seconds=0)
+    snapshot = await provider.snapshot(address, entry_time=entry_time)
+    assert client.post_attempts == 2
+    assert client.pump_attempts == 2
+    assert snapshot.connected is True
+    assert snapshot.failed_sources == ()
+    assert snapshot.matched_events == 4
+    assert snapshot.features["monitor_private_source_coverage"] == 1.0
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_monitor985_mixed_chain_full_page_stays_incomplete(monkeypatch) -> None:
     entry_time = 1_800_000_000
     address = "SoLTruncatedFixture111111111111111111111111"
