@@ -200,7 +200,7 @@ class Monitor985PrivateSignalProvider:
         base_url: str = MONITOR985_ORIGIN,
         cache_seconds: float = 15.0,
         auth_probe_seconds: float = 60.0,
-        timeout_seconds: float = 8.0,
+        timeout_seconds: float = 10.0,
         retry_delay_seconds: float = 0.20,
         client: Any | None = None,
     ) -> None:

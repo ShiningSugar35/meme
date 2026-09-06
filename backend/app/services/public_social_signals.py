@@ -183,7 +183,7 @@ class PublicSocialSignalProvider:
         base_url: str = "https://985monitor.xyz",
         endpoints: Sequence[PublicSignalEndpoint] = PUBLIC_SIGNAL_ENDPOINTS,
         cache_seconds: float = 20.0,
-        timeout_seconds: float = 6.0,
+        timeout_seconds: float = 10.0,
         retry_delay_seconds: float = 0.20,
         client: Any | None = None,
     ) -> None:
