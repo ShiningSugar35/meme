@@ -109,11 +109,10 @@ async def test_monitor985_account_session_is_readonly_and_features_are_pit(monke
     snapshot = await provider.snapshot(address, entry_time=entry_time)
 
     assert snapshot.connected is True
-    assert snapshot.matched_events == 4
+    assert snapshot.matched_events == 2
     assert snapshot.features["monitor_private_fomo_buy_ratio_15m"] == pytest.approx(0.5)
-    assert snapshot.features["monitor_private_pump_buy_ratio_15m"] == pytest.approx(0.5)
     assert snapshot.features["monitor_private_fomo_usd_imbalance_15m"] == pytest.approx(0.5)
-    assert snapshot.features["monitor_private_pump_usd_imbalance_15m"] == pytest.approx(0.5)
+    assert "monitor_private_pump_buy_ratio_15m" not in snapshot.features
     assert snapshot.features["monitor_private_source_coverage"] == 1.0
     assert len(client.posts) == 1
     assert str(client.posts[0]["url"]).endswith("/api/extension/session")
@@ -160,6 +159,9 @@ async def test_monitor985_future_event_is_never_used(monkeypatch) -> None:
     assert snapshot.connected is True
     assert snapshot.matched_events == 0
     assert snapshot.features["ln(monitor_private_fomo_events_15m+1)"] == 0.0
+    assert snapshot.features["monitor_private_fomo_buy_ratio_15m"] == pytest.approx(0.5)
+    assert snapshot.features["monitor_private_fomo_usd_imbalance_15m"] == pytest.approx(0.0)
+    assert snapshot.features["ln(monitor_private_fomo_usd_15m+1)"] == pytest.approx(0.0)
     await provider.close()
 
 
@@ -172,7 +174,7 @@ async def test_monitor985_transient_session_and_feed_failures_retry_once(monkeyp
         def __init__(self, *, entry_time: int, address: str) -> None:
             super().__init__(entry_time=entry_time, address=address)
             self.post_attempts = 0
-            self.pump_attempts = 0
+            self.fomo_attempts = 0
 
         async def post(self, url: str, **kwargs):
             self.post_attempts += 1
@@ -181,9 +183,9 @@ async def test_monitor985_transient_session_and_feed_failures_retry_once(monkeyp
             return await super().post(url, **kwargs)
 
         async def get(self, url: str, **kwargs):
-            if "pump-trade-events" in url:
-                self.pump_attempts += 1
-                if self.pump_attempts == 1:
+            if "fomo-events" in url:
+                self.fomo_attempts += 1
+                if self.fomo_attempts == 1:
                     return FakeResponse(503, {})
             return await super().get(url, **kwargs)
 
@@ -197,10 +199,10 @@ async def test_monitor985_transient_session_and_feed_failures_retry_once(monkeyp
     provider = Monitor985PrivateSignalProvider(client=client, retry_delay_seconds=0)
     snapshot = await provider.snapshot(address, entry_time=entry_time)
     assert client.post_attempts == 2
-    assert client.pump_attempts == 2
+    assert client.fomo_attempts == 2
     assert snapshot.connected is True
     assert snapshot.failed_sources == ()
-    assert snapshot.matched_events == 4
+    assert snapshot.matched_events == 2
     assert snapshot.features["monitor_private_source_coverage"] == 1.0
     await provider.close()
 
@@ -254,8 +256,8 @@ async def test_monitor985_mixed_chain_full_page_stays_incomplete(monkeypatch) ->
     provider = Monitor985PrivateSignalProvider(client=TruncatedClient(entry_time=entry_time, address=address))
     snapshot = await provider.snapshot(address, entry_time=entry_time)
     assert snapshot.connected is True
-    assert snapshot.incomplete_sources == ("private_fomo", "private_pump")
+    assert snapshot.incomplete_sources == ("private_fomo",)
     assert snapshot.features["monitor_private_source_coverage"] == 0.0
     assert snapshot.features["ln(monitor_private_fomo_events_15m+1)"] is None
-    assert snapshot.features["ln(monitor_private_pump_events_15m+1)"] is None
+    assert "ln(monitor_private_pump_events_15m+1)" not in snapshot.features
     await provider.close()

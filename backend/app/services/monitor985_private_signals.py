@@ -30,12 +30,6 @@ _PRIVATE_FEATURES = (
     "monitor_private_fomo_buy_ratio_15m",
     "monitor_private_fomo_usd_imbalance_15m",
     "ln(monitor_private_fomo_usd_15m+1)",
-    "ln(monitor_private_pump_events_5m+1)",
-    "ln(monitor_private_pump_events_15m+1)",
-    "ln(monitor_private_pump_unique_wallets_15m+1)",
-    "monitor_private_pump_buy_ratio_15m",
-    "monitor_private_pump_usd_imbalance_15m",
-    "ln(monitor_private_pump_usd_15m+1)",
     "monitor_private_source_coverage",
 )
 
@@ -365,7 +359,6 @@ class Monitor985PrivateSignalProvider:
                 return self._cache, self._failures, self._fetched_at, False
             requests = (
                 ("private_fomo", "/api/extension/fomo-events?limit=150"),
-                ("private_pump", "/api/extension/pump-trade-events?limit=150"),
             )
             results = await asyncio.gather(*(self._fetch_one(key, path, session) for key, path in requests))
             if any(unauthorized for _key, _rows, unauthorized in results):
@@ -433,8 +426,6 @@ class Monitor985PrivateSignalProvider:
             return found
 
         fomo15 = matches("private_fomo", 900)
-        pump15 = matches("private_pump", 900)
-        pump5 = matches("private_pump", 300)
 
         def behavior(events: Sequence[Mapping[str, Any]], *, pump: bool) -> tuple[float | None, float | None, float | None]:
             buy_count = sell_count = 0
@@ -462,22 +453,14 @@ class Monitor985PrivateSignalProvider:
             )
 
         fomo_buy, fomo_imbalance, fomo_usd_log = behavior(fomo15, pump=False)
-        pump_buy, pump_imbalance, pump_usd_log = behavior(pump15, pump=True)
         fomo_complete = "private_fomo" in completed
-        pump_complete = "private_pump" in completed
         features: dict[str, float | None] = {
             "ln(monitor_private_fomo_events_15m+1)": _log1p(len(fomo15)) if fomo_complete else None,
             "ln(monitor_private_fomo_unique_authors_15m+1)": _log1p(len({_principal(event, pump=False) for event in fomo15 if _principal(event, pump=False)})) if fomo_complete else None,
-            "monitor_private_fomo_buy_ratio_15m": fomo_buy if fomo_complete else None,
-            "monitor_private_fomo_usd_imbalance_15m": fomo_imbalance if fomo_complete else None,
-            "ln(monitor_private_fomo_usd_15m+1)": fomo_usd_log if fomo_complete else None,
-            "ln(monitor_private_pump_events_5m+1)": _log1p(len(pump5)) if pump_complete else None,
-            "ln(monitor_private_pump_events_15m+1)": _log1p(len(pump15)) if pump_complete else None,
-            "ln(monitor_private_pump_unique_wallets_15m+1)": _log1p(len({_principal(event, pump=True) for event in pump15 if _principal(event, pump=True)})) if pump_complete else None,
-            "monitor_private_pump_buy_ratio_15m": pump_buy if pump_complete else None,
-            "monitor_private_pump_usd_imbalance_15m": pump_imbalance if pump_complete else None,
-            "ln(monitor_private_pump_usd_15m+1)": pump_usd_log if pump_complete else None,
-            "monitor_private_source_coverage": len(completed) / 2.0,
+            "monitor_private_fomo_buy_ratio_15m": (fomo_buy if fomo_buy is not None else 0.5) if fomo_complete else None,
+            "monitor_private_fomo_usd_imbalance_15m": (fomo_imbalance if fomo_imbalance is not None else 0.0) if fomo_complete else None,
+            "ln(monitor_private_fomo_usd_15m+1)": (fomo_usd_log if fomo_usd_log is not None else 0.0) if fomo_complete else None,
+            "monitor_private_source_coverage": 1.0 if fomo_complete else 0.0,
         }
         return Monitor985PrivateSnapshot(
             observed_at=int(entry_time),
@@ -487,5 +470,5 @@ class Monitor985PrivateSignalProvider:
             successful_sources=tuple(sorted(feeds)),
             incomplete_sources=tuple(sorted(incomplete)),
             failed_sources=tuple(sorted(failures)),
-            matched_events=len(fomo15) + len(pump15),
+            matched_events=len(fomo15),
         )

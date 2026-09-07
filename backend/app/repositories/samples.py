@@ -177,8 +177,13 @@ class SampleRepository:
         rows = self.database.fetch_all(sql, parameters)
         for row in rows:
             features = json.loads(row.pop("features_json") or "{}")
-            row.pop("raw_json", None)
+            raw = json.loads(row.pop("raw_json", None) or "{}")
             row.update(features)
+            if isinstance(raw, Mapping):
+                for key in ("_public_social_signals", "_account_social_signals"):
+                    value = raw.get(key)
+                    if isinstance(value, Mapping):
+                        row[key] = dict(value)
         return rows
 
     def list_pending_due(self, *, before_epoch: int, limit: int = 100) -> list[dict[str, Any]]:

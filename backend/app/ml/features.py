@@ -77,6 +77,32 @@ MOMENTUM_ACCEL_1M_VS_5M_FEATURE = "momentum_accel_1m_vs_5m"
 LEGACY_AGE_FEATURE = "age"
 LEGACY_PRICE_FEATURE = "price"
 
+_PUBLIC_SOCIAL_PROVENANCE = "_public_social_signals"
+_ACCOUNT_SOCIAL_PROVENANCE = "_account_social_signals"
+_LATEST_MENTION_AGE_FEATURE = "ln(monitor_latest_mention_age_s+1)"
+_PRIVATE_SOURCE_COVERAGE_FEATURE = "monitor_private_source_coverage"
+_LATEST_MENTION_CENSOR_SECONDS = 900.0
+_PUBLIC_FOMO_NO_EVENT_DEFAULTS: Mapping[str, float] = {
+    "monitor_fomo_buy_ratio_15m": 0.5,
+    "monitor_fomo_usd_imbalance_15m": 0.0,
+    "ln(monitor_fomo_usd_15m+1)": 0.0,
+}
+_PRIVATE_FOMO_NO_EVENT_DEFAULTS: Mapping[str, float] = {
+    "monitor_private_fomo_buy_ratio_15m": 0.5,
+    "monitor_private_fomo_usd_imbalance_15m": 0.0,
+    "ln(monitor_private_fomo_usd_15m+1)": 0.0,
+}
+PRIVATE_PUMP_MODEL_FEATURES: frozenset[str] = frozenset(
+    {
+        "ln(monitor_private_pump_events_5m+1)",
+        "ln(monitor_private_pump_events_15m+1)",
+        "ln(monitor_private_pump_unique_wallets_15m+1)",
+        "monitor_private_pump_buy_ratio_15m",
+        "monitor_private_pump_usd_imbalance_15m",
+        "ln(monitor_private_pump_usd_15m+1)",
+    }
+)
+
 
 def _finite_float(value: Any) -> float | None:
     try:
@@ -84,6 +110,22 @@ def _finite_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _provenance_source_complete(
+    source: Mapping[str, Any],
+    provenance_key: str,
+    source_name: str,
+) -> bool:
+    provenance = source.get(provenance_key)
+    if not isinstance(provenance, Mapping):
+        return False
+    successful = {str(item) for item in provenance.get("successful_sources") or ()}
+    incomplete = {str(item) for item in provenance.get("incomplete_sources") or ()}
+    failed = {str(item) for item in provenance.get("failed_sources") or ()}
+    if provenance_key == _ACCOUNT_SOCIAL_PROVENANCE and provenance.get("connected") is not True:
+        return False
+    return source_name in successful and source_name not in incomplete and source_name not in failed
 
 
 def materialize_entry_feature(
@@ -105,6 +147,46 @@ def materialize_entry_feature(
         return math.log1p(price) if price is not None and price >= 0 else None
     if name == LEGACY_PRICE_FEATURE:
         return _finite_float(entry_price)
+
+    if name == _LATEST_MENTION_AGE_FEATURE:
+        current = _finite_float(source.get(name))
+        if current is not None:
+            return current
+        mention_count = _finite_float(source.get("ln(monitor_mentions_15m+1)"))
+        return math.log1p(_LATEST_MENTION_CENSOR_SECONDS) if mention_count is not None else None
+
+    if name in _PUBLIC_FOMO_NO_EVENT_DEFAULTS:
+        current = _finite_float(source.get(name))
+        if current is not None:
+            return current
+        if _provenance_source_complete(source, _PUBLIC_SOCIAL_PROVENANCE, "fomo"):
+            return _PUBLIC_FOMO_NO_EVENT_DEFAULTS[name]
+        return None
+
+    if name in _PRIVATE_FOMO_NO_EVENT_DEFAULTS:
+        current = _finite_float(source.get(name))
+        if current is not None:
+            return current
+        if _provenance_source_complete(source, _ACCOUNT_SOCIAL_PROVENANCE, "private_fomo"):
+            return _PRIVATE_FOMO_NO_EVENT_DEFAULTS[name]
+        return None
+
+    if name == _PRIVATE_SOURCE_COVERAGE_FEATURE:
+        provenance = source.get(_ACCOUNT_SOCIAL_PROVENANCE)
+        if isinstance(provenance, Mapping):
+            if provenance.get("connected") is not True:
+                return None
+            successful = {str(item) for item in provenance.get("successful_sources") or ()}
+            incomplete = {str(item) for item in provenance.get("incomplete_sources") or ()}
+            failed = {str(item) for item in provenance.get("failed_sources") or ()}
+            if "private_fomo" in failed:
+                return None
+            if "private_fomo" in incomplete:
+                return 0.0
+            if "private_fomo" in successful:
+                return 1.0
+            return None
+        return _finite_float(source.get(name))
 
     if name == AGE_LOG1P_FEATURE:
         current = _finite_float(source.get(AGE_LOG1P_FEATURE))
@@ -188,6 +270,7 @@ DEPRECATED_MODEL_FEATURES: frozenset[str] = frozenset({
     "dexscr_ad",
     "dexscr_trending_bar",
     LEGACY_MARKETCAP_LOG1P_FEATURE,
+    *PRIVATE_PUMP_MODEL_FEATURES,
 })
 
 V4_ADDED_MODEL_FEATURES: tuple[str, ...] = (
@@ -214,12 +297,6 @@ V4_ADDED_MODEL_FEATURES: tuple[str, ...] = (
     "monitor_private_fomo_buy_ratio_15m",
     "monitor_private_fomo_usd_imbalance_15m",
     "ln(monitor_private_fomo_usd_15m+1)",
-    "ln(monitor_private_pump_events_5m+1)",
-    "ln(monitor_private_pump_events_15m+1)",
-    "ln(monitor_private_pump_unique_wallets_15m+1)",
-    "monitor_private_pump_buy_ratio_15m",
-    "monitor_private_pump_usd_imbalance_15m",
-    "ln(monitor_private_pump_usd_15m+1)",
     "monitor_private_source_coverage",
 )
 
@@ -286,12 +363,6 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "monitor_private_fomo_buy_ratio_15m",
     "monitor_private_fomo_usd_imbalance_15m",
     "ln(monitor_private_fomo_usd_15m+1)",
-    "ln(monitor_private_pump_events_5m+1)",
-    "ln(monitor_private_pump_events_15m+1)",
-    "ln(monitor_private_pump_unique_wallets_15m+1)",
-    "monitor_private_pump_buy_ratio_15m",
-    "monitor_private_pump_usd_imbalance_15m",
-    "ln(monitor_private_pump_usd_15m+1)",
     "monitor_private_source_coverage",
 )
 

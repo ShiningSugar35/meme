@@ -377,6 +377,7 @@ class PublicSocialSignalProvider:
         latest_ts = max((item[2] for item in recent_15m), default=None)
         prior_10m_count = max(0, len(recent_15m) - len(recent_5m))
         acceleration = len(recent_5m) / 5.0 - prior_10m_count / 10.0
+        fomo_complete = "fomo" in complete_15m
         features: dict[str, float | None] = {
             "ln(monitor_mentions_5m+1)": _log1p(len(recent_5m)) if token_window_available else None,
             "ln(monitor_mentions_15m+1)": _log1p(len(recent_15m)) if token_window_available else None,
@@ -384,10 +385,10 @@ class PublicSocialSignalProvider:
             "monitor_unique_sources_15m": float(len(source_keys)) if token_window_available else None,
             "ln(monitor_follower_reach_15m+1)": _log1p(follower_reach) if token_window_available else None,
             "monitor_mention_accel_5m_vs_15m": float(acceleration) if token_window_available else None,
-            "ln(monitor_latest_mention_age_s+1)": _log1p(int(entry_time) - latest_ts) if latest_ts is not None else None,
-            "monitor_fomo_buy_ratio_15m": buy_count / action_count if action_count > 0 else None,
-            "monitor_fomo_usd_imbalance_15m": _signed_imbalance(buy_usd, sell_usd) if has_usd else None,
-            "ln(monitor_fomo_usd_15m+1)": _log1p(buy_usd + sell_usd) if has_usd else None,
+            "ln(monitor_latest_mention_age_s+1)": _log1p(int(entry_time) - latest_ts) if latest_ts is not None else (_log1p(900) if token_window_available else None),
+            "monitor_fomo_buy_ratio_15m": buy_count / action_count if action_count > 0 else (0.5 if fomo_complete else None),
+            "monitor_fomo_usd_imbalance_15m": _signed_imbalance(buy_usd, sell_usd) if has_usd else (0.0 if fomo_complete and action_count == 0 else None),
+            "ln(monitor_fomo_usd_15m+1)": _log1p(buy_usd + sell_usd) if has_usd else (0.0 if fomo_complete and action_count == 0 else None),
             "monitor_exchange_hits_15m": float(exchange_hits) if token_window_available else None,
             "monitor_news_hits_15m": float(news_hits) if token_window_available else None,
             "monitor_social_hits_15m": float(social_hits) if token_window_available else None,

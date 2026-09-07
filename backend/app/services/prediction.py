@@ -603,6 +603,17 @@ class PredictionService:
             source = json.loads(row.get("features_json") or "{}")
         except (TypeError, json.JSONDecodeError):
             source = {}
+        if not isinstance(source, dict):
+            source = {}
+        try:
+            raw = json.loads(row.get("raw_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            raw = {}
+        if isinstance(raw, dict):
+            for key in ("_public_social_signals", "_account_social_signals"):
+                value = raw.get(key)
+                if isinstance(value, dict):
+                    source[key] = value
         record = {
             name: materialize_entry_feature(
                 name,

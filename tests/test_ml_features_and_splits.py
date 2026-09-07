@@ -143,6 +143,53 @@ def test_log1p_entry_feature_materialization_keeps_legacy_models_compatible() ->
     ) == pytest.approx(legacy_marketcap)
 
 
+def test_social_no_event_materialization_uses_pit_provenance() -> None:
+    public_complete = {
+        "ln(monitor_mentions_15m+1)": 0.0,
+        "_public_social_signals": {
+            "successful_sources": ["fomo"],
+            "incomplete_sources": [],
+            "failed_sources": [],
+        },
+    }
+    assert materialize_entry_feature("ln(monitor_latest_mention_age_s+1)", public_complete) == pytest.approx(np.log1p(900))
+    assert materialize_entry_feature("monitor_fomo_buy_ratio_15m", public_complete) == pytest.approx(0.5)
+    assert materialize_entry_feature("monitor_fomo_usd_imbalance_15m", public_complete) == pytest.approx(0.0)
+    assert materialize_entry_feature("ln(monitor_fomo_usd_15m+1)", public_complete) == pytest.approx(0.0)
+
+    public_failed = {
+        "_public_social_signals": {
+            "successful_sources": [],
+            "incomplete_sources": [],
+            "failed_sources": ["fomo"],
+        },
+    }
+    assert materialize_entry_feature("monitor_fomo_buy_ratio_15m", public_failed) is None
+
+    private_complete = {
+        "_account_social_signals": {
+            "connected": True,
+            "successful_sources": ["private_fomo"],
+            "incomplete_sources": [],
+            "failed_sources": [],
+        },
+    }
+    assert materialize_entry_feature("monitor_private_fomo_buy_ratio_15m", private_complete) == pytest.approx(0.5)
+    assert materialize_entry_feature("monitor_private_fomo_usd_imbalance_15m", private_complete) == pytest.approx(0.0)
+    assert materialize_entry_feature("ln(monitor_private_fomo_usd_15m+1)", private_complete) == pytest.approx(0.0)
+    assert materialize_entry_feature("monitor_private_source_coverage", private_complete) == pytest.approx(1.0)
+
+    private_failed = {
+        "_account_social_signals": {
+            "connected": False,
+            "successful_sources": [],
+            "incomplete_sources": [],
+            "failed_sources": ["login_required"],
+        },
+    }
+    assert materialize_entry_feature("monitor_private_fomo_buy_ratio_15m", private_failed) is None
+
+
 def test_legacy_missing_liquidity_is_proxy_not_dollar_pnl() -> None:
     prepared = FeatureBuilder().prepare(_frame(liquidity=False))
     economics = prepared.economic_slice(np.arange(len(prepared)))

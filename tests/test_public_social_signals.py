@@ -148,6 +148,24 @@ async def test_all_sources_down_keeps_features_missing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_observed_no_event_is_numeric_but_failed_source_stays_missing() -> None:
+    endpoints = (
+        PublicSignalEndpoint("fomo", "/fomo", "trade"),
+        PublicSignalEndpoint("social", "/social", "social"),
+    )
+    provider = PublicSocialSignalProvider(
+        base_url="https://example.invalid",
+        endpoints=endpoints,
+        client=FakeClient({"/fomo": {"events": []}, "/social": {"events": []}}),
+    )
+    snapshot = await provider.snapshot(ADDRESS, entry_time=ENTRY)
+    assert snapshot.features["ln(monitor_latest_mention_age_s+1)"] == pytest.approx(math.log1p(900))
+    assert snapshot.features["monitor_fomo_buy_ratio_15m"] == pytest.approx(0.5)
+    assert snapshot.features["monitor_fomo_usd_imbalance_15m"] == pytest.approx(0.0)
+    assert snapshot.features["ln(monitor_fomo_usd_15m+1)"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
 async def test_retry_recovers_transient_public_source_failure() -> None:
     endpoint = PublicSignalEndpoint("flaky", "/flaky", "social")
 

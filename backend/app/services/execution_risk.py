@@ -59,6 +59,19 @@ class ExecutionRiskModel:
                 source = {}
         if not isinstance(source, Mapping):
             source = row
+        else:
+            source = dict(source)
+            raw = row.get("raw_json") if isinstance(row, Mapping) else None
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except json.JSONDecodeError:
+                    raw = {}
+            if isinstance(raw, Mapping):
+                for key in ("_public_social_signals", "_account_social_signals"):
+                    provenance = raw.get(key)
+                    if isinstance(provenance, Mapping):
+                        source[key] = dict(provenance)
         values: list[float] = []
         for name in self.feature_names:
             if name == "age_minutes":
@@ -156,7 +169,7 @@ class ExecutionRiskTrainer:
         return self.database.fetch_all(
             f"""
             SELECT p.id AS position_id,p.sample_id,p.stop_loss_price,p.exit_reason,p.metadata_json,
-                   s.entry_time,s.entry_price,s.age_minutes,s.features_json
+                   s.entry_time,s.entry_price,s.age_minutes,s.features_json,s.raw_json
             FROM positions p
             JOIN samples s ON s.id=p.sample_id
             WHERE p.account_kind='simulation'
@@ -265,6 +278,17 @@ class ExecutionRiskTrainer:
                 source = json.loads(str(row.get("features_json") or "{}"))
             except json.JSONDecodeError:
                 source = {}
+            if not isinstance(source, dict):
+                source = {}
+            try:
+                raw = json.loads(str(row.get("raw_json") or "{}"))
+            except json.JSONDecodeError:
+                raw = {}
+            if isinstance(raw, Mapping):
+                for key in ("_public_social_signals", "_account_social_signals"):
+                    provenance = raw.get(key)
+                    if isinstance(provenance, Mapping):
+                        source[key] = dict(provenance)
             for name in candidate_names:
                 value = (
                     row.get("age_minutes")

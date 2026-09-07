@@ -55,7 +55,7 @@ GMGN Trenches 候选发现
 
 关键字段缺失、不可解析、非有限值或状态未知时拒绝，不用默认值伪造安全事实。新增链上条件放在常规本地深筛与 top-holder 之后：GMGN 入场时事实优先，缺失/不完整才使用 Alchemy Mainnet RPC，Ankr 不参与。完整阈值以 `backend/app/collector/` 与《开发文档.md》为准。
 
-模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。系统还可在入场时采集 985monitor 公共只读事件流，以及可选的浏览器登录态只读 FOMO/Pump 流，形成跨交易所广场、资讯、TG、FOMO、Pump 等来源的 PIT 社媒/事件候选特征。登录态只在本机进程内读取/换只读 session，凭据不入库、不落 artifact、不进 Git；未登录时相应字段保持缺失且不阻断采集。默认 29 项仅用于没有持久特征选择时的 fallback；现有 v3 持久特征池迁移到 v4 时会保留旧选择并自动加入 30 个新链上/985monitor 候选，使其参加 chronological OOS 特征竞争，而不是直接强制进入最终模型。整个路径不依赖 LLM/Agent。
+模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录 63 项、默认 29 项；v4 新增 24 项候选（2 项链上 + 16 项 985monitor 公共事件 + 6 项浏览器登录态 FOMO）。来源/窗口完整但该 Token 无事件时不再当作缺失：最新 mention 年龄按 15 分钟右截尾编码为 `ln(901)`，FOMO buy-ratio 用中性 `0.5`，USD imbalance 与 `ln(USD+1)` 用 `0`；只有源失败、窗口不完整或未登录才保持 missing。985monitor 私有 Pump 当前上游仅返回 Robinhood/Base、没有 Solana 事件，因此其 6 项模型候选已退役。登录态由后端从本机 Chrome/Edge 白名单 localStorage 读取并换取独立只读 session，985monitor 网页标签和 Chrome 本身都无需一直打开；但退出登录、清除站点数据或 token 失效后，账号特征会转为 missing，重新登录即可恢复。凭据不入库、不落 artifact、不进 Git，整个路径不依赖 LLM/Agent。
 
 ## 4. 模型与决策
 

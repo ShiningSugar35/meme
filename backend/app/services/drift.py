@@ -196,7 +196,7 @@ class DriftGateService:
             )
         recent = self.database.fetch_all(
             """
-            SELECT id,entry_time,entry_price,features_json,tag
+            SELECT id,entry_time,entry_price,features_json,raw_json,tag
             FROM samples
             WHERE feature_schema_version=?
               AND label_version=?
@@ -237,6 +237,17 @@ class DriftGateService:
                     source = json.loads(row.get("features_json") or "{}")
                 except (TypeError, json.JSONDecodeError):
                     source = {}
+                if not isinstance(source, dict):
+                    source = {}
+                try:
+                    raw = json.loads(row.get("raw_json") or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    raw = {}
+                if isinstance(raw, dict):
+                    for key in ("_public_social_signals", "_account_social_signals"):
+                        provenance = raw.get(key)
+                        if isinstance(provenance, dict):
+                            source[key] = provenance
                 value = materialize_entry_feature(name, source, entry_price=row.get("entry_price"))
                 try:
                     numeric = float(value)

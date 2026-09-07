@@ -144,6 +144,8 @@ def test_v4_feature_pool_migration_keeps_legacy_choices_and_enrolls_new_candidat
     assert "buy_swap_ratio_1h" in selected
     assert "ln(creator_launches_24h+1)" in selected
     assert "monitor_fomo_buy_ratio_15m" in selected
+    assert "monitor_private_fomo_buy_ratio_15m" in selected
+    assert "monitor_private_pump_buy_ratio_15m" not in selected
     assert "monitor_source_coverage" in selected
 
 
