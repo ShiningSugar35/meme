@@ -163,6 +163,7 @@ class TrainingService:
     # silently excluding new event2m candidates after the sample reset.
     FEATURE_SELECTION_STATE_KEY = f"model_training_feature_pool:{FEATURE_SCHEMA_VERSION}"
     LEGACY_FEATURE_SELECTION_STATE_KEYS = (
+        "model_training_feature_pool:event1m_regime_v7",
         "model_training_feature_pool:event1m_regime_v6",
         "model_training_feature_pool:event1m_regime_v5",
         "model_training_feature_pool:event1m_regime_v4",

@@ -4,7 +4,7 @@ import asyncio
 
 from backend.app.collector.enrichment import EnrichmentResult
 from backend.app.collector.filters import FilterDecision
-from backend.app.collector.models import TokenCandidate
+from backend.app.collector.models import CollectedSample, TokenCandidate
 from backend.app.collector.service import CollectorService
 
 
@@ -56,6 +56,27 @@ class RejectAtEnrichment:
         return EnrichmentResult(None, FilterDecision(False, ("swaps_1h>19",)))
 
 
+class AcceptIncompleteModelPayload:
+    def prefilter(self, candidate: TokenCandidate) -> FilterDecision:
+        return FilterDecision(True, ())
+
+    async def enrich(self, candidate: TokenCandidate, *, now_ts=None) -> EnrichmentResult:
+        sample = CollectedSample(
+            address=candidate.address,
+            token_type=candidate.token_type,
+            entry_time=1900000000,
+            entry_price=0.00001,
+            launchpad="Pump.fun",
+            liquidity=10000.0,
+            features={},
+            age_minutes=10.0,
+            holder_count=100.0,
+            feature_snapshot_at=1900000000,
+            source={},
+        )
+        return EnrichmentResult(sample, FilterDecision(True, ()))
+
+
 def test_prefilter_rejection_skips_enrichment_and_is_counted_separately() -> None:
     enrichment = RejectAtPrefilter()
     events: list[tuple[str, dict[str, object]]] = []
@@ -83,3 +104,20 @@ def test_enrichment_rejection_is_counted_after_prefilter_passes() -> None:
     assert report.prefilter_rejected == 0
     assert report.enrichment_rejected == 1
     assert enrichment.enrich_calls == 1
+
+
+def test_model_feature_completeness_rejects_before_sink_write() -> None:
+    sink = FakeSink()
+    events: list[tuple[str, dict[str, object]]] = []
+    service = CollectorService(FakeDiscovery(), AcceptIncompleteModelPayload(), object(), sink)
+
+    report = asyncio.run(service.collect_once(limit=1, event_sink=lambda action, details: events.append((action, dict(details)))))
+
+    assert report.discovered == 1
+    assert report.accepted == 0
+    assert report.rejected == 1
+    assert report.enrichment_rejected == 1
+    assert sink.added == []
+    rejected = next(details for action, details in events if action == "candidate_rejected")
+    assert rejected["stage"] == "model_feature_completeness"
+    assert any(str(reason).startswith("missing_model_feature:") for reason in rejected["reasons"])

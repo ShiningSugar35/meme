@@ -16,7 +16,7 @@ DISCOVERY_TYPES = ("new_creation", "near_completion")
 # collected before the event/regime upgrade remain auditable, but must never be
 # silently backfilled with values that were not observed at their original PIT.
 LEGACY_FEATURE_SCHEMA_VERSION = "legacy_pre_event_v1"
-FEATURE_SCHEMA_VERSION = "event1m_regime_v7"
+FEATURE_SCHEMA_VERSION = "event1m_regime_v8"
 
 LAUNCHPADS = (
     "Pump.fun",

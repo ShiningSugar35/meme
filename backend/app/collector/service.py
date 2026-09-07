@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -12,6 +13,34 @@ from .discovery import DiscoveryService
 from .enrichment import EnrichmentService, EnrichmentProvider
 from .labels import LabelFinalizer, PriceWindowResult
 from .models import CollectedSample
+
+
+def _missing_model_features(sample: CollectedSample) -> tuple[str, ...]:
+    """Validate the frozen decision snapshot against the current model contract.
+
+    This is deliberately local-only and runs after enrichment has completed all
+    external observations. It must never fetch or reconstruct later facts.
+    """
+
+    from ..ml.features import AVAILABLE_MODEL_FEATURES, materialize_entry_feature
+
+    source = dict(sample.features)
+    for key in ("_public_social_signals", "_account_social_signals"):
+        provenance = sample.source.get(key) if isinstance(sample.source, Mapping) else None
+        if isinstance(provenance, Mapping):
+            source[key] = dict(provenance)
+
+    missing: list[str] = []
+    for name in AVAILABLE_MODEL_FEATURES:
+        value = materialize_entry_feature(name, source, entry_price=sample.entry_price)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            missing.append(name)
+            continue
+        if not math.isfinite(numeric):
+            missing.append(name)
+    return tuple(missing)
 
 
 class SampleSink(Protocol):
@@ -151,6 +180,31 @@ class CollectorService:
                     )
                     observe("candidate_enrichment_rejected", {
                         "source_key": f"trenches:{token_type}", "address": candidate.address, "reasons": list(reasons)
+                    })
+                    continue
+                missing_model_features = _missing_model_features(result.sample)
+                if missing_model_features:
+                    rejected += 1
+                    enrichment_rejected += 1
+                    current["rejected"] += 1
+                    current["enrichment_rejected"] += 1
+                    reasons = tuple(
+                        f"missing_model_feature:{name}" for name in missing_model_features
+                    )
+                    rejection_reasons.update(reasons)
+                    emit(
+                        "candidate_rejected",
+                        {
+                            "token_type": token_type,
+                            "token": token_label,
+                            "stage": "model_feature_completeness",
+                            "reasons": list(reasons),
+                        },
+                    )
+                    observe("candidate_model_feature_rejected", {
+                        "source_key": f"trenches:{token_type}",
+                        "address": candidate.address,
+                        "reasons": list(reasons),
                     })
                     continue
                 await self.sink.add_sample(result.sample)

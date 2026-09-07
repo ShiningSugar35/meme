@@ -131,10 +131,10 @@ def test_deprecated_absolute_liquidity_feature_is_filtered(tmp_path: Path) -> No
     assert json.loads(row["request_json"])["feature_names"] == list(selected)
 
 
-def test_v7_feature_pool_migration_keeps_v6_choices_and_enrolls_current_candidates(tmp_path: Path) -> None:
+def test_v8_feature_pool_migration_keeps_v7_choices_and_enrolls_current_candidates(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     database.set_runtime_state(
-        "model_training_feature_pool:event1m_regime_v6",
+        "model_training_feature_pool:event1m_regime_v7",
         ["ln(marketcap+1)", "price_change_1h", "monitor_private_pump_buy_ratio_15m"],
     )
     selected = TrainingService(database, make_settings(tmp_path)).configured_feature_selection()

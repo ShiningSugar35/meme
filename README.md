@@ -8,7 +8,7 @@
 
 - 运行形态：Windows、单机、单用户、SQLite、CPU-first。
 - 研究对象：允许清单内的 Solana Launchpad 新创建及接近完成阶段 Token。
-- 当前特征代：`event1m_regime_v7`。v4/v5/v6 仅保留历史审计，不进入当前训练；v7 以“前置候选 age>3m → 所有必需模型特征完成并验证为数值完整 → 最终轻量刷新市场事实 → 正式 SafetyFilter 仍要求 age>5m → 再提交 entry/决策时点”为因果快照合同。
+- 当前特征代：`event1m_regime_v8`。v4/v5/v6/v7 仅保留历史审计，不进入当前训练；v8 在v7因果决策时点基础上增加“正式写库前61/61模型候选必须全部可由冻结快照物化为有限数值”的最终完整性硬门。
 - 当前标签：`sl090_tp180_m90_binary_v5`，90 分钟窗口，0.9x 止损、1.8x 止盈，同一分钟同时触发时止损优先，超时未触及止盈记负类。
 - 当前模型决策合同：`phase19_expected_return_paper_v1`。
 - 当前上线认证合同：`phase19_expected_return_certification_v1`。
@@ -55,7 +55,7 @@ GMGN Trenches 候选发现
 
 关键字段缺失、不可解析、非有限值或状态未知时拒绝，不用默认值伪造安全事实。新增链上条件放在常规本地深筛与 top-holder 之后：GMGN 入场时事实优先，缺失/不完整才使用 Alchemy Mainnet RPC，Ankr 不参与。完整阈值以 `backend/app/collector/` 与《开发文档.md》为准。
 
-模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录 61 项、默认 29 项；当前新增候选共22项（2项链上 + 15项985monitor公共事件 + 5项浏览器登录态FOMO）。v7 生产采集先并行完成链上、公共985、账号985与PIT Kline等外部模型特征观测；配置的985monitor公共/账号源只要请求失败、窗口截断、未登录或任一训练字段仍为 `None/NaN/Inf`，该候选本轮就不进入正式样本。全部特征到手后只轻量刷新 price/liquidity/marketcap/age/holder/1h activity 等易变GMGN市场事实并重跑最终 SafetyFilter，随后才冻结 `entry_time/entry_price/feature_snapshot_at`；冻结后不再发任何模型特征请求。每条样本在 `_feature_snapshot_timing` 保存各源 cutoff 与最终 entry commit。完整观测但该 Token 无事件时，latest mention 使用15分钟右截尾 `ln(901)`、FOMO buy-ratio 用中性 `0.5`、USD imbalance 与 `ln(USD+1)` 用 `0`。两个 source coverage 特征因正式样本必然完整而恒为1，已与6个无Solana证据的私有Pump特征一起退役。985monitor网页标签和Chrome本身无需常驻；退出登录、清除站点数据或token失效后账号源会使候选 fail-closed，重新登录即可恢复。凭据不入库、不落artifact、不进Git，整个路径不依赖LLM/Agent。
+模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录61项、默认29项；当前新增候选共22项（2项链上 + 15项985monitor公共事件 + 5项浏览器登录态FOMO）。v8生产采集先并行完成链上、公共985、账号985与PIT Kline等外部模型特征观测；配置的985monitor公共/账号源只要请求失败、窗口截断、未登录或任一985训练字段仍为 `None/NaN/Inf`，候选本轮直接拒绝。全部外部特征到手后只轻量刷新 price/liquidity/marketcap/age/holder/1h activity 等易变GMGN市场事实并重跑最终 SafetyFilter，正式准入仍严格 `age>5min`，随后冻结 `entry_time/entry_price/feature_snapshot_at`。在SQLite写入前，Collector再使用训练同一个 materializer 对当前61个候选做纯本地完整性检查；任一字段仍不能物化为有限数值时按 `model_feature_completeness` fail-closed，不写正式样本，也不做训练插补。冻结/完整性检查后不再发任何模型特征请求。完整观测但无事件时，latest mention 用 `ln(901)`、FOMO buy-ratio 用0.5、USD imbalance 与 `ln(USD+1)` 用0。两个source coverage因正式完整性硬门后恒为1，已与6个无Solana证据的private Pump特征一起退役。985monitor网页标签和Chrome本身无需常驻；退出登录、清站点数据或token失效后账号源会阻断依赖该快照的正式准入，重新登录即可恢复。
 
 ## 4. 模型与决策
 
