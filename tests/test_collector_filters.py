@@ -40,6 +40,22 @@ def test_valid_token_passes_all_local_filters() -> None:
     assert SafetyFilter().evaluate(valid_token()).accepted
 
 
+def test_discovery_prefilter_uses_three_minute_age_but_final_gate_remains_five() -> None:
+    safety = SafetyFilter()
+    candidate = valid_token()
+    candidate["age"] = 4.0
+    assert safety.evaluate_discovery_prefilter(candidate).accepted
+    final = safety.evaluate(candidate)
+    assert not final.accepted
+    assert "age>5" in final.reasons
+
+    too_early = valid_token()
+    too_early["age"] = 3.0
+    preliminary = safety.evaluate_discovery_prefilter(too_early)
+    assert not preliminary.accepted
+    assert "age>3" in preliminary.reasons
+
+
 def test_live_sniper_wallets_alias_maps_to_sniper_count() -> None:
     raw = valid_token()
     raw.pop("sniper_count")
@@ -159,6 +175,27 @@ def test_top1_addr_type_zero_uses_strict_range() -> None:
     ]).accepted
     assert not safety.evaluate_top_holders([{"addr_type": 0, "rate": 0.028}]).accepted
     assert not safety.evaluate_top_holders([{"addr_type": 0, "rate": 0.056}]).accepted
+
+
+def test_preliminary_age_gate_is_strictly_above_three_but_final_stays_above_five() -> None:
+    safety = SafetyFilter()
+
+    at_three = valid_token()
+    at_three["age"] = 3.0
+    preliminary = safety.evaluate_discovery_prefilter(at_three)
+    assert not preliminary.accepted
+    assert "age>3" in preliminary.reasons
+
+    between = valid_token()
+    between["age"] = 4.0
+    assert safety.evaluate_discovery_prefilter(between).accepted
+    assert safety.evaluate(
+        between,
+        min_age_minutes=safety.t.preliminary_min_age_minutes,
+    ).accepted
+    final = safety.evaluate(between)
+    assert not final.accepted
+    assert "age>5" in final.reasons
 
 
 def test_age_must_be_strictly_between_five_and_300_minutes() -> None:

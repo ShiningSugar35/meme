@@ -8,7 +8,7 @@
 
 - 运行形态：Windows、单机、单用户、SQLite、CPU-first。
 - 研究对象：允许清单内的 Solana Launchpad 新创建及接近完成阶段 Token。
-- 当前特征代：`event1m_regime_v4`。
+- 当前特征代：`event1m_regime_v7`。v4/v5/v6 仅保留历史审计，不进入当前训练；v7 以“前置候选 age>3m → 所有必需模型特征完成并验证为数值完整 → 最终轻量刷新市场事实 → 正式 SafetyFilter 仍要求 age>5m → 再提交 entry/决策时点”为因果快照合同。
 - 当前标签：`sl090_tp180_m90_binary_v5`，90 分钟窗口，0.9x 止损、1.8x 止盈，同一分钟同时触发时止损优先，超时未触及止盈记负类。
 - 当前模型决策合同：`phase19_expected_return_paper_v1`。
 - 当前上线认证合同：`phase19_expected_return_certification_v1`。
@@ -38,7 +38,7 @@ GMGN Trenches 候选发现
 
 ## 3. 生产准入合同
 
-发现只负责传输层和生命周期范围；业务阈值全部在本地统一执行。关键准入条件包括：
+发现只负责传输层和生命周期范围；为给后续 enrichment 留出时间，服务器端与本地 discovery prefilter 的年龄下界仅为严格 `age>3min`，这不是交易放宽。业务阈值仍由最终本地准入统一执行，正式样本/交易继续严格要求 `5<age_minutes<300`。关键准入条件包括：
 
 - Launchpad、quote 资产与目标 Token 必须在允许范围；
 - rug、insider、bundler、fresh-wallet、wash-trading、税费、sniper 等安全指标通过；
@@ -55,7 +55,7 @@ GMGN Trenches 候选发现
 
 关键字段缺失、不可解析、非有限值或状态未知时拒绝，不用默认值伪造安全事实。新增链上条件放在常规本地深筛与 top-holder 之后：GMGN 入场时事实优先，缺失/不完整才使用 Alchemy Mainnet RPC，Ankr 不参与。完整阈值以 `backend/app/collector/` 与《开发文档.md》为准。
 
-模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录 63 项、默认 29 项；v4 新增 24 项候选（2 项链上 + 16 项 985monitor 公共事件 + 6 项浏览器登录态 FOMO）。来源/窗口完整但该 Token 无事件时不再当作缺失：最新 mention 年龄按 15 分钟右截尾编码为 `ln(901)`，FOMO buy-ratio 用中性 `0.5`，USD imbalance 与 `ln(USD+1)` 用 `0`；只有源失败、窗口不完整或未登录才保持 missing。985monitor 私有 Pump 当前上游仅返回 Robinhood/Base、没有 Solana 事件，因此其 6 项模型候选已退役。登录态由后端从本机 Chrome/Edge 白名单 localStorage 读取并换取独立只读 session，985monitor 网页标签和 Chrome 本身都无需一直打开；但退出登录、清除站点数据或 token 失效后，账号特征会转为 missing，重新登录即可恢复。凭据不入库、不落 artifact、不进 Git，整个路径不依赖 LLM/Agent。
+模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录 61 项、默认 29 项；当前新增候选共22项（2项链上 + 15项985monitor公共事件 + 5项浏览器登录态FOMO）。v7 生产采集先并行完成链上、公共985、账号985与PIT Kline等外部模型特征观测；配置的985monitor公共/账号源只要请求失败、窗口截断、未登录或任一训练字段仍为 `None/NaN/Inf`，该候选本轮就不进入正式样本。全部特征到手后只轻量刷新 price/liquidity/marketcap/age/holder/1h activity 等易变GMGN市场事实并重跑最终 SafetyFilter，随后才冻结 `entry_time/entry_price/feature_snapshot_at`；冻结后不再发任何模型特征请求。每条样本在 `_feature_snapshot_timing` 保存各源 cutoff 与最终 entry commit。完整观测但该 Token 无事件时，latest mention 使用15分钟右截尾 `ln(901)`、FOMO buy-ratio 用中性 `0.5`、USD imbalance 与 `ln(USD+1)` 用 `0`。两个 source coverage 特征因正式样本必然完整而恒为1，已与6个无Solana证据的私有Pump特征一起退役。985monitor网页标签和Chrome本身无需常驻；退出登录、清除站点数据或token失效后账号源会使候选 fail-closed，重新登录即可恢复。凭据不入库、不落artifact、不进Git，整个路径不依赖LLM/Agent。
 
 ## 4. 模型与决策
 

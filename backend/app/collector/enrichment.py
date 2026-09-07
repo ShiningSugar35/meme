@@ -209,7 +209,7 @@ class GMGNEnrichmentProvider:
         }
         info_fields = {
             "address", "launchpad", "symbol", "price", "liquidity",
-            "holder_count", "marketcap", "age", "swaps_1h", "volume_1h",
+            "holder_count", "marketcap", "age", "buys_1h", "swaps_1h", "volume_1h",
             "volume", "smart_degen_count", "renowned_count",
         }
         pool_fields = {"quote_symbol", "price", "liquidity"}
@@ -325,6 +325,12 @@ def _ratio(numerator: Any, denominator: Any) -> float | None:
     return n / d if n is not None and d not in (None, 0) else None
 
 
+def _numeric_feature_payload_complete(features: Mapping[str, Any]) -> bool:
+    if not features:
+        return False
+    return all(to_float(value) is not None for value in features.values())
+
+
 def _bool01(value: Any) -> int:
     if value in (None, "", False, 0, "0"):
         return 0
@@ -362,6 +368,7 @@ class EnrichmentService:
         readiness_attempts: int = 3,
         readiness_retry_seconds: float = 2.0,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.provider = provider
         self.safety_filter = safety_filter or SafetyFilter()
@@ -371,6 +378,7 @@ class EnrichmentService:
         self.readiness_attempts = max(1, int(readiness_attempts))
         self.readiness_retry_seconds = max(0.0, float(readiness_retry_seconds))
         self._sleep = sleeper
+        self._clock = clock
 
     def prefilter(self, candidate: TokenCandidate) -> FilterDecision:
         normalized = normalize_token(candidate.raw, candidate.token_type)
@@ -442,7 +450,10 @@ class EnrichmentService:
         if not readiness.accepted:
             return EnrichmentResult(None, readiness)
 
-        decision = self.safety_filter.evaluate(normalized)
+        decision = self.safety_filter.evaluate(
+            normalized,
+            min_age_minutes=self.safety_filter.t.preliminary_min_age_minutes,
+        )
         if not decision.accepted:
             return EnrichmentResult(None, decision)
 
@@ -461,32 +472,73 @@ class EnrichmentService:
 
         creator = str(recursive_find(source, ("creator_address", "creator", "owner")) or "")
         created_tokens: Mapping[str, Any] = {}
-        entry_time = int(now_ts or time.time())
-        onchain_decision = None
-        if self.onchain_admission is not None:
-            age_minutes = to_float(normalized.get("age"))
-            pool_address = str(recursive_find(
-                source,
-                ("biggest_pool_address", "pool_address", "pair_address", "amm_address", "pool_id"),
-            ) or "")
-            if age_minutes is None:
-                return EnrichmentResult(None, FilterDecision(False, ("missing_or_invalid:age",)))
+        fixed_asof = int(now_ts) if now_ts is not None else None
+        feature_cutoff_time = fixed_asof if fixed_asof is not None else int(self._clock())
+        public_social_cutoff_time = fixed_asof if fixed_asof is not None else int(self._clock())
+        account_social_cutoff_time = fixed_asof if fixed_asof is not None else int(self._clock())
+        kline_cutoff_time = fixed_asof if fixed_asof is not None else int(self._clock())
 
-            async def load_created_tokens() -> Mapping[str, Any]:
-                nonlocal created_tokens
-                created_tokens = await self.provider.created_tokens(creator)
-                return created_tokens
+        age_minutes = to_float(normalized.get("age"))
+        if self.onchain_admission is not None and age_minutes is None:
+            return EnrichmentResult(None, FilterDecision(False, ("missing_or_invalid:age",)))
+        pool_address = str(recursive_find(
+            source,
+            ("biggest_pool_address", "pool_address", "pair_address", "amm_address", "pool_id"),
+        ) or "")
 
-            onchain_decision = await self.onchain_admission.evaluate(
+        async def load_created_tokens() -> Mapping[str, Any]:
+            nonlocal created_tokens
+            created_tokens = await self.provider.created_tokens(creator)
+            return created_tokens
+
+        async def collect_onchain():
+            if self.onchain_admission is None:
+                await load_created_tokens()
+                return None
+            return await self.onchain_admission.evaluate(
                 token_mint=candidate.address,
                 pool_address=pool_address,
                 creator=creator,
-                entry_time=entry_time,
-                age_minutes=age_minutes,
+                entry_time=feature_cutoff_time,
+                age_minutes=float(age_minutes),
                 gmgn_buys_1h=normalized.get("buys_1h"),
                 gmgn_swaps_1h=normalized.get("swaps_1h"),
                 created_tokens_loader=load_created_tokens,
             )
+
+        async def collect_public_social():
+            if self.public_social_signals is None:
+                return None
+            return await self.public_social_signals.snapshot(
+                candidate.address, entry_time=public_social_cutoff_time
+            )
+
+        async def collect_account_social():
+            if self.account_social_signals is None:
+                return None
+            return await self.account_social_signals.snapshot(
+                candidate.address, entry_time=account_social_cutoff_time
+            )
+
+        async def collect_klines():
+            return tuple(
+                line for line in await self.provider.klines(
+                    candidate.address, kline_cutoff_time - 60 * 60, kline_cutoff_time
+                ) if line.timestamp <= kline_cutoff_time
+            )
+
+        onchain_result, public_result, account_result, kline_result = await asyncio.gather(
+            collect_onchain(),
+            collect_public_social(),
+            collect_account_social(),
+            collect_klines(),
+            return_exceptions=True,
+        )
+
+        if isinstance(onchain_result, BaseException):
+            return EnrichmentResult(None, FilterDecision(False, ("onchain_feature_collection_failed",)))
+        onchain_decision = onchain_result
+        if onchain_decision is not None:
             if not onchain_decision.accepted:
                 return EnrichmentResult(None, FilterDecision(False, onchain_decision.reasons))
             source = dict(source)
@@ -494,57 +546,126 @@ class EnrichmentService:
                 "buy_swap_source": onchain_decision.buy_swap_source,
                 "creator_launch_source": onchain_decision.creator_launch_source,
                 "rpc_used": bool(onchain_decision.rpc_used),
+                "cutoff_at": feature_cutoff_time,
             }
-        else:
-            created_tokens = await self.provider.created_tokens(creator)
 
         social_features: Mapping[str, Any] = {}
         if self.public_social_signals is not None:
-            try:
-                social_snapshot = await self.public_social_signals.snapshot(
-                    candidate.address, entry_time=entry_time
-                )
-                social_features = dict(social_snapshot.features)
-                source = dict(source)
-                source["_public_social_signals"] = {
-                    "provider": "985monitor_public",
-                    "fetched_at": int(social_snapshot.fetched_at),
-                    "successful_sources": list(social_snapshot.successful_sources),
-                    "incomplete_sources": list(social_snapshot.incomplete_sources),
-                    "failed_sources": list(social_snapshot.failed_sources),
-                    "matched_events_15m": int(social_snapshot.matched_events),
-                }
-            except Exception:
-                social_features = {}
+            if isinstance(public_result, BaseException) or public_result is None:
+                return EnrichmentResult(None, FilterDecision(False, ("public_social_snapshot_failed",)))
+            if public_result.failed_sources or public_result.incomplete_sources:
+                return EnrichmentResult(None, FilterDecision(False, ("public_social_snapshot_incomplete",)))
+            social_features = dict(public_result.features)
+            if not _numeric_feature_payload_complete(social_features):
+                return EnrichmentResult(None, FilterDecision(False, ("public_social_features_incomplete",)))
+            source = dict(source)
+            source["_public_social_signals"] = {
+                "provider": "985monitor_public",
+                "fetched_at": int(public_result.fetched_at),
+                "cutoff_at": public_social_cutoff_time,
+                "successful_sources": list(public_result.successful_sources),
+                "incomplete_sources": list(public_result.incomplete_sources),
+                "failed_sources": list(public_result.failed_sources),
+                "matched_events_15m": int(public_result.matched_events),
+            }
 
         account_social_features: Mapping[str, Any] = {}
         if self.account_social_signals is not None:
-            try:
-                account_snapshot = await self.account_social_signals.snapshot(
-                    candidate.address, entry_time=entry_time
-                )
-                account_social_features = dict(account_snapshot.features)
-                source = dict(source)
-                source["_account_social_signals"] = {
-                    "provider": "985monitor_account_readonly",
-                    "fetched_at": int(account_snapshot.fetched_at),
-                    "connected": bool(account_snapshot.connected),
-                    "successful_sources": list(account_snapshot.successful_sources),
-                    "incomplete_sources": list(account_snapshot.incomplete_sources),
-                    "failed_sources": list(account_snapshot.failed_sources),
-                    "matched_events_15m": int(account_snapshot.matched_events),
-                }
-            except Exception:
-                account_social_features = {}
+            if isinstance(account_result, BaseException) or account_result is None:
+                return EnrichmentResult(None, FilterDecision(False, ("account_social_snapshot_failed",)))
+            if not account_result.connected:
+                return EnrichmentResult(None, FilterDecision(False, ("account_social_snapshot_unavailable",)))
+            if account_result.failed_sources or account_result.incomplete_sources:
+                return EnrichmentResult(None, FilterDecision(False, ("account_social_snapshot_incomplete",)))
+            account_social_features = dict(account_result.features)
+            if not _numeric_feature_payload_complete(account_social_features):
+                return EnrichmentResult(None, FilterDecision(False, ("account_social_features_incomplete",)))
+            source = dict(source)
+            source["_account_social_signals"] = {
+                "provider": "985monitor_account_readonly",
+                "fetched_at": int(account_result.fetched_at),
+                "cutoff_at": account_social_cutoff_time,
+                "connected": bool(account_result.connected),
+                "successful_sources": list(account_result.successful_sources),
+                "incomplete_sources": list(account_result.incomplete_sources),
+                "failed_sources": list(account_result.failed_sources),
+                "matched_events_15m": int(account_result.matched_events),
+            }
 
+        history_klines = () if isinstance(kline_result, BaseException) else tuple(kline_result)
+
+        # All external model-feature observations are complete before the final
+        # market refresh and entry commit. Public/account 985monitor snapshots
+        # are mandatory when configured: source failure, a truncated window, or
+        # any unresolved numeric training field rejects the candidate. The final
+        # refresh is intentionally limited to volatile token/pool market facts.
+        final_market_refresh: Mapping[str, Any] = {}
+        if fixed_asof is None:
+            refresh = getattr(self.provider, "supplement_missing_facts", None)
+            try:
+                if callable(refresh):
+                    final_market_refresh = await refresh(
+                        candidate.address,
+                        (
+                            "price", "liquidity", "marketcap", "age", "holder_count",
+                            "buys_1h", "swaps_1h", "volume_1h", "volume",
+                            "smart_degen_count", "renowned_count",
+                        ),
+                    )
+                else:
+                    final_market_refresh = await self.provider.token_bundle(candidate.address)
+            except Exception:
+                return EnrichmentResult(None, FilterDecision(False, ("entry_snapshot_refresh_failed",)))
+            if not isinstance(final_market_refresh, Mapping) or not final_market_refresh:
+                return EnrichmentResult(None, FilterDecision(False, ("entry_snapshot_refresh_empty",)))
+            source = merge_sources(final_market_refresh, source)
+            normalized = normalize_token(source, candidate.token_type)
+            if not normalized.get("address"):
+                normalized["address"] = candidate.address
+
+        final_readiness = self.safety_filter.evaluate_required_facts(
+            normalized, allow_server_qualified=True
+        )
+        if not final_readiness.accepted:
+            return EnrichmentResult(None, final_readiness)
+        final_safety = self.safety_filter.evaluate(normalized)
+        if not final_safety.accepted:
+            return EnrichmentResult(None, final_safety)
+
+        entry_time = fixed_asof if fixed_asof is not None else int(self._clock())
         price = to_float(normalized.get("price"))
         liquidity = to_float(normalized.get("liquidity"))
         if not price or liquidity is None:
             return EnrichmentResult(None, FilterDecision(False, ("entry_price_or_liquidity_missing",)))
 
-        stat = recursive_find(bundle, ("stat", "stats"))
+        final_buy_ratio = onchain_decision.buy_swap_ratio_1h if onchain_decision is not None else None
+        if onchain_decision is not None:
+            final_buys = to_float(normalized.get("buys_1h"))
+            final_swaps = to_float(normalized.get("swaps_1h"))
+            if final_buys is not None and final_swaps is not None and 0 <= final_buys <= final_swaps and final_swaps > 0:
+                final_buy_ratio = final_buys / final_swaps
+            if final_buy_ratio is None:
+                return EnrichmentResult(None, FilterDecision(False, ("missing_or_invalid:buy_swap_ratio_1h",)))
+            if not final_buy_ratio < self.safety_filter.t.max_buy_swap_ratio_1h:
+                return EnrichmentResult(
+                    None,
+                    FilterDecision(False, (f"buy_swap_ratio_1h<{self.safety_filter.t.max_buy_swap_ratio_1h:g}",)),
+                )
+
+        source = dict(source)
+        source["_feature_snapshot_timing"] = {
+            "contract": "decision_commit_after_feature_collection_v1",
+            "onchain_cutoff_at": feature_cutoff_time,
+            "public_social_cutoff_at": public_social_cutoff_time,
+            "account_social_cutoff_at": account_social_cutoff_time,
+            "kline_cutoff_at": kline_cutoff_time,
+            "entry_committed_at": entry_time,
+            "final_market_refresh": bool(final_market_refresh),
+        }
+
+        stat = recursive_find(source, ("stat", "stats"))
         stat = stat if isinstance(stat, Mapping) else {}
-        link = recursive_find(bundle, ("link",))
+        link = recursive_find(source, ("link",))
         link = link if isinstance(link, Mapping) else {}
         twitter = first(link, ("twitter_username", "twitter", "twitter_url", "x"), recursive_find(source, ("twitter_username", "twitter", "twitter_url", "x")))
         website = first(link, ("website", "web", "homepage"), recursive_find(source, ("website", "web", "homepage")))
@@ -556,24 +677,13 @@ class EnrichmentService:
 
         price_change_1h = _price_change(price, source, ("price_1h", "price1h", "price_h1"))
         price_change_5m = _price_change(price, source, ("price_5m", "price5m", "price_m5"))
-        # One bounded pre-entry OHLCV request supplies the optional 2m event
-        # feature and also remains the existing fallback for 5m/1h momentum.
-        # No kline with a timestamp after entry_time is consumed.
-        try:
-            history_klines = tuple(
-                line for line in await self.provider.klines(
-                    candidate.address, entry_time - 60 * 60, entry_time
-                ) if line.timestamp <= entry_time
-            )
-        except Exception:
-            history_klines = ()
         if price_change_1h is None:
             price_change_1h = _historical_change_from_klines(
-                price, history_klines, entry_time - 60 * 60
+                price, history_klines, kline_cutoff_time - 60 * 60
             )
         if price_change_5m is None:
             price_change_5m = _historical_change_from_klines(
-                price, history_klines, entry_time - 5 * 60
+                price, history_klines, kline_cutoff_time - 5 * 60
             )
         event_features = build_gmgn_event_features(
             source,
@@ -590,7 +700,7 @@ class EnrichmentService:
             "ln(liquidity_usd)": _ln(liquidity),
             "liquidity/holder_count": _ln(_ratio(normalized.get("liquidity"), normalized.get("holder_count"))),
             "volume_1h/swaps_1h": _ln(_ratio(normalized.get("volume_1h"), normalized.get("swaps_1h"))),
-            "buy_swap_ratio_1h": onchain_decision.buy_swap_ratio_1h if onchain_decision is not None else None,
+            "buy_swap_ratio_1h": final_buy_ratio,
             "ln(creator_launches_24h+1)": _ln1p(onchain_decision.creator_launches_24h) if onchain_decision is not None else None,
             "has_twitter": _bool01(twitter),
             "has_website": _bool01(website),

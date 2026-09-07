@@ -38,7 +38,7 @@ from ..ml.features import (
     MARKETCAP_LIQUIDITY_LOG_FEATURE,
     MOMENTUM_ACCEL_1M_VS_5M_FEATURE,
     PRICE_LOG1P_FEATURE,
-    V4_ADDED_MODEL_FEATURES,
+    CURRENT_ADDED_MODEL_FEATURES,
     FeatureBuilder,
     FeaturePolicy,
     materialize_entry_feature,
@@ -162,7 +162,12 @@ class TrainingService:
     # Generation-scoped selection prevents the saved legacy 31-feature pool from
     # silently excluding new event2m candidates after the sample reset.
     FEATURE_SELECTION_STATE_KEY = f"model_training_feature_pool:{FEATURE_SCHEMA_VERSION}"
-    LEGACY_FEATURE_SELECTION_STATE_KEYS = ("model_training_feature_pool:event1m_regime_v3",)
+    LEGACY_FEATURE_SELECTION_STATE_KEYS = (
+        "model_training_feature_pool:event1m_regime_v6",
+        "model_training_feature_pool:event1m_regime_v5",
+        "model_training_feature_pool:event1m_regime_v4",
+        "model_training_feature_pool:event1m_regime_v3",
+    )
 
     def __init__(self, database: Database, settings: Settings | None = None) -> None:
         self.database = database
@@ -255,7 +260,7 @@ class TrainingService:
                 if isinstance(legacy, list):
                     try:
                         migrated = set(self.normalize_feature_selection(legacy))
-                        migrated.update(V4_ADDED_MODEL_FEATURES)
+                        migrated.update(CURRENT_ADDED_MODEL_FEATURES)
                         return tuple(name for name in AVAILABLE_MODEL_FEATURES if name in migrated)
                     except ValueError:
                         continue

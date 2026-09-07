@@ -240,7 +240,7 @@ class SafetyFilter:
         reject_lt("sell_tax", token.get("sell_tax"), t.max_sell_tax)
         reject_lt("buy_tax", token.get("buy_tax"), t.max_buy_tax)
         reject_lt("sniper_count", token.get("sniper_count"), t.max_sniper_count)
-        reject_gt("age", token.get("age"), t.min_age_minutes)
+        reject_gt("age", token.get("age"), t.preliminary_min_age_minutes)
         reject_lt("age", token.get("age"), t.max_age_minutes_exclusive)
 
         liquidity = _nonnegative_float(token.get("liquidity"))
@@ -269,8 +269,14 @@ class SafetyFilter:
 
         return FilterDecision(not fail, tuple(fail))
 
-    def evaluate(self, token: Mapping[str, Any]) -> FilterDecision:
+    def evaluate(
+        self,
+        token: Mapping[str, Any],
+        *,
+        min_age_minutes: float | None = None,
+    ) -> FilterDecision:
         t = self.t
+        effective_min_age = t.min_age_minutes if min_age_minutes is None else float(min_age_minutes)
         fail: list[str] = []
         qualified = token.get("_server_qualified_facts")
         qualified = qualified if isinstance(qualified, Mapping) else {}
@@ -340,7 +346,7 @@ class SafetyFilter:
         lt("sell_tax", token.get("sell_tax"), t.max_sell_tax)
         lt("buy_tax", token.get("buy_tax"), t.max_buy_tax)
         lt("sniper_count", token.get("sniper_count"), t.max_sniper_count)
-        gt("age", token.get("age"), t.min_age_minutes)
+        gt("age", token.get("age"), effective_min_age)
         lt("age", token.get("age"), t.max_age_minutes_exclusive)
         liquidity = _nonnegative_float(token.get("liquidity"))
         if not liquidity or not holder_count or liquidity / holder_count <= t.min_liquidity_per_holder:

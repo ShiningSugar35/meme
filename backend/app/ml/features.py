@@ -270,10 +270,12 @@ DEPRECATED_MODEL_FEATURES: frozenset[str] = frozenset({
     "dexscr_ad",
     "dexscr_trending_bar",
     LEGACY_MARKETCAP_LOG1P_FEATURE,
+    "monitor_source_coverage",
+    "monitor_private_source_coverage",
     *PRIVATE_PUMP_MODEL_FEATURES,
 })
 
-V4_ADDED_MODEL_FEATURES: tuple[str, ...] = (
+CURRENT_ADDED_MODEL_FEATURES: tuple[str, ...] = (
     "buy_swap_ratio_1h",
     "ln(creator_launches_24h+1)",
     "ln(monitor_mentions_5m+1)",
@@ -291,13 +293,11 @@ V4_ADDED_MODEL_FEATURES: tuple[str, ...] = (
     "monitor_social_hits_15m",
     "ln(monitor_global_events_5m+1)",
     "monitor_global_source_diversity_5m",
-    "monitor_source_coverage",
     "ln(monitor_private_fomo_events_15m+1)",
     "ln(monitor_private_fomo_unique_authors_15m+1)",
     "monitor_private_fomo_buy_ratio_15m",
     "monitor_private_fomo_usd_imbalance_15m",
     "ln(monitor_private_fomo_usd_15m+1)",
-    "monitor_private_source_coverage",
 )
 
 AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
@@ -357,13 +357,11 @@ AVAILABLE_MODEL_FEATURES: tuple[str, ...] = (
     "monitor_social_hits_15m",
     "ln(monitor_global_events_5m+1)",
     "monitor_global_source_diversity_5m",
-    "monitor_source_coverage",
     "ln(monitor_private_fomo_events_15m+1)",
     "ln(monitor_private_fomo_unique_authors_15m+1)",
     "monitor_private_fomo_buy_ratio_15m",
     "monitor_private_fomo_usd_imbalance_15m",
     "ln(monitor_private_fomo_usd_15m+1)",
-    "monitor_private_source_coverage",
 )
 
 # Event1m samples are generation-isolated from legacy CSV/pre-event rows;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 
 import pytest
@@ -298,3 +299,271 @@ async def test_trending_qualification_must_prove_strict_insider_bound() -> None:
 
     assert result.sample is None
     assert "missing_or_invalid:insider_ratio" in result.decision.reasons
+
+
+
+@pytest.mark.asyncio
+async def test_production_entry_commit_occurs_after_all_feature_observations() -> None:
+    address = "TokenCausalSnapshot11111111111111111111111111111"
+    initial = complete_facts(address)
+    refreshed = complete_facts(address)
+    refreshed["price"] = 0.00002
+    refreshed["liquidity"] = 12_000.0
+
+    class StepClock:
+        def __init__(self) -> None:
+            self.value = 1_900_000_000
+
+        def __call__(self) -> float:
+            self.value += 1
+            return float(self.value)
+
+    class RefreshProvider(ReadinessProvider):
+        def __init__(self) -> None:
+            super().__init__([initial])
+            self.refresh_calls = 0
+
+        async def supplement_missing_facts(self, _address: str, _fields):
+            self.refresh_calls += 1
+            return {"token_info": {"data": deepcopy(refreshed)}}
+
+    class PublicSignals:
+        def __init__(self) -> None:
+            self.cutoffs: list[int] = []
+
+        async def snapshot(self, _address: str, *, entry_time: int):
+            self.cutoffs.append(entry_time)
+            return type("Snapshot", (), {
+                "features": {"public_probe": 0.0},
+                "fetched_at": entry_time,
+                "successful_sources": ("public_probe",),
+                "incomplete_sources": (),
+                "failed_sources": (),
+                "matched_events": 0,
+            })()
+
+    class AccountSignals:
+        def __init__(self) -> None:
+            self.cutoffs: list[int] = []
+
+        async def snapshot(self, _address: str, *, entry_time: int):
+            self.cutoffs.append(entry_time)
+            return type("Snapshot", (), {
+                "features": {"account_probe": 0.0},
+                "fetched_at": entry_time,
+                "connected": True,
+                "successful_sources": ("private_fomo",),
+                "incomplete_sources": (),
+                "failed_sources": (),
+                "matched_events": 0,
+            })()
+
+    clock = StepClock()
+    provider = RefreshProvider()
+    public = PublicSignals()
+    account = AccountSignals()
+    service = EnrichmentService(
+        provider,
+        public_social_signals=public,
+        account_social_signals=account,
+        readiness_attempts=1,
+        readiness_retry_seconds=0,
+        clock=clock,
+    )
+
+    result = await service.enrich(TokenCandidate(address, "new_creation", {}))
+
+    assert result.sample is not None
+    sample = result.sample
+    timing = sample.source["_feature_snapshot_timing"]
+    assert sample.feature_snapshot_at == sample.entry_time
+    assert sample.entry_price == pytest.approx(0.00002)
+    assert sample.liquidity == pytest.approx(12_000.0)
+    assert provider.refresh_calls == 1
+    assert public.cutoffs == [timing["public_social_cutoff_at"]]
+    assert account.cutoffs == [timing["account_social_cutoff_at"]]
+    assert timing["final_market_refresh"] is True
+    assert max(
+        timing["onchain_cutoff_at"],
+        timing["public_social_cutoff_at"],
+        timing["account_social_cutoff_at"],
+        timing["kline_cutoff_at"],
+    ) < sample.entry_time
+    assert timing["entry_committed_at"] == sample.entry_time
+
+
+@pytest.mark.asyncio
+async def test_preliminary_age_four_can_continue_but_final_refresh_must_exceed_five() -> None:
+    address = "TokenTwoStageAge1111111111111111111111111111111"
+    initial = complete_facts(address)
+    initial["age"] = 4.0
+
+    class RefreshProvider(ReadinessProvider):
+        def __init__(self, final_age: float) -> None:
+            super().__init__([initial])
+            self.final_age = final_age
+
+        async def supplement_missing_facts(self, _address: str, _fields):
+            refreshed = complete_facts(address)
+            refreshed["age"] = self.final_age
+            return {"token_info": {"data": refreshed}}
+
+    accepted = await EnrichmentService(
+        RefreshProvider(5.1), readiness_attempts=1, readiness_retry_seconds=0
+    ).enrich(TokenCandidate(address, "new_creation", {}))
+    assert accepted.sample is not None
+    assert accepted.sample.age_minutes == pytest.approx(5.1)
+
+    rejected = await EnrichmentService(
+        RefreshProvider(4.9), readiness_attempts=1, readiness_retry_seconds=0
+    ).enrich(TokenCandidate(address, "new_creation", {}))
+    assert rejected.sample is None
+    assert "age>5" in rejected.decision.reasons
+
+
+@pytest.mark.asyncio
+async def test_configured_985_sources_must_be_complete_before_entry() -> None:
+    address = "TokenSocialComplete11111111111111111111111111111"
+
+    class PublicIncomplete:
+        async def snapshot(self, _address: str, *, entry_time: int):
+            return type("Snapshot", (), {
+                "features": {},
+                "fetched_at": entry_time,
+                "successful_sources": ("fomo",),
+                "incomplete_sources": ("news",),
+                "failed_sources": (),
+                "matched_events": 0,
+            })()
+
+    public_result = await EnrichmentService(
+        ReadinessProvider([complete_facts(address)]),
+        public_social_signals=PublicIncomplete(),
+        readiness_attempts=1,
+        readiness_retry_seconds=0,
+    ).enrich(TokenCandidate(address, "new_creation", {}), now_ts=1_800_000_000)
+    assert public_result.sample is None
+    assert public_result.decision.reasons == ("public_social_snapshot_incomplete",)
+
+    class PublicComplete:
+        async def snapshot(self, _address: str, *, entry_time: int):
+            return type("Snapshot", (), {
+                "features": {"public_probe": 0.0},
+                "fetched_at": entry_time,
+                "successful_sources": ("fomo",),
+                "incomplete_sources": (),
+                "failed_sources": (),
+                "matched_events": 0,
+            })()
+
+    class AccountUnavailable:
+        async def snapshot(self, _address: str, *, entry_time: int):
+            return type("Snapshot", (), {
+                "features": {},
+                "fetched_at": entry_time,
+                "connected": False,
+                "successful_sources": (),
+                "incomplete_sources": (),
+                "failed_sources": ("login_required",),
+                "matched_events": 0,
+            })()
+
+    account_result = await EnrichmentService(
+        ReadinessProvider([complete_facts(address)]),
+        public_social_signals=PublicComplete(),
+        account_social_signals=AccountUnavailable(),
+        readiness_attempts=1,
+        readiness_retry_seconds=0,
+    ).enrich(TokenCandidate(address, "new_creation", {}), now_ts=1_800_000_000)
+    assert account_result.sample is None
+    assert account_result.decision.reasons == ("account_social_snapshot_unavailable",)
+
+
+@pytest.mark.asyncio
+async def test_985_success_with_unresolved_numeric_field_is_rejected() -> None:
+    address = "Token985MissingNumeric111111111111111111111111111"
+
+    class PublicSignals:
+        async def snapshot(self, _address: str, *, entry_time: int):
+            return type("Snapshot", (), {
+                "features": {"complete": 0.0, "unresolved": None},
+                "fetched_at": entry_time,
+                "successful_sources": ("fomo",),
+                "incomplete_sources": (),
+                "failed_sources": (),
+                "matched_events": 0,
+            })()
+
+    result = await EnrichmentService(
+        ReadinessProvider([complete_facts(address)]),
+        public_social_signals=PublicSignals(),
+        readiness_attempts=1,
+        readiness_retry_seconds=0,
+    ).enrich(TokenCandidate(address, "new_creation", {}), now_ts=1_800_000_000)
+    assert result.sample is None
+    assert result.decision.reasons == ("public_social_features_incomplete",)
+
+
+@pytest.mark.asyncio
+async def test_public_and_account_985_collection_starts_concurrently() -> None:
+    address = "TokenConcurrent985111111111111111111111111111111"
+    public_started = asyncio.Event()
+    account_started = asyncio.Event()
+
+    class PublicSignals:
+        async def snapshot(self, _address: str, *, entry_time: int):
+            public_started.set()
+            await asyncio.wait_for(account_started.wait(), timeout=0.5)
+            return type("Snapshot", (), {
+                "features": {"public_probe": 0.0},
+                "fetched_at": entry_time,
+                "successful_sources": ("fomo",),
+                "incomplete_sources": (),
+                "failed_sources": (),
+                "matched_events": 0,
+            })()
+
+    class AccountSignals:
+        async def snapshot(self, _address: str, *, entry_time: int):
+            account_started.set()
+            await asyncio.wait_for(public_started.wait(), timeout=0.5)
+            return type("Snapshot", (), {
+                "features": {"account_probe": 0.0},
+                "fetched_at": entry_time,
+                "connected": True,
+                "successful_sources": ("private_fomo",),
+                "incomplete_sources": (),
+                "failed_sources": (),
+                "matched_events": 0,
+            })()
+
+    result = await asyncio.wait_for(
+        EnrichmentService(
+            ReadinessProvider([complete_facts(address)]),
+            public_social_signals=PublicSignals(),
+            account_social_signals=AccountSignals(),
+            readiness_attempts=1,
+            readiness_retry_seconds=0,
+        ).enrich(TokenCandidate(address, "new_creation", {}), now_ts=1_800_000_000),
+        timeout=1.0,
+    )
+    assert result.sample is not None
+    assert public_started.is_set()
+    assert account_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_fixed_asof_path_still_enforces_final_five_minute_age_gate() -> None:
+    address = "TokenFixedAsOfAge111111111111111111111111111111"
+    initial = complete_facts(address)
+    initial["age"] = 4.0
+    result = await EnrichmentService(
+        ReadinessProvider([initial]),
+        readiness_attempts=1,
+        readiness_retry_seconds=0,
+    ).enrich(
+        TokenCandidate(address, "new_creation", {}),
+        now_ts=1_800_000_000,
+    )
+    assert result.sample is None
+    assert "age>5" in result.decision.reasons

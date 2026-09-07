@@ -133,7 +133,7 @@ class DiscoveryService:
 
             "filters": ["renounced", "frozen", "is_internal_market"],
             "platform": list(LAUNCHPADS),
-            "min_created": f"{thresholds.min_age_minutes:g}m",
+            "min_created": f"{thresholds.preliminary_min_age_minutes:g}m",
             "max_created": f"{thresholds.max_age_minutes_exclusive:g}m",
             "min_liquidity": thresholds.min_liquidity,
             "min_marketcap": thresholds.min_marketcap,
@@ -162,7 +162,7 @@ class DiscoveryService:
 
             "launchpad_platform": list(LAUNCHPADS),
             "quote_address_type": list(SOL_TRENCH_QUOTE_ADDRESS_TYPES),
-            "min_created": f"{thresholds.min_age_minutes:g}m",
+            "min_created": f"{thresholds.preliminary_min_age_minutes:g}m",
             "max_created": f"{thresholds.max_age_minutes_exclusive:g}m",
         }
         return {"version": "v2", token_type: section}

@@ -56,7 +56,7 @@ def test_discovery_payload_tracks_current_gmgn_contract_without_business_prefilt
     assert section["launchpad_platform_v2"] is True
     assert section["filters"] == ["offchain", "onchain"]
     assert section["quote_address_type"] == [4, 5, 3, 1, 13, 0]
-    assert section["min_created"] == "5m"
+    assert section["min_created"] == "3m"
     assert section["max_created"] == "300m"
     for business_filter in (
         "max_rug_ratio",
@@ -122,7 +122,7 @@ def test_trending_contract_and_parser_use_official_rank_fields() -> None:
     assert params["order_by"] == "change5m"
     assert params["direction"] == "desc"
     assert "limit" not in params
-    assert params["min_created"] == "5m"
+    assert params["min_created"] == "3m"
     assert params["max_created"] == "300m"
     assert params["min_liquidity"] == 5_000.0
     assert params["min_marketcap"] == 5_000.0
