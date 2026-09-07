@@ -47,6 +47,9 @@ export interface ModelFeatureItem {
   name: string;
   default_enabled: boolean;
   active_model_slots: number[];
+  collected_available_rows: number;
+  total_collected_rows: number;
+  collected_coverage: number;
   available_rows: number;
   total_mature_rows: number;
   coverage: number;
@@ -56,6 +59,7 @@ export interface ModelFeatureCatalog {
   default_features: string[];
   selected_features: string[];
   available_features: string[];
+  total_collected_rows: number;
   total_mature_rows: number;
   active_model_count: number;
   items: ModelFeatureItem[];

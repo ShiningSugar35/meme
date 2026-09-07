@@ -163,6 +163,31 @@ class SampleRepository:
             ),
         )
 
+    @staticmethod
+    def _inflate_feature_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for row in rows:
+            features = json.loads(row.pop("features_json") or "{}")
+            raw = json.loads(row.pop("raw_json", None) or "{}")
+            row.update(features)
+            if isinstance(raw, Mapping):
+                for key in ("_public_social_signals", "_account_social_signals"):
+                    value = raw.get(key)
+                    if isinstance(value, Mapping):
+                        row[key] = dict(value)
+        return rows
+
+    def list_current(self) -> list[dict[str, Any]]:
+        rows = self.database.fetch_all(
+            """
+            SELECT * FROM samples
+            WHERE token_type IN ('new_creation','near_completion')
+              AND feature_schema_version=?
+            ORDER BY entry_time, id
+            """,
+            (FEATURE_SCHEMA_VERSION,),
+        )
+        return self._inflate_feature_rows(rows)
+
     def list_mature(self, *, since_epoch: int | None = None) -> list[dict[str, Any]]:
         sql = (
             "SELECT * FROM samples WHERE label_status='mature' AND tag IN (0,1) "
@@ -174,17 +199,7 @@ class SampleRepository:
             sql += " AND entry_time >= ?"
             parameters = (*parameters, since_epoch)
         sql += " ORDER BY entry_time, id"
-        rows = self.database.fetch_all(sql, parameters)
-        for row in rows:
-            features = json.loads(row.pop("features_json") or "{}")
-            raw = json.loads(row.pop("raw_json", None) or "{}")
-            row.update(features)
-            if isinstance(raw, Mapping):
-                for key in ("_public_social_signals", "_account_social_signals"):
-                    value = raw.get(key)
-                    if isinstance(value, Mapping):
-                        row[key] = dict(value)
-        return rows
+        return self._inflate_feature_rows(self.database.fetch_all(sql, parameters))
 
     def list_pending_due(self, *, before_epoch: int, limit: int = 100) -> list[dict[str, Any]]:
         return self.database.fetch_all(

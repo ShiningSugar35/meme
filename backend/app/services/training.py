@@ -1017,12 +1017,14 @@ class TrainingService:
         return champion
 
     def feature_catalog(self) -> dict[str, Any]:
-        rows = self.samples.list_mature()
-        total = len(rows)
+        collected_rows = self.samples.list_current()
+        mature_rows = self.samples.list_mature()
+        total_collected = len(collected_rows)
+        total_mature = len(mature_rows)
         active = self.models.active_models()
         active_features = [set(model.get("feature_names", [])) for model in active]
-        items: list[dict[str, Any]] = []
-        for name in AVAILABLE_MODEL_FEATURES:
+
+        def available_count(name: str, rows: list[dict[str, Any]]) -> int:
             present = 0
             for row in rows:
                 value = materialize_entry_feature(
@@ -1040,6 +1042,12 @@ class TrainingService:
                 except (TypeError, ValueError):
                     pass
                 present += 1
+            return present
+
+        items: list[dict[str, Any]] = []
+        for name in AVAILABLE_MODEL_FEATURES:
+            collected_present = available_count(name, collected_rows)
+            mature_present = available_count(name, mature_rows)
             items.append(
                 {
                     "name": name,
@@ -1047,16 +1055,20 @@ class TrainingService:
                     "active_model_slots": [
                         index + 1 for index, features in enumerate(active_features) if name in features
                     ],
-                    "available_rows": present,
-                    "total_mature_rows": total,
-                    "coverage": (present / total) if total else 0.0,
+                    "collected_available_rows": collected_present,
+                    "total_collected_rows": total_collected,
+                    "collected_coverage": (collected_present / total_collected) if total_collected else 0.0,
+                    "available_rows": mature_present,
+                    "total_mature_rows": total_mature,
+                    "coverage": (mature_present / total_mature) if total_mature else 0.0,
                 }
             )
         return {
             "default_features": list(DEFAULT_MODEL_TRAINING_FEATURES),
             "selected_features": list(self.configured_feature_selection()),
             "available_features": list(AVAILABLE_MODEL_FEATURES),
-            "total_mature_rows": total,
+            "total_collected_rows": total_collected,
+            "total_mature_rows": total_mature,
             "active_model_count": len(active),
             "items": items,
         }
