@@ -71,7 +71,7 @@ def test_new_creation_payload_pushes_supported_business_prefilters_server_side()
     assert section["max_insider_ratio"] < 0.2
     assert section["max_fresh_wallet_rate"] < 0.2
     assert section["min_swaps_24h"] == 20
-    assert section["min_volume_24h"] > 620.0
+    assert "min_volume_24h" not in section
 
 
 def test_discovery_parser_never_relabels_unrelated_sections() -> None:

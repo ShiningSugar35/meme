@@ -22,7 +22,7 @@
 ```text
 GMGN Trenches New + Trending Volume 5m 候选发现
   → 本地粗筛与权威 enrichment
-  → fail-closed 安全准入
+  → 关键事实完整且通过阈值才放行；缺失/不可验证时仅该候选不进入正式样本
   → 不可变入场时特征快照
   → rules_only 基线模拟
   → Active Top 3 校准概率与模型专属阈值
@@ -36,9 +36,9 @@ GMGN Trenches New + Trending Volume 5m 候选发现
 
 生产 Collector 的正式来源固定为两路：`/v1/trenches` 的 `new_creation`，以及 `/v1/market/rank` 的 `order_by=volume, interval=5m`。`near_completion` 与其他 Trending 排序均不再进入正式采集；历史 near 样本已清理，历史交易审计独立保留。
 
-服务器端只前置能够与当前 SafetyFilter 等价或构成其必要条件的约束，并且本地权威复核始终保留。Trenches New 当前前置 launchpad/quote、候选 age 3–300m、liquidity、marketcap、holder 30–999、严格 top10、rug、bundler、insider、fresh-wallet、mint/freeze/burn/not-wash，以及由 `swaps_1h>19` 与 `volume_1h/swaps_1h>31` 推导出的必要条件 `swaps_24h>=20`、`volume_24h>620`。Trending Volume 5m 前置内盘、mint/freeze/burn/not-wash、age、liquidity、marketcap、holder、严格 top10/insider/bundler；**不**把 `swaps_1h>19` / `volume_1h>620` 映射成 5m `min_swaps/min_volume`，因为窗口不等价会误杀本可通过的候选。GMGN range 为闭区间而本地多数门是严格不等式，因此浮点边界使用 `math.nextafter`，不能直接传 5000/0.14/0.2 等值而暗中放宽。
+服务器端只前置能够与当前 SafetyFilter 等价或构成其必要条件的约束，并且本地权威复核始终保留。Trenches New 当前前置 launchpad/quote、候选 age 3–300m、liquidity、marketcap、holder 30–999、严格 top10、rug、bundler、insider、fresh-wallet、mint/freeze/burn/not-wash，以及 `swaps_24h>=20` 的前置必要条件；`volume_24h` 不再前置，拉回本地后结合 1h volume/swaps 等完整事实做二次筛选。Trending Volume 5m 前置内盘、mint/freeze/burn/not-wash、age、liquidity、marketcap、holder、严格 top10/insider/bundler；**不**把 `swaps_1h>19` / `volume_1h>620` 映射成 5m `min_swaps/min_volume`，因为窗口不等价会误杀本可通过的候选。GMGN range 为闭区间而本地多数门是严格不等式，因此浮点边界使用 `math.nextafter`，不能直接传 5000/0.14/0.2 等值而暗中放宽。
 
-`rat_trader_amount_rate`、buy/sell tax、`sniper_count`、`liquidity/holder_count`、`volume_1h/swaps_1h`、`buy_swaps/swaps_1h`、creator 24h launches、weighted activity 与 top1 addr-type0 等没有当前官方参数中与本地定义严格等价的单一 server range，继续只由本地 fail-closed SafetyFilter / onchain / top-holder 链判定；不得把相似但不同语义字段硬映射。
+`rat_trader_amount_rate`、buy/sell tax、`sniper_count`、`liquidity/holder_count`、`volume_1h/swaps_1h`、`buy_swaps/swaps_1h`、creator 24h launches、weighted activity 与 top1 addr-type0 等没有当前官方参数中与本地定义严格等价的单一 server range，继续由本地 SafetyFilter / onchain / top-holder 链二次判定；仅当关键事实缺失、不可验证或明确不满足阈值时不放行该候选；不得把相似但不同语义字段硬映射。
 
 ## 3. 生产准入合同
 
@@ -59,7 +59,7 @@ GMGN Trenches New + Trending Volume 5m 候选发现
 
 关键字段缺失、不可解析、非有限值或状态未知时拒绝，不用默认值伪造安全事实。新增链上条件放在常规本地深筛与 top-holder 之后：GMGN 入场时事实优先，缺失/不完整才使用 Alchemy Mainnet RPC，Ankr 不参与。完整阈值以 `backend/app/collector/` 与《开发文档.md》为准。
 
-模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录61项、默认29项；当前新增候选共22项（2项链上 + 15项985monitor公共事件 + 5项浏览器登录态FOMO）。v10生产采集先并行完成链上、公共985、账号985与PIT Kline等外部模型特征观测；配置的985monitor公共/账号源只要请求失败、窗口截断、未登录或任一985训练字段仍为 `None/NaN/Inf`，候选本轮直接拒绝。全部外部特征到手后只轻量刷新 price/liquidity/marketcap/age/holder/1h activity 等易变GMGN市场事实并重跑最终 SafetyFilter，正式准入仍严格 `age>5min`，随后冻结 `entry_time/entry_price/feature_snapshot_at`。在SQLite写入前，Collector再使用训练同一个 materializer 对当前61个候选做纯本地完整性检查；任一字段仍不能物化为有限数值时按 `model_feature_completeness` fail-closed，不写正式样本，也不做训练插补。冻结/完整性检查后不再发任何模型特征请求。完整观测但无事件时，latest mention 用 `ln(901)`、FOMO buy-ratio 用0.5、USD imbalance 与 `ln(USD+1)` 用0。两个source coverage因正式完整性硬门后恒为1，已与6个无Solana证据的private Pump特征一起退役。985monitor网页标签和Chrome本身无需常驻；退出登录、清站点数据或token失效后账号源会阻断依赖该快照的正式准入，重新登录即可恢复。
+模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录61项、默认29项；当前新增候选共22项（2项链上 + 15项985monitor公共事件 + 5项浏览器登录态FOMO）。v10生产采集先并行完成链上、公共985、账号985与PIT Kline等外部模型特征观测；配置的985monitor公共/账号源只要请求失败、窗口截断、未登录或任一985训练字段仍为 `None/NaN/Inf`，候选本轮直接拒绝。全部外部特征到手后只轻量刷新 price/liquidity/marketcap/age/holder/1h activity 等易变GMGN市场事实并重跑最终 SafetyFilter，正式准入仍严格 `age>5min`，随后冻结 `entry_time/entry_price/feature_snapshot_at`。在SQLite写入前，Collector再使用训练同一个 materializer 对当前61个候选做纯本地完整性检查；任一字段仍不能物化为有限数值时按 `model_feature_completeness` 标记为特征不完整，仅该候选不写正式样本，也不做训练插补。冻结/完整性检查后不再发任何模型特征请求。完整观测但无事件时，latest mention 用 `ln(901)`、FOMO buy-ratio 用0.5、USD imbalance 与 `ln(USD+1)` 用0。两个source coverage因正式完整性硬门后恒为1，已与6个无Solana证据的private Pump特征一起退役。985monitor网页标签和Chrome本身无需常驻；退出登录、清站点数据或token失效后账号源会阻断依赖该快照的正式准入，重新登录即可恢复。
 
 ## 4. 模型与决策
 
@@ -92,7 +92,7 @@ Top 3、特征、概率校准和 J 最优 operating point 均先由 development 
 5. final AP/AP lift/ROC-AUC 继续记录为诊断，不参与重排、调阈值或部署硬门；execution-risk 与 drift 同样只作监控/研究；
 6. generation 至少存在 1 个具备上述正向 J 证据的模型才可 staged activation；激活后仍只有自身 `qualified_deployment_evidence=true` 的 slot 可以开仓，其他 slot 只做 shadow。
 
-旧标签、旧决策合同或旧认证合同的 Active 模型在新代码下 fail-closed；Collector、rules_only 与已有持仓退出继续运行。
+旧标签、旧决策合同或旧认证合同的 Active 模型在新代码下因合同不匹配而禁止该旧模型新开仓；Collector、rules_only 与已有持仓退出继续运行。
 
 ## 6. 模拟名义交易与退出
 

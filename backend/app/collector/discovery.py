@@ -158,10 +158,6 @@ class DiscoveryService:
         if not 1 <= limit <= 80:
             raise CollectorValidationError("GMGN trenches limit must be between 1 and 80")
         thresholds = FilterThresholds()
-        min_volume_24h = math.nextafter(
-            (thresholds.min_swaps_1h + 1) * thresholds.min_volume_per_swap_1h,
-            math.inf,
-        )
         section: dict[str, Any] = {
             "filters": ["offchain", "onchain", "renounced", "frozen", "is_burnt", "not_wash_trading"],
             "launchpad_platform_v2": True,
@@ -182,7 +178,6 @@ class DiscoveryService:
             "max_insider_ratio": math.nextafter(thresholds.max_insider_ratio, -math.inf),
             "max_fresh_wallet_rate": math.nextafter(thresholds.max_fresh_wallet_rate, -math.inf),
             "min_swaps_24h": thresholds.min_swaps_1h + 1,
-            "min_volume_24h": min_volume_24h,
         }
         return {"version": "v2", token_type: section}
 
