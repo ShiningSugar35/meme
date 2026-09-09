@@ -42,6 +42,8 @@ def extract_trench_candidates(data: Mapping[str, Any], requested_type: str) -> l
     inner: Any = data.get("data", data)
     if not isinstance(inner, Mapping):
         return []
+    if requested_type != "new_creation":
+        return []
     keys = [requested_type]
     if requested_type == "near_completion":
         keys.insert(0, "pump")  # GMGN returns this lifecycle under `pump`.
@@ -60,8 +62,8 @@ def extract_trench_candidates(data: Mapping[str, Any], requested_type: str) -> l
     return result
 
 
-TRENDING_ORDER_BY = ("volume", "smart_degen_count", "change5m")
-TRENDING_INTERVALS = ("1m", "5m", "1h", "6h", "24h")
+TRENDING_ORDER_BY = ("volume",)
+TRENDING_INTERVALS = ("5m",)
 TRENDING_QUALIFIED_FACTS_KEY = "_server_qualified_facts"
 
 
@@ -118,17 +120,12 @@ class DiscoveryService:
         )
 
     @staticmethod
-    def trending_params(order_by: str, *, interval: str = "1h") -> dict[str, Any]:
+    def trending_params(order_by: str, *, interval: str = "5m") -> dict[str, Any]:
         if order_by not in TRENDING_ORDER_BY:
             raise CollectorValidationError(f"Unsupported trending order: {order_by}")
         if interval not in TRENDING_INTERVALS:
             raise CollectorValidationError(f"Unsupported trending interval: {interval}")
         thresholds = FilterThresholds()
-        min_volume = math.nextafter(
-            (thresholds.min_swaps_1h + 1) * thresholds.min_volume_per_swap_1h,
-            math.inf,
-        )
-
         return {
             "chain": "sol",
             "interval": interval,
@@ -141,8 +138,8 @@ class DiscoveryService:
             "max_created": f"{thresholds.max_age_minutes_exclusive:g}m",
             "min_liquidity": math.nextafter(thresholds.min_liquidity, math.inf),
             "min_marketcap": math.nextafter(thresholds.min_marketcap, math.inf),
-            "min_volume": min_volume,
-            "min_swaps": thresholds.min_swaps_1h + 1,
+
+
             "min_holder_count": int(thresholds.min_holder_count_exclusive) + 1,
             "max_holder_count": int(thresholds.max_holder_count_exclusive) - 1,
             "min_top10_holder_rate": math.nextafter(thresholds.min_top_10_holder_rate, math.inf),
@@ -191,7 +188,7 @@ class DiscoveryService:
 
     async def discover(self, token_type: str, *, limit: int = 80) -> list[TokenCandidate]:
         if token_type == "trending":
-            return await self.discover_trending("volume", interval="1h")
+            return await self.discover_trending("volume", interval="5m")
         body = self.request_body(token_type, limit)
         primary = self.roles.discovery[0]
         fallback = self.roles.discovery_fallback
@@ -250,7 +247,7 @@ class DiscoveryService:
         self,
         order_by: str,
         *,
-        interval: str = "1h",
+        interval: str = "5m",
 
     ) -> list[TokenCandidate]:
         params = self.trending_params(order_by, interval=interval)

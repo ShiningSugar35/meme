@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from backend.app.collector.discovery import DiscoveryService, extract_trench_candidates, extract_trending_candidates
+from backend.app.collector.errors import CollectorValidationError
 from backend.app.collector.models import ApiKeyRoles
 
 
@@ -119,18 +122,18 @@ def test_trending_contract_and_parser_use_official_rank_fields() -> None:
     assert candidates[0].token_type == "trending"
     assert candidates[0].raw["_discovery_source"] == "trending:volume"
 
-    params = DiscoveryService.trending_params("change5m", interval="5m")
+    params = DiscoveryService.trending_params("volume", interval="5m")
     assert params["chain"] == "sol"
     assert params["interval"] == "5m"
-    assert params["order_by"] == "change5m"
+    assert params["order_by"] == "volume"
     assert params["direction"] == "desc"
     assert "limit" not in params
     assert params["min_created"] == "3m"
     assert params["max_created"] == "300m"
     assert params["min_liquidity"] > 5_000.0
     assert params["min_marketcap"] > 5_000.0
-    assert params["min_volume"] > 620.0
-    assert params["min_swaps"] == 20
+    assert "min_volume" not in params
+    assert "min_swaps" not in params
     assert params["min_holder_count"] == 30
     assert params["max_holder_count"] == 999
     assert 0.14 < params["min_top10_holder_rate"] < 0.140000001
@@ -140,6 +143,8 @@ def test_trending_contract_and_parser_use_official_rank_fields() -> None:
     assert params["max_bundler_rate"] < 0.2
     assert params["filters"] == ["renounced", "frozen", "burn", "not_wash_trading", "is_internal_market"]
     assert len(params["platform"]) == 8
+    with pytest.raises(CollectorValidationError):
+        DiscoveryService.trending_params("volume", interval="1h")
 
 
 def test_trending_discovery_balances_reserved_keys_by_documented_route_weight() -> None:
@@ -149,13 +154,13 @@ def test_trending_discovery_balances_reserved_keys_by_documented_route_weight() 
     asyncio.run(service.discover("new_creation", limit=1))
     found = asyncio.run(service.discover("trending", limit=1))
     assert len(found) == 1
-    for order_by in ("smart_degen_count", "change5m"):
-        found = asyncio.run(service.discover_trending(order_by, interval="5m"))
-        assert len(found) == 1
+    with pytest.raises(CollectorValidationError):
+        asyncio.run(service.discover_trending("change5m", interval="5m"))
+
     trench_slots = [slot for slot, path, _ in client.calls if path == "/v1/trenches"]
     trend_slots = [slot for slot, path, _ in client.calls if path == "/v1/market/rank"]
     assert trench_slots == [0]
-    # Weight-3 Trenches new stays on slot 0; production volume Trending plus two explicit
-    # shadow rank probes are weight-1 and balance onto the reserved discovery slots.
-    assert len(trend_slots) == 3
-    assert sum(service._reserved_weight.values()) == 6.0
+    # Weight-3 Trenches new stays on slot 0; only the production volume Trending
+    # request remains weight-1 on the reserved discovery slots.
+    assert len(trend_slots) == 1
+    assert sum(service._reserved_weight.values()) == 4.0

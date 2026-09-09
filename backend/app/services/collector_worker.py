@@ -298,7 +298,7 @@ class CollectorWorker:
     def _type_label(token_type: object) -> str:
         return {
             "new_creation": "New Creation",
-            "trending": "Trending / Volume 1h",
+            "trending": "Trending / Volume 5m",
         }.get(str(token_type), str(token_type or "Collector"))
 
     def _record_event(
@@ -320,7 +320,7 @@ class CollectorWorker:
         reason_text = f"{_rejection_stage} / {reason_text}" if reason_text else _rejection_stage
         messages = {
             "cycle_started": (
-                "采集周期开始：依次扫描 Trenches New → Trending Volume 1h，"
+                "采集周期开始：依次扫描 Trenches New → Trending Volume 5m，"
                 f"单类 limit={int(payload.get('requested_limit') or 0)}"
             ),
             "discovery_start": f"开始拉取 {label}",

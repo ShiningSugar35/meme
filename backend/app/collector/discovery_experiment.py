@@ -52,7 +52,7 @@ class DiscoveryExperimentManager:
         self,
         *,
         duration_seconds: int = 86_400,
-        interval: str = "1h",
+        interval: str = "5m",
 
         max_shadow_enrich_per_cycle: int = 8,
         config: Mapping[str, Any] | None = None,
