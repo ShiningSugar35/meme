@@ -298,7 +298,7 @@ class CollectorWorker:
     def _type_label(token_type: object) -> str:
         return {
             "new_creation": "New Creation",
-            "near_completion": "Near Completion",
+            "trending": "Trending / Volume 1h",
         }.get(str(token_type), str(token_type or "Collector"))
 
     def _record_event(
@@ -320,7 +320,7 @@ class CollectorWorker:
         reason_text = f"{_rejection_stage} / {reason_text}" if reason_text else _rejection_stage
         messages = {
             "cycle_started": (
-                "采集周期开始：依次扫描 New Creation → Near Completion，"
+                "采集周期开始：依次扫描 Trenches New → Trending Volume 1h，"
                 f"单类 limit={int(payload.get('requested_limit') or 0)}"
             ),
             "discovery_start": f"开始拉取 {label}",
@@ -372,8 +372,8 @@ class CollectorWorker:
             """
             INSERT INTO collector_cycle_snapshots(
                 observed_at,discovered,accepted,rejected,new_creation_returned,
-                near_completion_returned,payload_json,recorded_at
-            ) VALUES(?,?,?,?,?,?,?,?)
+                near_completion_returned,trending_returned,payload_json,recorded_at
+            ) VALUES(?,?,?,?,?,?,?,?,?)
             """,
             (
                 int(time.time()),
@@ -381,7 +381,8 @@ class CollectorWorker:
                 int(stats.get("accepted") or 0),
                 int(stats.get("rejected") or 0),
                 int((type_stats.get("new_creation") or {}).get("returned") or 0),
-                int((type_stats.get("near_completion") or {}).get("returned") or 0),
+                0,
+                int((type_stats.get("trending") or {}).get("returned") or 0),
                 json.dumps(dict(stats), ensure_ascii=False, separators=(",", ":")),
                 utc_now_iso(),
             ),

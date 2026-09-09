@@ -180,7 +180,7 @@ class SampleRepository:
         rows = self.database.fetch_all(
             """
             SELECT * FROM samples
-            WHERE token_type IN ('new_creation','near_completion')
+            WHERE token_type IN ('new_creation','trending')
               AND feature_schema_version=?
             ORDER BY entry_time, id
             """,
@@ -191,7 +191,7 @@ class SampleRepository:
     def list_mature(self, *, since_epoch: int | None = None) -> list[dict[str, Any]]:
         sql = (
             "SELECT * FROM samples WHERE label_status='mature' AND tag IN (0,1) "
-            "AND token_type IN ('new_creation','near_completion') AND label_version=? "
+            "AND token_type IN ('new_creation','trending') AND label_version=? "
             "AND feature_schema_version=?"
         )
         parameters: tuple[Any, ...] = (LabelPolicy().label_version, FEATURE_SCHEMA_VERSION)

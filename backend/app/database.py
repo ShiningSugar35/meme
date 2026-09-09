@@ -10,7 +10,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .config import get_settings
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 def utc_now_iso() -> str:
@@ -90,6 +90,7 @@ class Database:
 
     @classmethod
     def _migrate_schema(cls, connection: sqlite3.Connection) -> None:
+        cls._ensure_column(connection, "collector_cycle_snapshots", "trending_returned", "INTEGER NOT NULL DEFAULT 0")
         # v2: preserve complete label-path facts and durable training requests.
         for column, definition in (
             ("first_take_profit_at", "INTEGER"),
@@ -939,6 +940,7 @@ CREATE TABLE IF NOT EXISTS collector_cycle_snapshots (
     rejected INTEGER NOT NULL DEFAULT 0,
     new_creation_returned INTEGER NOT NULL DEFAULT 0,
     near_completion_returned INTEGER NOT NULL DEFAULT 0,
+    trending_returned INTEGER NOT NULL DEFAULT 0,
     payload_json TEXT NOT NULL DEFAULT '{}',
     recorded_at TEXT NOT NULL
 );

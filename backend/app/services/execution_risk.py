@@ -178,7 +178,7 @@ class ExecutionRiskTrainer:
               AND p.stop_loss_price>0
               AND p.sample_id IS NOT NULL
               AND s.feature_schema_version=?
-              AND s.token_type IN ('new_creation','near_completion')
+              AND s.token_type IN ('new_creation','trending')
               AND COALESCE(json_extract(p.metadata_json,'$.performance_excluded'),0)=0
               {cutoff_clause}
             ORDER BY s.entry_time,p.id

@@ -147,7 +147,7 @@ class PredictionService:
                 FROM samples s
                 WHERE s.entry_time >= ?
                   AND s.feature_schema_version=?
-                  AND s.token_type IN ('new_creation','near_completion')
+                  AND s.token_type IN ('new_creation','trending')
                   AND NOT EXISTS(
                       SELECT 1 FROM predictions p
                       WHERE p.sample_id=s.id AND p.model_id=?
@@ -371,7 +371,7 @@ class PredictionService:
                 FROM samples s
                 WHERE s.entry_time >= ?
                   AND s.feature_schema_version=?
-                  AND s.token_type IN ('new_creation','near_completion')
+                  AND s.token_type IN ('new_creation','trending')
                   AND NOT EXISTS(
                       SELECT 1 FROM predictions p
                       WHERE p.sample_id=s.id AND p.model_id=? AND p.strategy_key=?
@@ -643,7 +643,7 @@ class PredictionService:
               AND p.decision_reason='selected'
               AND p.strategy_key IN ('model_1','model_2','model_3')
               AND s.feature_schema_version=?
-              AND s.token_type IN ('new_creation','near_completion')
+              AND s.token_type IN ('new_creation','trending')
               AND NOT EXISTS(
                   SELECT 1 FROM positions pos
                   WHERE pos.prediction_id=p.id AND pos.strategy_key=p.strategy_key
@@ -701,7 +701,7 @@ class PredictionService:
             FROM samples s
             WHERE s.entry_time>=?
               AND s.feature_schema_version=?
-              AND s.token_type IN ('new_creation','near_completion')
+              AND s.token_type IN ('new_creation','trending')
               AND NOT EXISTS(
                   SELECT 1 FROM positions pos
                   WHERE pos.sample_id=s.id AND pos.account_kind='simulation'

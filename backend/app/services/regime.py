@@ -107,7 +107,7 @@ class MarketRegimeService:
 
     def _breadth(self, now: int) -> dict[str, float | None]:
         rows = self.database.fetch_all(
-            "SELECT discovered,accepted,new_creation_returned,near_completion_returned "
+            "SELECT discovered,accepted,new_creation_returned,trending_returned "
             "FROM collector_cycle_snapshots WHERE observed_at>=? "
             "ORDER BY observed_at DESC LIMIT 15",
             (now - 1800,),
@@ -117,7 +117,7 @@ class MarketRegimeService:
                 "meme_discovery_breadth": None,
                 "meme_acceptance_rate": None,
                 "meme_new_creation_breadth": None,
-                "meme_near_completion_breadth": None,
+                "meme_trending_volume_breadth": None,
             }
         discovered = sum(int(row.get("discovered") or 0) for row in rows)
         accepted = sum(int(row.get("accepted") or 0) for row in rows)
@@ -129,8 +129,8 @@ class MarketRegimeService:
             "meme_new_creation_breadth": statistics.mean(
                 float(row.get("new_creation_returned") or 0) for row in rows
             ),
-            "meme_near_completion_breadth": statistics.mean(
-                float(row.get("near_completion_returned") or 0) for row in rows
+            "meme_trending_volume_breadth": statistics.mean(
+                float(row.get("trending_returned") or 0) for row in rows
             ),
         }
 

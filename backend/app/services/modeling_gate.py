@@ -33,7 +33,7 @@ def modeling_readiness(
           AND label_version=?
           AND label_status='mature'
           AND tag IN (0,1)
-          AND token_type IN ('new_creation','near_completion')
+          AND token_type IN ('new_creation','trending')
         """,
         (FEATURE_SCHEMA_VERSION, LabelPolicy().label_version),
     ) or {"n": 0}

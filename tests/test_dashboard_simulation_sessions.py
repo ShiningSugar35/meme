@@ -244,7 +244,7 @@ def test_rules_only_quality_is_positive_prevalence_with_full_recall(tmp_path: Pa
         samples.insert(
             SampleRecord(
                 address=f"rules-quality-{index}",
-                token_type="near_completion",
+                token_type="trending",
                 entry_time=int((started + timedelta(seconds=index)).timestamp()),
                 entry_price=1.0,
                 liquidity=10_000.0,

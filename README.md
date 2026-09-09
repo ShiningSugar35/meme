@@ -7,8 +7,8 @@
 ## 1. 系统边界
 
 - 运行形态：Windows、单机、单用户、SQLite、CPU-first。
-- 研究对象：允许清单内的 Solana Launchpad 新创建及接近完成阶段 Token。
-- 当前特征代：`event1m_regime_v8`。v4/v5/v6/v7 仅保留历史审计，不进入当前训练；v8 在v7因果决策时点基础上增加“正式写库前61/61模型候选必须全部可由冻结快照物化为有限数值”的最终完整性硬门。
+- 研究对象：允许清单内的 Solana Launchpad 新创建 Token，以及仍处于内盘阶段、按 1h volume 排序的 GMGN Trending 候选。
+- 当前特征代：`event1m_regime_v9`。v4–v8 仅保留历史审计，不进入当前训练；v9 在 v8 全61字段因果快照合同上固定生产来源为 Trenches `new_creation` + Trending `volume/1h`，并禁止 near-completion 再进入正式样本。
 - 当前标签：`sl090_tp180_m90_binary_v5`，90 分钟窗口，0.9x 止损、1.8x 止盈，同一分钟同时触发时止损优先，超时未触及止盈记负类。
 - 当前模型决策合同：`phase19_expected_return_paper_v1`。
 - 当前上线认证合同：`phase19_expected_return_certification_v1`。
@@ -20,7 +20,7 @@
 ## 2. 核心链路
 
 ```text
-GMGN Trenches 候选发现
+GMGN Trenches New + Trending Volume 1h 候选发现
   → 本地粗筛与权威 enrichment
   → fail-closed 安全准入
   → 不可变入场时特征快照
@@ -34,7 +34,11 @@ GMGN Trenches 候选发现
 
 ### Discovery 来源实验
 
-生产 Collector 当前仍以 Trenches lifecycle 发现为正式入口；若需要评估其他发现策略，可使用独立 shadow discovery experiment 并行比较多个来源。Trending 会把 GMGN 官方能够等价表达的 age、liquidity、marketcap、holder、top10、insider、bundler 范围以及 `is_internal_market` 生命周期范围先推到 `/v1/market/rank`，从服务器端限定为尚未 migrated/completed 的 launchpad 内部市场；Trending 请求不显式设置 `limit`，使用 GMGN 默认/最大 100 条语义。缺失 required fact 必须优先使用同一采集周期已观测到的 Trenches 原始事实补齐，再按字段定向补拉对应 endpoint family；只有上游 range 已严格证明某个安全事实、而 PIT 可用的 rank/Trenches/address API 均不返回该数值时，才允许以带来源、谓词和实际请求阈值的 server-qualification provenance 作为最终 fallback，不得伪造数值，也不得替代其他 SafetyFilter。完整 SafetyFilter、top-holder 和 PIT 特征链仍必须执行。实验来源不写正式 `samples`、模型训练或 `rules_only`。状态可用 `scripts\discovery_experiment_status.py` 查询。
+生产 Collector 的正式来源固定为两路：`/v1/trenches` 的 `new_creation`，以及 `/v1/market/rank` 的 `order_by=volume, interval=1h`。`near_completion` 与其他 Trending 排序均不再进入正式采集；历史 near 样本已清理，历史交易审计独立保留。
+
+服务器端只前置能够与当前 SafetyFilter 等价或构成其必要条件的约束，并且本地权威复核始终保留。Trenches New 当前前置 launchpad/quote、候选 age 3–300m、liquidity、marketcap、holder 30–999、严格 top10、rug、bundler、insider、fresh-wallet、mint/freeze/burn/not-wash，以及由 `swaps_1h>19` 与 `volume_1h/swaps_1h>31` 推导出的必要条件 `swaps_24h>=20`、`volume_24h>620`。Trending Volume 1h 前置内盘、mint/freeze/burn/not-wash、age、liquidity、marketcap、holder、严格 top10/insider/bundler，以及 `swaps_1h>=20`、`volume_1h>620`。GMGN range 为闭区间而本地多数门是严格不等式，因此浮点边界使用 `math.nextafter`，不能直接传 5000/0.14/0.2 等值而暗中放宽。
+
+`rat_trader_amount_rate`、buy/sell tax、`sniper_count`、`liquidity/holder_count`、`volume_1h/swaps_1h`、`buy_swaps/swaps_1h`、creator 24h launches、weighted activity 与 top1 addr-type0 等没有当前官方参数中与本地定义严格等价的单一 server range，继续只由本地 fail-closed SafetyFilter / onchain / top-holder 链判定；不得把相似但不同语义字段硬映射。
 
 ## 3. 生产准入合同
 
@@ -55,7 +59,7 @@ GMGN Trenches 候选发现
 
 关键字段缺失、不可解析、非有限值或状态未知时拒绝，不用默认值伪造安全事实。新增链上条件放在常规本地深筛与 top-holder 之后：GMGN 入场时事实优先，缺失/不完整才使用 Alchemy Mainnet RPC，Ankr 不参与。完整阈值以 `backend/app/collector/` 与《开发文档.md》为准。
 
-模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录61项、默认29项；当前新增候选共22项（2项链上 + 15项985monitor公共事件 + 5项浏览器登录态FOMO）。v8生产采集先并行完成链上、公共985、账号985与PIT Kline等外部模型特征观测；配置的985monitor公共/账号源只要请求失败、窗口截断、未登录或任一985训练字段仍为 `None/NaN/Inf`，候选本轮直接拒绝。全部外部特征到手后只轻量刷新 price/liquidity/marketcap/age/holder/1h activity 等易变GMGN市场事实并重跑最终 SafetyFilter，正式准入仍严格 `age>5min`，随后冻结 `entry_time/entry_price/feature_snapshot_at`。在SQLite写入前，Collector再使用训练同一个 materializer 对当前61个候选做纯本地完整性检查；任一字段仍不能物化为有限数值时按 `model_feature_completeness` fail-closed，不写正式样本，也不做训练插补。冻结/完整性检查后不再发任何模型特征请求。完整观测但无事件时，latest mention 用 `ln(901)`、FOMO buy-ratio 用0.5、USD imbalance 与 `ln(USD+1)` 用0。两个source coverage因正式完整性硬门后恒为1，已与6个无Solana证据的private Pump特征一起退役。985monitor网页标签和Chrome本身无需常驻；退出登录、清站点数据或token失效后账号源会阻断依赖该快照的正式准入，重新登录即可恢复。
+模型的新训练候选使用 `ln(marketcap/liquidity)` 代替历史 `ln(marketcap+1)`；后者仅为旧工件兼容保留。当前可选目录61项、默认29项；当前新增候选共22项（2项链上 + 15项985monitor公共事件 + 5项浏览器登录态FOMO）。v9生产采集先并行完成链上、公共985、账号985与PIT Kline等外部模型特征观测；配置的985monitor公共/账号源只要请求失败、窗口截断、未登录或任一985训练字段仍为 `None/NaN/Inf`，候选本轮直接拒绝。全部外部特征到手后只轻量刷新 price/liquidity/marketcap/age/holder/1h activity 等易变GMGN市场事实并重跑最终 SafetyFilter，正式准入仍严格 `age>5min`，随后冻结 `entry_time/entry_price/feature_snapshot_at`。在SQLite写入前，Collector再使用训练同一个 materializer 对当前61个候选做纯本地完整性检查；任一字段仍不能物化为有限数值时按 `model_feature_completeness` fail-closed，不写正式样本，也不做训练插补。冻结/完整性检查后不再发任何模型特征请求。完整观测但无事件时，latest mention 用 `ln(901)`、FOMO buy-ratio 用0.5、USD imbalance 与 `ln(USD+1)` 用0。两个source coverage因正式完整性硬门后恒为1，已与6个无Solana证据的private Pump特征一起退役。985monitor网页标签和Chrome本身无需常驻；退出登录、清站点数据或token失效后账号源会阻断依赖该快照的正式准入，重新登录即可恢复。
 
 ## 4. 模型与决策
 

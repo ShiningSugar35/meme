@@ -120,9 +120,11 @@ class CollectorService:
                 {"token_type": token_type, "returned": len(candidates), "requested_limit": limit},
             )
             for source_rank, candidate in enumerate(candidates, start=1):
+                source_key = str(candidate.raw.get("_discovery_source") or f"trenches:{token_type}")
+                source_kind = "trending" if source_key.startswith("trending:") else "trenches"
                 observe("candidate_discovered", {
-                    "source_key": f"trenches:{token_type}",
-                    "source_kind": "trenches",
+                    "source_key": source_key,
+                    "source_kind": source_kind,
                     "token_type": token_type,
                     "address": candidate.address,
                     "source_rank": source_rank,
@@ -137,7 +139,7 @@ class CollectorService:
                     duplicates += 1
                     current["duplicates"] += 1
                     emit("candidate_duplicate", {"token_type": token_type, "token": token_label})
-                    observe("candidate_duplicate", {"source_key": f"trenches:{token_type}", "address": candidate.address})
+                    observe("candidate_duplicate", {"source_key": source_key, "address": candidate.address})
                     continue
                 prefilter = self.enrichment.prefilter(candidate)
                 if not prefilter.accepted:
@@ -157,10 +159,10 @@ class CollectorService:
                         },
                     )
                     observe("candidate_prefilter_rejected", {
-                        "source_key": f"trenches:{token_type}", "address": candidate.address, "reasons": list(reasons)
+                        "source_key": source_key, "address": candidate.address, "reasons": list(reasons)
                     })
                     continue
-                observe("candidate_prefilter_passed", {"source_key": f"trenches:{token_type}", "address": candidate.address})
+                observe("candidate_prefilter_passed", {"source_key": source_key, "address": candidate.address})
                 result = await self.enrichment.enrich(candidate, now_ts=now_ts)
                 if result.sample is None:
                     rejected += 1
@@ -179,7 +181,7 @@ class CollectorService:
                         },
                     )
                     observe("candidate_enrichment_rejected", {
-                        "source_key": f"trenches:{token_type}", "address": candidate.address, "reasons": list(reasons)
+                        "source_key": source_key, "address": candidate.address, "reasons": list(reasons)
                     })
                     continue
                 missing_model_features = _missing_model_features(result.sample)
@@ -202,7 +204,7 @@ class CollectorService:
                         },
                     )
                     observe("candidate_model_feature_rejected", {
-                        "source_key": f"trenches:{token_type}",
+                        "source_key": source_key,
                         "address": candidate.address,
                         "reasons": list(reasons),
                     })
@@ -211,7 +213,7 @@ class CollectorService:
                 accepted += 1
                 current["accepted"] += 1
                 observe("candidate_accepted", {
-                    "source_key": f"trenches:{token_type}",
+                    "source_key": source_key,
                     "address": candidate.address,
                     "sample": result.sample,
                 })

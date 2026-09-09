@@ -201,7 +201,7 @@ class DriftGateService:
             WHERE feature_schema_version=?
               AND label_version=?
               AND label_status='mature' AND tag IN (0,1)
-              AND token_type IN ('new_creation','near_completion')
+              AND token_type IN ('new_creation','trending')
             ORDER BY entry_time DESC,id DESC
             LIMIT ?
             """,
@@ -282,7 +282,7 @@ class DriftGateService:
               AND p.decision_policy_version=?
               AND s.feature_schema_version=? AND s.label_version=?
               AND s.label_status='mature' AND s.tag IN (0,1)
-              AND s.token_type IN ('new_creation','near_completion')
+              AND s.token_type IN ('new_creation','trending')
               AND s.entry_time BETWEEN ? AND ?
             """,
             (

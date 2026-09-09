@@ -16,8 +16,8 @@ from .models import CollectedSample, TokenCandidate
 from .rate_limit import AsyncRateLimiter
 
 
-CONTROL_SOURCES = ("trenches:new_creation", "trenches:near_completion")
-TRENDING_SOURCES = tuple(f"trending:{name}" for name in TRENDING_ORDER_BY)
+CONTROL_SOURCES = ("trenches:new_creation",)
+TRENDING_SOURCES = ("trending:volume",)
 ALL_SOURCES = (*CONTROL_SOURCES, *TRENDING_SOURCES)
 
 
@@ -52,7 +52,7 @@ class DiscoveryExperimentManager:
         self,
         *,
         duration_seconds: int = 86_400,
-        interval: str = "5m",
+        interval: str = "1h",
 
         max_shadow_enrich_per_cycle: int = 8,
         config: Mapping[str, Any] | None = None,
@@ -418,7 +418,7 @@ class DiscoveryExperimentManager:
         cap = int(experiment["max_shadow_enrich_per_cycle"])
         source_candidates: dict[str, list[TokenCandidate]] = {}
         errors: list[str] = []
-        for order_by in TRENDING_ORDER_BY:
+        for order_by in ("volume",):
             source_key = f"trending:{order_by}"
             try:
                 candidates = await discovery.discover_trending(order_by, interval=interval)

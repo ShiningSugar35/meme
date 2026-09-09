@@ -41,7 +41,7 @@ class SampleExportService:
             """
             SELECT * FROM samples
             WHERE label_status='mature' AND tag IN (0,1)
-              AND token_type IN ('new_creation','near_completion')
+              AND token_type IN ('new_creation','trending')
               AND label_version=?
             ORDER BY entry_time, id
             """,

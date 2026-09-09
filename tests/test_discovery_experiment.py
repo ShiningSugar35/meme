@@ -48,11 +48,11 @@ def test_trending_shadow_deduplicates_enrichment_and_never_writes_production_sam
     result = asyncio.run(manager.run_trending_cycle(discovery, enrichment)); manager.finish_cycle()
     assert result["accepted_unique"] == 1 and enrichment.enrich_calls == [shared]
     assert db.fetch_one("SELECT COUNT(*) AS count FROM samples")["count"] == 0
-    assert db.fetch_one("SELECT COUNT(*) AS count FROM discovery_experiment_samples")["count"] == 3
+    assert db.fetch_one("SELECT COUNT(*) AS count FROM discovery_experiment_samples")["count"] == 1
     for row in db.fetch_all("SELECT entry_time,raw_json FROM discovery_experiment_samples"):
         raw = json.loads(row["raw_json"])
         assert int(row["entry_time"]) >= int(raw["_experiment_source_observed_at"])
-    assert [row["samples"] for row in manager.summary()["sources"] if row["source_key"].startswith("trending:")] == [1,1,1]
+    assert [row["samples"] for row in manager.summary()["sources"] if row["source_key"].startswith("trending:")] == [1]
 
 
 def test_trending_reuses_same_cycle_trenches_missing_facts_without_overriding_rank_price(tmp_path):
@@ -74,13 +74,13 @@ def test_trending_reuses_same_cycle_trenches_missing_facts_without_overriding_ra
     assert enrichment.trending_facts == [{"address": address, "insider_ratio": 0.11, "price": 0.5}]
 
 
-def test_trending_budget_censoring_is_explicit(tmp_path):
+def test_volume_only_trending_has_no_cross_source_budget_censoring(tmp_path):
     db = Database(tmp_path / "budget.db"); db.initialize(); manager = DiscoveryExperimentManager(db); manager.create_or_resume(max_shadow_enrich_per_cycle=1)
     now=int(time.time()); manager.begin_cycle("cycle-budget", observed_at=now)
     discovery=FakeTrendingDiscovery({"volume":[_candidate("volume-only","volume")],"smart_degen_count":[_candidate("smart-only","smart")],"change5m":[_candidate("change-only","change")]})
     result=asyncio.run(manager.run_trending_cycle(discovery, FakeEnrichment(now))); manager.finish_cycle()
-    assert result["deep_enrich_selected"] == 1 and result["budget_censored_unique"] == 2
-    assert db.fetch_one("SELECT COUNT(*) AS count FROM discovery_experiment_observations WHERE outcome='budget_censored'")["count"] == 2
+    assert result["deep_enrich_selected"] == 1 and result["budget_censored_unique"] == 0
+    assert db.fetch_one("SELECT COUNT(*) AS count FROM discovery_experiment_observations WHERE outcome='budget_censored'")["count"] == 0
 
 
 def test_control_observer_is_shadow_only(tmp_path):
@@ -98,8 +98,8 @@ def test_shadow_labels_group_same_address_into_one_kline_request(tmp_path):
     discovery=FakeTrendingDiscovery({"volume":[_candidate(shared,"volume")],"smart_degen_count":[_candidate(shared,"smart")],"change5m":[]})
     asyncio.run(manager.run_trending_cycle(discovery,FakeEnrichment(now))); manager.finish_cycle(); provider=FakeKlineProvider()
     finalized=asyncio.run(manager.finalize_due(provider,now_ts=now+90*60+10))
-    assert finalized == 2 and provider.calls == [shared]
-    rows=db.fetch_all("SELECT label_status,tag FROM discovery_experiment_samples ORDER BY source_key"); assert [(r["label_status"],r["tag"]) for r in rows] == [("mature",1),("mature",1)]
+    assert finalized == 1 and provider.calls == [shared]
+    rows=db.fetch_all("SELECT label_status,tag FROM discovery_experiment_samples ORDER BY source_key"); assert [(r["label_status"],r["tag"]) for r in rows] == [("mature",1)]
 
 
 def test_shared_limiter_delta_and_route_metrics_are_persisted(tmp_path):

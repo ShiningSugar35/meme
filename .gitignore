@@ -20,6 +20,7 @@ data/*.db-*
 data/*.sqlite*
 data/backups/
 data/experimental_*
+data/.browser_session_tmp/
 logs/*
 !logs/.gitkeep
 ml_models/*

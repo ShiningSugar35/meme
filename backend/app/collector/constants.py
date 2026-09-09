@@ -10,13 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-DISCOVERY_TYPES = ("new_creation", "near_completion")
+DISCOVERY_TYPES = ("new_creation", "trending")
 
 # Entry-feature generations are intentionally versioned. Historical samples
 # collected before the event/regime upgrade remain auditable, but must never be
 # silently backfilled with values that were not observed at their original PIT.
 LEGACY_FEATURE_SCHEMA_VERSION = "legacy_pre_event_v1"
-FEATURE_SCHEMA_VERSION = "event1m_regime_v8"
+FEATURE_SCHEMA_VERSION = "event1m_regime_v9"
 
 LAUNCHPADS = (
     "Pump.fun",

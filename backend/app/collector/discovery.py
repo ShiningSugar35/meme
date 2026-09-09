@@ -118,12 +118,16 @@ class DiscoveryService:
         )
 
     @staticmethod
-    def trending_params(order_by: str, *, interval: str = "5m") -> dict[str, Any]:
+    def trending_params(order_by: str, *, interval: str = "1h") -> dict[str, Any]:
         if order_by not in TRENDING_ORDER_BY:
             raise CollectorValidationError(f"Unsupported trending order: {order_by}")
         if interval not in TRENDING_INTERVALS:
             raise CollectorValidationError(f"Unsupported trending interval: {interval}")
         thresholds = FilterThresholds()
+        min_volume = math.nextafter(
+            (thresholds.min_swaps_1h + 1) * thresholds.min_volume_per_swap_1h,
+            math.inf,
+        )
 
         return {
             "chain": "sol",
@@ -131,32 +135,38 @@ class DiscoveryService:
             "order_by": order_by,
             "direction": "desc",
 
-            "filters": ["renounced", "frozen", "is_internal_market"],
+            "filters": ["renounced", "frozen", "burn", "not_wash_trading", "is_internal_market"],
             "platform": list(LAUNCHPADS),
             "min_created": f"{thresholds.preliminary_min_age_minutes:g}m",
             "max_created": f"{thresholds.max_age_minutes_exclusive:g}m",
-            "min_liquidity": thresholds.min_liquidity,
-            "min_marketcap": thresholds.min_marketcap,
+            "min_liquidity": math.nextafter(thresholds.min_liquidity, math.inf),
+            "min_marketcap": math.nextafter(thresholds.min_marketcap, math.inf),
+            "min_volume": min_volume,
+            "min_swaps": thresholds.min_swaps_1h + 1,
             "min_holder_count": int(thresholds.min_holder_count_exclusive) + 1,
             "max_holder_count": int(thresholds.max_holder_count_exclusive) - 1,
-            "min_top10_holder_rate": thresholds.min_top_10_holder_rate,
-            "max_top10_holder_rate": thresholds.max_top_10_holder_rate,
+            "min_top10_holder_rate": math.nextafter(thresholds.min_top_10_holder_rate, math.inf),
+            "max_top10_holder_rate": math.nextafter(thresholds.max_top_10_holder_rate, -math.inf),
             # GMGN range bounds are inclusive while the local contract is strict.
             # Use the nearest representable value below 0.2 so a server-qualified
             # missing insider fact never weakens the local `insider_ratio < 0.2` rule.
             "max_insider_rate": math.nextafter(thresholds.max_insider_ratio, -math.inf),
-            "max_bundler_rate": thresholds.max_bundler_rate,
+            "max_bundler_rate": math.nextafter(thresholds.max_bundler_rate, -math.inf),
         }
 
     @staticmethod
     def request_body(token_type: str, limit: int = 80) -> dict[str, Any]:
-        if token_type not in DISCOVERY_TYPES:
+        if token_type != "new_creation":
             raise CollectorValidationError(f"Unsupported discovery type: {token_type}")
         if not 1 <= limit <= 80:
             raise CollectorValidationError("GMGN trenches limit must be between 1 and 80")
         thresholds = FilterThresholds()
+        min_volume_24h = math.nextafter(
+            (thresholds.min_swaps_1h + 1) * thresholds.min_volume_per_swap_1h,
+            math.inf,
+        )
         section: dict[str, Any] = {
-            "filters": ["offchain", "onchain"],
+            "filters": ["offchain", "onchain", "renounced", "frozen", "is_burnt", "not_wash_trading"],
             "launchpad_platform_v2": True,
             "limit": limit,
 
@@ -164,12 +174,26 @@ class DiscoveryService:
             "quote_address_type": list(SOL_TRENCH_QUOTE_ADDRESS_TYPES),
             "min_created": f"{thresholds.preliminary_min_age_minutes:g}m",
             "max_created": f"{thresholds.max_age_minutes_exclusive:g}m",
+            "min_liquidity": math.nextafter(thresholds.min_liquidity, math.inf),
+            "min_marketcap": math.nextafter(thresholds.min_marketcap, math.inf),
+            "min_holder_count": int(thresholds.min_holder_count_exclusive) + 1,
+            "max_holder_count": int(thresholds.max_holder_count_exclusive) - 1,
+            "min_top_holder_rate": math.nextafter(thresholds.min_top_10_holder_rate, math.inf),
+            "max_top_holder_rate": math.nextafter(thresholds.max_top_10_holder_rate, -math.inf),
+            "max_rug_ratio": math.nextafter(thresholds.max_rug_ratio, -math.inf),
+            "max_bundler_rate": math.nextafter(thresholds.max_bundler_rate, -math.inf),
+            "max_insider_ratio": math.nextafter(thresholds.max_insider_ratio, -math.inf),
+            "max_fresh_wallet_rate": math.nextafter(thresholds.max_fresh_wallet_rate, -math.inf),
+            "min_swaps_24h": thresholds.min_swaps_1h + 1,
+            "min_volume_24h": min_volume_24h,
         }
         return {"version": "v2", token_type: section}
 
     async def discover(self, token_type: str, *, limit: int = 80) -> list[TokenCandidate]:
+        if token_type == "trending":
+            return await self.discover_trending("volume", interval="1h")
         body = self.request_body(token_type, limit)
-        primary = self.roles.discovery[DISCOVERY_TYPES.index(token_type)]
+        primary = self.roles.discovery[0]
         fallback = self.roles.discovery_fallback
         last_error: BaseException | None = None
 
@@ -226,7 +250,7 @@ class DiscoveryService:
         self,
         order_by: str,
         *,
-        interval: str = "5m",
+        interval: str = "1h",
 
     ) -> list[TokenCandidate]:
         params = self.trending_params(order_by, interval=interval)
@@ -257,7 +281,7 @@ class DiscoveryService:
                     "lifecycle_scope": {
                         "source": "gmgn_market_rank",
                         "predicate": "is_internal_market",
-                        "scope": "new_creation_or_near_completion",
+                        "scope": "internal_launchpad_market",
                     },
                 }
                 return [

@@ -93,7 +93,7 @@ class DashboardService:
             SELECT COUNT(*) AS count
             FROM samples
             WHERE feature_schema_version=?
-              AND token_type IN ('new_creation','near_completion')
+              AND token_type IN ('new_creation','trending')
             """,
             (FEATURE_SCHEMA_VERSION,),
         ) or {"count": 0})["count"])
@@ -126,7 +126,7 @@ class DashboardService:
                 GROUP BY sample_id
             ) pos ON pos.sample_id=s.id
             WHERE s.feature_schema_version=?
-              AND s.token_type IN ('new_creation','near_completion')
+              AND s.token_type IN ('new_creation','trending')
             ORDER BY s.entry_time DESC,s.id DESC
             LIMIT ? OFFSET ?
             """,

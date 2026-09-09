@@ -40,7 +40,7 @@ REGIME_FAMILIES: dict[str, tuple[str, ...]] = {
         "meme_discovery_breadth",
         "meme_acceptance_rate",
         "meme_new_creation_breadth",
-        "meme_near_completion_breadth",
+        "meme_trending_volume_breadth",
         "market_buy_count_imbalance_1m",
         "market_buy_volume_imbalance_1m",
     ),

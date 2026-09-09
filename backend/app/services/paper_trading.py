@@ -390,7 +390,7 @@ class PaperTradingService:
                     WHERE p.model_id=? AND p.strategy_key=? AND p.predicted_at>=?
                       AND s.entry_time>=?
                       AND s.label_status='mature' AND s.tag IN (0,1)
-                      AND s.token_type IN ('new_creation','near_completion')
+                      AND s.token_type IN ('new_creation','trending')
                       AND s.label_version=?
                     """,
                     (scope["model_id"], strategy, scope["selected_at"], statistics_epoch, LabelPolicy().label_version),
@@ -439,7 +439,7 @@ class PaperTradingService:
                            COALESCE(SUM(CASE WHEN tag=1 THEN 1 ELSE 0 END),0) AS positive_count
                     FROM samples
                     WHERE label_status='mature' AND tag IN (0,1) AND entry_time>=?
-                      AND token_type IN ('new_creation','near_completion')
+                      AND token_type IN ('new_creation','trending')
                       AND label_version=?
                     """,
                     (statistics_epoch, LabelPolicy().label_version),
@@ -806,7 +806,7 @@ class PaperTradingService:
             JOIN samples s ON s.id=p.sample_id
             WHERE p.strategy_key IN ('model_1','model_2','model_3','rules_only')
               AND p.status='open' AND s.label_status='mature'
-              AND s.token_type IN ('new_creation','near_completion')
+              AND s.token_type IN ('new_creation','trending')
               AND s.label_version=?
             ORDER BY p.entry_time
             """,
